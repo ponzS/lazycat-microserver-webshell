@@ -8,11 +8,60 @@
   </head>
   <body>
     <div class="app-shell">
-      <nav class="instance-list" id="instance-list" aria-label="Running instances"></nav>
-      <main class="terminal-wrap">
-        <div id="terminal"></div>
+      <header class="tabs-bar">
+        <div class="tabs-strip">
+          <div class="tabs" id="tabs" role="tablist" aria-label="Terminal tabs"></div>
+          <button class="tab-add" id="newTab" type="button" aria-label="New tab" title="New tab">+</button>
+        </div>
+        <div class="header-actions">
+          <div class="instance-switcher" id="instanceSwitcher">
+            <button class="instance-switcher-btn" id="instanceSwitcherButton" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="Switch container">
+              <span class="instance-switcher-current">
+                <span class="instance-switcher-status-dot" id="instanceSwitcherStatusDot" data-status="unknown"></span>
+                <span class="instance-switcher-name" id="instanceSwitcherName">Container</span>
+              </span>
+              <span class="instance-switcher-chevron" aria-hidden="true">v</span>
+            </button>
+            <div class="instance-switcher-panel" id="instanceSwitcherPanel" hidden>
+              <div class="instance-switcher-panel-head">
+                <div class="instance-switcher-panel-title">Switch container</div>
+              </div>
+              <div class="instance-switcher-list" id="instanceSwitcherList" role="listbox" aria-label="Container instances"></div>
+              <div class="instance-switcher-feedback" id="instanceSwitcherFeedback" hidden></div>
+            </div>
+          </div>
+          <button class="icon-btn" id="themePickerButton" type="button" aria-label="Themes" title="Themes">
+            <span aria-hidden="true">T</span>
+          </button>
+        </div>
+      </header>
+      <main class="terminal-area" id="terminalArea">
+        <div class="empty-state" id="emptyState" hidden>
+          <div class="empty-state-message" id="emptyStateMessage">No active shells.</div>
+          <button class="empty-state-action" id="emptyStateAction" type="button">New tab</button>
+        </div>
       </main>
     </div>
+    <div class="context-menu" id="contextMenu" hidden>
+      <button class="context-menu-btn" type="button" data-action="rename-tab">Rename tab</button>
+      <button class="context-menu-btn" type="button" data-action="close-other-tabs">Close other tabs</button>
+      <button class="context-menu-btn" type="button" data-action="split-vertical">Split vertically</button>
+      <button class="context-menu-btn" type="button" data-action="split-horizontal">Split horizontally</button>
+      <button class="context-menu-btn" type="button" data-action="move-pane-new-tab">Move pane to new tab</button>
+      <button class="context-menu-btn" type="button" data-action="theme">Theme</button>
+      <button class="context-menu-btn danger" type="button" data-action="close-pane">Close pane</button>
+      <button class="context-menu-btn danger" type="button" data-action="close-tab">Close tab</button>
+    </div>
+    <div class="modal" id="themePickerBackdrop" hidden>
+      <div class="theme-picker-panel" id="themePickerPanel" role="dialog" aria-modal="true" aria-label="Themes">
+        <div class="theme-picker-header">
+          <h2>Themes</h2>
+          <button class="theme-picker-close" id="themePickerClose" type="button" aria-label="Close">x</button>
+        </div>
+        <div class="theme-picker-list" id="themePickerList" role="listbox" aria-label="Terminal themes"></div>
+      </div>
+    </div>
+    <div class="toast" id="toast" hidden></div>
     <script type="module" src="./static/main.js"></script>
   </body>
 </html>
