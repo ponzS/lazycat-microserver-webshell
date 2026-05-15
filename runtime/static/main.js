@@ -84,6 +84,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const fontSizeVersionStorageKey = `${storagePrefix}.fontSizeVersion`;
   const fontSizeStorageVersion = "2";
   const lastTabStorageKey = (name) => `${storagePrefix}.lastTab.${name || "default"}`;
+  const restartTabStorageKey = `${storagePrefix}.restartTab`;
   const touchShortcutFeedbackStorageKey = `${storagePrefix}.touchShortcutFeedback`;
   const defaultFontSize = 16;
   const minFontSize = 10;
@@ -1053,6 +1054,50 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     window.localStorage.setItem(lastTabStorageKey(activeName), activeTabId);
     if (!suppressLocationUpdate) {
       updateLocationName(activeName, { replace: true, tabId: activeTabId });
+    }
+  };
+
+  const readRestartTabForName = (name) => {
+    const targetName = String(name || "").trim();
+    if (!targetName) {
+      return "";
+    }
+    try {
+      const raw = window.sessionStorage.getItem(restartTabStorageKey);
+      const state = raw ? JSON.parse(raw) : null;
+      if (String(state?.name || "").trim() !== targetName) {
+        return "";
+      }
+      return String(state?.tabId || "").trim();
+    } catch (error) {
+      return "";
+    }
+  };
+
+  const clearRestartTabForReload = () => {
+    try {
+      window.sessionStorage.removeItem(restartTabStorageKey);
+    } catch (error) {
+    }
+  };
+
+  const rememberRestartTabForReload = (name, tabId) => {
+    const targetName = String(name || "").trim();
+    const targetTabId = String(tabId || "").trim();
+    if (!targetName || !targetTabId) {
+      return;
+    }
+    try {
+      window.sessionStorage.setItem(restartTabStorageKey, JSON.stringify({ name: targetName, tabId: targetTabId }));
+    } catch (error) {
+    }
+    try {
+      window.localStorage.setItem(lastTabStorageKey(targetName), targetTabId);
+    } catch (error) {
+    }
+    try {
+      updateLocationName(targetName, { replace: true, tabId: targetTabId });
+    } catch (error) {
     }
   };
 
@@ -3499,6 +3544,8 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (deployRestartDialogOpen) {
       return;
     }
+    const restartTargetName = activeName;
+    const restartTargetTabId = activeTabId;
     deployRestartDialogOpen = true;
     setAllTerminalInputLocked(true);
     setServerRevisionInputLocked(true).catch(() => {});
@@ -3514,6 +3561,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       });
       if (restart === true) {
         shouldUnlock = false;
+        rememberRestartTabForReload(restartTargetName, restartTargetTabId);
         await setServerRevisionInputLocked(false).catch(() => {});
         setAllTerminalInputLocked(false);
         deployRestartDialogOpen = false;
@@ -5053,7 +5101,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     tabsEl.appendChild(button);
   };
 
-  const createTab = ({ id = "", label, pane, focus = true, connect = true, customLabel = false, empty = false } = {}) => {
+  const createTab = ({ id = "", label, pane, focus = true, connect = true, customLabel = false, empty = false, activate = true } = {}) => {
     const normalizedID = String(id || `tab-${nextTabSeq}`).trim();
     const numeric = Number(normalizedID.replace(/^tab-/, ""));
     if (Number.isFinite(numeric) && numeric >= nextTabSeq) {
@@ -5091,12 +5139,14 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       tab.layout = { type: "leaf", paneId: session.id };
     }
     renderTabLayout(tab);
-    setActiveTab(tab.id, { focus });
+    if (activate) {
+      setActiveTab(tab.id, { focus });
+    }
     updateEmptyState();
     return tab;
   };
 
-  const setActiveTab = (tabId, { focus = true } = {}) => {
+  const setActiveTab = (tabId, { focus = true, remember = true } = {}) => {
     const tab = tabs.get(tabId);
     if (!tab) {
       return;
@@ -5113,7 +5163,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     setActivePane(tab, tab.activePaneId, { focus });
     syncCursorBlinkState();
     clearTabNotification(tab);
-    rememberActiveTab();
+    if (remember) {
+      rememberActiveTab();
+    }
     window.requestAnimationFrame(() => {
       scrollTabButtonIntoView(tab.button);
       resizeTab(tab);
@@ -5248,12 +5300,14 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (!targetName || !isCurrentInstanceRequest(targetName, generation)) {
       return false;
     }
+    const restartTab = readRestartTabForName(targetName);
+    const requestedTab = (new URLSearchParams(window.location.search).get("tab") || "").trim();
     applyingWorkspaceState = true;
     try {
       const nextTabIDs = new Set((state?.tabs || []).map((tab) => tab.id));
       for (const tab of [...tabs.values()]) {
         if (!nextTabIDs.has(tab.id)) {
-          closeTab(tab.id);
+          closeTab(tab.id, { remember: false });
         }
       }
 
@@ -5268,6 +5322,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
             focus: false,
             connect: false,
             empty: true,
+            activate: false,
           });
         }
         tab.label = tabState.label || tab.label;
@@ -5294,9 +5349,8 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         renderTabLayout(tab);
       }
 
-      const requestedTab = (new URLSearchParams(window.location.search).get("tab") || "").trim();
       const savedTab = targetName ? window.localStorage.getItem(lastTabStorageKey(targetName)) : "";
-      const nextActiveTab = tabs.get(requestedTab) || tabs.get(savedTab) || tabs.get(state?.active_tab_id) || tabs.values().next().value || null;
+      const nextActiveTab = tabs.get(restartTab) || tabs.get(requestedTab) || tabs.get(savedTab) || tabs.get(state?.active_tab_id) || tabs.values().next().value || null;
       if (nextActiveTab) {
         setActiveTab(nextActiveTab.id, { focus });
       } else {
@@ -5307,6 +5361,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       window.requestAnimationFrame(() => resizeAllTabsForCurrentDevice());
       return true;
     } finally {
+      clearRestartTabForReload();
       applyingWorkspaceState = false;
     }
   };
@@ -5569,14 +5624,14 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     const paneIds = collectPaneIds(tab.layout);
     tab.activePaneId = paneIds.includes(tab.activePaneId) ? tab.activePaneId : paneIds[0] || null;
     if (tab.panes.size === 0 || !tab.layout) {
-      closeTab(tab.id, { allowLast: true });
+      closeTab(tab.id, { allowLast: true, remember: false });
       return;
     }
     renderTabLayout(tab);
     setActiveTab(tab.id);
   };
 
-  const closeTab = (tabId, { allowLast = true } = {}) => {
+  const closeTab = (tabId, { allowLast = true, remember = true } = {}) => {
     const tab = tabs.get(tabId);
     if (!tab) {
       return;
@@ -5610,7 +5665,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (activeTabId === tab.id) {
       activeTabId = null;
       if (nextActiveTab && tabs.has(nextActiveTab.id)) {
-        setActiveTab(nextActiveTab.id);
+        setActiveTab(nextActiveTab.id, { remember });
       }
     }
     updateEmptyState();
@@ -6078,7 +6133,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     applyingWorkspaceState = true;
     try {
       for (const tab of [...tabs.values()]) {
-        closeTab(tab.id);
+        closeTab(tab.id, { remember: false });
       }
     } finally {
       applyingWorkspaceState = false;
