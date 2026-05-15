@@ -1256,7 +1256,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     textarea.addEventListener("input", (event) => {
       handleTerminalTextareaInput(session, event);
     }, { capture: true });
-    host.addEventListener("pointerdown", () => {
+    host.addEventListener("pointerdown", (event) => {
+      if (event.pointerType === "touch" || event.pointerType === "pen") {
+        return;
+      }
       window.requestAnimationFrame(() => focusTerminalInput(session));
     });
     positionTerminalInput(session);

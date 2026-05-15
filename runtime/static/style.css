@@ -592,10 +592,12 @@ body.split-resize-active * {
   outline: none;
   caret-color: transparent;
   line-height: 0;
+  touch-action: none;
 }
 
 .terminal-host canvas {
   display: block;
+  touch-action: none;
 }
 
 .empty-state {

@@ -2107,7 +2107,39 @@ class IA {
       get activeVersion() {
         return "15.1";
       }
-    }, this.dataEmitter = new J(), this.resizeEmitter = new J(), this.bellEmitter = new J(), this.selectionChangeEmitter = new J(), this.keyEmitter = new J(), this.titleChangeEmitter = new J(), this.scrollEmitter = new J(), this.renderEmitter = new J(), this.cursorMoveEmitter = new J(), this.onData = this.dataEmitter.event, this.onResize = this.resizeEmitter.event, this.onBell = this.bellEmitter.event, this.onSelectionChange = this.selectionChangeEmitter.event, this.onKey = this.keyEmitter.event, this.onTitleChange = this.titleChangeEmitter.event, this.onScroll = this.scrollEmitter.event, this.onRender = this.renderEmitter.event, this.onCursorMove = this.cursorMoveEmitter.event, this.isOpen = !1, this.isDisposed = !1, this.addons = [], this.currentTitle = "", this.viewportY = 0, this.targetViewportY = 0, this.lastCursorY = 0, this.isDraggingScrollbar = !1, this.scrollbarDragStart = null, this.scrollbarDragStartViewportY = 0, this.scrollbarVisible = !1, this.scrollbarOpacity = 0, this.SCROLLBAR_HIDE_DELAY_MS = 1500, this.SCROLLBAR_FADE_DURATION_MS = 200, this.animateScroll = () => {
+    }, this.dataEmitter = new J(), this.resizeEmitter = new J(), this.bellEmitter = new J(), this.selectionChangeEmitter = new J(), this.keyEmitter = new J(), this.titleChangeEmitter = new J(), this.scrollEmitter = new J(), this.renderEmitter = new J(), this.cursorMoveEmitter = new J(), this.onData = this.dataEmitter.event, this.onResize = this.resizeEmitter.event, this.onBell = this.bellEmitter.event, this.onSelectionChange = this.selectionChangeEmitter.event, this.onKey = this.keyEmitter.event, this.onTitleChange = this.titleChangeEmitter.event, this.onScroll = this.scrollEmitter.event, this.onRender = this.renderEmitter.event, this.onCursorMove = this.cursorMoveEmitter.event, this.isOpen = !1, this.isDisposed = !1, this.addons = [], this.currentTitle = "", this.viewportY = 0, this.targetViewportY = 0, this.lastCursorY = 0, this.isDraggingScrollbar = !1, this.scrollbarDragStart = null, this.scrollbarDragStartViewportY = 0, this.scrollbarVisible = !1, this.scrollbarOpacity = 0, this.SCROLLBAR_HIDE_DELAY_MS = 1500, this.SCROLLBAR_FADE_DURATION_MS = 200, this.touchScrollActive = !1, this.touchScrollLastY = 0, this.touchScrollStartY = 0, this.touchScrollRemainderY = 0, this.touchScrollMoved = !1, this.finishTouchScroll = () => {
+      this.touchScrollActive = !1, this.touchScrollLastY = 0, this.touchScrollStartY = 0, this.touchScrollRemainderY = 0;
+    }, this.handleTouchStart = (g) => {
+      if (!this.canvas || !this.renderer || !this.wasmTerm || g.touches.length !== 1)
+        return;
+      const E = g.touches[0];
+      this.touchScrollActive = !0, this.touchScrollLastY = E.clientY, this.touchScrollStartY = E.clientY, this.touchScrollRemainderY = 0, this.touchScrollMoved = !1;
+    }, this.handleTouchMove = (g) => {
+      var C, I;
+      if (!this.touchScrollActive || !this.canvas || !this.renderer || !this.wasmTerm || g.touches.length !== 1)
+        return;
+      const E = g.touches[0], D = E.clientY - this.touchScrollLastY;
+      if (this.touchScrollLastY = E.clientY, this.touchScrollRemainderY += D, Math.abs(E.clientY - this.touchScrollStartY) > 4 && (this.touchScrollMoved = !0), !this.touchScrollMoved)
+        return;
+      g.preventDefault(), g.stopPropagation();
+      const i = Math.max(1, ((I = (C = this.renderer) == null ? void 0 : C.getMetrics()) == null ? void 0 : I.height) || this.renderer.charHeight || 20), w = -this.touchScrollRemainderY / i;
+      if ((this.wasmTerm.isAlternateScreen() ?? !1)) {
+        const s = w > 0 ? Math.floor(w) : Math.ceil(w);
+        if (s !== 0) {
+          const N = s > 0 ? "down" : "up", k = Math.min(Math.abs(s), 10);
+          for (let M = 0; M < k; M++)
+            N === "up" ? this.dataEmitter.fire("\x1B[A") : this.dataEmitter.fire("\x1B[B");
+          this.touchScrollRemainderY += s * i;
+        }
+        return;
+      }
+      w !== 0 && (this.scrollLines(w), this.touchScrollRemainderY = 0);
+    }, this.handleTouchEnd = (g) => {
+      const E = this.touchScrollActive;
+      this.touchScrollMoved ? (g.preventDefault(), g.stopPropagation()) : E && (g.preventDefault(), this.textarea && this.textarea.focus()), this.finishTouchScroll(), this.touchScrollMoved = !1;
+    }, this.handleTouchCancel = () => {
+      this.finishTouchScroll(), this.touchScrollMoved = !1;
+    }, this.animateScroll = () => {
       if (!this.wasmTerm || this.scrollAnimationStartTime === void 0)
         return;
       const g = this.options.smoothScrollDuration ?? 100, E = this.targetViewportY - this.viewportY;
@@ -2335,9 +2367,7 @@ class IA {
       const g = this.textarea;
       this.canvas.addEventListener("mousedown", (E) => {
         E.preventDefault(), g.focus();
-      }), this.canvas.addEventListener("touchend", (E) => {
-        E.preventDefault(), g.focus();
-      }), this.renderer = new $(this.canvas, {
+      }), A.addEventListener("touchstart", this.handleTouchStart, { passive: !0, capture: !0 }), A.addEventListener("touchmove", this.handleTouchMove, { passive: !1, capture: !0 }), A.addEventListener("touchend", this.handleTouchEnd, { passive: !1, capture: !0 }), A.addEventListener("touchcancel", this.handleTouchCancel, { passive: !1, capture: !0 }), this.renderer = new $(this.canvas, {
         fontSize: this.options.fontSize,
         fontFamily: this.options.fontFamily,
         cursorStyle: this.options.cursorStyle,
@@ -2389,7 +2419,14 @@ class IA {
    */
   writeInternal(A, B) {
     var g;
-    this.wasmTerm.write(A), this.processTerminalResponses(), typeof A == "string" && A.includes("\x07") ? this.bellEmitter.fire() : A instanceof Uint8Array && A.includes(7) && this.bellEmitter.fire(), (g = this.linkDetector) == null || g.invalidateCache(), this.viewportY !== 0 && this.scrollToBottom(), typeof A == "string" && A.includes("\x1B]") && this.checkForTitleChange(A), B && requestAnimationFrame(B);
+    const E = this.getScrollbackLength(), C = this.viewportY || 0, I = this.scrollAnimationFrame ? this.targetViewportY || 0 : C, D = C <= 0.01 && I <= 0.01;
+    if (this.wasmTerm.write(A), this.processTerminalResponses(), typeof A == "string" && A.includes("\x07") ? this.bellEmitter.fire() : A instanceof Uint8Array && A.includes(7) && this.bellEmitter.fire(), (g = this.linkDetector) == null || g.invalidateCache(), D)
+      this.scrollToBottom();
+    else {
+      const i = this.getScrollbackLength(), w = Math.max(0, i - E), s = Math.max(0, Math.min(i, C + w)), N = Math.max(0, Math.min(i, I + w));
+      (s !== this.viewportY || N !== this.targetViewportY) && (this.viewportY = s, this.targetViewportY = N, this.scrollEmitter.fire(Math.floor(this.viewportY))), i > 0 && this.showScrollbar();
+    }
+    typeof A == "string" && A.includes("\x1B]") && this.checkForTitleChange(A), B && requestAnimationFrame(B);
   }
   /**
    * Write data with newline
@@ -2572,7 +2609,7 @@ class IA {
     if (!this.wasmTerm)
       throw new Error("Terminal not open");
     const B = this.getScrollbackLength(), E = Math.max(0, Math.min(B, this.viewportY - A));
-    E !== this.viewportY && (this.viewportY = E, this.scrollEmitter.fire(this.viewportY), B > 0 && this.showScrollbar());
+    (E !== this.viewportY || E !== this.targetViewportY) && (this.viewportY = E, this.targetViewportY = E, this.scrollEmitter.fire(this.viewportY), B > 0 && this.showScrollbar());
   }
   /**
    * Scroll viewport by a number of pages
@@ -2586,13 +2623,13 @@ class IA {
    */
   scrollToTop() {
     const A = this.getScrollbackLength();
-    A > 0 && this.viewportY !== A && (this.viewportY = A, this.scrollEmitter.fire(this.viewportY), this.showScrollbar());
+    A > 0 && (this.viewportY !== A || this.targetViewportY !== A) && (this.viewportY = A, this.targetViewportY = A, this.scrollEmitter.fire(this.viewportY), this.showScrollbar());
   }
   /**
    * Scroll viewport to the bottom (current output)
    */
   scrollToBottom() {
-    this.viewportY !== 0 && (this.viewportY = 0, this.scrollEmitter.fire(this.viewportY), this.getScrollbackLength() > 0 && this.showScrollbar());
+    (this.viewportY !== 0 || this.targetViewportY !== 0) && (this.viewportY = 0, this.targetViewportY = 0, this.scrollEmitter.fire(this.viewportY), this.getScrollbackLength() > 0 && this.showScrollbar());
   }
   /**
    * Scroll viewport to a specific line in the buffer
@@ -2600,7 +2637,7 @@ class IA {
    */
   scrollToLine(A) {
     const B = this.getScrollbackLength(), g = Math.max(0, Math.min(B, A));
-    g !== this.viewportY && (this.viewportY = g, this.scrollEmitter.fire(this.viewportY), B > 0 && this.showScrollbar());
+    (g !== this.viewportY || g !== this.targetViewportY) && (this.viewportY = g, this.targetViewportY = g, this.scrollEmitter.fire(this.viewportY), B > 0 && this.showScrollbar());
   }
   /**
    * Smoothly scroll to a target viewport position
@@ -2664,7 +2701,7 @@ class IA {
    * Clean up components (called on dispose or error)
    */
   cleanupComponents() {
-    this.selectionManager && (this.selectionManager.dispose(), this.selectionManager = void 0), this.inputHandler && (this.inputHandler.dispose(), this.inputHandler = void 0), this.renderer && (this.renderer.dispose(), this.renderer = void 0), this.canvas && this.canvas.parentNode && (this.canvas.parentNode.removeChild(this.canvas), this.canvas = void 0), this.textarea && this.textarea.parentNode && (this.textarea.parentNode.removeChild(this.textarea), this.textarea = void 0), this.element && (this.element.removeEventListener("wheel", this.handleWheel), this.element.removeEventListener("mousedown", this.handleMouseDown, { capture: !0 }), this.element.removeEventListener("mousemove", this.handleMouseMove), this.element.removeEventListener("mouseleave", this.handleMouseLeave), this.element.removeEventListener("click", this.handleClick), this.element.removeAttribute("contenteditable"), this.element.removeAttribute("role"), this.element.removeAttribute("aria-label"), this.element.removeAttribute("aria-multiline")), this.isOpen && typeof document < "u" && document.removeEventListener("mouseup", this.handleMouseUp), this.scrollbarHideTimeout && (window.clearTimeout(this.scrollbarHideTimeout), this.scrollbarHideTimeout = void 0), this.linkDetector && (this.linkDetector.dispose(), this.linkDetector = void 0), this.wasmTerm && (this.wasmTerm.free(), this.wasmTerm = void 0), this.ghostty = void 0, this.element = void 0, this.textarea = void 0;
+    this.selectionManager && (this.selectionManager.dispose(), this.selectionManager = void 0), this.inputHandler && (this.inputHandler.dispose(), this.inputHandler = void 0), this.renderer && (this.renderer.dispose(), this.renderer = void 0), this.canvas && this.canvas.parentNode && (this.canvas.parentNode.removeChild(this.canvas), this.canvas = void 0), this.textarea && this.textarea.parentNode && (this.textarea.parentNode.removeChild(this.textarea), this.textarea = void 0), this.element && (this.element.removeEventListener("wheel", this.handleWheel), this.element.removeEventListener("mousedown", this.handleMouseDown, { capture: !0 }), this.element.removeEventListener("mousemove", this.handleMouseMove), this.element.removeEventListener("mouseleave", this.handleMouseLeave), this.element.removeEventListener("click", this.handleClick), this.element.removeEventListener("touchstart", this.handleTouchStart, { capture: !0 }), this.element.removeEventListener("touchmove", this.handleTouchMove, { capture: !0 }), this.element.removeEventListener("touchend", this.handleTouchEnd, { capture: !0 }), this.element.removeEventListener("touchcancel", this.handleTouchCancel, { capture: !0 }), this.element.removeAttribute("contenteditable"), this.element.removeAttribute("role"), this.element.removeAttribute("aria-label"), this.element.removeAttribute("aria-multiline")), this.isOpen && typeof document < "u" && document.removeEventListener("mouseup", this.handleMouseUp), this.scrollbarHideTimeout && (window.clearTimeout(this.scrollbarHideTimeout), this.scrollbarHideTimeout = void 0), this.linkDetector && (this.linkDetector.dispose(), this.linkDetector = void 0), this.wasmTerm && (this.wasmTerm.free(), this.wasmTerm = void 0), this.ghostty = void 0, this.element = void 0, this.textarea = void 0;
   }
   /**
    * Assert terminal is open (throw if not)
