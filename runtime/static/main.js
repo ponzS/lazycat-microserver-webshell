@@ -741,6 +741,28 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
   };
 
+  const focusPaneAtPoint = (clientX, clientY) => {
+    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) {
+      return false;
+    }
+    const target = document.elementFromPoint(clientX, clientY);
+    const shellEl = target instanceof Element ? target.closest(".pane-shell") : null;
+    if (!(shellEl instanceof HTMLElement)) {
+      return false;
+    }
+    const paneId = shellEl.dataset.paneId;
+    const tabId = shellEl.closest(".terminal-pane")?.dataset.tabId || activeTabId;
+    const tab = tabs.get(tabId);
+    if (!paneId || !tab?.panes.has(paneId)) {
+      return false;
+    }
+    if (tab.id !== activeTabId) {
+      setActiveTab(tab.id, { focus: false });
+    }
+    setActivePane(tab, paneId, { focus: true });
+    return true;
+  };
+
   const sendTerminalSize = (pane) => {
     if (pane?.socket?.readyState === WebSocket.OPEN) {
       pane.socket.send(JSON.stringify({ type: "resize", cols: pane.term.cols, rows: pane.term.rows }));
@@ -2789,7 +2811,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   themePickerClose?.addEventListener("click", closeThemePicker);
   themePickerBackdrop?.addEventListener("click", (event) => {
     if (event.target === themePickerBackdrop) {
+      const { clientX, clientY } = event;
       closeThemePicker();
+      focusPaneAtPoint(clientX, clientY);
     }
   });
   themePickerList?.addEventListener("click", (event) => {
