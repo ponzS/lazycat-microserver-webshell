@@ -26,6 +26,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const themePickerBackdrop = document.getElementById("themePickerBackdrop");
   const themePickerClose = document.getElementById("themePickerClose");
   const themePickerList = document.getElementById("themePickerList");
+  const themePickerScrollbarSensor = document.getElementById("themePickerScrollbarSensor");
+  const themePickerScrollbarTrack = document.getElementById("themePickerScrollbarTrack");
+  const themePickerScrollbarThumb = document.getElementById("themePickerScrollbarThumb");
   const settingsBackdrop = document.getElementById("settingsBackdrop");
   const settingsClose = document.getElementById("settingsClose");
   const settingsFontSelect = document.getElementById("settingsFontSelect");
@@ -83,6 +86,15 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const touchSelectionMoveThresholdPx = 7;
   const terminalSizeReassertIntervalMs = 250;
   const mobileLayoutQuery = window.matchMedia?.("(max-width: 640px)");
+  const themeCardWidth = 280;
+  const themeCardHeight = 60;
+  const themeCardCornerRadius = 5;
+  const themeCardOuterPadding = 10;
+  const themeCardContentInset = 8;
+  const themeCardPreviewLineY = 20;
+  const themeCardNameLineY = 40;
+  const themeCardBackgroundAlpha = 0.8;
+  const themePickerScrollbarMinThumbPx = 100;
   const repeatableMobileShortcutIds = new Set(["arrow-up", "arrow-down", "arrow-left", "arrow-right"]);
   const contextPaneActions = new Set(["copy", "paste", "select-all", "search", "split-vertical", "split-horizontal", "move-pane-new-tab", "close-pane"]);
   const contextTabActions = new Set(["rename-tab", "move-tab-first", "move-tab-left", "move-tab-right", "move-tab-last", "close-other-tabs", "close-tab"]);
@@ -278,6 +290,11 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   let lightOSHomeURLPromise = null;
   let mobileActionSheetIgnoreClicksUntil = 0;
   let themePickerEdgeSwipe = null;
+  let resolvedThemeCardWidth = themeCardWidth;
+  let themePickerScrollbarSyncScheduled = false;
+  let themePickerScrollbarDragging = false;
+  let themePickerScrollbarPointerId = null;
+  let themePickerScrollbarThumbPointerOffset = 0;
   const searchState = { open: false, query: "", matches: [], index: -1, sessionId: "" };
   const mobileSticky = { ctrl: false, alt: false, shift: false };
   let touchShortcutFeedbackEnabled = loadTouchShortcutFeedbackEnabled();
@@ -1045,6 +1062,44 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     return rgb ? rgbaCSS(rgb, alpha) : fallback;
   };
 
+  const themeColorFromChannels = (red, green, blue) => {
+    const normalizeChannel = (value) =>
+      Math.max(0, Math.min(255, Math.round(Number.isFinite(value) ? value : 0)))
+        .toString(16)
+        .padStart(2, "0")
+        .toUpperCase();
+    return `#${normalizeChannel(red)}${normalizeChannel(green)}${normalizeChannel(blue)}`;
+  };
+
+  const normalizeThemeColor = (value, fallback = "#000000") => {
+    const rgb = hexToRGB(value);
+    return rgb ? themeColorFromChannels(rgb[0], rgb[1], rgb[2]) : fallback;
+  };
+
+  const parseThemeColor = (color) => {
+    const rgb = hexToRGB(normalizeThemeColor(color)) || [0, 0, 0];
+    return {
+      red: rgb[0],
+      green: rgb[1],
+      blue: rgb[2],
+    };
+  };
+
+  const rgbaFromThemeColor = (color, alpha) => {
+    const { red, green, blue } = parseThemeColor(color);
+    return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+  };
+
+  const dimThemeColor = (color, factor = 0.3) => {
+    const { red, green, blue } = parseThemeColor(color);
+    return `rgb(${Math.round(red * factor)}, ${Math.round(green * factor)}, ${Math.round(blue * factor)})`;
+  };
+
+  const terminalThemeBrightness = (color) => {
+    const { red, green, blue } = parseThemeColor(color);
+    return (0.299 * red + 0.587 * green + 0.114 * blue) / 255;
+  };
+
   const applyThemeDocumentState = () => {
     document.documentElement.style.setProperty("--terminal-bg", activeTheme.background);
     document.documentElement.style.setProperty("--terminal-fg", activeTheme.foreground);
@@ -1064,6 +1119,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     document.documentElement.style.setProperty("--modal-backdrop-bg", themeRGBA(activeTheme.background, 0.28, "#000000"));
     document.documentElement.style.setProperty("--text", activeTheme.foreground);
     document.documentElement.style.setProperty("--muted", themeRGBA(activeTheme.foreground, 0.68));
+    document.documentElement.style.setProperty("--theme-picker-scrollbar", themeRGBA(activeTheme.foreground, 0.3));
+    document.documentElement.style.setProperty("--theme-picker-scrollbar-hover", themeRGBA(activeTheme.foreground, 0.45));
+    document.documentElement.style.setProperty("--theme-picker-scrollbar-active", themeRGBA(activeTheme.foreground, 0.6));
+    document.documentElement.style.setProperty("--input-focus-border", themeRGBA(activeTheme.accent, 0.52));
     document.body.dataset.theme = activeTheme.id;
   };
 
@@ -1120,29 +1179,243 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     };
   };
 
+  const themePreviewPromptText = "lazycat@terminal:~/Theme$ _";
+  const themePreviewFont = "16px monospace";
+
+  const syncThemeCardWidthVar = () => {
+    document.documentElement.style.setProperty("--theme-picker-card-width", `${resolvedThemeCardWidth}px`);
+  };
+
+  const themePreviewSource = (theme) => {
+    const xterm = theme?.xterm || {};
+    const background = normalizeThemeColor(theme?.background || xterm.background, "#000000");
+    const foreground = normalizeThemeColor(theme?.foreground || xterm.foreground, "#FFFFFF");
+    const accent = normalizeThemeColor(theme?.accent || xterm.cursor || foreground, foreground);
+    const color11 = normalizeThemeColor(theme?.color_11 || theme?.color11 || xterm.brightGreen || xterm.green || foreground, foreground);
+    const color13 = normalizeThemeColor(theme?.color_13 || theme?.color13 || xterm.brightBlue || xterm.blue || accent, foreground);
+    const brightness = terminalThemeBrightness(background);
+    return {
+      name: String(theme?.name || ""),
+      background,
+      foreground,
+      color11,
+      color13,
+      isLightBackground: brightness > 0.5,
+    };
+  };
+
+  const measureThemeCardWidth = () => {
+    const measurementCanvas = document.createElement("canvas");
+    const context = measurementCanvas.getContext("2d");
+    if (!context) {
+      resolvedThemeCardWidth = themeCardWidth;
+      syncThemeCardWidthVar();
+      return;
+    }
+    context.font = themePreviewFont;
+    const promptWidth = context.measureText(themePreviewPromptText).width;
+    const widestThemeNameWidth = themes.reduce((maxWidth, theme) => {
+      const themeName = typeof theme?.name === "string" ? theme.name : "";
+      return Math.max(maxWidth, context.measureText(themeName).width);
+    }, 0);
+    const contentWidth = Math.max(promptWidth, widestThemeNameWidth);
+    resolvedThemeCardWidth = Math.max(
+      themeCardWidth,
+      Math.ceil(contentWidth + (themeCardOuterPadding + themeCardContentInset) * 2 + 12),
+    );
+    syncThemeCardWidthVar();
+  };
+
+  function drawRoundedRect(context, x, y, width, height, radius) {
+    context.beginPath();
+    context.moveTo(x + radius, y);
+    context.arcTo(x + width, y, x + width, y + height, radius);
+    context.arcTo(x + width, y + height, x, y + height, radius);
+    context.arcTo(x, y + height, x, y, radius);
+    context.arcTo(x, y, x + width, y, radius);
+    context.closePath();
+  }
+
+  function drawThemePreviewText(context, text, x, y, color) {
+    context.fillStyle = color;
+    context.fillText(text, x, y);
+    return context.measureText(text).width;
+  }
+
+  const themePreviewTextColor = (theme, color) => {
+    if (!theme?.isLightBackground) {
+      return normalizeThemeColor(color, "#FFFFFF");
+    }
+    return dimThemeColor(color);
+  };
+
+  const drawThemePreviewCard = (canvas, theme, selected) => {
+    if (!(canvas instanceof HTMLCanvasElement) || !theme) {
+      return;
+    }
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return;
+    }
+    const previewTheme = themePreviewSource(theme);
+    const currentPreviewTheme = themePreviewSource(activeTheme);
+    const pixelRatio = Math.max(1, Math.floor(window.devicePixelRatio || 1));
+    canvas.width = resolvedThemeCardWidth * pixelRatio;
+    canvas.height = themeCardHeight * pixelRatio;
+    canvas.style.width = `${resolvedThemeCardWidth}px`;
+    canvas.style.height = `${themeCardHeight}px`;
+    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    context.clearRect(0, 0, resolvedThemeCardWidth, themeCardHeight);
+
+    const cardX = themeCardOuterPadding;
+    const cardWidth = resolvedThemeCardWidth - themeCardOuterPadding * 2;
+    drawRoundedRect(context, cardX, 0, cardWidth, themeCardHeight, themeCardCornerRadius);
+    context.fillStyle = rgbaFromThemeColor(previewTheme.background, themeCardBackgroundAlpha);
+    context.fill();
+    if (selected) {
+      const selectedBorderWidth = 1;
+      const selectedBorderInset = selectedBorderWidth / 2;
+      drawRoundedRect(
+        context,
+        cardX + selectedBorderInset,
+        selectedBorderInset,
+        cardWidth - selectedBorderWidth,
+        themeCardHeight - selectedBorderWidth,
+        Math.max(0, themeCardCornerRadius - selectedBorderInset),
+      );
+      context.strokeStyle = currentPreviewTheme.foreground || previewTheme.foreground;
+      context.lineWidth = selectedBorderWidth;
+      context.stroke();
+    }
+
+    context.font = themePreviewFont;
+    context.textBaseline = "alphabetic";
+    let textX = cardX + themeCardContentInset;
+    textX += drawThemePreviewText(context, "lazycat", textX, themeCardPreviewLineY, themePreviewTextColor(previewTheme, previewTheme.color11));
+    textX += drawThemePreviewText(context, "@", textX, themeCardPreviewLineY, themePreviewTextColor(previewTheme, previewTheme.foreground));
+    textX += drawThemePreviewText(context, "terminal", textX, themeCardPreviewLineY, themePreviewTextColor(previewTheme, previewTheme.color13));
+    drawThemePreviewText(context, ":~/Theme$ _", textX, themeCardPreviewLineY, themePreviewTextColor(previewTheme, previewTheme.foreground));
+    drawThemePreviewText(context, previewTheme.name, cardX + themeCardContentInset, themeCardNameLineY, themePreviewTextColor(previewTheme, previewTheme.foreground));
+  };
+
+  const redrawThemePickerOptions = () => {
+    if (!themePickerList) {
+      return;
+    }
+    const options = Array.from(themePickerList.querySelectorAll(".theme-picker-option"));
+    options.forEach((option) => {
+      const theme = themes.find((item) => item.id === option.dataset.theme);
+      const selected = theme?.id === activeTheme.id;
+      option.setAttribute("aria-selected", selected ? "true" : "false");
+      option.setAttribute("aria-pressed", selected ? "true" : "false");
+      drawThemePreviewCard(option.querySelector(".theme-picker-canvas"), theme, selected);
+    });
+    scheduleThemePickerScrollbarSync();
+  };
+
   const renderThemePicker = () => {
     if (!themePickerList) {
       return;
     }
+    measureThemeCardWidth();
     themePickerList.textContent = "";
     for (const theme of themes) {
       const option = document.createElement("button");
       option.type = "button";
-      option.className = "theme-option";
+      option.className = "theme-picker-option";
       option.dataset.theme = theme.id;
       option.setAttribute("role", "option");
-      option.setAttribute("aria-selected", theme.id === activeTheme.id ? "true" : "false");
-      option.innerHTML = `
-        <span class="theme-swatch" style="--swatch-bg: ${theme.background}; --swatch-fg: ${theme.foreground}; --swatch-accent: ${theme.accent}"></span>
-        <span class="theme-option-body">
-          <span class="theme-option-name"></span>
-          <span class="theme-option-meta"></span>
-        </span>
-      `;
-      option.querySelector(".theme-option-name").textContent = theme.name;
-      option.querySelector(".theme-option-meta").textContent = `${theme.background} / ${theme.foreground}`;
+      option.setAttribute("aria-label", `使用 ${theme.name} 主题`);
+      const selected = theme.id === activeTheme.id;
+      option.setAttribute("aria-selected", selected ? "true" : "false");
+      option.setAttribute("aria-pressed", selected ? "true" : "false");
+      const canvas = document.createElement("canvas");
+      canvas.className = "theme-picker-canvas";
+      option.appendChild(canvas);
       themePickerList.appendChild(option);
+      drawThemePreviewCard(canvas, theme, selected);
     }
+    scheduleThemePickerScrollbarSync();
+  };
+
+  const focusSelectedThemeOption = () => {
+    themePickerList?.querySelector('.theme-picker-option[aria-selected="true"]')?.focus();
+  };
+
+  const getThemePickerScrollbarMetrics = () => {
+    const viewportHeight = themePickerList?.clientHeight || 0;
+    const scrollHeight = themePickerList?.scrollHeight || 0;
+    const maxScrollTop = Math.max(0, scrollHeight - viewportHeight);
+    const trackHeight = Math.max(0, themePickerScrollbarTrack?.clientHeight || 0);
+    const hasScroll = maxScrollTop > 0 && trackHeight > 0;
+    const thumbHeight = hasScroll
+      ? Math.min(trackHeight, Math.max(themePickerScrollbarMinThumbPx, Math.round((viewportHeight / scrollHeight) * trackHeight)))
+      : 0;
+    const maxThumbTop = Math.max(0, trackHeight - thumbHeight);
+    const scrollRatio = maxScrollTop > 0 ? themePickerList.scrollTop / maxScrollTop : 0;
+    const thumbTop = maxThumbTop * scrollRatio;
+    return {
+      hasScroll,
+      maxScrollTop,
+      thumbHeight,
+      maxThumbTop,
+      thumbTop,
+    };
+  };
+
+  const setThemePickerScrollbarHovering = (hovering) => {
+    themePickerScrollbarTrack?.classList.toggle("is-hovering", hovering || themePickerScrollbarDragging);
+  };
+
+  const syncThemePickerScrollbar = () => {
+    if (!themePickerScrollbarTrack || !themePickerScrollbarThumb) {
+      return;
+    }
+    const { hasScroll, thumbHeight, thumbTop } = getThemePickerScrollbarMetrics();
+    const visible = isThemePickerOpen() && hasScroll;
+    themePickerScrollbarTrack.classList.toggle("has-scroll", hasScroll);
+    themePickerScrollbarTrack.classList.toggle("is-visible", visible);
+    themePickerScrollbarThumb.style.height = hasScroll ? `${thumbHeight}px` : "0px";
+    themePickerScrollbarThumb.style.transform = hasScroll ? `translateY(${thumbTop}px)` : "";
+    if (!hasScroll && !themePickerScrollbarDragging) {
+      setThemePickerScrollbarHovering(false);
+    }
+  };
+
+  const scheduleThemePickerScrollbarSync = () => {
+    if (themePickerScrollbarSyncScheduled) {
+      return;
+    }
+    themePickerScrollbarSyncScheduled = true;
+    window.requestAnimationFrame(() => {
+      themePickerScrollbarSyncScheduled = false;
+      syncThemePickerScrollbar();
+    });
+  };
+
+  const setThemePickerScrollFromThumbTop = (nextThumbTop) => {
+    if (!themePickerList) {
+      return;
+    }
+    const { hasScroll, maxScrollTop, maxThumbTop } = getThemePickerScrollbarMetrics();
+    if (!hasScroll) {
+      return;
+    }
+    const clampedThumbTop = Math.max(0, Math.min(maxThumbTop, nextThumbTop));
+    const scrollRatio = maxThumbTop > 0 ? clampedThumbTop / maxThumbTop : 0;
+    themePickerList.scrollTop = scrollRatio * maxScrollTop;
+    scheduleThemePickerScrollbarSync();
+  };
+
+  const stopThemePickerScrollbarDrag = () => {
+    if (!themePickerScrollbarDragging) {
+      return;
+    }
+    themePickerScrollbarDragging = false;
+    themePickerScrollbarPointerId = null;
+    themePickerScrollbarThumbPointerOffset = 0;
+    themePickerScrollbarThumb?.classList.remove("is-dragging");
+    setThemePickerScrollbarHovering(false);
   };
 
   const applyThemeToSession = (session) => {
@@ -1191,12 +1464,21 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (themePickerBackdrop) {
       themePickerBackdrop.hidden = false;
     }
+    window.setTimeout(() => {
+      if (!isThemePickerOpen()) {
+        return;
+      }
+      scheduleThemePickerScrollbarSync();
+      focusSelectedThemeOption();
+    }, 0);
   };
 
   const closeThemePicker = () => {
     if (themePickerBackdrop) {
       themePickerBackdrop.hidden = true;
     }
+    stopThemePickerScrollbarDrag();
+    themePickerScrollbarTrack?.classList.remove("is-visible", "is-hovering");
     themePickerEdgeSwipe = null;
   };
 
@@ -1255,6 +1537,26 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (deltaX >= themePickerSwipeCloseDistance && absY <= themePickerSwipeMaxVerticalTravel) {
       closeThemePicker();
     }
+  };
+
+  const handleThemePickerScrollbarPointerMove = (event) => {
+    if (!themePickerScrollbarDragging || event.pointerId !== themePickerScrollbarPointerId) {
+      return;
+    }
+    event.preventDefault();
+    const trackRect = themePickerScrollbarTrack?.getBoundingClientRect();
+    if (!trackRect) {
+      return;
+    }
+    const nextThumbTop = event.clientY - trackRect.top - themePickerScrollbarThumbPointerOffset;
+    setThemePickerScrollFromThumbTop(nextThumbTop);
+  };
+
+  const handleThemePickerScrollbarPointerUp = (event) => {
+    if (!themePickerScrollbarDragging || event.pointerId !== themePickerScrollbarPointerId) {
+      return;
+    }
+    stopThemePickerScrollbarDrag();
   };
 
   const getOrderedTabs = () =>
@@ -5485,11 +5787,44 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   themePickerBackdrop?.addEventListener("touchend", resetThemePickerEdgeSwipe, { passive: true });
   themePickerBackdrop?.addEventListener("touchcancel", resetThemePickerEdgeSwipe, { passive: true });
   themePickerList?.addEventListener("click", (event) => {
-    const option = event.target.closest(".theme-option");
+    const option = event.target.closest(".theme-picker-option");
     if (!option) {
       return;
     }
     applyTheme(option.dataset.theme);
+  });
+  themePickerList?.addEventListener("scroll", scheduleThemePickerScrollbarSync, { passive: true });
+  themePickerScrollbarSensor?.addEventListener("pointerenter", () => {
+    setThemePickerScrollbarHovering(true);
+  });
+  themePickerScrollbarSensor?.addEventListener("pointerleave", () => {
+    if (!themePickerScrollbarDragging) {
+      setThemePickerScrollbarHovering(false);
+    }
+  });
+  themePickerScrollbarTrack?.addEventListener("pointerdown", (event) => {
+    if (event.target === themePickerScrollbarThumb || event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    const trackRect = themePickerScrollbarTrack.getBoundingClientRect();
+    const { thumbHeight } = getThemePickerScrollbarMetrics();
+    const nextThumbTop = event.clientY - trackRect.top - thumbHeight / 2;
+    setThemePickerScrollFromThumbTop(nextThumbTop);
+    setThemePickerScrollbarHovering(true);
+  });
+  themePickerScrollbarThumb?.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const thumbRect = themePickerScrollbarThumb.getBoundingClientRect();
+    themePickerScrollbarDragging = true;
+    themePickerScrollbarPointerId = event.pointerId;
+    themePickerScrollbarThumbPointerOffset = event.clientY - thumbRect.top;
+    themePickerScrollbarThumb.classList.add("is-dragging");
+    setThemePickerScrollbarHovering(true);
   });
 
   settingsClose?.addEventListener("click", closeSettings);
@@ -5696,12 +6031,17 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     handleGlobalShortcutKeydown(event);
   }, true);
 
+  window.addEventListener("pointermove", handleThemePickerScrollbarPointerMove, { passive: false });
+  window.addEventListener("pointerup", handleThemePickerScrollbarPointerUp);
+  window.addEventListener("pointercancel", handleThemePickerScrollbarPointerUp);
   window.addEventListener("resize", () => {
     if (!isMobileLayout()) {
       closeMobileActionSheet();
     } else if (mobileActionSheet && !mobileActionSheet.hidden) {
       renderMobileActionSheet();
     }
+    measureThemeCardWidth();
+    redrawThemePickerOptions();
     resizeAllTabsForCurrentDevice();
     scheduleTabOverviewRender();
   });
