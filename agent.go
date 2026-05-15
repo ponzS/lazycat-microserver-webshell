@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	agentProtocolVersion = "lcmd-webshell-agent-v1"
+	agentProtocolVersion = "lcmd-webshell-agent-v2"
 
 	agentFrameBinary = byte('B')
 	agentFrameText   = byte('T')
@@ -97,13 +97,14 @@ func runAgentCommand(args []string) error {
 	case "attach":
 		fs := flag.NewFlagSet("agent attach", flag.ContinueOnError)
 		socketPath := fs.String("socket", defaultAgentSocketPath, "unix socket path")
+		selector := fs.String("selector", "", "instance selector")
 		paneID := fs.String("pane", "", "pane id")
 		cols := fs.Int("cols", 0, "terminal columns")
 		rows := fs.Int("rows", 0, "terminal rows")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		return runAgentAttachClient(*socketPath, *paneID, *cols, *rows)
+		return runAgentAttachClient(*socketPath, *selector, *paneID, *cols, *rows)
 	default:
 		return fmt.Errorf("unknown agent command %q", args[0])
 	}
@@ -152,7 +153,14 @@ func (d *agentDaemon) handleConn(conn net.Conn) {
 	}
 	switch strings.TrimSpace(request.Type) {
 	case "ping":
-		_ = json.NewEncoder(conn).Encode(agentResponse{OK: true, Version: agentProtocolVersion})
+		d.mu.Lock()
+		err := d.validateRequestSelectorLocked(request.Selector)
+		d.mu.Unlock()
+		response := agentResponse{OK: err == nil, Version: agentProtocolVersion}
+		if err != nil {
+			response.Error = err.Error()
+		}
+		_ = json.NewEncoder(conn).Encode(response)
 	case "state":
 		state, err := d.workspaceState(context.Background(), request)
 		d.writeStateResponse(conn, state, err)
@@ -184,8 +192,8 @@ func (d *agentDaemon) writeStateResponse(w io.Writer, state workspaceState, err 
 }
 
 func (d *agentDaemon) ensureWorkspaceLocked(request agentRequest) (*terminalWorkspace, error) {
-	if selector := strings.TrimSpace(request.Selector); selector != "" {
-		d.selector = selector
+	if err := d.validateRequestSelectorLocked(request.Selector); err != nil {
+		return nil, err
 	}
 	if username := strings.TrimSpace(request.Username); username != "" || d.username == "" {
 		d.username = username
@@ -217,6 +225,21 @@ func (d *agentDaemon) ensureWorkspaceLocked(request agentRequest) (*terminalWork
 		}
 	}
 	return d.workspace, nil
+}
+
+func (d *agentDaemon) validateRequestSelectorLocked(selector string) error {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return nil
+	}
+	if d.selector != "" && d.selector != selector {
+		return fmt.Errorf("agent selector mismatch: daemon %q, request %q", d.selector, selector)
+	}
+	if d.workspace != nil && d.workspace.selector != "" && d.workspace.selector != selector {
+		return fmt.Errorf("agent workspace selector mismatch: workspace %q, request %q", d.workspace.selector, selector)
+	}
+	d.selector = selector
+	return nil
 }
 
 func (d *agentDaemon) workspaceState(ctx context.Context, request agentRequest) (workspaceState, error) {
@@ -290,7 +313,7 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 	writerDone := make(chan struct{})
 	go func() {
 		defer close(writerDone)
-		if !writeAgentHistoryReplay(conn, history, allowGeneratedInputDuringReplay) {
+		if !writeAgentHistoryReplay(conn, workspace.selector, pane.id, history, allowGeneratedInputDuringReplay) {
 			return
 		}
 		for {
@@ -361,7 +384,7 @@ func runAgentRequestClient(socketPath, encodedRequest string) error {
 	return err
 }
 
-func runAgentAttachClient(socketPath, paneID string, cols, rows int) error {
+func runAgentAttachClient(socketPath, selector, paneID string, cols, rows int) error {
 	if strings.TrimSpace(paneID) == "" {
 		return errors.New("pane is required")
 	}
@@ -370,7 +393,7 @@ func runAgentAttachClient(socketPath, paneID string, cols, rows int) error {
 		return err
 	}
 	defer conn.Close()
-	request := agentRequest{Type: "attach", PaneID: paneID, Cols: cols, Rows: rows}
+	request := agentRequest{Type: "attach", Selector: strings.TrimSpace(selector), PaneID: paneID, Cols: cols, Rows: rows}
 	data, err := json.Marshal(request)
 	if err != nil {
 		return err
@@ -393,9 +416,11 @@ func runAgentAttachClient(socketPath, paneID string, cols, rows int) error {
 	return <-done
 }
 
-func writeAgentHistoryReplay(w io.Writer, history []byte, allowGeneratedInput bool) bool {
+func writeAgentHistoryReplay(w io.Writer, selector, paneID string, history []byte, allowGeneratedInput bool) bool {
 	if err := writeAgentControlFrame(w, map[string]any{
 		"type":                  "history-replay-start",
+		"selector":              selector,
+		"pane_id":               paneID,
 		"allow_generated_input": allowGeneratedInput,
 	}); err != nil {
 		return false
@@ -410,7 +435,11 @@ func writeAgentHistoryReplay(w io.Writer, history []byte, allowGeneratedInput bo
 		}
 		history = history[chunkSize:]
 	}
-	return writeAgentControlFrame(w, map[string]any{"type": "history-replay-complete"}) == nil
+	return writeAgentControlFrame(w, map[string]any{
+		"type":     "history-replay-complete",
+		"selector": selector,
+		"pane_id":  paneID,
+	}) == nil
 }
 
 func writeAgentControlFrame(w io.Writer, payload any) error {

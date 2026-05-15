@@ -309,9 +309,11 @@ func writeJSON(w http.ResponseWriter, payload any) {
 	}
 }
 
-func writeHistoryReplay(conn *websocket.Conn, history []byte, allowGeneratedInput bool) bool {
+func writeHistoryReplay(conn *websocket.Conn, selector, paneID string, history []byte, allowGeneratedInput bool) bool {
 	if err := writeWebSocketJSON(conn, map[string]any{
 		"type":                  "history-replay-start",
+		"selector":              selector,
+		"pane_id":               paneID,
 		"allow_generated_input": allowGeneratedInput,
 	}); err != nil {
 		return false
@@ -326,7 +328,11 @@ func writeHistoryReplay(conn *websocket.Conn, history []byte, allowGeneratedInpu
 		}
 		history = history[chunkSize:]
 	}
-	return writeWebSocketJSON(conn, map[string]any{"type": "history-replay-complete"}) == nil
+	return writeWebSocketJSON(conn, map[string]any{
+		"type":     "history-replay-complete",
+		"selector": selector,
+		"pane_id":  paneID,
+	}) == nil
 }
 
 func writeWebSocketJSON(conn *websocket.Conn, payload any) error {

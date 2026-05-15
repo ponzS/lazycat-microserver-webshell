@@ -32,6 +32,25 @@ const (
 	agentInstallCachePrefix = agentProtocolVersion + "\t"
 )
 
+func agentSelectorHash(selector string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(selector)))
+	return hex.EncodeToString(sum[:])
+}
+
+func agentSocketPath(selector string) string {
+	if strings.TrimSpace(selector) == "" {
+		return defaultAgentSocketPath
+	}
+	return "/tmp/lcmd-webshell-agent-" + agentSelectorHash(selector) + ".sock"
+}
+
+func agentLogPathForSelector(selector string) string {
+	if strings.TrimSpace(selector) == "" {
+		return agentLogPath
+	}
+	return "/tmp/lcmd-webshell-agent-" + agentSelectorHash(selector) + ".log"
+}
+
 var persistentAgentCache = struct {
 	sync.Mutex
 	installed map[string]string
@@ -118,7 +137,7 @@ func runPersistentAgentRequest(ctx context.Context, selector string, request age
 	encoded := base64.StdEncoding.EncodeToString(data)
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(reqCtx, lightosctlPath, "exec", selector, agentInstallPath, "agent", "request", "--socket", defaultAgentSocketPath, "--request", encoded).CombinedOutput()
+	output, err := exec.CommandContext(reqCtx, lightosctlPath, "exec", selector, agentInstallPath, "agent", "request", "--socket", agentSocketPath(selector), "--request", encoded).CombinedOutput()
 	if err != nil {
 		text := strings.TrimSpace(string(output))
 		if text == "" {
@@ -315,25 +334,31 @@ func writeAgentTarFile(writer *tar.Writer, name string, data []byte, mode int64)
 func pingPersistentAgent(ctx context.Context, selector string) bool {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	_, err := runPersistentAgentRequest(ctx, selector, agentRequest{Type: "ping"})
+	_, err := runPersistentAgentRequest(ctx, selector, agentRequest{Type: "ping", Selector: selector})
 	return err == nil
 }
 
 func startPersistentAgent(ctx context.Context, selector, username string) error {
 	startCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	socketPath := agentSocketPath(selector)
+	logPath := agentLogPathForSelector(selector)
 	script := fmt.Sprintf(`set -eu
 agent=%s
 socket=%s
 log=%s
+legacy_socket=%s
 rm -f "$socket"
+if [ "$legacy_socket" != "$socket" ]; then
+  rm -f "$legacy_socket" 2>/dev/null || true
+fi
 if command -v setsid >/dev/null 2>&1; then
   setsid "$agent" agent daemon --socket "$socket" --selector %s --username %s </dev/null >>"$log" 2>&1 &
 else
   nohup "$agent" agent daemon --socket "$socket" --selector %s --username %s </dev/null >>"$log" 2>&1 &
 fi
 printf '%%s\n' %s
-`, shellScriptQuote(agentInstallPath), shellScriptQuote(defaultAgentSocketPath), shellScriptQuote(agentLogPath), shellScriptQuote(selector), shellScriptQuote(username), shellScriptQuote(selector), shellScriptQuote(username), shellScriptQuote(agentReadyMarker))
+`, shellScriptQuote(agentInstallPath), shellScriptQuote(socketPath), shellScriptQuote(logPath), shellScriptQuote(defaultAgentSocketPath), shellScriptQuote(selector), shellScriptQuote(username), shellScriptQuote(selector), shellScriptQuote(username), shellScriptQuote(agentReadyMarker))
 	output, err := exec.CommandContext(startCtx, lightosctlPath, "exec", selector, "/bin/sh", "-lc", script).CombinedOutput()
 	if err != nil {
 		text := strings.TrimSpace(string(output))
@@ -377,7 +402,7 @@ func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, s
 		"agent",
 		"attach",
 		"--socket",
-		defaultAgentSocketPath,
+		agentSocketPath(selector),
 		"--pane",
 		paneID,
 		"--cols",

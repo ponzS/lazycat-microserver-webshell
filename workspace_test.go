@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"strings"
@@ -208,6 +209,84 @@ func TestPluginServerTerminalInputLockMatchesClient(t *testing.T) {
 	}
 	if !server.terminalInputBlocked("demo@owner", "") {
 		t.Fatal("expected legacy websocket without client id to be blocked by any active lock")
+	}
+}
+
+func TestAgentSocketPathIsSelectorScoped(t *testing.T) {
+	a := agentSocketPath("a@owner")
+	b := agentSocketPath("b@owner")
+	if a == b {
+		t.Fatalf("expected distinct socket paths, got %q", a)
+	}
+	if !strings.HasPrefix(a, "/tmp/lcmd-webshell-agent-") || !strings.HasSuffix(a, ".sock") {
+		t.Fatalf("unexpected selector socket path %q", a)
+	}
+	if len(a) >= 108 {
+		t.Fatalf("selector socket path is too long for common unix socket limits: %d", len(a))
+	}
+	if agentSocketPath("") != defaultAgentSocketPath {
+		t.Fatalf("empty selector should keep default socket path")
+	}
+}
+
+func TestAgentDaemonRejectsMismatchedSelector(t *testing.T) {
+	daemon := &agentDaemon{
+		selector: "a@owner",
+		workspace: &terminalWorkspace{
+			selector: "a@owner",
+			panes:    make(map[string]*terminalPane),
+		},
+	}
+	if err := daemon.validateRequestSelectorLocked("b@owner"); err == nil {
+		t.Fatal("expected mismatched selector to be rejected")
+	}
+	if daemon.selector != "a@owner" {
+		t.Fatalf("mismatched request changed daemon selector to %q", daemon.selector)
+	}
+}
+
+func TestAgentHistoryReplayFramesIncludeSelectorAndPane(t *testing.T) {
+	var out bytes.Buffer
+	if !writeAgentHistoryReplay(&out, "demo@owner", "pane-1", []byte("hello"), false) {
+		t.Fatal("writeAgentHistoryReplay returned false")
+	}
+
+	frameType, payload, err := readAgentFrame(&out)
+	if err != nil {
+		t.Fatalf("reading replay start returned error: %v", err)
+	}
+	if frameType != agentFrameText {
+		t.Fatalf("expected text start frame, got %q", frameType)
+	}
+	var start map[string]any
+	if err := json.Unmarshal(payload, &start); err != nil {
+		t.Fatalf("unmarshal replay start returned error: %v", err)
+	}
+	if start["type"] != "history-replay-start" || start["selector"] != "demo@owner" || start["pane_id"] != "pane-1" {
+		t.Fatalf("unexpected replay start payload: %+v", start)
+	}
+
+	frameType, payload, err = readAgentFrame(&out)
+	if err != nil {
+		t.Fatalf("reading replay history returned error: %v", err)
+	}
+	if frameType != agentFrameBinary || string(payload) != "hello" {
+		t.Fatalf("unexpected replay history frame: type=%q payload=%q", frameType, string(payload))
+	}
+
+	frameType, payload, err = readAgentFrame(&out)
+	if err != nil {
+		t.Fatalf("reading replay complete returned error: %v", err)
+	}
+	if frameType != agentFrameText {
+		t.Fatalf("expected text complete frame, got %q", frameType)
+	}
+	var complete map[string]any
+	if err := json.Unmarshal(payload, &complete); err != nil {
+		t.Fatalf("unmarshal replay complete returned error: %v", err)
+	}
+	if complete["type"] != "history-replay-complete" || complete["selector"] != "demo@owner" || complete["pane_id"] != "pane-1" {
+		t.Fatalf("unexpected replay complete payload: %+v", complete)
 	}
 }
 

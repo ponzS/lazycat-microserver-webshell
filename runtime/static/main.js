@@ -275,6 +275,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
 
   let activeName = (params.get("name") || "").trim();
   let activeTabId = null;
+  let activeInstanceGeneration = 0;
   let currentInstances = [];
   let disposed = false;
   let nextTabSeq = 1;
@@ -677,6 +678,24 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const instanceDisplayName = (item) => String(item?.name || "").trim() || instanceSelector(item).split("@", 1)[0];
   const getActiveInstance = () => currentInstances.find((item) => instanceSelector(item) === activeName) || null;
   const isRunningInstance = (item) => item?.status === "running";
+  const setActiveInstanceName = (name) => {
+    const normalized = String(name || "").trim();
+    if (normalized !== activeName) {
+      activeName = normalized;
+      activeInstanceGeneration += 1;
+    }
+    return activeInstanceGeneration;
+  };
+  const isCurrentInstanceRequest = (name, generation) =>
+    String(name || "").trim() === activeName && generation === activeInstanceGeneration;
+  const responseSelector = (state) => String(state?.selector || "").trim();
+  const ensureResponseSelector = (state, expectedName, label = "Workspace") => {
+    const selector = responseSelector(state);
+    const expected = String(expectedName || "").trim();
+    if (selector && expected && selector !== expected) {
+      throw new Error(`${label} selector mismatch: expected ${expected}, got ${selector}`);
+    }
+  };
   const shortcutDefinitions = {
     fullscreen: "F11",
     new_tab: "Ctrl + Shift + t",
@@ -954,9 +973,14 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const refreshServerRevision = async () => {
-    const response = await fetch(serverRevisionURL(), { cache: "no-store" });
+    const requestName = activeName;
+    const generation = activeInstanceGeneration;
+    const response = await fetch(serverRevisionURL(requestName), { cache: "no-store" });
     if (!response.ok) {
       throw new Error(await response.text() || `Server revision request failed (${response.status})`);
+    }
+    if (!isCurrentInstanceRequest(requestName, generation)) {
+      return;
     }
     observeServerRevision(await response.json());
   };
@@ -978,17 +1002,17 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (!response.ok) {
       throw new Error(await response.text() || `Workspace request failed (${response.status})`);
     }
-    const state = await response.json();
-    observeServerRevision(state);
-    return state;
+    return response.json();
   };
 
   const postWorkspaceAction = async (action, payload = {}) => {
-    if (!activeName) {
+    const requestName = activeName;
+    const generation = activeInstanceGeneration;
+    if (!requestName) {
       throw new Error("No running container is available.");
     }
     const size = terminalSizeQuery();
-    const response = await fetch(workspaceURL(), {
+    const response = await fetch(workspaceURL(requestName), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action, cols: size.cols, rows: size.rows, ...payload }),
@@ -997,8 +1021,12 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       throw new Error(await response.text() || `Workspace action failed (${response.status})`);
     }
     const state = await response.json();
+    if (!isCurrentInstanceRequest(requestName, generation)) {
+      return state;
+    }
+    ensureResponseSelector(state, requestName);
     observeServerRevision(state);
-    applyWorkspaceState(state, { focus: true });
+    applyWorkspaceState(state, { focus: true, instanceName: requestName, generation });
     return state;
   };
 
@@ -3155,14 +3183,20 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const refreshActivity = async ({ silent = true } = {}) => {
-    if (!activeName) {
+    const requestName = activeName;
+    const generation = activeInstanceGeneration;
+    if (!requestName) {
       return [];
     }
-    const response = await fetch(workspaceActivityURL(), { cache: "no-store" });
+    const response = await fetch(workspaceActivityURL(requestName), { cache: "no-store" });
     if (!response.ok) {
       throw new Error(await response.text() || `Activity request failed (${response.status})`);
     }
     const state = await response.json();
+    if (!isCurrentInstanceRequest(requestName, generation)) {
+      return [];
+    }
+    ensureResponseSelector(state, requestName, "Activity");
     observeServerRevision(state);
     for (const paneState of state?.panes || []) {
       updatePaneActivity(paneState);
@@ -3263,7 +3297,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     const tab = currentTab();
     for (const pane of tab?.panes.values() || []) {
-      connectSession(pane).catch((error) => showToast(error.message));
+      if (pane.name === activeName) {
+        connectSession(pane).catch((error) => showToast(error.message));
+      }
     }
   };
 
@@ -4546,7 +4582,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const writeSessionOutput = (session, data) => {
-    if (!session?.term) {
+    if (!session?.term || session.closed || session.name !== activeName) {
       return;
     }
     // Replayed history may contain terminal queries. Only the first attach replays live startup output.
@@ -4570,7 +4606,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const scheduleReconnect = (session) => {
-    if (disposed || session.closed || session.reconnectPending) {
+    if (disposed || session.closed || session.reconnectPending || session.name !== activeName) {
       return;
     }
     if (navigator.onLine === false) {
@@ -4582,8 +4618,13 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     session.reconnectTimer = window.setTimeout(() => {
       session.reconnectTimer = 0;
       session.reconnectPending = false;
+      if (session.name !== activeName) {
+        return;
+      }
       connectSession(session).catch((error) => {
-        session.term.write(`\r\n[webshell error] ${error.message}\r\n`);
+        if (!session.closed && session.name === activeName) {
+          session.term.write(`\r\n[webshell error] ${error.message}\r\n`);
+        }
       });
     }, 240);
   };
@@ -4592,6 +4633,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (
       !session ||
       session.closed ||
+      session.name !== activeName ||
       navigator.onLine === false ||
       session.socket?.readyState === WebSocket.OPEN ||
       session.socket?.readyState === WebSocket.CONNECTING
@@ -4608,8 +4650,36 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     const currentSocket = new WebSocket(socketUrl.toString());
     session.socket = currentSocket;
     session.replayComplete = false;
+    session.replayVerified = false;
     session.allowGeneratedInputDuringReplay = false;
     currentSocket.binaryType = "arraybuffer";
+
+    const replayMessageHasIdentity = (message) => {
+      const selector = String(message?.selector || "").trim();
+      const paneID = String(message?.pane_id || message?.paneId || "").trim();
+      return selector || paneID;
+    };
+
+    const validateReplayMessage = (message) => {
+      const selector = String(message?.selector || "").trim();
+      const paneID = String(message?.pane_id || message?.paneId || "").trim();
+      if (!selector && !paneID) {
+        return true;
+      }
+      return selector === session.name && paneID === session.id;
+    };
+
+    const rejectMismatchedReplay = (message) => {
+      const selector = String(message?.selector || "").trim() || "unknown";
+      const paneID = String(message?.pane_id || message?.paneId || "").trim() || "unknown";
+      session.replayVerified = false;
+      session.shellEl.dataset.connection = "error";
+      console.warn(`Rejected terminal replay for ${selector}/${paneID}; expected ${session.name}/${session.id}.`);
+      if (session.socket === currentSocket) {
+        session.socket = null;
+      }
+      currentSocket.close();
+    };
 
     currentSocket.addEventListener("open", () => {
       if (session.socket !== currentSocket) {
@@ -4631,18 +4701,33 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       if (session.socket !== currentSocket) {
         return;
       }
+      if (session.name !== activeName) {
+        session.socket = null;
+        currentSocket.close();
+        return;
+      }
       if (typeof event.data === "string") {
         try {
           const message = JSON.parse(event.data);
           if (message && typeof message.type === "string") {
             switch (message.type) {
               case "history-replay-start":
+                if (!validateReplayMessage(message)) {
+                  rejectMismatchedReplay(message);
+                  return;
+                }
                 session.replayComplete = false;
+                session.replayVerified = replayMessageHasIdentity(message) ? "identified" : "legacy";
                 session.allowGeneratedInputDuringReplay = message.allow_generated_input === true || message.allowGeneratedInput === true;
                 session.suppressGeneratedTerminalInputUntil = 0;
                 return;
               case "history-replay-complete":
+                if (!session.replayVerified || (session.replayVerified === "identified" && !validateReplayMessage(message))) {
+                  rejectMismatchedReplay(message);
+                  return;
+                }
                 session.replayComplete = true;
+                session.replayVerified = false;
                 session.allowGeneratedInputDuringReplay = false;
                 session.shellEl.dataset.connection = "open";
                 flushPendingInput(session);
@@ -4664,14 +4749,18 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         return;
       }
       if (event.data instanceof ArrayBuffer) {
+        if (!session.replayVerified && !session.replayComplete) {
+          return;
+        }
         writeSessionOutput(session, new Uint8Array(event.data));
       }
     });
 
     currentSocket.addEventListener("close", () => {
-      if (session.socket === currentSocket) {
-        session.socket = null;
+      if (session.socket !== currentSocket) {
+        return;
       }
+      session.socket = null;
       session.shellEl.dataset.connection = "closed";
       if (session.exitExpected) {
         return;
@@ -4680,9 +4769,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     });
 
     currentSocket.addEventListener("error", () => {
-      if (session.socket === currentSocket) {
-        session.socket = null;
+      if (session.socket !== currentSocket) {
+        return;
       }
+      session.socket = null;
       session.shellEl.dataset.connection = "error";
     });
   };
@@ -4737,6 +4827,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       reconnectTimer: 0,
       reconnectPending: false,
       replayComplete: false,
+      replayVerified: false,
       pendingInput: [],
       pendingInputSize: 0,
       inputBuffer: "",
@@ -4850,7 +4941,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     tab.panes.set(normalizedID, session);
     if (connect) {
       connectSession(session).catch((error) => {
-        session.term.write(`\r\n[webshell error] ${error.message}\r\n`);
+        if (!session.closed && session.name === activeName) {
+          session.term.write(`\r\n[webshell error] ${error.message}\r\n`);
+        }
       });
     }
     return session;
@@ -5089,7 +5182,13 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     window.requestAnimationFrame(() => resizeTab(tab));
   };
 
-  const applyWorkspaceState = (state, { focus = false } = {}) => {
+  const applyWorkspaceState = (state, { focus = false, instanceName = activeName, generation = activeInstanceGeneration } = {}) => {
+    const expectedName = String(instanceName || "").trim();
+    ensureResponseSelector(state, expectedName);
+    const targetName = responseSelector(state) || expectedName;
+    if (!targetName || !isCurrentInstanceRequest(targetName, generation)) {
+      return false;
+    }
     applyingWorkspaceState = true;
     try {
       const nextTabIDs = new Set((state?.tabs || []).map((tab) => tab.id));
@@ -5128,7 +5227,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         }
         for (const paneState of tabState.panes || []) {
           if (!tab.panes.has(paneState.id)) {
-            createPaneSession(tab, activeName, { id: paneState.id, connect: true });
+            createPaneSession(tab, targetName, { id: paneState.id, connect: true });
           }
           updatePaneActivity(paneState);
         }
@@ -5137,7 +5236,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       }
 
       const requestedTab = (new URLSearchParams(window.location.search).get("tab") || "").trim();
-      const savedTab = activeName ? window.localStorage.getItem(lastTabStorageKey(activeName)) : "";
+      const savedTab = targetName ? window.localStorage.getItem(lastTabStorageKey(targetName)) : "";
       const nextActiveTab = tabs.get(requestedTab) || tabs.get(savedTab) || tabs.get(state?.active_tab_id) || tabs.values().next().value || null;
       if (nextActiveTab) {
         setActiveTab(nextActiveTab.id, { focus });
@@ -5147,14 +5246,21 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       updateEmptyState();
       scheduleTabOverviewRender();
       window.requestAnimationFrame(() => resizeAllTabsForCurrentDevice());
+      return true;
     } finally {
       applyingWorkspaceState = false;
     }
   };
 
-  const refreshWorkspace = async ({ focus = false } = {}) => {
-    const state = await fetchWorkspaceState(activeName);
-    applyWorkspaceState(state, { focus });
+  const refreshWorkspace = async ({ focus = false, instanceName = activeName, generation = activeInstanceGeneration } = {}) => {
+    const requestName = String(instanceName || "").trim();
+    const state = await fetchWorkspaceState(requestName);
+    if (!isCurrentInstanceRequest(requestName, generation)) {
+      return state;
+    }
+    ensureResponseSelector(state, requestName);
+    observeServerRevision(state);
+    applyWorkspaceState(state, { focus, instanceName: requestName, generation });
     return state;
   };
 
@@ -5925,19 +6031,19 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (!normalized || normalized === activeName) {
       return;
     }
-    activeName = normalized;
+    const generation = setActiveInstanceName(normalized);
     if (updateURL) {
       updateLocationName(activeName, { replace: replaceURL, tabId: "" });
     }
     renderInstanceSwitcher();
     resetTabsForInstance();
-    await refreshWorkspace({ focus: true });
+    await refreshWorkspace({ focus: true, instanceName: activeName, generation });
   };
 
   const refreshInstances = async () => {
     const instances = await loadInstances();
     if (!activeName) {
-      activeName = await loadDefaultInstanceName();
+      setActiveInstanceName(await loadDefaultInstanceName());
       updateLocationName(activeName, { replace: true, tabId: "" });
     }
     const active = instances.find((item) => instanceSelector(item) === activeName);
@@ -5945,7 +6051,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       const fallback = instances.find((item) => isRunningInstance(item));
       const fallbackName = instanceSelector(fallback);
       if (fallbackName) {
-        activeName = fallbackName;
+        setActiveInstanceName(fallbackName);
         updateLocationName(activeName, { replace: true, tabId: "" });
       } else {
         throw new Error("No running LightOS instance found");
@@ -6381,7 +6487,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
 
   bootstrap().catch((error) => {
     showToast(error.message);
-    activeName = "";
+    setActiveInstanceName("");
     renderInstanceSwitcher();
     createTab({ label: "Error", focus: true, connect: false });
     const tab = currentTab();
