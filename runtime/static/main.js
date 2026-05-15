@@ -241,6 +241,8 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const mobileSticky = { ctrl: false, alt: false, shift: false };
   const textEncoder = new TextEncoder();
   const textDecoder = new TextDecoder();
+  // Mobile IMEs keep Backspace auto-repeat active only while the focused editable has text.
+  const terminalInputSentinel = "\u200b";
   const urlPattern = /(?:https?:\/\/|mailto:|ftp:\/\/|ssh:\/\/|git:\/\/|tel:|magnet:|gemini:\/\/|gopher:\/\/|news:)[\w\-.~:\/?#@!$&*+,;=%]+/gi;
   const trailingURLPunctuation = /[.,;!?)\]]+$/;
 
@@ -908,6 +910,49 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     window.requestAnimationFrame(() => resetTerminalHostViewport(session, options));
   };
 
+  const stripTerminalInputSentinel = (value) => String(value || "").split(terminalInputSentinel).join("");
+
+  const moveTerminalTextareaCaretToEnd = (textarea) => {
+    try {
+      const end = textarea.value.length;
+      textarea.setSelectionRange(end, end);
+    } catch (error) {
+    }
+  };
+
+  const prepareTerminalTextareaForInput = (session) => {
+    const textarea = session?.term?.textarea;
+    if (!textarea || session.composingIME) {
+      return;
+    }
+    if (textarea.value !== terminalInputSentinel) {
+      textarea.value = terminalInputSentinel;
+    }
+    moveTerminalTextareaCaretToEnd(textarea);
+  };
+
+  const clearTerminalTextareaSentinel = (session) => {
+    const textarea = session?.term?.textarea;
+    if (!textarea) {
+      return "";
+    }
+    const value = stripTerminalInputSentinel(textarea.value);
+    if (textarea.value !== value) {
+      textarea.value = value;
+      moveTerminalTextareaCaretToEnd(textarea);
+    }
+    return value;
+  };
+
+  const isBackwardDeleteInputType = (type) => (
+    type === "deleteContentBackward"
+    || type === "deleteWordBackward"
+    || type === "deleteSoftLineBackward"
+    || type === "deleteHardLineBackward"
+  );
+
+  const isForwardDeleteInputType = (type) => type === "deleteContentForward" || type === "deleteWordForward";
+
   const positionTerminalInput = (session) => {
     const term = session?.term;
     const textarea = term?.textarea;
@@ -921,7 +966,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     const height = Math.max(1, Number(metrics.height) || Number(terminalFontSize) || 16);
     const cursorX = Math.max(0, Math.min(Math.max(0, (term.cols || 1) - 1), Number(cursor.x) || 0));
     const cursorY = Math.max(0, Math.min(Math.max(0, (term.rows || 1) - 1), Number(cursor.y) || 0));
-    textarea.value = session.composingIME ? textarea.value : "";
     textarea.style.position = "absolute";
     textarea.style.left = `${cursorX * width}px`;
     textarea.style.top = `${cursorY * height}px`;
@@ -942,6 +986,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     textarea.style.caretColor = "transparent";
     textarea.style.pointerEvents = "none";
     textarea.style.zIndex = "1";
+    prepareTerminalTextareaForInput(session);
   };
 
   const focusTerminalInput = (session) => {
@@ -955,6 +1000,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     } catch (error) {
       textarea.focus();
     }
+    prepareTerminalTextareaForInput(session);
     resetTerminalHostViewport(session, { clean: true });
   };
 
@@ -985,22 +1031,26 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (!textarea || session.composingIME) {
       return;
     }
-    textarea.value = "";
+    textarea.value = terminalInputSentinel;
+    moveTerminalTextareaCaretToEnd(textarea);
     positionTerminalInput(session);
   };
 
   const handleTerminalBeforeInput = (session, event) => {
     const type = String(event.inputType || "");
     const textarea = session?.term?.textarea;
-    positionTerminalInput(session);
     if (type === "insertCompositionText" || type === "deleteCompositionText" || event.isComposing) {
+      setTerminalInputComposing(session, true);
+      clearTerminalTextareaSentinel(session);
+      positionTerminalInput(session);
       event.stopPropagation();
       return;
     }
+    positionTerminalInput(session);
     let data = "";
-    if (type === "deleteContentBackward" || type === "deleteWordBackward" || type === "deleteSoftLineBackward" || type === "deleteHardLineBackward") {
+    if (isBackwardDeleteInputType(type)) {
       data = "\x7f";
-    } else if (type === "deleteContentForward" || type === "deleteWordForward") {
+    } else if (isForwardDeleteInputType(type)) {
       data = "\x1b[3~";
     } else if (type === "insertLineBreak" || type === "insertParagraph") {
       data = "\r";
@@ -1021,7 +1071,8 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     event.stopPropagation();
     setTerminalInputComposing(session, false);
     if (textarea) {
-      textarea.value = "";
+      textarea.value = terminalInputSentinel;
+      moveTerminalTextareaCaretToEnd(textarea);
     }
     sendTerminalTextInput(session, data, {
       dedupe: type === "insertText" || type === "insertReplacementText" || Boolean(event.data),
@@ -1036,9 +1087,18 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (!textarea) {
       return;
     }
-    if (!session.composingIME && textarea.value) {
-      sendTerminalTextInput(session, textarea.value, { dedupe: true });
-      textarea.value = "";
+    const type = String(event.inputType || "");
+    if (!session.composingIME) {
+      const value = stripTerminalInputSentinel(textarea.value);
+      if (!value && isBackwardDeleteInputType(type)) {
+        sendTerminalTextInput(session, "\x7f");
+      } else if (!value && isForwardDeleteInputType(type)) {
+        sendTerminalTextInput(session, "\x1b[3~");
+      } else if (value) {
+        sendTerminalTextInput(session, value, { dedupe: true });
+      }
+      textarea.value = terminalInputSentinel;
+      moveTerminalTextareaCaretToEnd(textarea);
     }
     resetTerminalHostViewport(session, { clean: true });
     positionTerminalInput(session);
@@ -1059,6 +1119,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }, { capture: true });
     textarea.addEventListener("compositionstart", (event) => {
       event.stopPropagation();
+      clearTerminalTextareaSentinel(session);
       setTerminalInputComposing(session, true);
       positionTerminalInput(session);
       scheduleTerminalHostViewportReset(session);
