@@ -1,6 +1,41 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestBuildInstanceShellBootstrapScriptUsesConfiguredUser(t *testing.T) {
+	script := buildInstanceShellBootstrapScript("admin")
+	if !containsAll(script,
+		"user='admin'",
+		`setpriv --reuid "$uid" --regid "$gid" --init-groups "$__webshell_shell"`,
+		`exec su -s "$__webshell_shell" "$user"`,
+		`/run/catlink/shell-env.sh`,
+	) {
+		t.Fatalf("expected configured user login script, got:\n%s", script)
+	}
+	if containsAll(script, `su -s /bin/sh -c`) {
+		t.Fatalf("configured user login script should not use non-interactive su -c wrapper, got:\n%s", script)
+	}
+}
+
+func TestBuildInstanceShellBootstrapScriptKeepsRootCompatibility(t *testing.T) {
+	script := buildInstanceShellBootstrapScript("root")
+	if containsAll(script, "exec su -s") {
+		t.Fatalf("root compatibility script should not use su wrapper, got:\n%s", script)
+	}
+	if !containsAll(script, `exec "${SHELL:-/bin/sh}"`) {
+		t.Fatalf("expected original shell bootstrap, got:\n%s", script)
+	}
+}
+
+func TestBuildInstanceShellBootstrapScriptQuotesUsername(t *testing.T) {
+	script := buildInstanceShellBootstrapScript("dev'user")
+	if !containsAll(script, `user='dev'"'"'user'`) {
+		t.Fatalf("expected shell-quoted username, got:\n%s", script)
+	}
+}
 
 func TestParseProcStatWithSpacesAndParenInComm(t *testing.T) {
 	stat := "1234 (my shell) S 1 2222 3333 34816 4444 0 0 0 0 0 0"
@@ -156,4 +191,13 @@ func assertTabOrder(t *testing.T, tabs []*terminalTab, want ...string) {
 			t.Fatalf("tab at index %d = %q, want %q", index, tabs[index].ID, want[index])
 		}
 	}
+}
+
+func containsAll(text string, values ...string) bool {
+	for _, value := range values {
+		if !strings.Contains(text, value) {
+			return false
+		}
+	}
+	return true
 }

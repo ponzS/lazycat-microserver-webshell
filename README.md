@@ -132,7 +132,7 @@ permissions:
 /lzcinit/lightosctl ps
 ```
 
-`lightosctl ps` 输出 JSON 数组。每个实例包含 `name`、`owner_deploy_id`、`status` 等字段。provider 应使用以下规则拼接 selector：
+`lightosctl ps` 输出 JSON 数组。每个实例包含 `name`、`owner_deploy_id`、`status`、`username` 等字段。provider 应使用以下规则拼接 selector：
 
 ```text
 <name>@<owner_deploy_id>
@@ -145,6 +145,7 @@ permissions:
   {
     "name": "demo",
     "owner_deploy_id": "cloud.lazycat.lightos.entry",
+    "username": "demo",
     "status": "running"
   }
 ]
@@ -158,7 +159,7 @@ provider 应把 `name` 和 `owner_deploy_id` 作为稳定 selector 字段，`sta
 /lzcinit/lightosctl exec -ti '<name>@<owner_deploy_id>' /bin/sh
 ```
 
-后端通常使用持久 PTY 启动该命令，再通过 WebSocket binary frame 与浏览器交换 raw bytes。浏览器断开连接不应关闭后台 PTY；用户显式关闭 pane/tab 时才结束对应 PTY。窗口尺寸变化时，provider 自行调整 PTY size。
+后端通常使用持久 PTY 启动该命令，再通过 WebSocket binary frame 与浏览器交换 raw bytes。进入 shell 时应使用实例元数据里的 `username` 切换到当前实例用户，不应默认停留在 root；浏览器断开连接不应关闭后台 PTY，用户显式关闭 pane/tab 时才结束对应 PTY。窗口尺寸变化时，provider 自行调整 PTY size。
 
 Go 示例：
 

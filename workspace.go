@@ -43,6 +43,7 @@ type workspaceManager struct {
 type terminalWorkspace struct {
 	manager  *workspaceManager
 	selector string
+	username string
 	rootDir  string
 
 	mu         sync.Mutex
@@ -170,10 +171,22 @@ func newWorkspaceManager(rootDir string) *workspaceManager {
 	}
 }
 
-func (m *workspaceManager) getOrCreate(selector string, cols, rows int) (*terminalWorkspace, error) {
+func (m *workspaceManager) getOrCreate(ctx context.Context, selector string, cols, rows int) (*terminalWorkspace, error) {
 	if err := validateInstanceSelector(selector); err != nil {
 		return nil, err
 	}
+	m.mu.Lock()
+	if workspace := m.workspaces[selector]; workspace != nil {
+		m.mu.Unlock()
+		return workspace, nil
+	}
+	m.mu.Unlock()
+
+	username, err := resolveInstanceLoginUser(ctx, selector)
+	if err != nil {
+		return nil, err
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if workspace := m.workspaces[selector]; workspace != nil {
@@ -182,6 +195,7 @@ func (m *workspaceManager) getOrCreate(selector string, cols, rows int) (*termin
 	workspace := &terminalWorkspace{
 		manager:    m,
 		selector:   selector,
+		username:   username,
 		rootDir:    m.rootDir,
 		panes:      make(map[string]*terminalPane),
 		nextTabID:  1,
@@ -215,7 +229,7 @@ func (s *pluginServer) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cols, rows := parseTerminalSize(r.URL.Query().Get("cols"), r.URL.Query().Get("rows"))
-	workspace, err := s.workspaces.getOrCreate(selector, cols, rows)
+	workspace, err := s.workspaces.getOrCreate(r.Context(), selector, cols, rows)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -251,7 +265,7 @@ func (s *pluginServer) handleWorkspaceActivity(w http.ResponseWriter, r *http.Re
 		return
 	}
 	cols, rows := parseTerminalSize(r.URL.Query().Get("cols"), r.URL.Query().Get("rows"))
-	workspace, err := s.workspaces.getOrCreate(selector, cols, rows)
+	workspace, err := s.workspaces.getOrCreate(r.Context(), selector, cols, rows)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -274,7 +288,7 @@ func (s *pluginServer) attachPersistentPane(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "pane is required", http.StatusBadRequest)
 		return nil
 	}
-	workspace, err := s.workspaces.getOrCreate(selector, cols, rows)
+	workspace, err := s.workspaces.getOrCreate(r.Context(), selector, cols, rows)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return nil
@@ -915,7 +929,7 @@ func (t *terminalTab) removePane(paneID string) {
 }
 
 func newTerminalPane(workspace *terminalWorkspace, paneID string, cols, rows int) (*terminalPane, error) {
-	command := exec.Command(lightosctlPath, "exec", "-ti", workspace.selector, "/bin/sh", "-lc", buildShellBootstrapScript())
+	command := exec.Command(lightosctlPath, "exec", "-ti", workspace.selector, "/bin/sh", "-lc", buildInstanceShellBootstrapScript(workspace.username))
 	command.Dir = workspace.rootDir
 	command.Env = append(os.Environ(),
 		"TERM=xterm-256color",
@@ -942,6 +956,88 @@ func newTerminalPane(workspace *terminalWorkspace, paneID string, cols, rows int
 	_ = pty.Setsize(ptyFile, &pty.Winsize{Cols: uint16(pane.cols), Rows: uint16(pane.rows)})
 	go pane.readLoop()
 	return pane, nil
+}
+
+func buildInstanceShellBootstrapScript(username string) string {
+	if instanceCommandNeedsUserSwitch(username) {
+		return buildUserLoginShellBootstrapScript(username)
+	}
+	return buildShellBootstrapScript()
+}
+
+func instanceCommandNeedsUserSwitch(username string) bool {
+	switch strings.TrimSpace(username) {
+	case "", "root":
+		return false
+	default:
+		return true
+	}
+}
+
+func buildUserShellBootstrapScript(username string) string {
+	return fmt.Sprintf(`PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+user=%s
+uid=$(id -u "$user" 2>/dev/null) || {
+  echo "webshell user was not found."
+  exit 127
+}
+gid=$(id -g "$user" 2>/dev/null) || {
+  echo "webshell user was not found."
+  exit 127
+}
+entry=$(getent passwd "$user" 2>/dev/null) || {
+  echo "webshell user entry was not found."
+  exit 127
+}
+home=$(printf '%%s\n' "$entry" | cut -d: -f6)
+shell=$(printf '%%s\n' "$entry" | cut -d: -f7)
+if [ -z "$home" ]; then
+  home=/
+fi
+if [ -z "$shell" ]; then
+  shell=/bin/sh
+fi
+if [ ! -d "$home" ]; then
+  mkdir -p "$home"
+fi
+if [ "$(stat -c '%%u' "$home" 2>/dev/null || true)" != "$uid" ] || [ "$(stat -c '%%g' "$home" 2>/dev/null || true)" != "$gid" ]; then
+  chown "$uid:$gid" "$home"
+fi
+`, shellScriptQuote(username))
+}
+
+func buildLoginShellBootstrapScript() string {
+	return strings.Join([]string{
+		`__webshell_tty="$(tty 2>/dev/null || true)"`,
+		`case "$__webshell_tty" in /dev/pts/[0-9]*) printf '\033]777;webshell-tty=%s\a' "$__webshell_tty";; esac`,
+		`unset __webshell_tty`,
+		`__webshell_user="$(id -un 2>/dev/null || true)"`,
+		`__webshell_entry="$(getent passwd "$__webshell_user" 2>/dev/null || true)"`,
+		`__webshell_shell="$(printf '%s\n' "$__webshell_entry" | cut -d: -f7)"`,
+		`if [ -z "$__webshell_shell" ]; then __webshell_shell="${SHELL:-/bin/sh}"; fi`,
+		`export SHELL="$__webshell_shell"`,
+		`unset __webshell_user __webshell_entry`,
+		"if [ -f /run/catlink/shell-env.sh ]; then . /run/catlink/shell-env.sh; fi",
+	}, "\n")
+}
+
+func buildUserLoginShellBootstrapScript(username string) string {
+	return buildUserShellBootstrapScript(username) + buildLoginShellBootstrapScript() + `
+cd "$home" 2>/dev/null || cd /
+if command -v setpriv >/dev/null 2>&1; then
+  exec env HOME="$home" USER="$user" LOGNAME="$user" SHELL="$__webshell_shell" setpriv --reuid "$uid" --regid "$gid" --init-groups "$__webshell_shell"
+fi
+if command -v su >/dev/null 2>&1; then
+  export HOME="$home" USER="$user" LOGNAME="$user" SHELL="$__webshell_shell"
+  exec su -s "$__webshell_shell" "$user"
+fi
+echo "setpriv or su is required for webshell login session."
+exit 127
+`
+}
+
+func shellScriptQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
 func (p *terminalPane) readLoop() {

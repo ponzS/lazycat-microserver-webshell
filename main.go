@@ -30,6 +30,7 @@ type instanceSummary struct {
 	Name          string `json:"name"`
 	OwnerDeployID string `json:"owner_deploy_id"`
 	Status        string `json:"status"`
+	Username      string `json:"username,omitempty"`
 }
 
 type adminInfo struct {
@@ -241,6 +242,31 @@ func validateInstanceSelector(value string) error {
 		return errors.New("invalid instance selector")
 	}
 	return nil
+}
+
+func instanceSelector(item instanceSummary) string {
+	name := strings.TrimSpace(item.Name)
+	ownerDeployID := strings.TrimSpace(item.OwnerDeployID)
+	if name == "" || ownerDeployID == "" {
+		return ""
+	}
+	return name + "@" + ownerDeployID
+}
+
+func resolveInstanceLoginUser(ctx context.Context, selector string) (string, error) {
+	if err := validateInstanceSelector(selector); err != nil {
+		return "", err
+	}
+	items, err := listInstances(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, item := range items {
+		if instanceSelector(item) == selector {
+			return strings.TrimSpace(item.Username), nil
+		}
+	}
+	return "", errors.New("instance not found")
 }
 
 func resolveLightOSAdminInfo(ctx context.Context) (adminInfo, error) {
