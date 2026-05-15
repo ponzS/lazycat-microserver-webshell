@@ -12,6 +12,7 @@ func TestBuildInstanceShellBootstrapScriptUsesConfiguredUser(t *testing.T) {
 		`setpriv --reuid "$uid" --regid "$gid" --init-groups "$__webshell_shell"`,
 		`exec su -s "$__webshell_shell" "$user"`,
 		`/run/catlink/shell-env.sh`,
+		`XDG_CONFIG_HOME="$xdg_config_home"`,
 	) {
 		t.Fatalf("expected configured user login script, got:\n%s", script)
 	}

@@ -1117,6 +1117,17 @@ fi
 if [ "$(stat -c '%%u' "$home" 2>/dev/null || true)" != "$uid" ] || [ "$(stat -c '%%g' "$home" 2>/dev/null || true)" != "$gid" ]; then
   chown "$uid:$gid" "$home"
 fi
+xdg_config_home="$home/.config"
+if [ ! -d "$xdg_config_home" ]; then
+  mkdir -p "$xdg_config_home" 2>/dev/null || true
+fi
+if [ -d "$xdg_config_home" ]; then
+  chown "$uid:$gid" "$xdg_config_home" 2>/dev/null || true
+fi
+xdg_runtime_dir="/run/user/$uid"
+if [ ! -d "$xdg_runtime_dir" ]; then
+  xdg_runtime_dir=""
+fi
 `, shellScriptQuote(username))
 }
 
@@ -1141,8 +1152,14 @@ func buildUserLoginShellBootstrapScript(username, initialCWD string) string {
 if [ -z "$__webshell_initial_cwd" ]; then
   cd "$home" 2>/dev/null || cd /
 fi
+export XDG_CONFIG_HOME="$xdg_config_home"
+if [ -n "$xdg_runtime_dir" ]; then
+  export XDG_RUNTIME_DIR="$xdg_runtime_dir"
+else
+  unset XDG_RUNTIME_DIR
+fi
 if command -v setpriv >/dev/null 2>&1; then
-  exec env HOME="$home" USER="$user" LOGNAME="$user" SHELL="$__webshell_shell" setpriv --reuid "$uid" --regid "$gid" --init-groups "$__webshell_shell"
+  exec env HOME="$home" USER="$user" LOGNAME="$user" SHELL="$__webshell_shell" XDG_CONFIG_HOME="$xdg_config_home" setpriv --reuid "$uid" --regid "$gid" --init-groups "$__webshell_shell"
 fi
 if command -v su >/dev/null 2>&1; then
   export HOME="$home" USER="$user" LOGNAME="$user" SHELL="$__webshell_shell"

@@ -1578,6 +1578,24 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     session.pendingInputSize += byteLength;
   };
 
+  const writeSessionOutput = (session, data) => {
+    if (!session?.term) {
+      return;
+    }
+    // Replayed history may contain terminal queries; responses to replay must not be sent to the live PTY.
+    const suppressGeneratedInput = !session.replayComplete;
+    if (suppressGeneratedInput) {
+      session.replayOutputDepth += 1;
+    }
+    try {
+      session.term.write(data);
+    } finally {
+      if (suppressGeneratedInput) {
+        session.replayOutputDepth = Math.max(0, session.replayOutputDepth - 1);
+      }
+    }
+  };
+
   const scheduleReconnect = (session) => {
     if (disposed || session.closed || session.reconnectPending) {
       return;
@@ -1657,11 +1675,11 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
           }
         } catch (error) {
         }
-        session.term.write(event.data);
+        writeSessionOutput(session, event.data);
         return;
       }
       if (event.data instanceof ArrayBuffer) {
-        session.term.write(new Uint8Array(event.data));
+        writeSessionOutput(session, new Uint8Array(event.data));
       }
     });
 
@@ -1725,6 +1743,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       inputBuffer: "",
       inputBufferSize: 0,
       inputFlushTimer: 0,
+      replayOutputDepth: 0,
       exitExpected: false,
       closed: false,
       baseTheme: activeTheme,
@@ -1740,6 +1759,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     installRendererThemeMapper(session);
 
     term.onData((data) => {
+      if (session.replayOutputDepth > 0) {
+        return;
+      }
       sendOrQueueInput(session, data);
     });
     term.onResize(() => sendTerminalSize(session));

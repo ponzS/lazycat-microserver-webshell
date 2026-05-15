@@ -1,4 +1,4 @@
-package: cloud.lazycat.webshell.demo
+package: cloud.lazycat.webshell.andy
 version: 0.1.15
 name: Demo WebShell
 description: Demo LightOS WebShell provider
