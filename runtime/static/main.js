@@ -1116,6 +1116,13 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     return rgb ? themeColorFromChannels(rgb[0], rgb[1], rgb[2]) : fallback;
   };
 
+  const updateBrowserThemeColor = (color) => {
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) {
+      meta.setAttribute("content", normalizeThemeColor(color));
+    }
+  };
+
   const parseThemeColor = (color) => {
     const rgb = hexToRGB(normalizeThemeColor(color)) || [0, 0, 0];
     return {
@@ -1163,6 +1170,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     document.documentElement.style.setProperty("--theme-picker-scrollbar-hover", themeRGBA(activeTheme.foreground, 0.45));
     document.documentElement.style.setProperty("--theme-picker-scrollbar-active", themeRGBA(activeTheme.foreground, 0.6));
     document.documentElement.style.setProperty("--input-focus-border", themeRGBA(activeTheme.accent, 0.52));
+    updateBrowserThemeColor(activeTheme.background);
     document.body.dataset.theme = activeTheme.id;
   };
 
