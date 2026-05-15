@@ -8,5 +8,5 @@ permissions:
     - lightos.manage
 locales:
   zh:
-    name: 演示 WebShell
-    description: LightOS WebShell provider 演示
+    name: LCMD WebShell
+    description: LCMD WebShell for LightOS
