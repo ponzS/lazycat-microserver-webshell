@@ -362,6 +362,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     next_tab: "Ctrl + Tab",
     previous_tab: "Ctrl + Shift + Tab",
     last_tab: "Alt + 0",
+    move_tab_to_first: "Ctrl + Shift + Home",
+    move_tab_left: "Ctrl + Shift + Page_Up",
+    move_tab_right: "Ctrl + Shift + Page_Down",
+    move_tab_to_last: "Ctrl + Shift + End",
     vertical_split: "Ctrl + Shift + j",
     horizontal_split: "Ctrl + Shift + h",
     select_up: "Alt + k",
@@ -3682,6 +3686,26 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         return;
       case "last_tab":
         setActiveTabByIndex(getOrderedTabs().length - 1);
+        return;
+      case "move_tab_to_first":
+        if (tab) {
+          moveTab(tab.id, "first");
+        }
+        return;
+      case "move_tab_left":
+        if (tab) {
+          moveTab(tab.id, "left");
+        }
+        return;
+      case "move_tab_right":
+        if (tab) {
+          moveTab(tab.id, "right");
+        }
+        return;
+      case "move_tab_to_last":
+        if (tab) {
+          moveTab(tab.id, "last");
+        }
         return;
       case "vertical_split":
         if (tab?.activePaneId) {
