@@ -117,9 +117,10 @@ type paneOutbound struct {
 }
 
 type workspaceState struct {
-	Selector    string     `json:"selector"`
-	ActiveTabID string     `json:"active_tab_id"`
-	Tabs        []tabState `json:"tabs"`
+	Selector       string     `json:"selector"`
+	ServerRevision string     `json:"server_revision,omitempty"`
+	ActiveTabID    string     `json:"active_tab_id"`
+	Tabs           []tabState `json:"tabs"`
 }
 
 type tabState struct {
@@ -159,9 +160,10 @@ type workspaceActionRequest struct {
 }
 
 type workspaceActivityState struct {
-	Selector string        `json:"selector"`
-	Panes    []paneSummary `json:"panes"`
-	Error    string        `json:"error,omitempty"`
+	Selector       string        `json:"selector"`
+	ServerRevision string        `json:"server_revision,omitempty"`
+	Panes          []paneSummary `json:"panes"`
+	Error          string        `json:"error,omitempty"`
 }
 
 type terminalControlMessage struct {
@@ -244,6 +246,7 @@ func (s *pluginServer) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
+		state.ServerRevision = s.serverRevision
 		writeJSON(w, state)
 	case http.MethodPost:
 		var request workspaceActionRequest
@@ -256,6 +259,7 @@ func (s *pluginServer) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		state.ServerRevision = s.serverRevision
 		writeJSON(w, state)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -278,6 +282,7 @@ func (s *pluginServer) handleWorkspaceActivity(w http.ResponseWriter, r *http.Re
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	state.ServerRevision = s.serverRevision
 	writeJSON(w, state)
 }
 

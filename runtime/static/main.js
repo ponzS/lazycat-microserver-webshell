@@ -232,6 +232,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   let activityRefreshTimer = 0;
   let activityRefreshDelayTimer = 0;
   let deployRestartDialogOpen = false;
+  let currentServerRevision = "";
+  let serverRevisionReloadPrompted = false;
+  let serverRevisionRefreshTimer = 0;
   let suppressLocationUpdate = false;
   let suppressBeforeUnloadOnce = false;
   let suppressBeforeUnloadResetTimer = 0;
@@ -240,7 +243,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const searchState = { open: false, query: "", matches: [], index: -1, sessionId: "" };
   const mobileSticky = { ctrl: false, alt: false, shift: false };
   const textEncoder = new TextEncoder();
-  const textDecoder = new TextDecoder();
+  const serverRevisionClientID = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   // Mobile IMEs keep Backspace auto-repeat active only while the focused editable has text.
   const terminalInputSentinel = "\u200b";
   const backtabSequence = "\x1b[Z";
@@ -540,6 +543,45 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     return url;
   };
 
+  const serverRevisionURL = (name = activeName) => {
+    const url = new URL("./api/server-revision", window.location.href);
+    if (name) {
+      url.searchParams.set("name", name);
+    }
+    url.searchParams.set("client_id", serverRevisionClientID);
+    return url;
+  };
+
+  const observeServerRevision = (state) => {
+    const nextRevision = String(state?.server_revision || "").trim();
+    if (!nextRevision) {
+      return;
+    }
+    currentServerRevision = nextRevision;
+    if (state?.reload_required !== true || serverRevisionReloadPrompted) {
+      return;
+    }
+    serverRevisionReloadPrompted = true;
+    showDeployRestartDialog().catch((error) => showToast(error.message || "重启提示失败"));
+  };
+
+  const refreshServerRevision = async () => {
+    const response = await fetch(serverRevisionURL(), { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(await response.text() || `Server revision request failed (${response.status})`);
+    }
+    observeServerRevision(await response.json());
+  };
+
+  const startServerRevisionRefresh = () => {
+    window.clearInterval(serverRevisionRefreshTimer);
+    serverRevisionRefreshTimer = window.setInterval(() => {
+      if (navigator.onLine !== false) {
+        refreshServerRevision().catch(() => {});
+      }
+    }, 1800);
+  };
+
   const fetchWorkspaceState = async (name = activeName) => {
     if (!name) {
       throw new Error("No running container is available.");
@@ -548,7 +590,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (!response.ok) {
       throw new Error(await response.text() || `Workspace request failed (${response.status})`);
     }
-    return response.json();
+    const state = await response.json();
+    observeServerRevision(state);
+    return state;
   };
 
   const postWorkspaceAction = async (action, payload = {}) => {
@@ -565,6 +609,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       throw new Error(await response.text() || `Workspace action failed (${response.status})`);
     }
     const state = await response.json();
+    observeServerRevision(state);
     applyWorkspaceState(state, { focus: true });
     return state;
   };
@@ -1653,7 +1698,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       if (!pane) {
         continue;
       }
-      const wasBusy = pane.busy;
       pane.tty = paneState.tty || pane.tty || "";
       pane.busy = Boolean(paneState.busy);
       pane.command = paneState.command || "";
@@ -1661,19 +1705,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       pane.cwd = paneState.cwd || pane.cwd || "";
       pane.activityCheckedAt = Number(paneState.activity_checked_at || 0);
       pane.shellEl.dataset.busy = pane.busy ? "true" : "false";
-      if (pane.busy && submittedCommandNeedsRestart(pane.processCommandLine)) {
-        if (!pane.deployRestartPending) {
-          markDeployRestartPending(pane);
-        }
-        pane.deployRestartSawBusy = true;
-      }
-      if (pane.deployRestartPending) {
-        if (pane.busy) {
-          pane.deployRestartSawBusy = true;
-        } else if (pane.deployRestartSawBusy || wasBusy) {
-          promptDeployRestartWhenReady(pane, { force: true });
-        }
-      }
       if (tab.activePaneId === pane.id) {
         refreshTabAutoLabel(tab);
       }
@@ -1690,6 +1721,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       throw new Error(await response.text() || `Activity request failed (${response.status})`);
     }
     const state = await response.json();
+    observeServerRevision(state);
     for (const paneState of state?.panes || []) {
       updatePaneActivity(paneState);
     }
@@ -1801,22 +1833,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     selectionSheet.hidden = !hasSelection || window.matchMedia("(min-width: 721px)").matches;
   };
 
-  const normalizeSubmittedCommand = (command) => String(command || "").trim().replace(/\s+/g, " ");
-
-  const submittedCommandNeedsRestart = (command) =>
-    normalizeSubmittedCommand(command)
-      .split(/\s*(?:&&|\|\||;)\s*/g)
-      .some((part) => /^(?:\S*\/)?lzc-cli\s+project\s+deploy(?:\s|$)/.test(part));
-
-  const outputLineHasDeployCommand = (line) =>
-    /\blzc-cli\s+project\s+deploy(?:\s|$)/.test(normalizeSubmittedCommand(line));
-
-  const stripTerminalControlText = (text) =>
-    String(text || "")
-      .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
-      .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
-      .replace(/\x1b[@-Z\\-_]/g, "");
-
   const generatedTerminalResponsePattern =
     /^(?:\x1b)?(?:\[\d{1,4};\d{1,4}R|\[0n|\[\?[\d;]{1,16}c|\[>[\d;]{1,16}c)/;
 
@@ -1855,36 +1871,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     return Number(session.suppressGeneratedTerminalInputUntil || 0) > Date.now();
   };
 
-  const removeLastInputChar = (value) => Array.from(String(value || "")).slice(0, -1).join("");
-
-  const removeLastInputWord = (value) => String(value || "").replace(/\s*\S+\s*$/, "");
-
-  const skipTerminalInputEscape = (data, index) => {
-    if (data.startsWith("\x1b[200~", index) || data.startsWith("\x1b[201~", index)) {
-      return index + 6;
-    }
-    let next = index + 1;
-    if (data[next] === "[" || data[next] === "O") {
-      next += 1;
-      while (next < data.length) {
-        const code = data.charCodeAt(next);
-        next += 1;
-        if (code >= 0x40 && code <= 0x7e) {
-          break;
-        }
-      }
-      return next;
-    }
-    return Math.min(data.length, index + 2);
-  };
-
-  const clearDeployRestartTimer = (session) => {
-    if (session?.deployRestartTimer) {
-      window.clearTimeout(session.deployRestartTimer);
-      session.deployRestartTimer = 0;
-    }
-  };
-
   const showDeployRestartDialog = async () => {
     if (deployRestartDialogOpen) {
       return;
@@ -1892,9 +1878,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     deployRestartDialogOpen = true;
     try {
       const restart = await openDialog({
-        title: "终端需要重启",
-        message: "需要重启终端以使用最新的功能",
-        okText: "重启",
+        title: "WebShell 已更新",
+        message: "检测到 WebShell 服务已更新，请重新加载页面以使用最新版本。",
+        okText: "重新加载",
         cancelText: "取消",
         initialFocus: "ok",
       });
@@ -1905,114 +1891,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     } finally {
       deployRestartDialogOpen = false;
     }
-  };
-
-  const promptDeployRestartWhenReady = (session, { force = false } = {}) => {
-    if (!session?.deployRestartPending) {
-      return;
-    }
-    if (!force && session.busy) {
-      return;
-    }
-    session.deployRestartPending = false;
-    session.deployRestartSawBusy = false;
-    session.deployRestartStartedAt = 0;
-    session.deployRestartLastOutputAt = 0;
-    clearDeployRestartTimer(session);
-    showDeployRestartDialog().catch((error) => showToast(error.message || "重启提示失败"));
-  };
-
-  const scheduleDeployRestartFallback = (session, delay = 1000) => {
-    clearDeployRestartTimer(session);
-    session.deployRestartTimer = window.setTimeout(() => {
-      session.deployRestartTimer = 0;
-      if (!session.deployRestartPending) {
-        return;
-      }
-      if (session.busy) {
-        scheduleDeployRestartFallback(session, 1000);
-        return;
-      }
-      const now = Date.now();
-      const elapsed = now - Number(session.deployRestartStartedAt || now);
-      const quietFor = now - Number(session.deployRestartLastOutputAt || session.deployRestartStartedAt || now);
-      if (!session.deployRestartSawBusy && (elapsed < 5000 || quietFor < 1200)) {
-        scheduleDeployRestartFallback(session, Math.max(500, Math.min(1000, 5000 - elapsed, 1200 - quietFor)));
-        return;
-      }
-      promptDeployRestartWhenReady(session, { force: true });
-    }, delay);
-  };
-
-  const markDeployRestartPending = (session) => {
-    const now = Date.now();
-    session.deployRestartPending = true;
-    session.deployRestartSawBusy = false;
-    session.deployRestartStartedAt = now;
-    session.deployRestartLastOutputAt = now;
-    scheduleActivityRefresh(450);
-    scheduleDeployRestartFallback(session, 1000);
-  };
-
-  const handleSubmittedCommand = (session, command) => {
-    if (submittedCommandNeedsRestart(command)) {
-      markDeployRestartPending(session);
-    }
-  };
-
-  const updateDeployRestartFromOutput = (session, data) => {
-    if (!session || session.deployRestartPending) {
-      return;
-    }
-    let text = "";
-    if (typeof data === "string") {
-      text = data;
-    } else if (data instanceof Uint8Array) {
-      text = textDecoder.decode(data);
-    }
-    if (!text) {
-      return;
-    }
-    session.deployOutputLineBuffer = `${session.deployOutputLineBuffer || ""}${stripTerminalControlText(text)}`.slice(-4096);
-    const lines = session.deployOutputLineBuffer.split(/\r\n|\r|\n/g);
-    session.deployOutputLineBuffer = lines.pop() || "";
-    for (const line of lines) {
-      if (outputLineHasDeployCommand(line)) {
-        markDeployRestartPending(session);
-        return;
-      }
-    }
-  };
-
-  const recordTerminalCommandInput = (session, data) => {
-    if (!session || typeof data !== "string" || data === "") {
-      return;
-    }
-    let buffer = session.commandLineBuffer || "";
-    for (let index = 0; index < data.length;) {
-      const codePoint = data.codePointAt(index);
-      const char = String.fromCodePoint(codePoint);
-      if (char === "\x1b") {
-        index = skipTerminalInputEscape(data, index);
-        continue;
-      }
-      index += char.length;
-      if (char === "\r" || char === "\n") {
-        handleSubmittedCommand(session, buffer);
-        buffer = "";
-      } else if (char === "\x7f" || char === "\b") {
-        buffer = removeLastInputChar(buffer);
-      } else if (char === "\x03" || char === "\x15") {
-        buffer = "";
-      } else if (char === "\x17") {
-        buffer = removeLastInputWord(buffer);
-      } else if (char === "\t") {
-        buffer += " ";
-      } else if (codePoint >= 0x20 && codePoint !== 0x7f) {
-        buffer += char;
-      }
-    }
-    session.commandLineBuffer = buffer;
   };
 
   const encodedArrow = (direction) => {
@@ -2174,7 +2052,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (session.closed || session.exitExpected) {
       return;
     }
-    recordTerminalCommandInput(session, data);
     if (/[\r\n]/.test(data)) {
       scheduleActivityRefresh(450);
     }
@@ -2205,12 +2082,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     const suppressGeneratedInput = !session.replayComplete;
     if (suppressGeneratedInput) {
       armReplayGeneratedInputSuppression(session);
-    } else {
-      updateDeployRestartFromOutput(session, data);
-      if (session.deployRestartPending) {
-        session.deployRestartLastOutputAt = Date.now();
-        scheduleActivityRefresh(300);
-      }
     }
     if (suppressGeneratedInput) {
       session.replayOutputDepth += 1;
@@ -2291,13 +2162,11 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
               case "history-replay-start":
                 session.replayComplete = false;
                 session.allowGeneratedInputDuringReplay = message.allow_generated_input === true || message.allowGeneratedInput === true;
-                session.deployOutputLineBuffer = "";
                 session.suppressGeneratedTerminalInputUntil = 0;
                 return;
               case "history-replay-complete":
                 session.replayComplete = true;
                 session.allowGeneratedInputDuringReplay = false;
-                session.deployOutputLineBuffer = "";
                 session.shellEl.dataset.connection = "open";
                 flushPendingInput(session);
                 return;
@@ -2396,13 +2265,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       inputBuffer: "",
       inputBufferSize: 0,
       inputFlushTimer: 0,
-      commandLineBuffer: "",
-      deployOutputLineBuffer: "",
-      deployRestartPending: false,
-      deployRestartSawBusy: false,
-      deployRestartTimer: 0,
-      deployRestartStartedAt: 0,
-      deployRestartLastOutputAt: 0,
       replayOutputDepth: 0,
       allowGeneratedInputDuringReplay: false,
       suppressGeneratedTerminalInputUntil: 0,
@@ -3002,7 +2864,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     pane.inputBufferSize = 0;
     clearInputFlushTimer(pane);
     clearReconnectTimer(pane);
-    clearDeployRestartTimer(pane);
     if (pane.socket) {
       const socket = pane.socket;
       pane.socket = null;
@@ -3556,6 +3417,8 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     renderThemePicker();
     await refreshInstances();
     await refreshWorkspace({ focus: true });
+    await refreshServerRevision().catch(() => {});
+    startServerRevisionRefresh();
     startActivityRefresh();
     refreshActivity({ silent: true }).catch(() => {});
   };
@@ -3748,6 +3611,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   window.addEventListener("online", () => {
     setNetworkBanner(false);
     showToast("Network is online. Reconnecting.");
+    refreshServerRevision().catch(() => {});
     reconnectVisibleSessions();
     refreshActivity({ silent: true }).catch(() => {});
   });
@@ -3757,12 +3621,14 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   });
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
+      refreshServerRevision().catch(() => {});
       reconnectVisibleSessions();
       refreshActivity({ silent: true }).catch(() => {});
       updateSelectionSheet();
     }
   });
   window.addEventListener("focus", () => {
+    refreshServerRevision().catch(() => {});
     reconnectVisibleSessions();
     refreshActivity({ silent: true }).catch(() => {});
   });
@@ -3773,11 +3639,11 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       return "";
     }
     disposed = true;
+    window.clearInterval(serverRevisionRefreshTimer);
     for (const tab of tabs.values()) {
       for (const pane of tab.panes.values()) {
         pane.closed = true;
         clearReconnectTimer(pane);
-        clearDeployRestartTimer(pane);
         pane.socket?.close();
       }
     }

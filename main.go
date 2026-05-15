@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -13,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -22,8 +26,9 @@ import (
 )
 
 type pluginServer struct {
-	rootDir    string
-	workspaces *workspaceManager
+	rootDir        string
+	serverRevision string
+	workspaces     *workspaceManager
 }
 
 type instanceSummary struct {
@@ -37,6 +42,11 @@ type adminInfo struct {
 	DeployID string `json:"deploy_id"`
 	Domain   string `json:"domain"`
 	BaseURL  string `json:"base_url"`
+}
+
+type serverRevisionInfo struct {
+	ServerRevision string `json:"server_revision"`
+	ReloadRequired bool   `json:"reload_required,omitempty"`
 }
 
 var upgrader = websocket.Upgrader{
@@ -53,9 +63,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	rootDir := resolvePluginRoot()
 	server := &pluginServer{
-		rootDir:    resolvePluginRoot(),
-		workspaces: newWorkspaceManager(resolvePluginRoot()),
+		rootDir:        rootDir,
+		serverRevision: computeServerRevision(rootDir),
+		workspaces:     newWorkspaceManager(rootDir),
 	}
 	if err := server.run(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
@@ -76,6 +88,44 @@ func resolvePluginRoot() string {
 	return "."
 }
 
+func computeServerRevision(rootDir string) string {
+	hash := sha256.New()
+	if exe, err := os.Executable(); err == nil {
+		if data, readErr := os.ReadFile(exe); readErr == nil {
+			_, _ = hash.Write([]byte("exe\x00"))
+			_, _ = hash.Write(data)
+			_, _ = hash.Write([]byte{0})
+		}
+	}
+
+	staticRoot := filepath.Join(rootDir, "runtime", "static")
+	var paths []string
+	_ = filepath.WalkDir(staticRoot, func(path string, entry fs.DirEntry, err error) error {
+		if err == nil && entry != nil && !entry.IsDir() {
+			paths = append(paths, path)
+		}
+		return nil
+	})
+	sort.Strings(paths)
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		rel, err := filepath.Rel(rootDir, path)
+		if err != nil {
+			rel = path
+		}
+		_, _ = hash.Write([]byte(filepath.ToSlash(rel)))
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write(data)
+		_, _ = hash.Write([]byte{0})
+	}
+	contentRevision := hex.EncodeToString(hash.Sum(nil))
+	startEpoch := strconv.FormatInt(time.Now().UnixNano(), 36)
+	return contentRevision + ":" + startEpoch + ":" + strconv.Itoa(os.Getpid())
+}
+
 func (s *pluginServer) run(ctx context.Context) error {
 	if s.workspaces == nil {
 		s.workspaces = newWorkspaceManager(s.rootDir)
@@ -90,6 +140,7 @@ func (s *pluginServer) run(ctx context.Context) error {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/instances", s.handleInstances)
 	mux.HandleFunc("/api/lightos-admin-info", s.handleLightOSAdminInfo)
+	mux.HandleFunc("/api/server-revision", s.handleServerRevision)
 	mux.HandleFunc("/api/workspace", s.handleWorkspace)
 	mux.HandleFunc("/api/workspace/activity", s.handleWorkspaceActivity)
 	mux.HandleFunc("/ws", s.handleWebSocket)
@@ -176,6 +227,59 @@ func (s *pluginServer) handleLightOSAdminInfo(w http.ResponseWriter, r *http.Req
 	if err := json.NewEncoder(w).Encode(info); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func (s *pluginServer) handleServerRevision(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	info := serverRevisionInfo{ServerRevision: s.serverRevision}
+	selector := strings.TrimSpace(r.URL.Query().Get("name"))
+	clientID := strings.TrimSpace(r.URL.Query().Get("client_id"))
+	if clientID == "" {
+		clientID = strings.TrimSpace(r.URL.Query().Get("client"))
+	}
+	if selector != "" && clientID != "" {
+		changed, err := observeServerRevisionState(r.Context(), selector, clientID, s.serverRevision)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		info.ReloadRequired = changed
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, info)
+}
+
+func observeServerRevisionState(ctx context.Context, selector, clientID, revision string) (bool, error) {
+	if err := validateInstanceSelector(selector); err != nil {
+		return false, err
+	}
+	sum := sha256.Sum256([]byte(clientID))
+	key := hex.EncodeToString(sum[:])
+	script := strings.Join([]string{
+		"set -eu",
+		"dir=/tmp/lcmd-webshell-server-revision",
+		"file=\"$dir\"/" + shellScriptQuote(key),
+		"current=" + shellScriptQuote(revision),
+		"mkdir -p \"$dir\"",
+		"previous=\"$(cat \"$file\" 2>/dev/null || true)\"",
+		"if [ \"$previous\" = \"$current\" ]; then printf '%s\\n' unchanged; exit 0; fi",
+		"printf '%s\\n' \"$current\" > \"$file\"",
+		"if [ -n \"$previous\" ]; then printf '%s\\n' changed; else printf '%s\\n' initialized; fi",
+	}, "\n")
+	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(reqCtx, lightosctlPath, "exec", selector, "/bin/sh", "-lc", script).CombinedOutput()
+	if err != nil {
+		text := strings.TrimSpace(string(output))
+		if text == "" {
+			return false, err
+		}
+		return false, fmt.Errorf("%w: %s", err, text)
+	}
+	return strings.TrimSpace(string(output)) == "changed", nil
 }
 
 func (s *pluginServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
