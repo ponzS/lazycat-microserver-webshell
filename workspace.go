@@ -1,0 +1,1217 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/creack/pty"
+	"github.com/gorilla/websocket"
+)
+
+const (
+	defaultTerminalCols = 120
+	defaultTerminalRows = 32
+
+	paneHistoryLimit      = 16 << 20
+	workspaceHistoryLimit = 256 << 20
+	clientQueueLimit      = 8 << 20
+	historyReplayChunk    = 256 << 10
+	websocketReadLimit    = 10 << 20
+)
+
+type workspaceManager struct {
+	rootDir string
+
+	mu         sync.Mutex
+	workspaces map[string]*terminalWorkspace
+}
+
+type terminalWorkspace struct {
+	manager  *workspaceManager
+	selector string
+	rootDir  string
+
+	mu         sync.Mutex
+	tabs       []*terminalTab
+	activeTab  string
+	panes      map[string]*terminalPane
+	nextTabID  int
+	nextPaneID int
+}
+
+type terminalTab struct {
+	ID           string
+	Label        string
+	CustomLabel  bool
+	ActivePaneID string
+	Layout       *layoutNode
+	PaneIDs      []string
+}
+
+type layoutNode struct {
+	Type      string        `json:"type"`
+	Direction string        `json:"direction,omitempty"`
+	PaneID    string        `json:"paneId,omitempty"`
+	Children  []*layoutNode `json:"children,omitempty"`
+	Size      float64       `json:"size,omitempty"`
+}
+
+type terminalPane struct {
+	workspace *terminalWorkspace
+	id        string
+	selector  string
+	rootDir   string
+
+	mu       sync.Mutex
+	writeMu  sync.Mutex
+	cmd      *exec.Cmd
+	ptyFile  *os.File
+	clients  map[*paneClient]struct{}
+	history  []byte
+	cols     int
+	rows     int
+	exited   bool
+	exitCode int
+	exitText string
+	done     chan struct{}
+}
+
+type paneClient struct {
+	send chan paneOutbound
+	done chan struct{}
+	once sync.Once
+
+	mu          sync.Mutex
+	queuedBytes int
+}
+
+type paneOutbound struct {
+	messageType int
+	payload     []byte
+	closeAfter  bool
+}
+
+type workspaceState struct {
+	Selector    string     `json:"selector"`
+	ActiveTabID string     `json:"active_tab_id"`
+	Tabs        []tabState `json:"tabs"`
+}
+
+type tabState struct {
+	ID           string        `json:"id"`
+	Label        string        `json:"label"`
+	CustomLabel  bool          `json:"custom_label"`
+	ActivePaneID string        `json:"active_pane_id"`
+	Layout       *layoutNode   `json:"layout"`
+	Panes        []paneSummary `json:"panes"`
+}
+
+type paneSummary struct {
+	ID       string `json:"id"`
+	Cols     int    `json:"cols"`
+	Rows     int    `json:"rows"`
+	Exited   bool   `json:"exited"`
+	ExitCode int    `json:"exit_code"`
+}
+
+type workspaceActionRequest struct {
+	Action       string      `json:"action"`
+	TabID        string      `json:"tab_id"`
+	PaneID       string      `json:"pane_id"`
+	Direction    string      `json:"direction"`
+	Label        string      `json:"label"`
+	Layout       *layoutNode `json:"layout"`
+	ActivePaneID string      `json:"active_pane_id"`
+	Cols         int         `json:"cols"`
+	Rows         int         `json:"rows"`
+}
+
+type terminalControlMessage struct {
+	Type string `json:"type"`
+	Cols int    `json:"cols"`
+	Rows int    `json:"rows"`
+	Data string `json:"data"`
+}
+
+func newWorkspaceManager(rootDir string) *workspaceManager {
+	return &workspaceManager{
+		rootDir:    rootDir,
+		workspaces: make(map[string]*terminalWorkspace),
+	}
+}
+
+func (m *workspaceManager) getOrCreate(selector string, cols, rows int) (*terminalWorkspace, error) {
+	if err := validateInstanceSelector(selector); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if workspace := m.workspaces[selector]; workspace != nil {
+		return workspace, nil
+	}
+	workspace := &terminalWorkspace{
+		manager:    m,
+		selector:   selector,
+		rootDir:    m.rootDir,
+		panes:      make(map[string]*terminalPane),
+		nextTabID:  1,
+		nextPaneID: 1,
+	}
+	if err := workspace.createTabLocked(normalizeCols(cols), normalizeRows(rows)); err != nil {
+		return nil, err
+	}
+	m.workspaces[selector] = workspace
+	return workspace, nil
+}
+
+func (m *workspaceManager) closeAll() {
+	m.mu.Lock()
+	workspaces := make([]*terminalWorkspace, 0, len(m.workspaces))
+	for _, workspace := range m.workspaces {
+		workspaces = append(workspaces, workspace)
+	}
+	m.workspaces = make(map[string]*terminalWorkspace)
+	m.mu.Unlock()
+
+	for _, workspace := range workspaces {
+		workspace.closeAllPanes()
+	}
+}
+
+func (s *pluginServer) handleWorkspace(w http.ResponseWriter, r *http.Request) {
+	selector := strings.TrimSpace(r.URL.Query().Get("name"))
+	if selector == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	cols, rows := parseTerminalSize(r.URL.Query().Get("cols"), r.URL.Query().Get("rows"))
+	workspace, err := s.workspaces.getOrCreate(selector, cols, rows)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, workspace.snapshot())
+	case http.MethodPost:
+		var request workspaceActionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := workspace.applyAction(request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, workspace.snapshot())
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *pluginServer) attachPersistentPane(w http.ResponseWriter, r *http.Request, cols, rows int) error {
+	selector := strings.TrimSpace(r.URL.Query().Get("name"))
+	paneID := strings.TrimSpace(r.URL.Query().Get("pane"))
+	if selector == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return nil
+	}
+	if paneID == "" {
+		http.Error(w, "pane is required", http.StatusBadRequest)
+		return nil
+	}
+	workspace, err := s.workspaces.getOrCreate(selector, cols, rows)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return nil
+	}
+	pane := workspace.getPane(paneID)
+	if pane == nil {
+		http.Error(w, "pane not found", http.StatusNotFound)
+		return nil
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	conn.EnableWriteCompression(false)
+	conn.SetReadLimit(websocketReadLimit)
+
+	if cols > 0 && rows > 0 {
+		_ = pane.resize(cols, rows)
+	}
+	history, client, err := pane.attachClient()
+	if err != nil {
+		_ = writeWebSocketJSON(conn, map[string]any{
+			"type":    "process-exit",
+			"message": err.Error(),
+		})
+		return nil
+	}
+	defer func() {
+		pane.detachClient(client)
+		client.close()
+	}()
+
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		if !writeHistoryReplay(conn, history) {
+			return
+		}
+		for {
+			select {
+			case outbound := <-client.send:
+				client.dequeued(len(outbound.payload))
+				if err := conn.WriteMessage(outbound.messageType, outbound.payload); err != nil {
+					return
+				}
+				if outbound.closeAfter {
+					_ = conn.Close()
+					return
+				}
+				continue
+			default:
+			}
+			select {
+			case outbound := <-client.send:
+				client.dequeued(len(outbound.payload))
+				if err := conn.WriteMessage(outbound.messageType, outbound.payload); err != nil {
+					return
+				}
+				if outbound.closeAfter {
+					_ = conn.Close()
+					return
+				}
+			case <-client.done:
+				return
+			}
+		}
+	}()
+
+	for {
+		messageType, payload, err := conn.ReadMessage()
+		if err != nil {
+			client.close()
+			<-writerDone
+			return nil
+		}
+		switch messageType {
+		case websocket.BinaryMessage:
+			if len(payload) > 0 {
+				_ = pane.writeInput(payload)
+			}
+		case websocket.TextMessage:
+			if !handleTerminalControlMessage(pane, payload, client) {
+				client.close()
+				<-writerDone
+				return nil
+			}
+		}
+	}
+}
+
+func writeJSON(w http.ResponseWriter, payload any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func writeHistoryReplay(conn *websocket.Conn, history []byte) bool {
+	for len(history) > 0 {
+		chunkSize := historyReplayChunk
+		if len(history) < chunkSize {
+			chunkSize = len(history)
+		}
+		if err := conn.WriteMessage(websocket.BinaryMessage, history[:chunkSize]); err != nil {
+			return false
+		}
+		history = history[chunkSize:]
+	}
+	return writeWebSocketJSON(conn, map[string]any{"type": "history-replay-complete"}) == nil
+}
+
+func writeWebSocketJSON(conn *websocket.Conn, payload any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return conn.WriteMessage(websocket.TextMessage, data)
+}
+
+func handleTerminalControlMessage(pane *terminalPane, payload []byte, client *paneClient) bool {
+	var message terminalControlMessage
+	if err := json.Unmarshal(payload, &message); err != nil {
+		if data, ok := strings.CutPrefix(string(payload), "input:"); ok {
+			_ = pane.writeInput([]byte(data))
+			return true
+		}
+		return true
+	}
+	switch message.Type {
+	case "input":
+		if message.Data != "" {
+			_ = pane.writeInput([]byte(message.Data))
+		}
+	case "resize":
+		if message.Cols > 0 && message.Rows > 0 {
+			_ = pane.resize(message.Cols, message.Rows)
+		}
+	case "ping":
+		data, err := json.Marshal(map[string]any{"type": "pong"})
+		if err == nil {
+			client.enqueue(paneOutbound{messageType: websocket.TextMessage, payload: data})
+		}
+	case "detach":
+		return false
+	}
+	return true
+}
+
+func (w *terminalWorkspace) applyAction(request workspaceActionRequest) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	switch request.Action {
+	case "create_tab":
+		return w.createTabLocked(normalizeCols(request.Cols), normalizeRows(request.Rows))
+	case "rename_tab":
+		return w.renameTabLocked(request.TabID, request.Label)
+	case "close_tab":
+		return w.closeTabLocked(request.TabID)
+	case "close_other_tabs":
+		return w.closeOtherTabsLocked(request.TabID)
+	case "split_pane":
+		return w.splitPaneLocked(request.TabID, request.PaneID, request.Direction, normalizeCols(request.Cols), normalizeRows(request.Rows))
+	case "close_pane":
+		return w.closePaneLocked(request.TabID, request.PaneID)
+	case "move_pane_to_tab":
+		return w.movePaneToTabLocked(request.TabID, request.PaneID)
+	case "activate_tab":
+		return w.activateTabLocked(request.TabID)
+	case "activate_pane":
+		return w.activatePaneLocked(request.TabID, request.PaneID)
+	case "update_layout":
+		return w.updateLayoutLocked(request.TabID, request.Layout, request.ActivePaneID)
+	default:
+		return errors.New("unknown workspace action")
+	}
+}
+
+func (w *terminalWorkspace) snapshot() workspaceState {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	state := workspaceState{
+		Selector:    w.selector,
+		ActiveTabID: w.activeTab,
+		Tabs:        make([]tabState, 0, len(w.tabs)),
+	}
+	for _, tab := range w.tabs {
+		nextTab := tabState{
+			ID:           tab.ID,
+			Label:        tab.Label,
+			CustomLabel:  tab.CustomLabel,
+			ActivePaneID: tab.ActivePaneID,
+			Layout:       cloneLayout(tab.Layout),
+			Panes:        make([]paneSummary, 0, len(tab.PaneIDs)),
+		}
+		for _, paneID := range tab.PaneIDs {
+			if pane := w.panes[paneID]; pane != nil {
+				nextTab.Panes = append(nextTab.Panes, pane.summary())
+			}
+		}
+		state.Tabs = append(state.Tabs, nextTab)
+	}
+	return state
+}
+
+func (w *terminalWorkspace) createTabLocked(cols, rows int) error {
+	pane, err := w.newPaneLocked(cols, rows)
+	if err != nil {
+		return err
+	}
+	tabID := w.nextTabIDStringLocked()
+	tab := &terminalTab{
+		ID:           tabID,
+		Label:        fmt.Sprintf("Shell %d", w.nextTabID-1),
+		ActivePaneID: pane.id,
+		Layout:       &layoutNode{Type: "leaf", PaneID: pane.id},
+		PaneIDs:      []string{pane.id},
+	}
+	w.tabs = append(w.tabs, tab)
+	w.activeTab = tab.ID
+	return nil
+}
+
+func (w *terminalWorkspace) newPaneLocked(cols, rows int) (*terminalPane, error) {
+	paneID := w.nextPaneIDStringLocked()
+	pane, err := newTerminalPane(w, paneID, cols, rows)
+	if err != nil {
+		return nil, err
+	}
+	w.panes[pane.id] = pane
+	return pane, nil
+}
+
+func (w *terminalWorkspace) nextTabIDStringLocked() string {
+	id := fmt.Sprintf("tab-%d", w.nextTabID)
+	w.nextTabID++
+	return id
+}
+
+func (w *terminalWorkspace) nextPaneIDStringLocked() string {
+	id := fmt.Sprintf("pane-%d", w.nextPaneID)
+	w.nextPaneID++
+	return id
+}
+
+func (w *terminalWorkspace) renameTabLocked(tabID, label string) error {
+	tab := w.findTabLocked(tabID)
+	if tab == nil {
+		return errors.New("tab not found")
+	}
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return errors.New("label is required")
+	}
+	tab.Label = label
+	tab.CustomLabel = true
+	return nil
+}
+
+func (w *terminalWorkspace) closeTabLocked(tabID string) error {
+	index, tab := w.findTabIndexLocked(tabID)
+	if tab == nil {
+		return errors.New("tab not found")
+	}
+	for _, paneID := range tab.PaneIDs {
+		if pane := w.panes[paneID]; pane != nil {
+			delete(w.panes, paneID)
+			pane.close()
+		}
+	}
+	w.tabs = append(w.tabs[:index], w.tabs[index+1:]...)
+	if w.activeTab == tabID {
+		w.activeTab = ""
+		if len(w.tabs) > 0 {
+			w.activeTab = w.tabs[min(index, len(w.tabs)-1)].ID
+		}
+	}
+	return nil
+}
+
+func (w *terminalWorkspace) closeOtherTabsLocked(tabID string) error {
+	if w.findTabLocked(tabID) == nil {
+		return errors.New("tab not found")
+	}
+	for i := len(w.tabs) - 1; i >= 0; i-- {
+		if w.tabs[i].ID != tabID {
+			if err := w.closeTabLocked(w.tabs[i].ID); err != nil {
+				return err
+			}
+		}
+	}
+	w.activeTab = tabID
+	return nil
+}
+
+func (w *terminalWorkspace) splitPaneLocked(tabID, paneID, direction string, cols, rows int) error {
+	tab := w.findTabLocked(tabID)
+	if tab == nil {
+		return errors.New("tab not found")
+	}
+	if !tab.hasPane(paneID) {
+		return errors.New("pane not found")
+	}
+	if direction != "vertical" && direction != "horizontal" {
+		return errors.New("invalid split direction")
+	}
+	pane, err := w.newPaneLocked(cols, rows)
+	if err != nil {
+		return err
+	}
+	if !splitLayoutNode(tab.Layout, paneID, direction, pane.id) {
+		tab.Layout = &layoutNode{
+			Type:      "split",
+			Direction: direction,
+			Children: []*layoutNode{
+				{Type: "leaf", PaneID: paneID, Size: 50},
+				{Type: "leaf", PaneID: pane.id, Size: 50},
+			},
+		}
+	}
+	tab.PaneIDs = append(tab.PaneIDs, pane.id)
+	tab.ActivePaneID = pane.id
+	w.activeTab = tab.ID
+	return nil
+}
+
+func (w *terminalWorkspace) closePaneLocked(tabID, paneID string) error {
+	tab := w.findTabLocked(tabID)
+	if tab == nil {
+		return errors.New("tab not found")
+	}
+	return w.closePaneInTabLocked(tab, paneID)
+}
+
+func (w *terminalWorkspace) closePaneInTabLocked(tab *terminalTab, paneID string) error {
+	if !tab.hasPane(paneID) {
+		return errors.New("pane not found")
+	}
+	if pane := w.panes[paneID]; pane != nil {
+		delete(w.panes, paneID)
+		pane.close()
+	}
+	tab.removePane(paneID)
+	tab.Layout = removePaneFromLayoutNode(tab.Layout, paneID)
+	paneIDs := collectLayoutPaneIDs(tab.Layout, nil)
+	tab.ActivePaneID = firstExistingPaneID(tab.ActivePaneID, paneIDs)
+	if tab.ActivePaneID == "" && len(paneIDs) > 0 {
+		tab.ActivePaneID = paneIDs[0]
+	}
+	if len(tab.PaneIDs) == 0 || tab.Layout == nil {
+		return w.closeTabLocked(tab.ID)
+	}
+	return nil
+}
+
+func (w *terminalWorkspace) movePaneToTabLocked(tabID, paneID string) error {
+	source := w.findTabLocked(tabID)
+	if source == nil {
+		return errors.New("tab not found")
+	}
+	if len(source.PaneIDs) <= 1 {
+		return errors.New("cannot move the last pane")
+	}
+	if !source.hasPane(paneID) {
+		return errors.New("pane not found")
+	}
+	source.removePane(paneID)
+	source.Layout = removePaneFromLayoutNode(source.Layout, paneID)
+	sourcePaneIDs := collectLayoutPaneIDs(source.Layout, nil)
+	source.ActivePaneID = firstExistingPaneID(source.ActivePaneID, sourcePaneIDs)
+	if source.ActivePaneID == "" && len(sourcePaneIDs) > 0 {
+		source.ActivePaneID = sourcePaneIDs[0]
+	}
+
+	tabIDNext := w.nextTabIDStringLocked()
+	tab := &terminalTab{
+		ID:           tabIDNext,
+		Label:        fmt.Sprintf("%s %d", source.Label, len(w.tabs)+1),
+		ActivePaneID: paneID,
+		Layout:       &layoutNode{Type: "leaf", PaneID: paneID},
+		PaneIDs:      []string{paneID},
+	}
+	w.tabs = append(w.tabs, tab)
+	w.activeTab = tab.ID
+	return nil
+}
+
+func (w *terminalWorkspace) activateTabLocked(tabID string) error {
+	tab := w.findTabLocked(tabID)
+	if tab == nil {
+		return errors.New("tab not found")
+	}
+	w.activeTab = tab.ID
+	return nil
+}
+
+func (w *terminalWorkspace) activatePaneLocked(tabID, paneID string) error {
+	tab := w.findTabLocked(tabID)
+	if tab == nil {
+		return errors.New("tab not found")
+	}
+	if !tab.hasPane(paneID) {
+		return errors.New("pane not found")
+	}
+	tab.ActivePaneID = paneID
+	w.activeTab = tab.ID
+	return nil
+}
+
+func (w *terminalWorkspace) updateLayoutLocked(tabID string, layout *layoutNode, activePaneID string) error {
+	tab := w.findTabLocked(tabID)
+	if tab == nil {
+		return errors.New("tab not found")
+	}
+	if layout == nil {
+		return errors.New("layout is required")
+	}
+	normalized := cloneLayout(layout)
+	if err := validateLayoutForTab(normalized, tab); err != nil {
+		return err
+	}
+	tab.Layout = normalized
+	if activePaneID != "" {
+		if !tab.hasPane(activePaneID) {
+			return errors.New("active pane not found")
+		}
+		tab.ActivePaneID = activePaneID
+	}
+	return nil
+}
+
+func (w *terminalWorkspace) handlePaneExited(paneID string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, tab := range w.tabs {
+		if tab.hasPane(paneID) {
+			_ = w.closePaneInTabLocked(tab, paneID)
+			return
+		}
+	}
+}
+
+func (w *terminalWorkspace) closeAllPanes() {
+	w.mu.Lock()
+	panes := make([]*terminalPane, 0, len(w.panes))
+	for _, pane := range w.panes {
+		panes = append(panes, pane)
+	}
+	w.panes = make(map[string]*terminalPane)
+	w.tabs = nil
+	w.activeTab = ""
+	w.mu.Unlock()
+
+	for _, pane := range panes {
+		pane.close()
+	}
+}
+
+func (w *terminalWorkspace) getPane(paneID string) *terminalPane {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.panes[paneID]
+}
+
+func (w *terminalWorkspace) findTabLocked(tabID string) *terminalTab {
+	_, tab := w.findTabIndexLocked(tabID)
+	return tab
+}
+
+func (w *terminalWorkspace) findTabIndexLocked(tabID string) (int, *terminalTab) {
+	for index, tab := range w.tabs {
+		if tab.ID == tabID {
+			return index, tab
+		}
+	}
+	return -1, nil
+}
+
+func (w *terminalWorkspace) trimHistoryLocked() {
+	for {
+		total := 0
+		var target *terminalPane
+		targetSize := 0
+		for _, pane := range w.panes {
+			pane.mu.Lock()
+			size := len(pane.history)
+			pane.mu.Unlock()
+			total += size
+			if size > targetSize {
+				target = pane
+				targetSize = size
+			}
+		}
+		if total <= workspaceHistoryLimit || target == nil || targetSize == 0 {
+			return
+		}
+		drop := min(total-workspaceHistoryLimit, targetSize)
+		if drop < 1<<20 && targetSize > 1<<20 {
+			drop = 1 << 20
+		}
+		target.mu.Lock()
+		if drop >= len(target.history) {
+			target.history = nil
+		} else {
+			target.history = append([]byte(nil), target.history[drop:]...)
+		}
+		target.mu.Unlock()
+	}
+}
+
+func (t *terminalTab) hasPane(paneID string) bool {
+	for _, id := range t.PaneIDs {
+		if id == paneID {
+			return true
+		}
+	}
+	return false
+}
+
+func (t *terminalTab) removePane(paneID string) {
+	next := t.PaneIDs[:0]
+	for _, id := range t.PaneIDs {
+		if id != paneID {
+			next = append(next, id)
+		}
+	}
+	t.PaneIDs = next
+}
+
+func newTerminalPane(workspace *terminalWorkspace, paneID string, cols, rows int) (*terminalPane, error) {
+	command := exec.Command(lightosctlPath, "exec", "-ti", workspace.selector, "/bin/sh", "-lc", buildShellBootstrapScript())
+	command.Dir = workspace.rootDir
+	command.Env = append(os.Environ(),
+		"TERM=xterm-256color",
+		"COLORTERM=truecolor",
+		"LANG=C.UTF-8",
+		"LC_ALL=C.UTF-8",
+	)
+	ptyFile, err := pty.Start(command)
+	if err != nil {
+		return nil, err
+	}
+	pane := &terminalPane{
+		workspace: workspace,
+		id:        paneID,
+		selector:  workspace.selector,
+		rootDir:   workspace.rootDir,
+		cmd:       command,
+		ptyFile:   ptyFile,
+		clients:   make(map[*paneClient]struct{}),
+		cols:      normalizeCols(cols),
+		rows:      normalizeRows(rows),
+		done:      make(chan struct{}),
+	}
+	_ = pty.Setsize(ptyFile, &pty.Winsize{Cols: uint16(pane.cols), Rows: uint16(pane.rows)})
+	go pane.readLoop()
+	return pane, nil
+}
+
+func (p *terminalPane) readLoop() {
+	waitErr := make(chan error, 1)
+	go func() {
+		waitErr <- p.cmd.Wait()
+	}()
+
+	buf := make([]byte, 32768)
+	for {
+		n, err := p.ptyFile.Read(buf)
+		if n > 0 {
+			p.appendOutput(buf[:n])
+		}
+		if err != nil {
+			break
+		}
+	}
+	_ = p.ptyFile.Close()
+
+	var err error
+	select {
+	case err = <-waitErr:
+	case <-time.After(2 * time.Second):
+		_ = killCommand(p.cmd)
+		err = <-waitErr
+	}
+	p.markExited(err)
+}
+
+func (p *terminalPane) appendOutput(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	copied := append([]byte(nil), data...)
+	var clients []*paneClient
+
+	p.workspace.mu.Lock()
+	p.mu.Lock()
+	if !p.exited {
+		p.history = append(p.history, copied...)
+		if len(p.history) > paneHistoryLimit {
+			p.history = append([]byte(nil), p.history[len(p.history)-paneHistoryLimit:]...)
+		}
+		clients = make([]*paneClient, 0, len(p.clients))
+		for client := range p.clients {
+			clients = append(clients, client)
+		}
+	}
+	p.mu.Unlock()
+	p.workspace.trimHistoryLocked()
+	p.workspace.mu.Unlock()
+
+	for _, client := range clients {
+		client.enqueue(paneOutbound{messageType: websocket.BinaryMessage, payload: copied})
+	}
+}
+
+func (p *terminalPane) markExited(err error) {
+	exitCode := processExitCode(err)
+	exitText := ""
+	if err != nil && !errors.Is(err, os.ErrProcessDone) {
+		exitText = err.Error()
+	}
+	payload := map[string]any{
+		"type":      "process-exit",
+		"exit_code": exitCode,
+	}
+	if exitText != "" {
+		payload["message"] = exitText
+	}
+	data, _ := json.Marshal(payload)
+
+	var clients []*paneClient
+	p.mu.Lock()
+	if !p.exited {
+		p.exited = true
+		p.exitCode = exitCode
+		p.exitText = exitText
+		for client := range p.clients {
+			clients = append(clients, client)
+		}
+	}
+	p.mu.Unlock()
+
+	for _, client := range clients {
+		client.enqueue(paneOutbound{messageType: websocket.TextMessage, payload: data, closeAfter: true})
+	}
+	p.workspace.handlePaneExited(p.id)
+	close(p.done)
+}
+
+func (p *terminalPane) attachClient() ([]byte, *paneClient, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.exited {
+		return nil, nil, errors.New("pane has exited")
+	}
+	history := append([]byte(nil), p.history...)
+	client := &paneClient{
+		send: make(chan paneOutbound, 256),
+		done: make(chan struct{}),
+	}
+	p.clients[client] = struct{}{}
+	return history, client, nil
+}
+
+func (p *terminalPane) detachClient(client *paneClient) {
+	p.mu.Lock()
+	delete(p.clients, client)
+	p.mu.Unlock()
+}
+
+func (p *terminalPane) writeInput(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	p.mu.Lock()
+	ptyFile := p.ptyFile
+	exited := p.exited
+	p.mu.Unlock()
+	if exited || ptyFile == nil {
+		return errors.New("pane is not running")
+	}
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	for len(data) > 0 {
+		n, err := ptyFile.Write(data)
+		if n > 0 {
+			data = data[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
+}
+
+func (p *terminalPane) resize(cols, rows int) error {
+	cols = normalizeCols(cols)
+	rows = normalizeRows(rows)
+	p.mu.Lock()
+	p.cols = cols
+	p.rows = rows
+	ptyFile := p.ptyFile
+	exited := p.exited
+	p.mu.Unlock()
+	if exited || ptyFile == nil {
+		return nil
+	}
+	return pty.Setsize(ptyFile, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+}
+
+func (p *terminalPane) close() {
+	p.mu.Lock()
+	ptyFile := p.ptyFile
+	clients := make([]*paneClient, 0, len(p.clients))
+	for client := range p.clients {
+		clients = append(clients, client)
+	}
+	p.mu.Unlock()
+
+	for _, client := range clients {
+		client.close()
+	}
+	if ptyFile != nil {
+		_ = ptyFile.Close()
+	}
+	_ = killCommand(p.cmd)
+}
+
+func (p *terminalPane) summary() paneSummary {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return paneSummary{
+		ID:       p.id,
+		Cols:     p.cols,
+		Rows:     p.rows,
+		Exited:   p.exited,
+		ExitCode: p.exitCode,
+	}
+}
+
+func (c *paneClient) enqueue(outbound paneOutbound) bool {
+	payloadSize := len(outbound.payload)
+	c.mu.Lock()
+	select {
+	case <-c.done:
+		c.mu.Unlock()
+		return false
+	default:
+	}
+	if c.queuedBytes+payloadSize > clientQueueLimit {
+		c.mu.Unlock()
+		c.close()
+		return false
+	}
+	c.queuedBytes += payloadSize
+	c.mu.Unlock()
+
+	select {
+	case c.send <- outbound:
+		return true
+	case <-c.done:
+		c.dequeued(payloadSize)
+		return false
+	default:
+		c.dequeued(payloadSize)
+		c.close()
+		return false
+	}
+}
+
+func (c *paneClient) dequeued(size int) {
+	if size <= 0 {
+		return
+	}
+	c.mu.Lock()
+	c.queuedBytes -= size
+	if c.queuedBytes < 0 {
+		c.queuedBytes = 0
+	}
+	c.mu.Unlock()
+}
+
+func (c *paneClient) close() {
+	c.once.Do(func() {
+		close(c.done)
+	})
+}
+
+func splitLayoutNode(node *layoutNode, targetPaneID, direction, newPaneID string) bool {
+	if node == nil {
+		return false
+	}
+	if node.Type == "leaf" && node.PaneID == targetPaneID {
+		outerSize := node.Size
+		node.Type = "split"
+		node.Direction = direction
+		node.PaneID = ""
+		node.Children = []*layoutNode{
+			{Type: "leaf", PaneID: targetPaneID, Size: 50},
+			{Type: "leaf", PaneID: newPaneID, Size: 50},
+		}
+		node.Size = outerSize
+		return true
+	}
+	for _, child := range node.Children {
+		if splitLayoutNode(child, targetPaneID, direction, newPaneID) {
+			return true
+		}
+	}
+	return false
+}
+
+func removePaneFromLayoutNode(node *layoutNode, paneID string) *layoutNode {
+	if node == nil {
+		return nil
+	}
+	if node.Type == "leaf" {
+		if node.PaneID == paneID {
+			return nil
+		}
+		return cloneLayout(node)
+	}
+	children := make([]*layoutNode, 0, len(node.Children))
+	for _, child := range node.Children {
+		if next := removePaneFromLayoutNode(child, paneID); next != nil {
+			children = append(children, next)
+		}
+	}
+	if len(children) == 0 {
+		return nil
+	}
+	if len(children) == 1 {
+		if node.Size > 0 {
+			children[0].Size = node.Size
+		}
+		return children[0]
+	}
+	next := cloneLayout(node)
+	next.Children = children
+	share := 100 / float64(len(children))
+	for _, child := range next.Children {
+		if child.Size <= 0 {
+			child.Size = share
+		}
+	}
+	return next
+}
+
+func validateLayoutForTab(node *layoutNode, tab *terminalTab) error {
+	seen := make(map[string]int)
+	if err := validateLayoutNode(node, tab, seen); err != nil {
+		return err
+	}
+	if len(seen) != len(tab.PaneIDs) {
+		return errors.New("layout does not include every pane")
+	}
+	for _, paneID := range tab.PaneIDs {
+		if seen[paneID] != 1 {
+			return errors.New("layout pane set does not match tab")
+		}
+	}
+	return nil
+}
+
+func validateLayoutNode(node *layoutNode, tab *terminalTab, seen map[string]int) error {
+	if node == nil {
+		return errors.New("layout node is required")
+	}
+	switch node.Type {
+	case "leaf":
+		if !tab.hasPane(node.PaneID) {
+			return errors.New("layout references unknown pane")
+		}
+		seen[node.PaneID]++
+		if seen[node.PaneID] > 1 {
+			return errors.New("layout references pane more than once")
+		}
+		node.Direction = ""
+		node.Children = nil
+	case "split":
+		if node.Direction != "vertical" && node.Direction != "horizontal" {
+			return errors.New("invalid layout direction")
+		}
+		if len(node.Children) < 2 {
+			return errors.New("split layout needs at least two children")
+		}
+		node.PaneID = ""
+		totalSized := 0.0
+		for _, child := range node.Children {
+			if err := validateLayoutNode(child, tab, seen); err != nil {
+				return err
+			}
+			if child.Size < 5 {
+				child.Size = 5
+			}
+			if child.Size > 95 {
+				child.Size = 95
+			}
+			totalSized += child.Size
+		}
+		if totalSized <= 0 {
+			share := 100 / float64(len(node.Children))
+			for _, child := range node.Children {
+				child.Size = share
+			}
+		}
+	default:
+		return errors.New("invalid layout node type")
+	}
+	return nil
+}
+
+func collectLayoutPaneIDs(node *layoutNode, result []string) []string {
+	if node == nil {
+		return result
+	}
+	if node.Type == "leaf" {
+		return append(result, node.PaneID)
+	}
+	for _, child := range node.Children {
+		result = collectLayoutPaneIDs(child, result)
+	}
+	return result
+}
+
+func firstExistingPaneID(current string, paneIDs []string) string {
+	for _, paneID := range paneIDs {
+		if paneID == current {
+			return current
+		}
+	}
+	if len(paneIDs) == 0 {
+		return ""
+	}
+	return paneIDs[0]
+}
+
+func cloneLayout(node *layoutNode) *layoutNode {
+	if node == nil {
+		return nil
+	}
+	next := &layoutNode{
+		Type:      node.Type,
+		Direction: node.Direction,
+		PaneID:    node.PaneID,
+		Size:      node.Size,
+	}
+	if len(node.Children) > 0 {
+		next.Children = make([]*layoutNode, 0, len(node.Children))
+		for _, child := range node.Children {
+			next.Children = append(next.Children, cloneLayout(child))
+		}
+	}
+	return next
+}
+
+func normalizeCols(cols int) int {
+	if cols <= 0 {
+		return defaultTerminalCols
+	}
+	return min(cols, 500)
+}
+
+func normalizeRows(rows int) int {
+	if rows <= 0 {
+		return defaultTerminalRows
+	}
+	return min(rows, 300)
+}
+
+func sortedPaneIDs(panes map[string]*terminalPane) []string {
+	ids := make([]string, 0, len(panes))
+	for id := range panes {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}

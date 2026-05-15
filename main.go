@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -17,16 +15,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
-	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 )
 
 type pluginServer struct {
-	rootDir string
+	rootDir    string
+	workspaces *workspaceManager
 }
 
 type instanceSummary struct {
@@ -41,12 +38,6 @@ type adminInfo struct {
 	BaseURL  string `json:"base_url"`
 }
 
-type webSocketClientMessage struct {
-	messageType int
-	payload     []byte
-	err         error
-}
-
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
@@ -58,7 +49,8 @@ func main() {
 	defer stop()
 
 	server := &pluginServer{
-		rootDir: resolvePluginRoot(),
+		rootDir:    resolvePluginRoot(),
+		workspaces: newWorkspaceManager(resolvePluginRoot()),
 	}
 	if err := server.run(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
@@ -67,13 +59,24 @@ func main() {
 
 func resolvePluginRoot() string {
 	exe, err := os.Executable()
-	if err != nil {
-		return "."
+	if err == nil {
+		root := filepath.Dir(exe)
+		if _, statErr := os.Stat(filepath.Join(root, "runtime", "static", "index.html")); statErr == nil {
+			return root
+		}
 	}
-	return filepath.Dir(exe)
+	if cwd, err := os.Getwd(); err == nil {
+		return cwd
+	}
+	return "."
 }
 
 func (s *pluginServer) run(ctx context.Context) error {
+	if s.workspaces == nil {
+		s.workspaces = newWorkspaceManager(s.rootDir)
+	}
+	defer s.workspaces.closeAll()
+
 	listener, err := net.Listen("tcp", "127.0.0.1:8080")
 	if err != nil {
 		return err
@@ -83,10 +86,24 @@ func (s *pluginServer) run(ctx context.Context) error {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/instances", s.handleInstances)
 	mux.HandleFunc("/api/lightos-admin-info", s.handleLightOSAdminInfo)
+	mux.HandleFunc("/api/workspace", s.handleWorkspace)
 	mux.HandleFunc("/ws", s.handleWebSocket)
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir(filepath.Join(s.rootDir, "runtime", "static")))))
+	mux.Handle("/static/", http.StripPrefix("/static/", staticFileServer(filepath.Join(s.rootDir, "runtime", "static"))))
 
 	return s.serveHTTP(ctx, listener, mux)
+}
+
+func staticFileServer(root string) http.Handler {
+	files := http.FileServer(http.Dir(root))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch filepath.Ext(r.URL.Path) {
+		case ".wasm":
+			w.Header().Set("Content-Type", "application/wasm")
+		case ".js":
+			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		}
+		files.ServeHTTP(w, r)
+	})
 }
 
 func (s *pluginServer) serveHTTP(ctx context.Context, listener net.Listener, mux http.Handler) error {
@@ -151,147 +168,10 @@ func (s *pluginServer) handleLightOSAdminInfo(w http.ResponseWriter, r *http.Req
 }
 
 func (s *pluginServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	selector := strings.TrimSpace(r.URL.Query().Get("name"))
-	if selector == "" {
-		http.Error(w, "name is required", http.StatusBadRequest)
-		return
-	}
-	if err := validateInstanceSelector(selector); err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return
-	}
-	defer conn.Close()
-
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-
-	var writeMu sync.Mutex
-	writeMessage := func(messageType int, payload []byte) bool {
-		writeMu.Lock()
-		defer writeMu.Unlock()
-		return conn.WriteMessage(messageType, payload) == nil
-	}
-	writeTextMessage := func(text string) {
-		_ = writeMessage(websocket.TextMessage, []byte(text))
-	}
-	writeControlMessage := func(payload any) {
-		data, err := json.Marshal(payload)
-		if err != nil {
-			return
-		}
-		_ = writeMessage(websocket.TextMessage, data)
-	}
-
 	cols, rows := parseTerminalSize(r.URL.Query().Get("cols"), r.URL.Query().Get("rows"))
-	if cols <= 0 {
-		cols = 120
-	}
-	if rows <= 0 {
-		rows = 32
-	}
-
-	command := exec.CommandContext(ctx, lightosctlPath, "exec", "-ti", selector, "/bin/sh", "-lc", buildShellBootstrapScript())
-	command.Dir = s.rootDir
-	command.Env = append(os.Environ(), "TERM=xterm-256color")
-
-	ptyFile, err := pty.Start(command)
-	if err != nil {
-		writeTextMessage(fmt.Sprintf("[webshell error] %v", err))
+	if err := s.attachPersistentPane(w, r, cols, rows); err != nil {
+		log.Printf("websocket attach failed: %v", err)
 		return
-	}
-	defer func() {
-		_ = ptyFile.Close()
-	}()
-	if err := pty.Setsize(ptyFile, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}); err != nil {
-		writeTextMessage(fmt.Sprintf("[webshell error] %v", err))
-		return
-	}
-
-	done := make(chan struct{})
-	waitErr := make(chan error, 1)
-	clientMessages := make(chan webSocketClientMessage, 16)
-	go func() {
-		defer close(done)
-		buf := make([]byte, 4096)
-		for {
-			n, err := ptyFile.Read(buf)
-			if n > 0 {
-				if ok := writeMessage(websocket.BinaryMessage, append([]byte(nil), buf[:n]...)); !ok {
-					return
-				}
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-	go func() {
-		waitErr <- command.Wait()
-	}()
-	go func() {
-		defer close(clientMessages)
-		for {
-			messageType, message, err := conn.ReadMessage()
-			next := webSocketClientMessage{
-				messageType: messageType,
-				payload:     message,
-				err:         err,
-			}
-			select {
-			case clientMessages <- next:
-			case <-ctx.Done():
-				return
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-
-	for {
-		select {
-		case <-ctx.Done():
-			_ = killCommand(command)
-			<-done
-			<-waitErr
-			return
-		case err := <-waitErr:
-			if err != nil && !errors.Is(err, os.ErrProcessDone) {
-				writeTextMessage(fmt.Sprintf("[webshell error] %v", err))
-			}
-			<-done
-			exitMessage := map[string]any{
-				"type":      "process-exit",
-				"exit_code": processExitCode(err),
-			}
-			if err != nil && !errors.Is(err, os.ErrProcessDone) {
-				exitMessage["message"] = err.Error()
-			}
-			writeControlMessage(exitMessage)
-			return
-		case clientMessage, ok := <-clientMessages:
-			if !ok || clientMessage.err != nil {
-				_ = killCommand(command)
-				<-done
-				<-waitErr
-				return
-			}
-			switch {
-			case bytes.HasPrefix(clientMessage.payload, []byte("resize:")):
-				cols, rows = parseTerminalSizeFromPayload(clientMessage.payload)
-				if cols > 0 && rows > 0 {
-					_ = pty.Setsize(ptyFile, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
-				}
-			case bytes.HasPrefix(clientMessage.payload, []byte("input:")):
-				_, _ = io.WriteString(ptyFile, strings.TrimPrefix(string(clientMessage.payload), "input:"))
-			default:
-				_, _ = ptyFile.Write(clientMessage.payload)
-			}
-		}
 	}
 }
 
@@ -326,14 +206,6 @@ func parsePositiveInt(text string) int {
 		return 0
 	}
 	return n
-}
-
-func parseTerminalSizeFromPayload(message []byte) (int, int) {
-	parts := strings.SplitN(strings.TrimPrefix(string(message), "resize:"), ",", 2)
-	if len(parts) != 2 {
-		return 0, 0
-	}
-	return parsePositiveInt(parts[0]), parsePositiveInt(parts[1])
 }
 
 func buildShellBootstrapScript() string {

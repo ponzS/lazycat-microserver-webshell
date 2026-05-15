@@ -197,6 +197,8 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   let contextTarget = null;
   let toastTimer = 0;
   let activeTheme = themes.find((theme) => theme.id === window.localStorage.getItem("webshell.theme")) || themes[0];
+  let applyingWorkspaceState = false;
+  const textEncoder = new TextEncoder();
 
   const cloneTheme = (theme) => ({ ...theme.xterm });
   const terminalOptions = () => ({ ...terminalOptionsBase, theme: cloneTheme(activeTheme) });
@@ -376,6 +378,53 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     return targetName;
   };
 
+  const terminalSizeQuery = () => {
+    const tab = currentTab();
+    const pane = tab?.panes.get(tab.activePaneId);
+    return {
+      cols: pane?.term?.cols || 120,
+      rows: pane?.term?.rows || 32,
+    };
+  };
+
+  const workspaceURL = (name = activeName) => {
+    const url = new URL("./api/workspace", window.location.href);
+    url.searchParams.set("name", name);
+    const size = terminalSizeQuery();
+    url.searchParams.set("cols", String(size.cols));
+    url.searchParams.set("rows", String(size.rows));
+    return url;
+  };
+
+  const fetchWorkspaceState = async (name = activeName) => {
+    if (!name) {
+      throw new Error("No running container is available.");
+    }
+    const response = await fetch(workspaceURL(name), { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(await response.text() || `Workspace request failed (${response.status})`);
+    }
+    return response.json();
+  };
+
+  const postWorkspaceAction = async (action, payload = {}) => {
+    if (!activeName) {
+      throw new Error("No running container is available.");
+    }
+    const size = terminalSizeQuery();
+    const response = await fetch(workspaceURL(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, cols: size.cols, rows: size.rows, ...payload }),
+    });
+    if (!response.ok) {
+      throw new Error(await response.text() || `Workspace action failed (${response.status})`);
+    }
+    const state = await response.json();
+    applyWorkspaceState(state, { focus: true });
+    return state;
+  };
+
   const updateLocationName = (nextName, { replace = false } = {}) => {
     const nextURL = new URL(window.location.href);
     nextURL.searchParams.set("name", nextName);
@@ -502,6 +551,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (!tab || !tab.panes.has(paneId)) {
       return;
     }
+    const wasActive = tab.activePaneId === paneId;
     tab.activePaneId = paneId;
     for (const pane of tab.panes.values()) {
       pane.shellEl.classList.toggle("active", pane.id === paneId);
@@ -513,11 +563,14 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         pane?.term?.focus();
       });
     }
+    if (!applyingWorkspaceState && !wasActive) {
+      postWorkspaceAction("activate_pane", { tab_id: tab.id, pane_id: paneId }).catch((error) => showToast(error.message));
+    }
   };
 
   const sendTerminalSize = (pane) => {
     if (pane?.socket?.readyState === WebSocket.OPEN) {
-      pane.socket.send(`resize:${pane.term.cols},${pane.term.rows}`);
+      pane.socket.send(JSON.stringify({ type: "resize", cols: pane.term.cols, rows: pane.term.rows }));
     }
   };
 
@@ -544,11 +597,119 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
 
   const resizeActiveTab = () => resizeTab(currentTab());
 
+  const resizeAllTabsForCurrentDevice = () => {
+    if (tabs.size === 0) {
+      return;
+    }
+    const visibleTabId = activeTabId;
+    for (const tab of tabs.values()) {
+      tab.paneEl.classList.add("active");
+    }
+    for (const tab of tabs.values()) {
+      resizeTab(tab);
+    }
+    for (const tab of tabs.values()) {
+      tab.paneEl.classList.toggle("active", tab.id === visibleTabId);
+    }
+  };
+
   const clearReconnectTimer = (session) => {
     if (session?.reconnectTimer) {
       window.clearTimeout(session.reconnectTimer);
       session.reconnectTimer = 0;
     }
+  };
+
+  const clearInputFlushTimer = (session) => {
+    if (session?.inputFlushTimer) {
+      window.clearTimeout(session.inputFlushTimer);
+      session.inputFlushTimer = 0;
+    }
+  };
+
+  const flushInputBuffer = (session) => {
+    if (!session) {
+      return;
+    }
+    clearInputFlushTimer(session);
+    if (!session.inputBuffer || session.socket?.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const data = session.inputBuffer;
+    session.inputBuffer = "";
+    session.inputBufferSize = 0;
+    try {
+      session.socket.send(JSON.stringify({ type: "input", data }));
+    } catch (error) {
+      session.inputBuffer = data + session.inputBuffer;
+      session.inputBufferSize += textEncoder.encode(data).length;
+    }
+  };
+
+  const scheduleInputFlush = (session) => {
+    if (session.inputFlushTimer) {
+      return;
+    }
+    session.inputFlushTimer = window.setTimeout(() => flushInputBuffer(session), 8);
+  };
+
+  const sendSessionInput = (session, data, { immediate = false } = {}) => {
+    if (!data || session.socket?.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const byteLength = textEncoder.encode(data).length;
+    const maxBufferedInput = 8 * 1024 * 1024;
+    if (session.inputBufferSize + byteLength > maxBufferedInput) {
+      flushInputBuffer(session);
+    }
+    if (byteLength > maxBufferedInput) {
+      try {
+        session.socket.send(JSON.stringify({ type: "input", data }));
+      } catch (error) {
+      }
+      return;
+    }
+    session.inputBuffer += data;
+    session.inputBufferSize += byteLength;
+    if (immediate || session.inputBufferSize >= 4096) {
+      flushInputBuffer(session);
+    } else {
+      scheduleInputFlush(session);
+    }
+  };
+
+  const flushPendingInput = (session) => {
+    for (const data of session.pendingInput || []) {
+      sendSessionInput(session, data);
+    }
+    session.pendingInput = [];
+    session.pendingInputSize = 0;
+    flushInputBuffer(session);
+  };
+
+  const sendOrQueueInput = (session, data) => {
+    const byteLength = textEncoder.encode(data).length;
+    const maxPendingInput = 8 * 1024 * 1024;
+    if (session.closed || session.exitExpected) {
+      return;
+    }
+    if (session.replayComplete) {
+      if (session.socket?.readyState === WebSocket.OPEN) {
+        sendSessionInput(session, data, { immediate: /[\r\n\x03\x04]/.test(data) });
+      } else {
+        if (session.pendingInputSize + byteLength > maxPendingInput) {
+          return;
+        }
+        session.pendingInput.push(data);
+        session.pendingInputSize += byteLength;
+      }
+      return;
+    }
+    if (session.pendingInputSize + byteLength > maxPendingInput) {
+      return;
+    }
+    session.pendingInput.push(data);
+    session.pendingInputSize += byteLength;
   };
 
   const scheduleReconnect = (session) => {
@@ -578,10 +739,12 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     clearReconnectTimer(session);
     const socketUrl = new URL("./ws", window.location.href);
     socketUrl.searchParams.set("name", session.name);
+    socketUrl.searchParams.set("pane", session.id);
     socketUrl.searchParams.set("cols", String(session.term.cols || 120));
     socketUrl.searchParams.set("rows", String(session.term.rows || 32));
     const currentSocket = new WebSocket(socketUrl.toString());
     session.socket = currentSocket;
+    session.replayComplete = false;
     currentSocket.binaryType = "arraybuffer";
 
     currentSocket.addEventListener("open", () => {
@@ -606,12 +769,17 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
           if (message && typeof message.type === "string") {
             switch (message.type) {
               case "history-replay-complete":
+                session.replayComplete = true;
+                session.shellEl.dataset.connection = "open";
+                flushPendingInput(session);
+                return;
               case "pong":
                 return;
               case "process-exit":
                 session.exitExpected = true;
                 session.socket = null;
-                closePane(session.tabId, session.id);
+                disposePane(session);
+                refreshWorkspace().catch((error) => showToast(error.message));
                 return;
             }
           }
@@ -644,11 +812,15 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     });
   };
 
-  const createPaneSession = (tab, instanceName, { connect = true } = {}) => {
-    const id = `pane-${nextPaneSeq++}`;
+  const createPaneSession = (tab, instanceName, { id = "", connect = true } = {}) => {
+    const normalizedID = String(id || `pane-${nextPaneSeq++}`).trim();
+    const numeric = Number(normalizedID.replace(/^pane-/, ""));
+    if (Number.isFinite(numeric) && numeric >= nextPaneSeq) {
+      nextPaneSeq = numeric + 1;
+    }
     const shellEl = document.createElement("section");
     shellEl.className = "pane-shell";
-    shellEl.dataset.paneId = id;
+    shellEl.dataset.paneId = normalizedID;
     shellEl.dataset.connection = connect ? "connecting" : "idle";
     shellEl.setAttribute("tabindex", "-1");
 
@@ -665,7 +837,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
 
     const session = {
-      id,
+      id: normalizedID,
       tabId: tab.id,
       name: instanceName,
       shellEl,
@@ -675,14 +847,18 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       socket: null,
       reconnectTimer: 0,
       reconnectPending: false,
+      replayComplete: false,
+      pendingInput: [],
+      pendingInputSize: 0,
+      inputBuffer: "",
+      inputBufferSize: 0,
+      inputFlushTimer: 0,
       exitExpected: false,
       closed: false,
     };
 
     term.onData((data) => {
-      if (session.socket?.readyState === WebSocket.OPEN) {
-        session.socket.send(`input:${data}`);
-      }
+      sendOrQueueInput(session, data);
     });
     term.onResize(() => sendTerminalSize(session));
     term.onTitleChange((title) => {
@@ -709,7 +885,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       showContextMenu(event.clientX, event.clientY, { type: "pane", tabId: session.tabId, paneId: session.id });
     });
 
-    tab.panes.set(id, session);
+    tab.panes.set(normalizedID, session);
     if (connect) {
       connectSession(session).catch((error) => {
         session.term.write(`\r\n[webshell error] ${error.message}\r\n`);
@@ -755,11 +931,18 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     tabsEl.appendChild(button);
   };
 
-  const createTab = ({ label, pane, focus = true, connect = true } = {}) => {
+  const createTab = ({ id = "", label, pane, focus = true, connect = true, customLabel = false, empty = false } = {}) => {
+    const normalizedID = String(id || `tab-${nextTabSeq}`).trim();
+    const numeric = Number(normalizedID.replace(/^tab-/, ""));
+    if (Number.isFinite(numeric) && numeric >= nextTabSeq) {
+      nextTabSeq = numeric + 1;
+    } else if (!id) {
+      nextTabSeq += 1;
+    }
     const tab = {
-      id: `tab-${nextTabSeq}`,
-      label: label || `Shell ${nextTabSeq}`,
-      customLabel: Boolean(label),
+      id: normalizedID,
+      label: label || `Shell ${numeric || nextTabSeq - 1}`,
+      customLabel: Boolean(customLabel || label),
       panes: new Map(),
       activePaneId: null,
       layout: null,
@@ -767,7 +950,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       layoutHost: document.createElement("div"),
       button: null,
     };
-    nextTabSeq += 1;
     tab.paneEl.className = "terminal-pane";
     tab.paneEl.dataset.tabId = tab.id;
     tab.layoutHost.className = "terminal-layout";
@@ -781,7 +963,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       tab.panes.set(pane.id, pane);
       tab.activePaneId = pane.id;
       tab.layout = { type: "leaf", paneId: pane.id };
-    } else {
+    } else if (!empty) {
       const session = createPaneSession(tab, activeName, { connect });
       tab.activePaneId = session.id;
       tab.layout = { type: "leaf", paneId: session.id };
@@ -797,6 +979,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (!tab) {
       return;
     }
+    const wasActive = activeTabId === tab.id;
     activeTabId = tab.id;
     for (const item of tabs.values()) {
       const isActive = item.id === activeTabId;
@@ -807,6 +990,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     setActivePane(tab, tab.activePaneId, { focus });
     window.requestAnimationFrame(() => resizeTab(tab));
+    if (!applyingWorkspaceState && !wasActive) {
+      postWorkspaceAction("activate_tab", { tab_id: tab.id }).catch((error) => showToast(error.message));
+    }
   };
 
   const renderLeaf = (tab, node) => {
@@ -869,6 +1055,14 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         divider.removeEventListener("pointerup", onUp);
         divider.removeEventListener("pointercancel", onUp);
         resizeActiveTab();
+        const tab = currentTab();
+        if (tab && !applyingWorkspaceState) {
+          postWorkspaceAction("update_layout", {
+            tab_id: tab.id,
+            layout: tab.layout,
+            active_pane_id: tab.activePaneId,
+          }).catch((error) => showToast(error.message));
+        }
       };
 
       divider.addEventListener("pointermove", onMove);
@@ -916,6 +1110,71 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     setActivePane(tab, tab.activePaneId, { focus: false });
     window.requestAnimationFrame(() => resizeTab(tab));
+  };
+
+  const applyWorkspaceState = (state, { focus = false } = {}) => {
+    applyingWorkspaceState = true;
+    try {
+      const nextTabIDs = new Set((state?.tabs || []).map((tab) => tab.id));
+      for (const tab of [...tabs.values()]) {
+        if (!nextTabIDs.has(tab.id)) {
+          closeTab(tab.id);
+        }
+      }
+
+      tabsEl.textContent = "";
+      for (const tabState of state?.tabs || []) {
+        let tab = tabs.get(tabState.id);
+        if (!tab) {
+          tab = createTab({
+            id: tabState.id,
+            label: tabState.label,
+            customLabel: tabState.custom_label,
+            focus: false,
+            connect: false,
+            empty: true,
+          });
+        }
+        tab.label = tabState.label || tab.label;
+        tab.customLabel = Boolean(tabState.custom_label);
+        tab.activePaneId = tabState.active_pane_id;
+        tab.layout = tabState.layout || null;
+        tab.button?.remove();
+        createTabButton(tab);
+
+        const wantedPaneIDs = new Set((tabState.panes || []).map((pane) => pane.id));
+        for (const pane of [...tab.panes.values()]) {
+          if (!wantedPaneIDs.has(pane.id)) {
+            disposePane(pane);
+            tab.panes.delete(pane.id);
+          }
+        }
+        for (const paneState of tabState.panes || []) {
+          if (!tab.panes.has(paneState.id)) {
+            createPaneSession(tab, activeName, { id: paneState.id, connect: true });
+          }
+        }
+        renderTabLabel(tab);
+        renderTabLayout(tab);
+      }
+
+      const nextActiveTab = tabs.get(state?.active_tab_id) || tabs.values().next().value || null;
+      if (nextActiveTab) {
+        setActiveTab(nextActiveTab.id, { focus });
+      } else {
+        activeTabId = null;
+      }
+      updateEmptyState();
+      window.requestAnimationFrame(() => resizeAllTabsForCurrentDevice());
+    } finally {
+      applyingWorkspaceState = false;
+    }
+  };
+
+  const refreshWorkspace = async ({ focus = false } = {}) => {
+    const state = await fetchWorkspaceState(activeName);
+    applyWorkspaceState(state, { focus });
+    return state;
   };
 
   const splitLayout = (node, targetPaneId, direction, newPaneId) => {
@@ -988,6 +1247,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const splitPane = (tabId, paneId, direction) => {
     const tab = tabs.get(tabId);
     if (!tab || !tab.panes.has(paneId)) {
+      return;
+    }
+    if (!applyingWorkspaceState) {
+      postWorkspaceAction("split_pane", { tab_id: tabId, pane_id: paneId, direction }).catch((error) => showToast(error.message));
       return;
     }
     const session = createPaneSession(tab, activeName);
@@ -1121,6 +1384,11 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       return;
     }
     pane.closed = true;
+    pane.pendingInput = [];
+    pane.pendingInputSize = 0;
+    pane.inputBuffer = "";
+    pane.inputBufferSize = 0;
+    clearInputFlushTimer(pane);
     clearReconnectTimer(pane);
     if (pane.socket) {
       const socket = pane.socket;
@@ -1138,6 +1406,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     const tab = tabs.get(tabId);
     const pane = tab?.panes.get(paneId);
     if (!tab || !pane) {
+      return;
+    }
+    if (!applyingWorkspaceState) {
+      postWorkspaceAction("close_pane", { tab_id: tabId, pane_id: paneId }).catch((error) => showToast(error.message));
       return;
     }
     disposePane(pane);
@@ -1162,6 +1434,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       showToast("At least one tab must remain.");
       return;
     }
+    if (!applyingWorkspaceState) {
+      postWorkspaceAction("close_tab", { tab_id: tabId }).catch((error) => showToast(error.message));
+      return;
+    }
     for (const pane of tab.panes.values()) {
       disposePane(pane);
     }
@@ -1179,6 +1455,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const closeOtherTabs = (tabId) => {
+    if (!applyingWorkspaceState) {
+      postWorkspaceAction("close_other_tabs", { tab_id: tabId }).catch((error) => showToast(error.message));
+      return;
+    }
     for (const tab of [...tabs.values()]) {
       if (tab.id !== tabId) {
         closeTab(tab.id);
@@ -1200,6 +1480,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (!normalized) {
       return;
     }
+    if (!applyingWorkspaceState) {
+      postWorkspaceAction("rename_tab", { tab_id: tabId, label: normalized }).catch((error) => showToast(error.message));
+      return;
+    }
     tab.label = normalized;
     tab.customLabel = true;
     renderTabLabel(tab);
@@ -1209,6 +1493,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     const sourceTab = tabs.get(tabId);
     const pane = sourceTab?.panes.get(paneId);
     if (!sourceTab || !pane || sourceTab.panes.size <= 1) {
+      return;
+    }
+    if (!applyingWorkspaceState) {
+      postWorkspaceAction("move_pane_to_tab", { tab_id: tabId, pane_id: paneId }).catch((error) => showToast(error.message));
       return;
     }
     sourceTab.panes.delete(paneId);
@@ -1326,7 +1614,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         await toggleFullscreen();
         return;
       case "new_tab":
-        createUserTab();
+        await createUserTab();
         return;
       case "close_tab":
         if (tab) {
@@ -1478,10 +1766,14 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const resetTabsForInstance = () => {
-    for (const tab of [...tabs.values()]) {
-      closeTab(tab.id);
+    applyingWorkspaceState = true;
+    try {
+      for (const tab of [...tabs.values()]) {
+        closeTab(tab.id);
+      }
+    } finally {
+      applyingWorkspaceState = false;
     }
-    createTab();
   };
 
   const switchInstance = async (nextName, { updateURL = true, replaceURL = false } = {}) => {
@@ -1495,6 +1787,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     renderInstanceSwitcher();
     resetTabsForInstance();
+    await refreshWorkspace({ focus: true });
   };
 
   const refreshInstances = async () => {
@@ -1521,20 +1814,24 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     applyThemeDocumentState();
     renderThemePicker();
     await refreshInstances();
-    createTab({ focus: true });
+    await refreshWorkspace({ focus: true });
   };
 
-  function createUserTab() {
+  async function createUserTab() {
     if (!activeName) {
       showToast("No running container is available.");
       return;
     }
-    createTab();
+    await postWorkspaceAction("create_tab");
   }
 
-  newTabButton?.addEventListener("click", createUserTab);
+  newTabButton?.addEventListener("click", () => {
+    createUserTab().catch((error) => showToast(error.message));
+  });
 
-  emptyStateAction?.addEventListener("click", createUserTab);
+  emptyStateAction?.addEventListener("click", () => {
+    createUserTab().catch((error) => showToast(error.message));
+  });
 
   instanceSwitcherButton?.addEventListener("click", () => {
     if (instanceSwitcherPanel?.hidden) {
@@ -1601,7 +1898,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     handleGlobalShortcutKeydown(event);
   }, true);
 
-  window.addEventListener("resize", () => resizeActiveTab());
+  window.addEventListener("resize", () => resizeAllTabsForCurrentDevice());
   window.addEventListener("popstate", () => {
     const nextParams = new URLSearchParams(window.location.search);
     const nextName = (nextParams.get("name") || "").trim();
