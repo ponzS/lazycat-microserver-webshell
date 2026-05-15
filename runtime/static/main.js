@@ -1031,7 +1031,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     ensureResponseSelector(state, requestName);
     observeServerRevision(state);
-    applyWorkspaceState(state, { focus: true, instanceName: requestName, generation });
+    applyWorkspaceState(state, { focus: true, instanceName: requestName, generation, preferStateActiveTab: true });
     return state;
   };
 
@@ -5375,7 +5375,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     window.requestAnimationFrame(() => resizeTab(tab));
   };
 
-  const applyWorkspaceState = (state, { focus = false, instanceName = activeName, generation = activeInstanceGeneration } = {}) => {
+  const applyWorkspaceState = (state, { focus = false, instanceName = activeName, generation = activeInstanceGeneration, preferStateActiveTab = false } = {}) => {
     const expectedName = String(instanceName || "").trim();
     ensureResponseSelector(state, expectedName);
     const targetName = responseSelector(state) || expectedName;
@@ -5432,7 +5432,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       }
 
       const savedTab = targetName ? window.localStorage.getItem(lastTabStorageKey(targetName)) : "";
-      const nextActiveTab = tabs.get(restartTab) || tabs.get(requestedTab) || tabs.get(savedTab) || tabs.get(state?.active_tab_id) || tabs.values().next().value || null;
+      const stateActiveTab = state?.active_tab_id || "";
+      const nextActiveTab = preferStateActiveTab
+        ? tabs.get(restartTab) || tabs.get(stateActiveTab) || tabs.get(requestedTab) || tabs.get(savedTab) || tabs.values().next().value || null
+        : tabs.get(restartTab) || tabs.get(requestedTab) || tabs.get(savedTab) || tabs.get(stateActiveTab) || tabs.values().next().value || null;
       if (nextActiveTab) {
         setActiveTab(nextActiveTab.id, { focus });
       } else {
