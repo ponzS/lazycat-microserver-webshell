@@ -84,6 +84,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const touchShortcutRepeatInitialDelayMs = 320;
   const touchShortcutRepeatIntervalMs = 80;
   const touchSelectionMoveThresholdPx = 7;
+  const desktopSelectionCopyMoveThresholdPx = 4;
   const terminalSizeReassertIntervalMs = 250;
   const mobileLayoutQuery = window.matchMedia?.("(max-width: 640px)");
   const themeCardWidth = 280;
@@ -2529,6 +2530,155 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
   };
 
+  const addSessionCleanup = (session, cleanup) => {
+    if (!session || typeof cleanup !== "function") {
+      return;
+    }
+    if (!Array.isArray(session.cleanupCallbacks)) {
+      session.cleanupCallbacks = [];
+    }
+    session.cleanupCallbacks.push(cleanup);
+  };
+
+  const runSessionCleanups = (session) => {
+    if (!session) {
+      return;
+    }
+    const callbacks = Array.isArray(session?.cleanupCallbacks) ? session.cleanupCallbacks : [];
+    session.cleanupCallbacks = [];
+    for (const cleanup of callbacks) {
+      try {
+        cleanup();
+      } catch (error) {
+      }
+    }
+  };
+
+  const copyCurrentMouseSelection = async (session) => {
+    const text = session?.term?.getSelection?.() || "";
+    if (!text) {
+      return;
+    }
+    try {
+      const copied = await copyText(text);
+      if (!copied) {
+        console.warn("Terminal selection copy failed.");
+      }
+    } catch (error) {
+      console.warn("Terminal selection copy failed.", error);
+    }
+  };
+
+  const readClipboardTextSilently = async () => {
+    try {
+      return await readClipboardText();
+    } catch (error) {
+      return "";
+    }
+  };
+
+  const disableSelectionManagerAutoCopy = (session) => {
+    const manager = session?.term?.selectionManager;
+    if (!manager || manager.webshellAutoCopyDisabled) {
+      return;
+    }
+    manager.webshellAutoCopyDisabled = true;
+    manager.webshellOriginalCopyToClipboard = manager.copyToClipboard;
+    manager.copyToClipboard = async () => {};
+  };
+
+  const installDesktopMouseClipboard = (session) => {
+    const shell = session?.shellEl;
+    const host = session?.terminalHost;
+    const term = session?.term;
+    if (!shell || !host || !term) {
+      return;
+    }
+    disableSelectionManagerAutoCopy(session);
+
+    let selectionDrag = null;
+    const isTerminalMouseTarget = (target) => target instanceof Element && target.closest(".terminal-host") === host;
+    const activateSessionPane = () => {
+      const current = tabs.get(session.tabId);
+      setActivePane(current, session.id, { focus: false });
+    };
+
+    const handleMouseDown = (event) => {
+      if (event.button === 1 && isTerminalMouseTarget(event.target)) {
+        event.preventDefault();
+        activateSessionPane();
+        return;
+      }
+      if (event.button !== 0 || isMobileLayout() || !isTerminalMouseTarget(event.target)) {
+        selectionDrag = null;
+        return;
+      }
+      session.selectAllBufferActive = false;
+      selectionDrag = {
+        startX: event.clientX,
+        startY: event.clientY,
+        moved: false,
+      };
+    };
+
+    const handleMouseMove = (event) => {
+      if (!selectionDrag) {
+        return;
+      }
+      const distance = Math.hypot(event.clientX - selectionDrag.startX, event.clientY - selectionDrag.startY);
+      if (distance >= desktopSelectionCopyMoveThresholdPx) {
+        selectionDrag.moved = true;
+      }
+    };
+
+    const handleMouseUp = (event) => {
+      const drag = selectionDrag;
+      selectionDrag = null;
+      if (!drag || event.button !== 0 || isMobileLayout() || !drag.moved) {
+        return;
+      }
+      if (!session.closed) {
+        copyCurrentMouseSelection(session);
+      }
+    };
+
+    const handleDoubleClick = (event) => {
+      if (event.button !== 0 || isMobileLayout() || !isTerminalMouseTarget(event.target)) {
+        return;
+      }
+      session.selectAllBufferActive = false;
+      if (!session.closed) {
+        copyCurrentMouseSelection(session);
+      }
+    };
+
+    const handleAuxClick = async (event) => {
+      if (event.button !== 1 || !isTerminalMouseTarget(event.target)) {
+        return;
+      }
+      event.preventDefault();
+      activateSessionPane();
+      reassertTerminalSize(session, { force: true });
+      const text = await readClipboardTextSilently();
+      if (text && !session.closed) {
+        pasteIntoSession(session, text).catch(() => {});
+      }
+    };
+
+    shell.addEventListener("mousedown", handleMouseDown, { capture: true });
+    shell.addEventListener("dblclick", handleDoubleClick);
+    shell.addEventListener("auxclick", handleAuxClick);
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+    addSessionCleanup(session, () => {
+      shell.removeEventListener("mousedown", handleMouseDown, { capture: true });
+      shell.removeEventListener("dblclick", handleDoubleClick);
+      shell.removeEventListener("auxclick", handleAuxClick);
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    });
+  };
+
   const selectAllSessionBuffer = (session = activeSession()) => {
     if (!session?.term) {
       return;
@@ -4516,6 +4666,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       cwd: "",
       activityCheckedAt: 0,
       lastSizeReassertAt: 0,
+      cleanupCallbacks: [],
     };
 
     installTerminalInputFocus(session);
@@ -4523,6 +4674,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     installTerminalHostViewportGuard(session);
     installRendererThemeMapper(session);
     installMobileTouchSelection(session);
+    installDesktopMouseClipboard(session);
 
     term.onData((data) => {
       if (isTerminalInputBlocked()) {
@@ -4592,14 +4744,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       }
       const link = findURLAtPosition(session, event.clientX, event.clientY);
       showContextMenu(event.clientX, event.clientY, { type: "pane", tabId: session.tabId, paneId: session.id, link: link?.url || "" });
-    });
-    shellEl.addEventListener("auxclick", (event) => {
-      if (event.button !== 1) {
-        return;
-      }
-      event.preventDefault();
-      reassertTerminalSize(session, { force: true });
-      readClipboardText().then((text) => pasteIntoSession(session, text)).catch((error) => showToast(error.message || "Paste failed."));
     });
     terminalHost.addEventListener("paste", (event) => {
       const text = event.clipboardData?.getData("text/plain");
@@ -5134,6 +5278,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     pane.inputBufferSize = 0;
     clearInputFlushTimer(pane);
     clearReconnectTimer(pane);
+    runSessionCleanups(pane);
     if (pane.socket) {
       const socket = pane.socket;
       pane.socket = null;
