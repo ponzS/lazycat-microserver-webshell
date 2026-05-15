@@ -46,6 +46,10 @@ var upgrader = websocket.Upgrader{
 const lightosctlPath = "/lzcinit/lightosctl"
 
 func main() {
+	if handleAgentCommand(os.Args[1:]) {
+		return
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -76,7 +80,6 @@ func (s *pluginServer) run(ctx context.Context) error {
 	if s.workspaces == nil {
 		s.workspaces = newWorkspaceManager(s.rootDir)
 	}
-	defer s.workspaces.closeAll()
 
 	listener, err := net.Listen("tcp", "127.0.0.1:8080")
 	if err != nil {

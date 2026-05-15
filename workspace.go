@@ -45,6 +45,7 @@ type terminalWorkspace struct {
 	selector string
 	username string
 	rootDir  string
+	localPTY bool
 
 	mu         sync.Mutex
 	tabs       []*terminalTab
@@ -233,29 +234,27 @@ func (s *pluginServer) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cols, rows := parseTerminalSize(r.URL.Query().Get("cols"), r.URL.Query().Get("rows"))
-	workspace, err := s.workspaces.getOrCreate(r.Context(), selector, cols, rows)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
 
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, workspace.snapshot())
+		state, err := requestAgentWorkspaceState(r.Context(), selector, cols, rows)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, state)
 	case http.MethodPost:
 		var request workspaceActionRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if request.Action == "create_tab" || request.Action == "split_pane" {
-			_, _ = workspace.refreshActivity(r.Context())
-		}
-		if err := workspace.applyAction(request); err != nil {
+		state, err := requestAgentWorkspaceAction(r.Context(), selector, cols, rows, request)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, workspace.snapshot())
+		writeJSON(w, state)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
@@ -272,14 +271,10 @@ func (s *pluginServer) handleWorkspaceActivity(w http.ResponseWriter, r *http.Re
 		return
 	}
 	cols, rows := parseTerminalSize(r.URL.Query().Get("cols"), r.URL.Query().Get("rows"))
-	workspace, err := s.workspaces.getOrCreate(r.Context(), selector, cols, rows)
+	state, err := requestAgentWorkspaceActivity(r.Context(), selector, cols, rows)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
-	}
-	state, err := workspace.refreshActivity(r.Context())
-	if err != nil {
-		state.Error = err.Error()
 	}
 	writeJSON(w, state)
 }
@@ -295,97 +290,7 @@ func (s *pluginServer) attachPersistentPane(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "pane is required", http.StatusBadRequest)
 		return nil
 	}
-	workspace, err := s.workspaces.getOrCreate(r.Context(), selector, cols, rows)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return nil
-	}
-	pane := workspace.getPane(paneID)
-	if pane == nil {
-		http.Error(w, "pane not found", http.StatusNotFound)
-		return nil
-	}
-
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	conn.EnableWriteCompression(false)
-	conn.SetReadLimit(websocketReadLimit)
-
-	if cols > 0 && rows > 0 {
-		_ = pane.resize(cols, rows)
-	}
-	history, client, allowGeneratedInputDuringReplay, err := pane.attachClient()
-	if err != nil {
-		_ = writeWebSocketJSON(conn, map[string]any{
-			"type":    "process-exit",
-			"message": err.Error(),
-		})
-		return nil
-	}
-	defer func() {
-		pane.detachClient(client)
-		client.close()
-	}()
-
-	writerDone := make(chan struct{})
-	go func() {
-		defer close(writerDone)
-		if !writeHistoryReplay(conn, history, allowGeneratedInputDuringReplay) {
-			return
-		}
-		for {
-			select {
-			case outbound := <-client.send:
-				client.dequeued(len(outbound.payload))
-				if err := conn.WriteMessage(outbound.messageType, outbound.payload); err != nil {
-					return
-				}
-				if outbound.closeAfter {
-					_ = conn.Close()
-					return
-				}
-				continue
-			default:
-			}
-			select {
-			case outbound := <-client.send:
-				client.dequeued(len(outbound.payload))
-				if err := conn.WriteMessage(outbound.messageType, outbound.payload); err != nil {
-					return
-				}
-				if outbound.closeAfter {
-					_ = conn.Close()
-					return
-				}
-			case <-client.done:
-				return
-			}
-		}
-	}()
-
-	for {
-		messageType, payload, err := conn.ReadMessage()
-		if err != nil {
-			client.close()
-			<-writerDone
-			return nil
-		}
-		switch messageType {
-		case websocket.BinaryMessage:
-			if len(payload) > 0 {
-				_ = pane.writeInput(payload)
-			}
-		case websocket.TextMessage:
-			if !handleTerminalControlMessage(pane, payload, client) {
-				client.close()
-				<-writerDone
-				return nil
-			}
-		}
-	}
+	return attachAgentPane(w, r, selector, paneID, cols, rows)
 }
 
 func writeJSON(w http.ResponseWriter, payload any) {
@@ -542,7 +447,13 @@ func (w *terminalWorkspace) refreshActivity(ctx context.Context) (workspaceActiv
 	for _, target := range targets {
 		ttys = append(ttys, target.TTY)
 	}
-	activities, err := scanContainerActivities(ctx, selector, ttys)
+	var activities map[string]paneActivity
+	var err error
+	if w.localPTY {
+		activities, err = scanLocalActivities(ctx, ttys)
+	} else {
+		activities, err = scanContainerActivities(ctx, selector, ttys)
+	}
 	if err == nil {
 		checkedAt := time.Now()
 		w.mu.Lock()
@@ -1050,8 +961,15 @@ func (t *terminalTab) removePane(paneID string) {
 }
 
 func newTerminalPane(workspace *terminalWorkspace, paneID string, cols, rows int, initialCWD string) (*terminalPane, error) {
-	command := exec.Command(lightosctlPath, "exec", "-ti", workspace.selector, "/bin/sh", "-lc", buildInstanceShellBootstrapScript(workspace.username, initialCWD))
-	command.Dir = workspace.rootDir
+	var command *exec.Cmd
+	if workspace.localPTY {
+		command = exec.Command("/bin/sh", "-lc", buildInstanceShellBootstrapScript(workspace.username, initialCWD))
+	} else {
+		command = exec.Command(lightosctlPath, "exec", "-ti", workspace.selector, "/bin/sh", "-lc", buildInstanceShellBootstrapScript(workspace.username, initialCWD))
+	}
+	if workspace.rootDir != "" {
+		command.Dir = workspace.rootDir
+	}
 	command.Env = append(os.Environ(),
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
@@ -1594,6 +1512,42 @@ func scanContainerActivities(ctx context.Context, selector string, ttys []string
 	scanCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()
 	output, err := exec.CommandContext(scanCtx, lightosctlPath, "exec", selector, "/bin/sh", "-lc", procScanScript).CombinedOutput()
+	if err != nil {
+		text := strings.TrimSpace(string(output))
+		if text == "" {
+			return result, err
+		}
+		return result, fmt.Errorf("%w: %s", err, text)
+	}
+	processes := parseProcScanOutput(output)
+	for _, tty := range uniqueTTYs {
+		result[tty] = resolveTTYActivity(tty, processes)
+	}
+	return result, nil
+}
+
+func scanLocalActivities(ctx context.Context, ttys []string) (map[string]paneActivity, error) {
+	result := make(map[string]paneActivity, len(ttys))
+	uniqueTTYs := make([]string, 0, len(ttys))
+	seen := make(map[string]struct{}, len(ttys))
+	for _, tty := range ttys {
+		tty = strings.TrimSpace(tty)
+		if !privateTTYPattern.MatchString(tty) {
+			continue
+		}
+		if _, ok := seen[tty]; ok {
+			continue
+		}
+		seen[tty] = struct{}{}
+		uniqueTTYs = append(uniqueTTYs, tty)
+		result[tty] = paneActivity{TTY: tty}
+	}
+	if len(uniqueTTYs) == 0 {
+		return result, nil
+	}
+	scanCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	defer cancel()
+	output, err := exec.CommandContext(scanCtx, "/bin/sh", "-lc", procScanScript).CombinedOutput()
 	if err != nil {
 		text := strings.TrimSpace(string(output))
 		if text == "" {
