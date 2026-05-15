@@ -243,6 +243,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const textDecoder = new TextDecoder();
   // Mobile IMEs keep Backspace auto-repeat active only while the focused editable has text.
   const terminalInputSentinel = "\u200b";
+  const backtabSequence = "\x1b[Z";
   const urlPattern = /(?:https?:\/\/|mailto:|ftp:\/\/|ssh:\/\/|git:\/\/|tel:|magnet:|gemini:\/\/|gopher:\/\/|news:)[\w\-.~:\/?#@!$&*+,;=%]+/gi;
   const trailingURLPunctuation = /[.,;!?)\]]+$/;
 
@@ -2062,7 +2063,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         clearMobileSticky();
         return;
       case "tab":
-        session?.term?.paste(mobileSticky.shift ? "\x1b[Z" : "\t");
+        session?.term?.paste(mobileSticky.shift ? backtabSequence : "\t");
         clearMobileSticky();
         return;
       case "up":
@@ -2340,6 +2341,20 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     });
   };
 
+  const installTerminalKeyOverrides = (session) => {
+    const term = session?.term;
+    if (typeof term?.attachCustomKeyEventHandler !== "function") {
+      return;
+    }
+    term.attachCustomKeyEventHandler((event) => {
+      if (event.key !== "Tab" || !event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) {
+        return false;
+      }
+      term.input(backtabSequence, true);
+      return true;
+    });
+  };
+
   const createPaneSession = (tab, instanceName, { id = "", connect = true } = {}) => {
     const normalizedID = String(id || `pane-${nextPaneSeq++}`).trim();
     const numeric = Number(normalizedID.replace(/^pane-/, ""));
@@ -2406,6 +2421,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     };
 
     installTerminalInputFocus(session);
+    installTerminalKeyOverrides(session);
     installTerminalHostViewportGuard(session);
     installRendererThemeMapper(session);
 
