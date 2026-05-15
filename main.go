@@ -101,7 +101,12 @@ func (s *pluginServer) run(ctx context.Context) error {
 func staticFileServer(root string) http.Handler {
 	files := http.FileServer(http.Dir(root))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch filepath.Ext(r.URL.Path) {
+		ext := filepath.Ext(r.URL.Path)
+		switch ext {
+		case ".css", ".html", ".js", ".json":
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		switch ext {
 		case ".wasm":
 			w.Header().Set("Content-Type", "application/wasm")
 		case ".js":
@@ -134,6 +139,7 @@ func (s *pluginServer) serveHTTP(ctx context.Context, listener net.Listener, mux
 func (s *pluginServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/", "":
+		w.Header().Set("Cache-Control", "no-store")
 		http.ServeFile(w, r, filepath.Join(s.rootDir, "runtime", "static", "index.html"))
 	default:
 		http.NotFound(w, r)

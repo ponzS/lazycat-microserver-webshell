@@ -187,6 +187,9 @@ func TestResolveTTYActivityUsesForegroundProcessGroup(t *testing.T) {
 	if activity.Command != "vim" {
 		t.Fatalf("expected foreground command vim, got %q", activity.Command)
 	}
+	if activity.CommandLine != "/usr/bin/vim file.txt" {
+		t.Fatalf("expected foreground command line, got %q", activity.CommandLine)
+	}
 	if activity.CWD != "/home/demo/project" {
 		t.Fatalf("expected foreground cwd, got %q", activity.CWD)
 	}
@@ -202,6 +205,9 @@ func TestResolveTTYActivityTreatsIdleShellAsNotBusy(t *testing.T) {
 	}
 	if activity.Command != "bash" {
 		t.Fatalf("expected fallback command bash, got %q", activity.Command)
+	}
+	if activity.CommandLine != "-bash" {
+		t.Fatalf("expected fallback command line, got %q", activity.CommandLine)
 	}
 	if activity.CWD != "/home/demo" {
 		t.Fatalf("expected idle shell cwd, got %q", activity.CWD)

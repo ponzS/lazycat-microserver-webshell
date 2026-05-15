@@ -89,6 +89,7 @@ type terminalPane struct {
 	tty                  string
 	busy                 bool
 	command              string
+	commandLine          string
 	cwd                  string
 	activityCheckedAt    time.Time
 	controlPending       []byte
@@ -137,6 +138,7 @@ type paneSummary struct {
 	TTY               string `json:"tty,omitempty"`
 	Busy              bool   `json:"busy"`
 	Command           string `json:"command,omitempty"`
+	CommandLine       string `json:"command_line,omitempty"`
 	CWD               string `json:"cwd,omitempty"`
 	ActivityCheckedAt int64  `json:"activity_checked_at,omitempty"`
 	Exited            bool   `json:"exited"`
@@ -424,10 +426,11 @@ type paneActivityTarget struct {
 }
 
 type paneActivity struct {
-	TTY     string
-	Busy    bool
-	Command string
-	CWD     string
+	TTY         string
+	Busy        bool
+	Command     string
+	CommandLine string
+	CWD         string
 }
 
 func (w *terminalWorkspace) refreshActivity(ctx context.Context) (workspaceActivityState, error) {
@@ -466,6 +469,7 @@ func (w *terminalWorkspace) refreshActivity(ctx context.Context) (workspaceActiv
 			pane.mu.Lock()
 			pane.busy = activity.Busy
 			pane.command = activity.Command
+			pane.commandLine = activity.CommandLine
 			pane.cwd = activity.CWD
 			pane.activityCheckedAt = checkedAt
 			pane.mu.Unlock()
@@ -1455,6 +1459,7 @@ func (p *terminalPane) summary() paneSummary {
 		TTY:               p.tty,
 		Busy:              p.busy,
 		Command:           p.command,
+		CommandLine:       p.commandLine,
 		CWD:               p.cwd,
 		Exited:            p.exited,
 		ExitCode:          p.exitCode,
@@ -1643,6 +1648,7 @@ func resolveTTYActivity(tty string, processes []procInfo) paneActivity {
 	}
 
 	var fallback string
+	var fallbackCommandLine string
 	var fallbackCWD string
 	for index := range processes {
 		process := processes[index]
@@ -1653,12 +1659,16 @@ func resolveTTYActivity(tty string, processes []procInfo) paneActivity {
 		if fallback == "" {
 			fallback = display
 		}
+		if fallbackCommandLine == "" {
+			fallbackCommandLine = process.Cmd
+		}
 		if fallbackCWD == "" {
 			fallbackCWD = process.CWD
 		}
 		if !isIdleShellCommand(display, process.Comm) {
 			activity.Busy = true
 			activity.Command = display
+			activity.CommandLine = process.Cmd
 			activity.CWD = process.CWD
 			if activity.CWD == "" {
 				activity.CWD = fallbackCWD
@@ -1667,6 +1677,7 @@ func resolveTTYActivity(tty string, processes []procInfo) paneActivity {
 		}
 	}
 	activity.Command = fallback
+	activity.CommandLine = fallbackCommandLine
 	activity.CWD = fallbackCWD
 	return activity
 }
