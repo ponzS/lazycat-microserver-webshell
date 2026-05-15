@@ -60,6 +60,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const touchShortcutMoveThresholdPx = 8;
   const touchShortcutRepeatInitialDelayMs = 320;
   const touchShortcutRepeatIntervalMs = 80;
+  const terminalSizeReassertIntervalMs = 250;
   const repeatableMobileShortcutIds = new Set(["arrow-up", "arrow-down", "arrow-left", "arrow-right"]);
   const storedFontSize = window.localStorage.getItem(fontSizeVersionStorageKey) === fontSizeStorageVersion
     ? Number(window.localStorage.getItem(fontSizeStorageKey))
@@ -1149,6 +1150,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const handleTerminalBeforeInput = (session, event) => {
+    reassertTerminalSize(session, { force: true });
     const type = String(event.inputType || "");
     const textarea = session?.term?.textarea;
     if (type === "insertCompositionText" || type === "deleteCompositionText" || event.isComposing) {
@@ -1195,6 +1197,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
 
   const handleTerminalTextareaInput = (session, event) => {
     event.stopPropagation();
+    reassertTerminalSize(session);
     const textarea = session?.term?.textarea;
     if (!textarea) {
       return;
@@ -1226,6 +1229,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     textarea.setAttribute("inputmode", "text");
     textarea.setAttribute("enterkeyhint", "enter");
     term.focus = () => focusTerminalInput(session);
+    host.addEventListener("keydown", () => {
+      reassertTerminalSize(session, { force: true });
+    }, { capture: true });
     textarea.addEventListener("beforeinput", (event) => {
       handleTerminalBeforeInput(session, event);
     }, { capture: true });
@@ -1319,6 +1325,25 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const resizeActiveTab = () => resizeTab(currentTab());
+
+  const reassertTerminalSize = (session, { force = false } = {}) => {
+    if (!session || session.closed) {
+      return;
+    }
+    const now = performance.now();
+    if (!force && now - Number(session.lastSizeReassertAt || 0) < terminalSizeReassertIntervalMs) {
+      return;
+    }
+    session.lastSizeReassertAt = now;
+    resizePane(session);
+  };
+
+  const reassertTerminalSizeForMouse = (session, event) => {
+    if (typeof PointerEvent !== "undefined" && event instanceof PointerEvent && event.pointerType && event.pointerType !== "mouse") {
+      return;
+    }
+    reassertTerminalSize(session, { force: true });
+  };
 
   const resizeAllTabsForCurrentDevice = () => {
     if (tabs.size === 0) {
@@ -2881,6 +2906,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       processCommandLine: "",
       cwd: "",
       activityCheckedAt: 0,
+      lastSizeReassertAt: 0,
     };
 
     installTerminalInputFocus(session);
@@ -2902,6 +2928,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         }
         return;
       }
+      reassertTerminalSize(session);
       sendOrQueueInput(session, data);
     });
     term.onResize(() => {
@@ -2925,7 +2952,8 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       updateSelectionSheet();
     });
 
-    shellEl.addEventListener("pointerdown", () => {
+    shellEl.addEventListener("pointerdown", (event) => {
+      reassertTerminalSizeForMouse(session, event);
       const current = tabs.get(session.tabId);
       setActivePane(current, session.id, { focus: false });
     });
@@ -2945,12 +2973,14 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         return;
       }
       event.preventDefault();
+      reassertTerminalSize(session, { force: true });
       readClipboardText().then((text) => pasteIntoSession(session, text)).catch((error) => showToast(error.message || "Paste failed."));
     });
     terminalHost.addEventListener("paste", (event) => {
       const text = event.clipboardData?.getData("text/plain");
       if (text) {
         event.preventDefault();
+        reassertTerminalSize(session, { force: true });
         pasteIntoSession(session, text).catch((error) => showToast(error.message));
       }
     });
@@ -4179,6 +4209,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   });
 
   document.addEventListener("pointerdown", (event) => {
+    if (typeof PointerEvent === "undefined" || !(event instanceof PointerEvent) || !event.pointerType || event.pointerType === "mouse") {
+      reassertTerminalSize(activeSession());
+    }
     const target = event.target;
     if (contextMenu && !contextMenu.hidden && target instanceof Node && !contextMenu.contains(target)) {
       closeContextMenu();
@@ -4240,6 +4273,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   });
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
+      resizeActiveTab();
       refreshServerRevision().catch(() => {});
       reconnectVisibleSessions();
       refreshActivity({ silent: true }).catch(() => {});
@@ -4247,6 +4281,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
   });
   window.addEventListener("focus", () => {
+    resizeActiveTab();
     refreshServerRevision().catch(() => {});
     reconnectVisibleSessions();
     refreshActivity({ silent: true }).catch(() => {});
