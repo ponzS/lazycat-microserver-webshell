@@ -26,6 +26,7 @@ const (
 	agentFrameText   = byte('T')
 	agentFrameInput  = byte('I')
 	agentFrameResize = byte('R')
+	agentFrameLock   = byte('L')
 	agentFrameDetach = byte('D')
 
 	agentMaxFramePayload = 32 << 20
@@ -279,7 +280,9 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 		_ = writeAgentControlFrame(conn, map[string]any{"type": "process-exit", "message": err.Error(), "exit_code": -1})
 		return
 	}
+	inputLockOwner := fmt.Sprintf("attach:%p", conn)
 	defer func() {
+		pane.setInputBlockedBy(inputLockOwner, false)
 		pane.detachClient(client)
 		client.close()
 	}()
@@ -324,6 +327,11 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 			var message terminalControlMessage
 			if err := json.Unmarshal(payload, &message); err == nil && message.Cols > 0 && message.Rows > 0 {
 				_ = pane.resize(message.Cols, message.Rows)
+			}
+		case agentFrameLock:
+			var message terminalControlMessage
+			if err := json.Unmarshal(payload, &message); err == nil {
+				pane.setInputBlockedBy(inputLockOwner, message.Blocked)
 			}
 		case agentFrameDetach:
 			client.close()

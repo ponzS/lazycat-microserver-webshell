@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -136,6 +138,98 @@ func TestTerminalPaneKeepsNonDeviceAttributeCSI(t *testing.T) {
 	filtered := pane.filterTerminalQueryOutput(input)
 	if string(filtered) != string(input) {
 		t.Fatalf("unexpected filtered output: %q", string(filtered))
+	}
+}
+
+func TestTerminalPaneInputLockDropsWrites(t *testing.T) {
+	pane := &terminalPane{}
+	pane.setInputBlocked(true)
+	if err := pane.writeInput([]byte("blocked")); err != nil {
+		t.Fatalf("blocked writeInput returned error: %v", err)
+	}
+	pane.setInputBlocked(false)
+	if err := pane.writeInput([]byte("unblocked")); err == nil {
+		t.Fatal("expected unblocked writeInput without pty to fail")
+	}
+}
+
+func TestTerminalPaneInputLockOwnersAreIndependent(t *testing.T) {
+	pane := &terminalPane{}
+	pane.setInputBlockedBy("one", true)
+	pane.setInputBlockedBy("two", true)
+	pane.setInputBlockedBy("one", false)
+	if err := pane.writeInput([]byte("still blocked")); err != nil {
+		t.Fatalf("writeInput should stay blocked while another owner holds the lock: %v", err)
+	}
+	pane.setInputBlockedBy("two", false)
+	if err := pane.writeInput([]byte("unblocked")); err == nil {
+		t.Fatal("expected writeInput to fail after all input locks are released")
+	}
+}
+
+func TestTerminalControlInputLockTogglesPaneWrites(t *testing.T) {
+	pane := &terminalPane{}
+	if !handleTerminalControlMessage(pane, []byte(`{"type":"input_lock","blocked":true}`), nil) {
+		t.Fatal("input_lock control message should keep the connection open")
+	}
+	if err := pane.writeInput([]byte("blocked")); err != nil {
+		t.Fatalf("writeInput should be dropped while locked: %v", err)
+	}
+	if !handleTerminalControlMessage(pane, []byte(`{"type":"input_lock","blocked":false}`), nil) {
+		t.Fatal("input unlock control message should keep the connection open")
+	}
+	if err := pane.writeInput([]byte("unblocked")); err == nil {
+		t.Fatal("expected writeInput to fail after input lock is released")
+	}
+}
+
+func TestPluginServerTerminalInputLockOwnersAreIndependent(t *testing.T) {
+	server := &pluginServer{}
+	server.setTerminalInputBlocked("demo@owner", "one", true)
+	server.setTerminalInputBlocked("demo@owner", "two", true)
+	server.setTerminalInputBlocked("demo@owner", "one", false)
+	if !server.terminalInputBlocked("demo@owner", "") {
+		t.Fatal("expected terminal input to stay blocked while another owner holds the lock")
+	}
+	server.setTerminalInputBlocked("demo@owner", "two", false)
+	if server.terminalInputBlocked("demo@owner", "") {
+		t.Fatal("expected terminal input to be unblocked after all owners release")
+	}
+}
+
+func TestPluginServerTerminalInputLockMatchesClient(t *testing.T) {
+	server := &pluginServer{}
+	server.setTerminalInputBlocked("demo@owner", serverRevisionInputLockOwner("client-one"), true)
+	if !server.terminalInputBlocked("demo@owner", "client-one") {
+		t.Fatal("expected matching client to be blocked")
+	}
+	if server.terminalInputBlocked("demo@owner", "client-two") {
+		t.Fatal("expected different client to remain unblocked")
+	}
+	if !server.terminalInputBlocked("demo@owner", "") {
+		t.Fatal("expected legacy websocket without client id to be blocked by any active lock")
+	}
+}
+
+func TestHandleAgentAttachControlMessageDropsInputWhenServerLocked(t *testing.T) {
+	var blocked bytes.Buffer
+	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &blocked, []byte(`{"type":"input","data":"8;36R"}`), true) {
+		t.Fatal("blocked input message should keep the connection open")
+	}
+	if blocked.Len() != 0 {
+		t.Fatalf("expected blocked input to be dropped, got %d framed bytes", blocked.Len())
+	}
+
+	var allowed bytes.Buffer
+	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &allowed, []byte(`{"type":"input","data":"6;55R"}`), false) {
+		t.Fatal("allowed input message should keep the connection open")
+	}
+	frameType, payload, err := readAgentFrame(&allowed)
+	if err != nil {
+		t.Fatalf("reading forwarded input frame returned error: %v", err)
+	}
+	if frameType != agentFrameInput || string(payload) != "6;55R" {
+		t.Fatalf("unexpected forwarded frame: type=%q payload=%q", frameType, string(payload))
 	}
 }
 

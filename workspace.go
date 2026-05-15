@@ -95,6 +95,7 @@ type terminalPane struct {
 	controlPending       []byte
 	terminalQueryPending []byte
 	hasAttached          bool
+	inputBlockers        map[string]struct{}
 	exited               bool
 	exitCode             int
 	exitText             string
@@ -167,10 +168,11 @@ type workspaceActivityState struct {
 }
 
 type terminalControlMessage struct {
-	Type string `json:"type"`
-	Cols int    `json:"cols"`
-	Rows int    `json:"rows"`
-	Data string `json:"data"`
+	Type    string `json:"type"`
+	Cols    int    `json:"cols"`
+	Rows    int    `json:"rows"`
+	Data    string `json:"data"`
+	Blocked bool   `json:"blocked,omitempty"`
 }
 
 func newWorkspaceManager(rootDir string) *workspaceManager {
@@ -297,7 +299,7 @@ func (s *pluginServer) attachPersistentPane(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "pane is required", http.StatusBadRequest)
 		return nil
 	}
-	return attachAgentPane(w, r, selector, paneID, cols, rows)
+	return s.attachAgentPane(w, r, selector, paneID, cols, rows)
 }
 
 func writeJSON(w http.ResponseWriter, payload any) {
@@ -353,6 +355,8 @@ func handleTerminalControlMessage(pane *terminalPane, payload []byte, client *pa
 		if message.Cols > 0 && message.Rows > 0 {
 			_ = pane.resize(message.Cols, message.Rows)
 		}
+	case "input_lock":
+		pane.setInputBlocked(message.Blocked)
 	case "ping":
 		data, err := json.Marshal(map[string]any{"type": "pong"})
 		if err == nil {
@@ -1399,8 +1403,12 @@ func (p *terminalPane) writeInput(data []byte) error {
 	}
 	p.mu.Lock()
 	ptyFile := p.ptyFile
+	inputBlocked := len(p.inputBlockers) > 0
 	exited := p.exited
 	p.mu.Unlock()
+	if inputBlocked {
+		return nil
+	}
 	if exited || ptyFile == nil {
 		return errors.New("pane is not running")
 	}
@@ -1419,6 +1427,30 @@ func (p *terminalPane) writeInput(data []byte) error {
 		}
 	}
 	return nil
+}
+
+func (p *terminalPane) setInputBlocked(blocked bool) {
+	p.setInputBlockedBy("global", blocked)
+}
+
+func (p *terminalPane) setInputBlockedBy(owner string, blocked bool) {
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		owner = "global"
+	}
+	p.mu.Lock()
+	if blocked {
+		if p.inputBlockers == nil {
+			p.inputBlockers = make(map[string]struct{})
+		}
+		p.inputBlockers[owner] = struct{}{}
+	} else if p.inputBlockers != nil {
+		delete(p.inputBlockers, owner)
+		if len(p.inputBlockers) == 0 {
+			p.inputBlockers = nil
+		}
+	}
+	p.mu.Unlock()
 }
 
 func (p *terminalPane) resize(cols, rows int) error {

@@ -1940,11 +1940,84 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     return Number(session.suppressGeneratedTerminalInputUntil || 0) > Date.now();
   };
 
+  const isTerminalInputBlocked = () => deployRestartDialogOpen;
+
+  const discardSessionInputBuffers = (session) => {
+    if (!session) {
+      return;
+    }
+    if (session.inputFlushTimer) {
+      window.clearTimeout(session.inputFlushTimer);
+      session.inputFlushTimer = 0;
+    }
+    session.inputBuffer = "";
+    session.inputBufferSize = 0;
+    session.pendingInput = [];
+    session.pendingInputSize = 0;
+  };
+
+  const sendSessionInputLock = (session, blocked) => {
+    if (!session) {
+      return;
+    }
+    session.inputLocked = blocked === true;
+    if (session.socket?.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    try {
+      session.socket.send(JSON.stringify({ type: "input_lock", blocked: session.inputLocked }));
+    } catch (error) {
+    }
+  };
+
+  const discardAllTerminalInputBuffers = () => {
+    for (const tab of tabs.values()) {
+      for (const pane of tab.panes.values()) {
+        discardSessionInputBuffers(pane);
+      }
+    }
+  };
+
+  const setAllTerminalInputLocked = (blocked) => {
+    for (const tab of tabs.values()) {
+      for (const pane of tab.panes.values()) {
+        sendSessionInputLock(pane, blocked);
+      }
+    }
+  };
+
+  const setServerRevisionInputLocked = async (blocked) => {
+    if (!activeName) {
+      return;
+    }
+    const url = serverRevisionURL();
+    url.searchParams.set("terminal_input_blocked", blocked ? "true" : "false");
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(await response.text() || `Server revision input lock failed (${response.status})`);
+    }
+  };
+
+  const drainGeneratedTerminalResponses = (session) => {
+    const term = session?.term;
+    const wasmTerm = term?.wasmTerm;
+    if (!term || !wasmTerm || typeof term.processTerminalResponses !== "function" || typeof wasmTerm.hasResponse !== "function") {
+      return;
+    }
+    for (let index = 0; index < 256 && wasmTerm.hasResponse(); index += 1) {
+      term.processTerminalResponses();
+    }
+  };
+
   const showDeployRestartDialog = async () => {
     if (deployRestartDialogOpen) {
       return;
     }
     deployRestartDialogOpen = true;
+    setAllTerminalInputLocked(true);
+    setServerRevisionInputLocked(true).catch(() => {});
+    discardAllTerminalInputBuffers();
+    let shouldUnlock = true;
     try {
       const restart = await openDialog({
         title: "WebShell 已更新",
@@ -1954,11 +2027,19 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         initialFocus: "ok",
       });
       if (restart === true) {
+        shouldUnlock = false;
+        await setServerRevisionInputLocked(false).catch(() => {});
+        setAllTerminalInputLocked(false);
+        deployRestartDialogOpen = false;
         suppressBeforeUnloadForNavigation();
         window.location.reload();
       }
     } finally {
-      deployRestartDialogOpen = false;
+      if (shouldUnlock) {
+        await setServerRevisionInputLocked(false).catch(() => {});
+        setAllTerminalInputLocked(false);
+        deployRestartDialogOpen = false;
+      }
     }
   };
 
@@ -2487,6 +2568,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (!session) {
       return;
     }
+    if (isTerminalInputBlocked()) {
+      discardSessionInputBuffers(session);
+      return;
+    }
     clearInputFlushTimer(session);
     if (!session.inputBuffer || session.socket?.readyState !== WebSocket.OPEN) {
       return;
@@ -2510,6 +2595,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const sendSessionInput = (session, data, { immediate = false } = {}) => {
+    if (isTerminalInputBlocked()) {
+      discardSessionInputBuffers(session);
+      return;
+    }
     if (!data || session.socket?.readyState !== WebSocket.OPEN) {
       return;
     }
@@ -2535,6 +2624,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const flushPendingInput = (session) => {
+    if (isTerminalInputBlocked()) {
+      discardSessionInputBuffers(session);
+      return;
+    }
     for (const data of session.pendingInput || []) {
       sendSessionInput(session, data);
     }
@@ -2544,6 +2637,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const sendOrQueueInput = (session, data) => {
+    if (isTerminalInputBlocked()) {
+      discardSessionInputBuffers(session);
+      return;
+    }
     const byteLength = textEncoder.encode(data).length;
     const maxPendingInput = 8 * 1024 * 1024;
     if (session.closed || session.exitExpected) {
@@ -2585,6 +2682,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     try {
       session.term.write(data);
+      drainGeneratedTerminalResponses(session);
     } finally {
       if (suppressGeneratedInput) {
         session.replayOutputDepth = Math.max(0, session.replayOutputDepth - 1);
@@ -2627,6 +2725,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     const socketUrl = new URL("./ws", window.location.href);
     socketUrl.searchParams.set("name", session.name);
     socketUrl.searchParams.set("pane", session.id);
+    socketUrl.searchParams.set("client_id", serverRevisionClientID);
     socketUrl.searchParams.set("cols", String(session.term.cols || 120));
     socketUrl.searchParams.set("rows", String(session.term.rows || 32));
     const currentSocket = new WebSocket(socketUrl.toString());
@@ -2641,6 +2740,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       }
       session.reconnectPending = false;
       session.shellEl.dataset.connection = "open";
+      if (isTerminalInputBlocked() || session.inputLocked) {
+        sendSessionInputLock(session, true);
+        discardSessionInputBuffers(session);
+      }
       resizePane(session);
       if (session.tabId === activeTabId && currentTab()?.activePaneId === session.id) {
         session.term.focus();
@@ -2765,6 +2868,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       replayOutputDepth: 0,
       allowGeneratedInputDuringReplay: false,
       suppressGeneratedTerminalInputUntil: 0,
+      inputLocked: false,
       composingIME: false,
       exitExpected: false,
       closed: false,
@@ -2785,6 +2889,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     installRendererThemeMapper(session);
 
     term.onData((data) => {
+      if (isTerminalInputBlocked()) {
+        discardSessionInputBuffers(session);
+        return;
+      }
       if (shouldSuppressGeneratedTerminalInput(session, data)) {
         return;
       }

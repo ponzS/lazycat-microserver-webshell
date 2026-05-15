@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -29,6 +30,9 @@ type pluginServer struct {
 	rootDir        string
 	serverRevision string
 	workspaces     *workspaceManager
+
+	inputLocksMu sync.Mutex
+	inputLocks   map[string]map[string]struct{}
 }
 
 type instanceSummary struct {
@@ -241,15 +245,77 @@ func (s *pluginServer) handleServerRevision(w http.ResponseWriter, r *http.Reque
 		clientID = strings.TrimSpace(r.URL.Query().Get("client"))
 	}
 	if selector != "" && clientID != "" {
+		if blockedText := strings.TrimSpace(r.URL.Query().Get("terminal_input_blocked")); blockedText != "" {
+			s.setTerminalInputBlocked(selector, serverRevisionInputLockOwner(clientID), parseBoolQuery(blockedText))
+		}
 		changed, err := observeServerRevisionState(r.Context(), selector, clientID, s.serverRevision)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 		info.ReloadRequired = changed
+		if changed {
+			s.setTerminalInputBlocked(selector, serverRevisionInputLockOwner(clientID), true)
+		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, info)
+}
+
+func serverRevisionInputLockOwner(clientID string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(clientID)))
+	return "server-revision:" + hex.EncodeToString(sum[:])
+}
+
+func parseBoolQuery(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on", "blocked", "lock", "locked":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *pluginServer) setTerminalInputBlocked(selector, owner string, blocked bool) {
+	selector = strings.TrimSpace(selector)
+	owner = strings.TrimSpace(owner)
+	if selector == "" || owner == "" {
+		return
+	}
+	s.inputLocksMu.Lock()
+	defer s.inputLocksMu.Unlock()
+	if blocked {
+		if s.inputLocks == nil {
+			s.inputLocks = make(map[string]map[string]struct{})
+		}
+		if s.inputLocks[selector] == nil {
+			s.inputLocks[selector] = make(map[string]struct{})
+		}
+		s.inputLocks[selector][owner] = struct{}{}
+		return
+	}
+	if s.inputLocks == nil || s.inputLocks[selector] == nil {
+		return
+	}
+	delete(s.inputLocks[selector], owner)
+	if len(s.inputLocks[selector]) == 0 {
+		delete(s.inputLocks, selector)
+	}
+}
+
+func (s *pluginServer) terminalInputBlocked(selector, clientID string) bool {
+	s.inputLocksMu.Lock()
+	defer s.inputLocksMu.Unlock()
+	locks := s.inputLocks[strings.TrimSpace(selector)]
+	if len(locks) == 0 {
+		return false
+	}
+	clientID = strings.TrimSpace(clientID)
+	if clientID == "" {
+		return true
+	}
+	_, blocked := locks[serverRevisionInputLockOwner(clientID)]
+	return blocked
 }
 
 func observeServerRevisionState(ctx context.Context, selector, clientID, revision string) (bool, error) {

@@ -150,9 +150,15 @@ func ensurePersistentAgent(ctx context.Context, selector string) (string, error)
 	if err != nil {
 		return "", err
 	}
+	persistentAgentCache.Lock()
+	previousManifest := persistentAgentCache.installed[selector]
+	persistentAgentCache.Unlock()
 	manifest, err := ensureAgentBinaryInstalled(ctx, selector)
 	if err != nil {
 		return "", err
+	}
+	if previousManifest != "" && previousManifest != manifest {
+		markPersistentAgentNotRunning(selector)
 	}
 
 	persistentAgentCache.Lock()
@@ -342,10 +348,14 @@ printf '%%s\n' %s
 	return nil
 }
 
-func attachAgentPane(w http.ResponseWriter, r *http.Request, selector, paneID string, cols, rows int) error {
+func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, selector, paneID string, cols, rows int) error {
 	if _, err := ensurePersistentAgent(r.Context(), selector); err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return nil
+	}
+	clientID := strings.TrimSpace(r.URL.Query().Get("client_id"))
+	if clientID == "" {
+		clientID = strings.TrimSpace(r.URL.Query().Get("client"))
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -449,11 +459,11 @@ func attachAgentPane(w http.ResponseWriter, r *http.Request, selector, paneID st
 		}
 		switch messageType {
 		case websocket.BinaryMessage:
-			if len(payload) > 0 {
+			if len(payload) > 0 && !s.terminalInputBlocked(selector, clientID) {
 				_ = writeAgentFrame(stdin, agentFrameInput, payload)
 			}
 		case websocket.TextMessage:
-			keepOpen := handleAgentAttachControlMessage(conn, &writeMu, stdin, payload)
+			keepOpen := handleAgentAttachControlMessage(conn, &writeMu, stdin, payload, s.terminalInputBlocked(selector, clientID))
 			if !keepOpen {
 				stopAttach()
 				<-writerDone
@@ -463,17 +473,19 @@ func attachAgentPane(w http.ResponseWriter, r *http.Request, selector, paneID st
 	}
 }
 
-func handleAgentAttachControlMessage(conn *websocket.Conn, writeMu *sync.Mutex, stdin io.Writer, payload []byte) bool {
+func handleAgentAttachControlMessage(conn *websocket.Conn, writeMu *sync.Mutex, stdin io.Writer, payload []byte, inputBlocked bool) bool {
 	var message terminalControlMessage
 	if err := json.Unmarshal(payload, &message); err != nil {
 		if data, ok := strings.CutPrefix(string(payload), "input:"); ok {
-			_ = writeAgentFrame(stdin, agentFrameInput, []byte(data))
+			if !inputBlocked {
+				_ = writeAgentFrame(stdin, agentFrameInput, []byte(data))
+			}
 		}
 		return true
 	}
 	switch message.Type {
 	case "input":
-		if message.Data != "" {
+		if message.Data != "" && !inputBlocked {
 			_ = writeAgentFrame(stdin, agentFrameInput, []byte(message.Data))
 		}
 	case "resize":
@@ -481,6 +493,9 @@ func handleAgentAttachControlMessage(conn *websocket.Conn, writeMu *sync.Mutex, 
 			data, _ := json.Marshal(message)
 			_ = writeAgentFrame(stdin, agentFrameResize, data)
 		}
+	case "input_lock":
+		data, _ := json.Marshal(message)
+		_ = writeAgentFrame(stdin, agentFrameLock, data)
 	case "ping":
 		_ = writeWebSocketJSONLocked(conn, writeMu, map[string]any{"type": "pong"})
 	case "detach":
