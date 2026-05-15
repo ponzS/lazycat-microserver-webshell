@@ -19,6 +19,22 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const themePickerBackdrop = document.getElementById("themePickerBackdrop");
   const themePickerClose = document.getElementById("themePickerClose");
   const themePickerList = document.getElementById("themePickerList");
+  const searchPanel = document.getElementById("searchPanel");
+  const searchInput = document.getElementById("searchInput");
+  const searchCount = document.getElementById("searchCount");
+  const searchPrevious = document.getElementById("searchPrevious");
+  const searchNext = document.getElementById("searchNext");
+  const searchClose = document.getElementById("searchClose");
+  const dialogBackdrop = document.getElementById("dialogBackdrop");
+  const dialogPanel = document.getElementById("dialogPanel");
+  const dialogTitle = document.getElementById("dialogTitle");
+  const dialogMessage = document.getElementById("dialogMessage");
+  const dialogInput = document.getElementById("dialogInput");
+  const dialogCancel = document.getElementById("dialogCancel");
+  const dialogOK = document.getElementById("dialogOK");
+  const mobileShortcuts = document.getElementById("mobileShortcuts");
+  const selectionSheet = document.getElementById("selectionSheet");
+  const networkBanner = document.getElementById("networkBanner");
   const contextMenu = document.getElementById("contextMenu");
   const toast = document.getElementById("toast");
 
@@ -28,14 +44,23 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
 
   const params = new URLSearchParams(window.location.search);
   const tabs = new Map();
+  const storagePrefix = "webshell";
+  const themeStorageKey = `${storagePrefix}.theme`;
+  const fontSizeStorageKey = `${storagePrefix}.fontSize`;
+  const lastTabStorageKey = (name) => `${storagePrefix}.lastTab.${name || "default"}`;
+  const defaultFontSize = 14;
+  const minFontSize = 8;
+  const maxFontSize = 32;
+  const storedFontSize = Number(window.localStorage.getItem(fontSizeStorageKey));
+  let terminalFontSize = Number.isFinite(storedFontSize) ? Math.max(minFontSize, Math.min(maxFontSize, storedFontSize)) : defaultFontSize;
   const terminalOptionsBase = {
     cursorBlink: true,
     convertEol: true,
     scrollback: 5000,
     fontFamily: '"DejaVu Sans Mono", "Liberation Mono", monospace',
-    fontSize: 14,
+    fontSize: terminalFontSize,
   };
-  const themes = [
+  let themes = [
     {
       id: "default",
       name: "Default",
@@ -196,12 +221,42 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   let nextPaneSeq = 1;
   let contextTarget = null;
   let toastTimer = 0;
-  let activeTheme = themes.find((theme) => theme.id === window.localStorage.getItem("webshell.theme")) || themes[0];
+  let activeTheme = themes.find((theme) => theme.id === window.localStorage.getItem(themeStorageKey)) || themes[0];
   let applyingWorkspaceState = false;
+  let activityRefreshTimer = 0;
+  let suppressLocationUpdate = false;
+  const searchState = { open: false, query: "", matches: [], index: -1, sessionId: "" };
+  const mobileSticky = { ctrl: false, alt: false, shift: false };
   const textEncoder = new TextEncoder();
+  const urlPattern = /(?:https?:\/\/|mailto:|ftp:\/\/|ssh:\/\/|git:\/\/|tel:|magnet:|gemini:\/\/|gopher:\/\/|news:)[\w\-.~:\/?#@!$&*+,;=%]+/gi;
+  const trailingURLPunctuation = /[.,;!?)\]]+$/;
 
   const cloneTheme = (theme) => ({ ...theme.xterm });
-  const terminalOptions = () => ({ ...terminalOptionsBase, theme: cloneTheme(activeTheme) });
+  const terminalOptions = () => ({ ...terminalOptionsBase, fontSize: terminalFontSize, theme: cloneTheme(activeTheme) });
+
+  const selectStoredTheme = () => {
+    activeTheme = themes.find((theme) => theme.id === window.localStorage.getItem(themeStorageKey)) || themes[0];
+  };
+
+  const loadThemeCatalog = async () => {
+    try {
+      const response = await fetch("./static/themes.json", { cache: "no-store" });
+      if (!response.ok) {
+        return;
+      }
+      const catalog = await response.json();
+      if (!Array.isArray(catalog) || catalog.length === 0) {
+        return;
+      }
+      const normalized = catalog.filter((theme) => theme?.id && theme?.xterm?.background && theme?.xterm?.foreground);
+      if (normalized.length > 0) {
+        themes = normalized;
+        selectStoredTheme();
+      }
+    } catch (error) {
+      console.warn("Failed to load theme catalog", error);
+    }
+  };
 
   const instanceSelector = (item) => {
     const name = String(item?.name || "").trim();
@@ -231,6 +286,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     close_pane: "Ctrl + Alt + q",
     theme: "Ctrl + Shift + p",
     switch_container: "Ctrl + Shift + o",
+    copy_terminal: "Ctrl + Shift + c",
+    paste_terminal: "Ctrl + Shift + v",
+    search_terminal: "Ctrl + Shift + f",
+    select_all_terminal: "Ctrl + Shift + a",
   };
   const shortcutActionMap = new Map();
 
@@ -396,6 +455,15 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     return url;
   };
 
+  const workspaceActivityURL = (name = activeName) => {
+    const url = new URL("./api/workspace/activity", window.location.href);
+    url.searchParams.set("name", name);
+    const size = terminalSizeQuery();
+    url.searchParams.set("cols", String(size.cols));
+    url.searchParams.set("rows", String(size.rows));
+    return url;
+  };
+
   const fetchWorkspaceState = async (name = activeName) => {
     if (!name) {
       throw new Error("No running container is available.");
@@ -425,14 +493,29 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     return state;
   };
 
-  const updateLocationName = (nextName, { replace = false } = {}) => {
+  const updateLocationName = (nextName, { replace = false, tabId = activeTabId } = {}) => {
     const nextURL = new URL(window.location.href);
     nextURL.searchParams.set("name", nextName);
+    if (tabId) {
+      nextURL.searchParams.set("tab", tabId);
+    } else {
+      nextURL.searchParams.delete("tab");
+    }
     if (replace) {
       window.history.replaceState({ name: nextName }, "", nextURL);
       return;
     }
     window.history.pushState({ name: nextName }, "", nextURL);
+  };
+
+  const rememberActiveTab = () => {
+    if (!activeName || !activeTabId) {
+      return;
+    }
+    window.localStorage.setItem(lastTabStorageKey(activeName), activeTabId);
+    if (!suppressLocationUpdate) {
+      updateLocationName(activeName, { replace: true, tabId: activeTabId });
+    }
   };
 
   const applyThemeDocumentState = () => {
@@ -489,7 +572,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       return;
     }
     activeTheme = nextTheme;
-    window.localStorage.setItem("webshell.theme", activeTheme.id);
+    window.localStorage.setItem(themeStorageKey, activeTheme.id);
     applyThemeDocumentState();
     renderThemePicker();
     for (const tab of tabs.values()) {
@@ -613,6 +696,594 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
   };
 
+  const activeSession = () => {
+    const tab = currentTab();
+    return tab?.panes.get(tab.activePaneId) || null;
+  };
+
+  const refreshTerminalMetrics = (session) => {
+    if (!session?.term) {
+      return;
+    }
+    try {
+      if (session.term.renderer && session.term.wasmTerm && typeof session.term.renderer.render === "function") {
+        session.term.renderer.render(session.term.wasmTerm, true, session.term.viewportY || 0, session.term);
+      }
+      resizePane(session);
+    } catch (error) {
+    }
+  };
+
+  const setTerminalFontSize = (size) => {
+    terminalFontSize = Math.max(minFontSize, Math.min(maxFontSize, Math.round(size)));
+    terminalOptionsBase.fontSize = terminalFontSize;
+    window.localStorage.setItem(fontSizeStorageKey, String(terminalFontSize));
+    for (const tab of tabs.values()) {
+      for (const pane of tab.panes.values()) {
+        pane.term.options.fontSize = terminalFontSize;
+        refreshTerminalMetrics(pane);
+      }
+    }
+    showToast(`Font size ${terminalFontSize}px`);
+  };
+
+  const adjustTerminalFontSize = (delta) => setTerminalFontSize(terminalFontSize + delta);
+  const resetTerminalFontSize = () => setTerminalFontSize(defaultFontSize);
+
+  const lineToTextAndMap = (line, { trimEnd = false } = {}) => {
+    const length = Number(line?.length || 0);
+    let text = "";
+    const map = [];
+    for (let col = 0; col < length; col += 1) {
+      const cell = line.getCell(col);
+      let chars = cell?.getChars?.() || "";
+      if (!chars) {
+        if (cell?.getWidth?.() === 0) {
+          continue;
+        }
+        chars = " ";
+      }
+      for (let index = 0; index < chars.length; index += 1) {
+        map.push(col);
+      }
+      text += chars;
+    }
+    if (trimEnd) {
+      const trimmed = text.trimEnd();
+      return { text: trimmed, map: map.slice(0, trimmed.length) };
+    }
+    return { text, map };
+  };
+
+  const buildLogicalLines = (term) => {
+    const buffer = term?.buffer?.active;
+    const length = Number(buffer?.length || 0);
+    const scrollback = term?.wasmTerm?.getScrollbackLength?.() || Math.max(0, length - (term?.rows || 0));
+    const logicalLines = [];
+    let current = null;
+    for (let row = 0; row < length; row += 1) {
+      const line = buffer.getLine(row);
+      if (!line) {
+        continue;
+      }
+      if (!current) {
+        current = { text: "", positions: [], startRow: row, endRow: row };
+      }
+      const raw = lineToTextAndMap(line, { trimEnd: false });
+      const rawTrimmedLength = raw.text.trimEnd().length;
+      const wrapped = Boolean(line.isWrapped) || (row < scrollback && rawTrimmedLength >= Math.max(1, term?.cols || line.length));
+      const { text, map } = wrapped ? raw : lineToTextAndMap(line, { trimEnd: true });
+      for (let index = 0; index < text.length; index += 1) {
+        current.positions.push({ row, col: map[index] ?? index });
+      }
+      current.text += text;
+      current.endRow = row;
+      if (!wrapped) {
+        logicalLines.push(current);
+        current = null;
+      }
+    }
+    if (current) {
+      current.text = current.text.trimEnd();
+      current.positions = current.positions.slice(0, current.text.length);
+      logicalLines.push(current);
+    }
+    return logicalLines;
+  };
+
+  const fullBufferText = (term) => buildLogicalLines(term).map((line) => line.text).join("\n");
+
+  const copyText = async (text) => {
+    if (!text) {
+      return false;
+    }
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (error) {
+      }
+    }
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    let copied = false;
+    try {
+      copied = document.execCommand("copy");
+    } finally {
+      textarea.remove();
+    }
+    return copied;
+  };
+
+  const readClipboardText = async () => {
+    if (!navigator.clipboard?.readText || !window.isSecureContext) {
+      throw new Error("Clipboard read is unavailable in this browser context.");
+    }
+    return navigator.clipboard.readText();
+  };
+
+  const copyFromSession = async (session = activeSession()) => {
+    if (!session?.term) {
+      return;
+    }
+    let text = "";
+    if (session.selectAllBufferActive) {
+      text = fullBufferText(session.term);
+      session.selectAllBufferActive = false;
+    } else {
+      text = session.term.getSelection?.() || "";
+    }
+    if (!text) {
+      showToast("No selection to copy.");
+      return;
+    }
+    if (await copyText(text)) {
+      showToast("Copied.");
+      session.term.clearSelection?.();
+      updateSelectionSheet();
+    } else {
+      showToast("Copy failed.");
+    }
+  };
+
+  const pasteIntoSession = async (session = activeSession(), text = null) => {
+    if (!session?.term) {
+      return;
+    }
+    try {
+      const value = text === null ? await readClipboardText() : text;
+      if (value) {
+        session.term.paste(value);
+      }
+    } catch (error) {
+      showToast(error.message || "Paste failed.");
+    }
+  };
+
+  const selectAllSessionBuffer = (session = activeSession()) => {
+    if (!session?.term) {
+      return;
+    }
+    session.selectAllBufferActive = true;
+    session.term.selectLines?.(0, Math.max(0, session.term.rows - 1));
+    updateSelectionSheet();
+    showToast("Full terminal buffer selected.");
+  };
+
+  const scrollToAbsoluteRow = (term, absoluteRow, preferredViewportRow = 2) => {
+    const scrollback = term.wasmTerm?.getScrollbackLength?.() || 0;
+    const viewportY = Math.max(0, Math.min(scrollback, scrollback + preferredViewportRow - absoluteRow));
+    term.scrollToLine?.(viewportY);
+    return Math.max(0, Math.min(term.rows - 1, absoluteRow - scrollback + Math.floor(term.getViewportY?.() || term.viewportY || 0)));
+  };
+
+  const updateSearchCount = () => {
+    if (!searchCount) {
+      return;
+    }
+    if (!searchState.query) {
+      searchCount.textContent = "0/0";
+      return;
+    }
+    searchCount.textContent = searchState.matches.length > 0 ? `${searchState.index + 1}/${searchState.matches.length}` : "0/0";
+  };
+
+  const selectSearchMatch = () => {
+    const session = activeSession();
+    const match = searchState.matches[searchState.index];
+    if (!session?.term || !match) {
+      updateSearchCount();
+      return;
+    }
+    const viewportRow = scrollToAbsoluteRow(session.term, match.row);
+    session.term.select(match.col, viewportRow, Math.max(1, match.length));
+    updateSearchCount();
+  };
+
+  const rebuildSearchMatches = () => {
+    const session = activeSession();
+    searchState.matches = [];
+    searchState.index = -1;
+    searchState.sessionId = session?.id || "";
+    const query = searchState.query;
+    if (!session?.term || !query) {
+      updateSearchCount();
+      return;
+    }
+    const queryLower = query.toLowerCase();
+    for (const logical of buildLogicalLines(session.term)) {
+      const textLower = logical.text.toLowerCase();
+      let offset = textLower.indexOf(queryLower);
+      while (offset >= 0) {
+        const position = logical.positions[offset];
+        if (position) {
+          searchState.matches.push({
+            row: position.row,
+            col: position.col,
+            length: query.length,
+          });
+        }
+        offset = textLower.indexOf(queryLower, offset + Math.max(1, queryLower.length));
+      }
+    }
+    searchState.index = searchState.matches.length > 0 ? 0 : -1;
+    selectSearchMatch();
+    updateSearchCount();
+  };
+
+  const setSearchQuery = (value) => {
+    searchState.query = String(value || "");
+    rebuildSearchMatches();
+  };
+
+  const openSearch = () => {
+    if (!searchPanel || !searchInput) {
+      return;
+    }
+    closeContextMenu();
+    searchState.open = true;
+    searchPanel.hidden = false;
+    searchInput.value = searchState.query;
+    window.setTimeout(() => {
+      searchInput.focus();
+      searchInput.select();
+    }, 0);
+    rebuildSearchMatches();
+  };
+
+  const closeSearch = () => {
+    searchState.open = false;
+    if (searchPanel) {
+      searchPanel.hidden = true;
+    }
+    activeSession()?.term?.focus();
+  };
+
+  const moveSearchResult = (delta) => {
+    if (searchState.matches.length === 0) {
+      return;
+    }
+    searchState.index = (searchState.index + delta + searchState.matches.length) % searchState.matches.length;
+    selectSearchMatch();
+  };
+
+  const logicalLineAt = (term, absoluteRow) => buildLogicalLines(term).find((line) => line.startRow <= absoluteRow && line.endRow >= absoluteRow) || null;
+
+  const findURLAtPosition = (session, clientX, clientY) => {
+    const term = session?.term;
+    const renderer = term?.renderer;
+    const canvas = term?.canvas || term?.element?.querySelector?.("canvas");
+    if (!term || !renderer || !canvas) {
+      return null;
+    }
+    const rect = canvas.getBoundingClientRect();
+    const col = Math.floor((clientX - rect.left) / (renderer.charWidth || renderer.getMetrics?.().width || 10));
+    const viewportRow = Math.floor((clientY - rect.top) / (renderer.charHeight || renderer.getMetrics?.().height || 18));
+    if (viewportRow < 0 || viewportRow >= term.rows) {
+      return null;
+    }
+    const scrollback = term.wasmTerm?.getScrollbackLength?.() || 0;
+    const absoluteRow = scrollback + viewportRow - Math.floor(term.getViewportY?.() || term.viewportY || 0);
+    const logical = logicalLineAt(term, absoluteRow);
+    if (!logical) {
+      return null;
+    }
+    urlPattern.lastIndex = 0;
+    let match = urlPattern.exec(logical.text);
+    while (match) {
+      let url = match[0].replace(trailingURLPunctuation, "");
+      const start = match.index;
+      const end = start + url.length - 1;
+      const startPosition = logical.positions[start];
+      const endPosition = logical.positions[end];
+      const pointerIndex = logical.positions.findIndex((position) => position.row === absoluteRow && position.col === col);
+      if (url.length > 0 && pointerIndex >= start && pointerIndex <= end && startPosition && endPosition) {
+        return { url, start: startPosition, end: endPosition };
+      }
+      match = urlPattern.exec(logical.text);
+    }
+    return null;
+  };
+
+  const openURL = (url) => {
+    if (!url) {
+      return;
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
+
+  let dialogResolve = null;
+
+  const closeDialog = (value) => {
+    if (!dialogResolve) {
+      return;
+    }
+    const resolve = dialogResolve;
+    dialogResolve = null;
+    if (dialogBackdrop) {
+      dialogBackdrop.hidden = true;
+      dialogBackdrop.dataset.mode = "";
+    }
+    resolve(value);
+    window.setTimeout(() => activeSession()?.term?.focus(), 0);
+  };
+
+  const openDialog = ({ mode = "confirm", title = "Confirm", message = "", value = "", okText = "OK", cancelText = "Cancel", danger = false } = {}) =>
+    new Promise((resolve) => {
+      if (!dialogBackdrop || !dialogTitle || !dialogMessage || !dialogInput || !dialogOK || !dialogCancel) {
+        resolve(mode === "prompt" ? window.prompt(title, value) : window.confirm(message || title));
+        return;
+      }
+      if (dialogResolve) {
+        closeDialog(mode === "prompt" ? null : false);
+      }
+      dialogResolve = resolve;
+      dialogBackdrop.hidden = false;
+      dialogBackdrop.dataset.mode = mode;
+      dialogBackdrop.dataset.danger = danger ? "true" : "false";
+      dialogTitle.textContent = title;
+      dialogMessage.textContent = message;
+      dialogInput.hidden = mode !== "prompt";
+      dialogInput.value = value || "";
+      dialogOK.textContent = okText;
+      dialogCancel.textContent = cancelText;
+      window.setTimeout(() => {
+        if (mode === "prompt") {
+          dialogInput.focus();
+          dialogInput.select();
+        } else {
+          dialogCancel.focus();
+        }
+      }, 0);
+    });
+
+  const confirmDialog = async (message, options = {}) => {
+    const result = await openDialog({ mode: "confirm", message, title: options.title || "Confirm", okText: options.okText || "Confirm", cancelText: options.cancelText || "Cancel", danger: Boolean(options.danger) });
+    return result === true;
+  };
+
+  const promptDialog = async (title, value) => {
+    const result = await openDialog({ mode: "prompt", title, value, okText: "Save", cancelText: "Cancel" });
+    return result === null ? null : String(result || "").trim();
+  };
+
+  const updatePaneActivity = (paneState) => {
+    const paneId = paneState?.id;
+    if (!paneId) {
+      return;
+    }
+    for (const tab of tabs.values()) {
+      const pane = tab.panes.get(paneId);
+      if (!pane) {
+        continue;
+      }
+      pane.tty = paneState.tty || pane.tty || "";
+      pane.busy = Boolean(paneState.busy);
+      pane.command = paneState.command || "";
+      pane.activityCheckedAt = Number(paneState.activity_checked_at || 0);
+      pane.shellEl.dataset.busy = pane.busy ? "true" : "false";
+      return;
+    }
+  };
+
+  const refreshActivity = async ({ silent = true } = {}) => {
+    if (!activeName) {
+      return [];
+    }
+    const response = await fetch(workspaceActivityURL(), { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(await response.text() || `Activity request failed (${response.status})`);
+    }
+    const state = await response.json();
+    for (const paneState of state?.panes || []) {
+      updatePaneActivity(paneState);
+    }
+    if (state?.error) {
+      if (!silent) {
+        showToast(state.error);
+      }
+      throw new Error(state.error);
+    }
+    updateDocumentTitle();
+    return state?.panes || [];
+  };
+
+  const targetPanesFromTab = (tab) => Array.from(tab?.panes.values() || []);
+  const busyPanes = (panes) => panes.filter((pane) => pane?.busy);
+
+  const refreshAndConfirmClose = async (panes, messagePrefix) => {
+    try {
+      await refreshActivity({ silent: true });
+    } catch (error) {
+      showToast(error.message || "Activity refresh failed.");
+      return true;
+    }
+    const busy = busyPanes(panes);
+    if (busy.length === 0) {
+      return true;
+    }
+    const commands = busy.map((pane) => pane.command || pane.id).slice(0, 5).join(", ");
+    return confirmDialog(`${messagePrefix}\n\nRunning: ${commands}`, { title: "Running command", okText: "Close", danger: true });
+  };
+
+  const hasCachedBusyPane = () => {
+    for (const tab of tabs.values()) {
+      for (const pane of tab.panes.values()) {
+        if (pane.busy) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  const startActivityRefresh = () => {
+    window.clearInterval(activityRefreshTimer);
+    activityRefreshTimer = window.setInterval(() => {
+      if (!document.hidden && navigator.onLine !== false) {
+        refreshActivity({ silent: true }).catch(() => {});
+      }
+    }, 5000);
+  };
+
+  const updateDocumentTitle = () => {
+    const tab = currentTab();
+    const title = tab?.label || "WebShell";
+    const hasNotification = Array.from(tabs.values()).some((item) => item.hasNotification);
+    document.title = `${hasNotification ? "* " : ""}${title} - LightOS WebShell`;
+  };
+
+  const markTabNotification = (tabId) => {
+    const tab = tabs.get(tabId);
+    if (!tab || tab.id === activeTabId) {
+      return;
+    }
+    tab.hasNotification = true;
+    tab.button?.classList.add("has-notification");
+    updateDocumentTitle();
+  };
+
+  const clearTabNotification = (tab) => {
+    if (!tab) {
+      return;
+    }
+    tab.hasNotification = false;
+    tab.button?.classList.remove("has-notification");
+    updateDocumentTitle();
+  };
+
+  const setNetworkBanner = (visible, message = "") => {
+    if (!networkBanner) {
+      return;
+    }
+    networkBanner.textContent = message || "Offline. Reconnecting when network is back.";
+    networkBanner.hidden = !visible;
+  };
+
+  const reconnectVisibleSessions = () => {
+    if (disposed || navigator.onLine === false) {
+      return;
+    }
+    const tab = currentTab();
+    for (const pane of tab?.panes.values() || []) {
+      connectSession(pane).catch((error) => showToast(error.message));
+    }
+  };
+
+  const updateSelectionSheet = () => {
+    if (!selectionSheet) {
+      return;
+    }
+    const session = activeSession();
+    const hasSelection = Boolean(session?.term?.hasSelection?.() || session?.selectAllBufferActive);
+    selectionSheet.hidden = !hasSelection || window.matchMedia("(min-width: 721px)").matches;
+  };
+
+  const encodedArrow = (direction) => {
+    const base = { up: "A", down: "B", right: "C", left: "D" }[direction];
+    if (!base) {
+      return "";
+    }
+    let modifier = 1;
+    if (mobileSticky.shift) {
+      modifier += 1;
+    }
+    if (mobileSticky.alt) {
+      modifier += 2;
+    }
+    if (mobileSticky.ctrl) {
+      modifier += 4;
+    }
+    return modifier === 1 ? `\x1b[${base}` : `\x1b[1;${modifier}${base}`;
+  };
+
+  const clearMobileSticky = () => {
+    mobileSticky.ctrl = false;
+    mobileSticky.alt = false;
+    mobileSticky.shift = false;
+    for (const button of mobileShortcuts?.querySelectorAll("[data-mobile-action]") || []) {
+      const action = button.dataset.mobileAction;
+      if (["ctrl", "alt", "shift"].includes(action)) {
+        button.classList.remove("active");
+      }
+    }
+  };
+
+  const toggleMobileSticky = (action, button) => {
+    mobileSticky[action] = !mobileSticky[action];
+    button?.classList.toggle("active", mobileSticky[action]);
+  };
+
+  const runMobileAction = (action, button) => {
+    const session = activeSession();
+    switch (action) {
+      case "ctrl":
+      case "alt":
+      case "shift":
+        toggleMobileSticky(action, button);
+        return;
+      case "esc":
+        session?.term?.paste(mobileSticky.alt ? "\x1b\x1b" : "\x1b");
+        clearMobileSticky();
+        return;
+      case "tab":
+        session?.term?.paste(mobileSticky.shift ? "\x1b[Z" : "\t");
+        clearMobileSticky();
+        return;
+      case "up":
+      case "down":
+      case "left":
+      case "right":
+        session?.term?.paste(encodedArrow(action));
+        clearMobileSticky();
+        return;
+      case "copy":
+        copyFromSession(session).catch((error) => showToast(error.message));
+        return;
+      case "paste":
+        pasteIntoSession(session).catch((error) => showToast(error.message));
+        return;
+      case "page-up":
+        session?.term?.scrollPages?.(-1);
+        return;
+      case "page-down":
+        session?.term?.scrollPages?.(1);
+        return;
+      case "zoom-out":
+        adjustTerminalFontSize(-1);
+        return;
+      case "zoom-in":
+        adjustTerminalFontSize(1);
+        return;
+    }
+  };
+
   const clearReconnectTimer = (session) => {
     if (session?.reconnectTimer) {
       window.clearTimeout(session.reconnectTimer);
@@ -716,6 +1387,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (disposed || session.closed || session.reconnectPending) {
       return;
     }
+    if (navigator.onLine === false) {
+      setNetworkBanner(true);
+      return;
+    }
     session.reconnectPending = true;
     clearReconnectTimer(session);
     session.reconnectTimer = window.setTimeout(() => {
@@ -731,6 +1406,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (
       !session ||
       session.closed ||
+      navigator.onLine === false ||
       session.socket?.readyState === WebSocket.OPEN ||
       session.socket?.readyState === WebSocket.CONNECTING
     ) {
@@ -855,6 +1531,11 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       inputFlushTimer: 0,
       exitExpected: false,
       closed: false,
+      selectAllBufferActive: false,
+      tty: "",
+      busy: false,
+      command: "",
+      activityCheckedAt: 0,
     };
 
     term.onData((data) => {
@@ -867,7 +1548,15 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       if (normalized && current?.panes.size === 1 && !current.customLabel) {
         current.label = normalized;
         renderTabLabel(current);
+        updateDocumentTitle();
       }
+    });
+    term.onBell(() => markTabNotification(session.tabId));
+    term.onSelectionChange(() => {
+      if (!term.hasSelection?.()) {
+        session.selectAllBufferActive = false;
+      }
+      updateSelectionSheet();
     });
 
     shellEl.addEventListener("pointerdown", () => {
@@ -882,7 +1571,22 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       event.preventDefault();
       const current = tabs.get(session.tabId);
       setActivePane(current, session.id, { focus: false });
-      showContextMenu(event.clientX, event.clientY, { type: "pane", tabId: session.tabId, paneId: session.id });
+      const link = findURLAtPosition(session, event.clientX, event.clientY);
+      showContextMenu(event.clientX, event.clientY, { type: "pane", tabId: session.tabId, paneId: session.id, link: link?.url || "" });
+    });
+    shellEl.addEventListener("auxclick", (event) => {
+      if (event.button !== 1) {
+        return;
+      }
+      event.preventDefault();
+      readClipboardText().then((text) => pasteIntoSession(session, text)).catch((error) => showToast(error.message || "Paste failed."));
+    });
+    terminalHost.addEventListener("paste", (event) => {
+      const text = event.clipboardData?.getData("text/plain");
+      if (text) {
+        event.preventDefault();
+        pasteIntoSession(session, text).catch((error) => showToast(error.message));
+      }
     });
 
     tab.panes.set(normalizedID, session);
@@ -899,6 +1603,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (label) {
       label.textContent = tab.label;
       tab.button.title = tab.label;
+    }
+    if (tab.id === activeTabId) {
+      updateDocumentTitle();
     }
   };
 
@@ -989,6 +1696,8 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       item.button?.setAttribute("tabindex", isActive ? "0" : "-1");
     }
     setActivePane(tab, tab.activePaneId, { focus });
+    clearTabNotification(tab);
+    rememberActiveTab();
     window.requestAnimationFrame(() => resizeTab(tab));
     if (!applyingWorkspaceState && !wasActive) {
       postWorkspaceAction("activate_tab", { tab_id: tab.id }).catch((error) => showToast(error.message));
@@ -1153,12 +1862,15 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
           if (!tab.panes.has(paneState.id)) {
             createPaneSession(tab, activeName, { id: paneState.id, connect: true });
           }
+          updatePaneActivity(paneState);
         }
         renderTabLabel(tab);
         renderTabLayout(tab);
       }
 
-      const nextActiveTab = tabs.get(state?.active_tab_id) || tabs.values().next().value || null;
+      const requestedTab = (new URLSearchParams(window.location.search).get("tab") || "").trim();
+      const savedTab = activeName ? window.localStorage.getItem(lastTabStorageKey(activeName)) : "";
+      const nextActiveTab = tabs.get(requestedTab) || tabs.get(savedTab) || tabs.get(state?.active_tab_id) || tabs.values().next().value || null;
       if (nextActiveTab) {
         setActiveTab(nextActiveTab.id, { focus });
       } else {
@@ -1409,7 +2121,11 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       return;
     }
     if (!applyingWorkspaceState) {
-      postWorkspaceAction("close_pane", { tab_id: tabId, pane_id: paneId }).catch((error) => showToast(error.message));
+      refreshAndConfirmClose([pane], "Close this pane and terminate the running command?").then((confirmed) => {
+        if (confirmed) {
+          postWorkspaceAction("close_pane", { tab_id: tabId, pane_id: paneId }).catch((error) => showToast(error.message));
+        }
+      });
       return;
     }
     disposePane(pane);
@@ -1435,7 +2151,11 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       return;
     }
     if (!applyingWorkspaceState) {
-      postWorkspaceAction("close_tab", { tab_id: tabId }).catch((error) => showToast(error.message));
+      refreshAndConfirmClose(targetPanesFromTab(tab), "Close this tab and terminate running commands?").then((confirmed) => {
+        if (confirmed) {
+          postWorkspaceAction("close_tab", { tab_id: tabId }).catch((error) => showToast(error.message));
+        }
+      });
       return;
     }
     for (const pane of tab.panes.values()) {
@@ -1456,7 +2176,14 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
 
   const closeOtherTabs = (tabId) => {
     if (!applyingWorkspaceState) {
-      postWorkspaceAction("close_other_tabs", { tab_id: tabId }).catch((error) => showToast(error.message));
+      const panes = Array.from(tabs.values())
+        .filter((tab) => tab.id !== tabId)
+        .flatMap((tab) => targetPanesFromTab(tab));
+      refreshAndConfirmClose(panes, "Close other tabs and terminate running commands?").then((confirmed) => {
+        if (confirmed) {
+          postWorkspaceAction("close_other_tabs", { tab_id: tabId }).catch((error) => showToast(error.message));
+        }
+      });
       return;
     }
     for (const tab of [...tabs.values()]) {
@@ -1467,12 +2194,12 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     setActiveTab(tabId);
   };
 
-  const renameTab = (tabId) => {
+  const renameTab = async (tabId) => {
     const tab = tabs.get(tabId);
     if (!tab) {
       return;
     }
-    const nextLabel = window.prompt("Rename tab", tab.label);
+    const nextLabel = await promptDialog("Rename tab", tab.label);
     if (nextLabel === null) {
       return;
     }
@@ -1510,6 +2237,43 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     setActiveTab(nextTab.id);
   };
 
+  const moveTab = (tabId, position) => {
+    const tab = tabs.get(tabId);
+    if (!tab) {
+      return;
+    }
+    if (!applyingWorkspaceState) {
+      postWorkspaceAction("move_tab", { tab_id: tabId, position }).catch((error) => showToast(error.message));
+      return;
+    }
+    const ordered = getOrderedTabs();
+    const index = ordered.findIndex((item) => item.id === tabId);
+    if (index < 0) {
+      return;
+    }
+    let target = index;
+    if (position === "first") {
+      target = 0;
+    } else if (position === "left") {
+      target = Math.max(0, index - 1);
+    } else if (position === "right") {
+      target = Math.min(ordered.length - 1, index + 1);
+    } else if (position === "last") {
+      target = ordered.length - 1;
+    }
+    if (target === index) {
+      return;
+    }
+    const reference = tabsEl.children[target];
+    tab.button?.remove();
+    if (position === "right" || position === "last") {
+      tabsEl.insertBefore(tab.button, reference?.nextSibling || null);
+    } else {
+      tabsEl.insertBefore(tab.button, reference || tabsEl.firstChild);
+    }
+    setActiveTab(tabId, { focus: false });
+  };
+
   const closeContextMenu = () => {
     if (contextMenu) {
       contextMenu.hidden = true;
@@ -1526,9 +2290,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     contextMenu.dataset.type = target.type;
     for (const item of contextMenu.querySelectorAll(".context-menu-btn")) {
       const action = item.dataset.action;
-      const paneOnly = ["split-vertical", "split-horizontal", "move-pane-new-tab", "close-pane"].includes(action);
-      const tabOnly = ["rename-tab", "close-other-tabs", "close-tab"].includes(action);
-      item.hidden = (paneOnly && !target.paneId) || (tabOnly && !target.tabId);
+      const paneOnly = ["copy", "paste", "select-all", "search", "split-vertical", "split-horizontal", "move-pane-new-tab", "close-pane"].includes(action);
+      const tabOnly = ["rename-tab", "move-tab-first", "move-tab-left", "move-tab-right", "move-tab-last", "close-other-tabs", "close-tab"].includes(action);
+      const linkOnly = ["open-link", "copy-link"].includes(action);
+      item.hidden = (paneOnly && !target.paneId) || (tabOnly && !target.tabId) || (linkOnly && !target.link);
     }
     const rect = contextMenu.getBoundingClientRect();
     const left = Math.min(x, window.innerWidth - rect.width - 8);
@@ -1544,8 +2309,38 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       return;
     }
     switch (action) {
+      case "copy":
+        copyFromSession(tabs.get(target.tabId)?.panes.get(target.paneId)).catch((error) => showToast(error.message));
+        break;
+      case "paste":
+        pasteIntoSession(tabs.get(target.tabId)?.panes.get(target.paneId)).catch((error) => showToast(error.message));
+        break;
+      case "select-all":
+        selectAllSessionBuffer(tabs.get(target.tabId)?.panes.get(target.paneId));
+        break;
+      case "search":
+        openSearch();
+        break;
+      case "open-link":
+        openURL(target.link);
+        break;
+      case "copy-link":
+        copyText(target.link).then((ok) => showToast(ok ? "Link copied." : "Copy failed."));
+        break;
       case "rename-tab":
-        renameTab(target.tabId);
+        renameTab(target.tabId).catch((error) => showToast(error.message));
+        break;
+      case "move-tab-first":
+        moveTab(target.tabId, "first");
+        break;
+      case "move-tab-left":
+        moveTab(target.tabId, "left");
+        break;
+      case "move-tab-right":
+        moveTab(target.tabId, "right");
+        break;
+      case "move-tab-last":
+        moveTab(target.tabId, "last");
         break;
       case "close-other-tabs":
         closeOtherTabs(target.tabId);
@@ -1663,6 +2458,18 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       case "switch_container":
         await openInstanceSwitcher();
         return;
+      case "copy_terminal":
+        await copyFromSession();
+        return;
+      case "paste_terminal":
+        await pasteIntoSession();
+        return;
+      case "search_terminal":
+        openSearch();
+        return;
+      case "select_all_terminal":
+        selectAllSessionBuffer();
+        return;
       default: {
         const match = action.match(/^tab_(\d+)$/);
         if (match) {
@@ -1684,6 +2491,31 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     if (isInteractiveShortcutTarget(event.target)) {
       return;
+    }
+    if (event.ctrlKey && !event.altKey && !event.metaKey) {
+      if (event.key === "+" || event.key === "=") {
+        event.preventDefault();
+        adjustTerminalFontSize(1);
+        return;
+      }
+      if (event.key === "-" || event.key === "_") {
+        event.preventDefault();
+        adjustTerminalFontSize(-1);
+        return;
+      }
+      if (event.key === "0") {
+        event.preventDefault();
+        resetTerminalFontSize();
+        return;
+      }
+    }
+    if (!event.ctrlKey && !event.altKey && !event.metaKey && (event.key === "PageUp" || event.key === "PageDown")) {
+      const session = activeSession();
+      if (session?.term) {
+        event.preventDefault();
+        session.term.scrollPages(event.key === "PageUp" ? -1 : 1);
+        return;
+      }
     }
     const shortcut = getShortcutKeyFromEvent(event);
     const action = shortcutActionMap.get(shortcut);
@@ -1783,7 +2615,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     activeName = normalized;
     if (updateURL) {
-      updateLocationName(activeName, { replace: replaceURL });
+      updateLocationName(activeName, { replace: replaceURL, tabId: "" });
     }
     renderInstanceSwitcher();
     resetTabsForInstance();
@@ -1794,7 +2626,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     const instances = await loadInstances();
     if (!activeName) {
       activeName = await loadDefaultInstanceName();
-      updateLocationName(activeName, { replace: true });
+      updateLocationName(activeName, { replace: true, tabId: "" });
     }
     const active = instances.find((item) => instanceSelector(item) === activeName);
     if (!active || !isRunningInstance(active)) {
@@ -1802,7 +2634,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       const fallbackName = instanceSelector(fallback);
       if (fallbackName) {
         activeName = fallbackName;
-        updateLocationName(activeName, { replace: true });
+        updateLocationName(activeName, { replace: true, tabId: "" });
       } else {
         throw new Error("No running LightOS instance found");
       }
@@ -1811,10 +2643,13 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const bootstrap = async () => {
+    await loadThemeCatalog();
     applyThemeDocumentState();
     renderThemePicker();
     await refreshInstances();
     await refreshWorkspace({ focus: true });
+    startActivityRefresh();
+    refreshActivity({ silent: true }).catch(() => {});
   };
 
   async function createUserTab() {
@@ -1866,6 +2701,76 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     closeThemePicker();
   });
 
+  searchInput?.addEventListener("input", () => setSearchQuery(searchInput.value));
+  searchInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      moveSearchResult(event.shiftKey ? -1 : 1);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeSearch();
+    }
+  });
+  searchPrevious?.addEventListener("click", () => moveSearchResult(-1));
+  searchNext?.addEventListener("click", () => moveSearchResult(1));
+  searchClose?.addEventListener("click", closeSearch);
+
+  dialogPanel?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (dialogBackdrop?.dataset.mode === "prompt") {
+      closeDialog(dialogInput?.value || "");
+      return;
+    }
+    closeDialog(true);
+  });
+  dialogCancel?.addEventListener("click", () => closeDialog(dialogBackdrop?.dataset.mode === "prompt" ? null : false));
+  dialogBackdrop?.addEventListener("click", (event) => {
+    if (event.target === dialogBackdrop) {
+      closeDialog(dialogBackdrop.dataset.mode === "prompt" ? null : false);
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (dialogResolve && event.key === "Escape") {
+      event.preventDefault();
+      closeDialog(dialogBackdrop?.dataset.mode === "prompt" ? null : false);
+    }
+  }, true);
+
+  tabsEl.addEventListener("wheel", (event) => {
+    if (Math.abs(event.deltaY) > Math.abs(event.deltaX)) {
+      tabsEl.scrollLeft += event.deltaY;
+      event.preventDefault();
+    }
+  }, { passive: false });
+
+  mobileShortcuts?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-mobile-action]");
+    if (!button) {
+      return;
+    }
+    runMobileAction(button.dataset.mobileAction, button);
+  });
+
+  selectionSheet?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-selection-action]");
+    if (!button) {
+      return;
+    }
+    const action = button.dataset.selectionAction;
+    if (action === "copy") {
+      copyFromSession().catch((error) => showToast(error.message));
+    } else if (action === "paste") {
+      pasteIntoSession().catch((error) => showToast(error.message));
+    } else if (action === "clear") {
+      const session = activeSession();
+      session?.term?.clearSelection?.();
+      if (session) {
+        session.selectAllBufferActive = false;
+      }
+      updateSelectionSheet();
+    }
+  });
+
   contextMenu?.addEventListener("click", (event) => {
     const item = event.target.closest(".context-menu-btn");
     if (!item) {
@@ -1899,15 +2804,57 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   }, true);
 
   window.addEventListener("resize", () => resizeAllTabsForCurrentDevice());
+  document.fonts?.ready?.then(() => {
+    for (const tab of tabs.values()) {
+      for (const pane of tab.panes.values()) {
+        refreshTerminalMetrics(pane);
+      }
+    }
+  });
   window.addEventListener("popstate", () => {
     const nextParams = new URLSearchParams(window.location.search);
     const nextName = (nextParams.get("name") || "").trim();
-    if (!nextName || nextName === activeName) {
+    const nextTab = (nextParams.get("tab") || "").trim();
+    if (!nextName) {
+      return;
+    }
+    if (nextName === activeName) {
+      if (nextTab && tabs.has(nextTab)) {
+        suppressLocationUpdate = true;
+        setActiveTab(nextTab);
+        suppressLocationUpdate = false;
+      }
       return;
     }
     switchInstance(nextName, { updateURL: false }).catch((error) => showToast(error.message));
   });
-  window.addEventListener("beforeunload", () => {
+  window.addEventListener("online", () => {
+    setNetworkBanner(false);
+    showToast("Network is online. Reconnecting.");
+    reconnectVisibleSessions();
+    refreshActivity({ silent: true }).catch(() => {});
+  });
+  window.addEventListener("offline", () => {
+    setNetworkBanner(true);
+    showToast("Network is offline.");
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      reconnectVisibleSessions();
+      refreshActivity({ silent: true }).catch(() => {});
+      updateSelectionSheet();
+    }
+  });
+  window.addEventListener("focus", () => {
+    reconnectVisibleSessions();
+    refreshActivity({ silent: true }).catch(() => {});
+  });
+  window.addEventListener("beforeunload", (event) => {
+    if (hasCachedBusyPane()) {
+      event.preventDefault();
+      event.returnValue = "";
+      return "";
+    }
     disposed = true;
     for (const tab of tabs.values()) {
       for (const pane of tab.panes.values()) {

@@ -87,6 +87,7 @@ func (s *pluginServer) run(ctx context.Context) error {
 	mux.HandleFunc("/api/instances", s.handleInstances)
 	mux.HandleFunc("/api/lightos-admin-info", s.handleLightOSAdminInfo)
 	mux.HandleFunc("/api/workspace", s.handleWorkspace)
+	mux.HandleFunc("/api/workspace/activity", s.handleWorkspaceActivity)
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.Handle("/static/", http.StripPrefix("/static/", staticFileServer(filepath.Join(s.rootDir, "runtime", "static"))))
 
@@ -210,6 +211,9 @@ func parsePositiveInt(text string) int {
 
 func buildShellBootstrapScript() string {
 	return strings.Join([]string{
+		`__webshell_tty="$(tty 2>/dev/null || true)"`,
+		`case "$__webshell_tty" in /dev/pts/[0-9]*) printf '\033]777;webshell-tty=%s\a' "$__webshell_tty";; esac`,
+		`unset __webshell_tty`,
 		"if [ -f /run/catlink/shell-env.sh ]; then . /run/catlink/shell-env.sh; fi",
 		`exec "${SHELL:-/bin/sh}"`,
 	}, "\n")

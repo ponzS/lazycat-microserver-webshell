@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,7 +10,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -71,18 +76,23 @@ type terminalPane struct {
 	selector  string
 	rootDir   string
 
-	mu       sync.Mutex
-	writeMu  sync.Mutex
-	cmd      *exec.Cmd
-	ptyFile  *os.File
-	clients  map[*paneClient]struct{}
-	history  []byte
-	cols     int
-	rows     int
-	exited   bool
-	exitCode int
-	exitText string
-	done     chan struct{}
+	mu                sync.Mutex
+	writeMu           sync.Mutex
+	cmd               *exec.Cmd
+	ptyFile           *os.File
+	clients           map[*paneClient]struct{}
+	history           []byte
+	cols              int
+	rows              int
+	tty               string
+	busy              bool
+	command           string
+	activityCheckedAt time.Time
+	controlPending    []byte
+	exited            bool
+	exitCode          int
+	exitText          string
+	done              chan struct{}
 }
 
 type paneClient struct {
@@ -116,11 +126,15 @@ type tabState struct {
 }
 
 type paneSummary struct {
-	ID       string `json:"id"`
-	Cols     int    `json:"cols"`
-	Rows     int    `json:"rows"`
-	Exited   bool   `json:"exited"`
-	ExitCode int    `json:"exit_code"`
+	ID                string `json:"id"`
+	Cols              int    `json:"cols"`
+	Rows              int    `json:"rows"`
+	TTY               string `json:"tty,omitempty"`
+	Busy              bool   `json:"busy"`
+	Command           string `json:"command,omitempty"`
+	ActivityCheckedAt int64  `json:"activity_checked_at,omitempty"`
+	Exited            bool   `json:"exited"`
+	ExitCode          int    `json:"exit_code"`
 }
 
 type workspaceActionRequest struct {
@@ -133,6 +147,13 @@ type workspaceActionRequest struct {
 	ActivePaneID string      `json:"active_pane_id"`
 	Cols         int         `json:"cols"`
 	Rows         int         `json:"rows"`
+	Position     string      `json:"position"`
+}
+
+type workspaceActivityState struct {
+	Selector string        `json:"selector"`
+	Panes    []paneSummary `json:"panes"`
+	Error    string        `json:"error,omitempty"`
 }
 
 type terminalControlMessage struct {
@@ -217,6 +238,29 @@ func (s *pluginServer) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *pluginServer) handleWorkspaceActivity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	selector := strings.TrimSpace(r.URL.Query().Get("name"))
+	if selector == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	cols, rows := parseTerminalSize(r.URL.Query().Get("cols"), r.URL.Query().Get("rows"))
+	workspace, err := s.workspaces.getOrCreate(selector, cols, rows)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	state, err := workspace.refreshActivity(r.Context())
+	if err != nil {
+		state.Error = err.Error()
+	}
+	writeJSON(w, state)
 }
 
 func (s *pluginServer) attachPersistentPane(w http.ResponseWriter, r *http.Request, cols, rows int) error {
@@ -400,6 +444,8 @@ func (w *terminalWorkspace) applyAction(request workspaceActionRequest) error {
 		return w.closePaneLocked(request.TabID, request.PaneID)
 	case "move_pane_to_tab":
 		return w.movePaneToTabLocked(request.TabID, request.PaneID)
+	case "move_tab":
+		return w.moveTabLocked(request.TabID, request.Position)
 	case "activate_tab":
 		return w.activateTabLocked(request.TabID)
 	case "activate_pane":
@@ -437,6 +483,73 @@ func (w *terminalWorkspace) snapshot() workspaceState {
 		state.Tabs = append(state.Tabs, nextTab)
 	}
 	return state
+}
+
+type paneActivityTarget struct {
+	ID  string
+	TTY string
+}
+
+type paneActivity struct {
+	TTY     string
+	Busy    bool
+	Command string
+}
+
+func (w *terminalWorkspace) refreshActivity(ctx context.Context) (workspaceActivityState, error) {
+	w.mu.Lock()
+	targets := make([]paneActivityTarget, 0, len(w.panes))
+	for _, pane := range w.panes {
+		pane.mu.Lock()
+		if !pane.exited && pane.tty != "" {
+			targets = append(targets, paneActivityTarget{ID: pane.id, TTY: pane.tty})
+		}
+		pane.mu.Unlock()
+	}
+	selector := w.selector
+	w.mu.Unlock()
+
+	ttys := make([]string, 0, len(targets))
+	for _, target := range targets {
+		ttys = append(ttys, target.TTY)
+	}
+	activities, err := scanContainerActivities(ctx, selector, ttys)
+	if err == nil {
+		checkedAt := time.Now()
+		w.mu.Lock()
+		for _, target := range targets {
+			pane := w.panes[target.ID]
+			if pane == nil {
+				continue
+			}
+			activity := activities[target.TTY]
+			pane.mu.Lock()
+			pane.busy = activity.Busy
+			pane.command = activity.Command
+			pane.activityCheckedAt = checkedAt
+			pane.mu.Unlock()
+		}
+		w.mu.Unlock()
+	}
+
+	return workspaceActivityState{
+		Selector: selector,
+		Panes:    w.snapshotPaneSummaries(),
+	}, err
+}
+
+func (w *terminalWorkspace) snapshotPaneSummaries() []paneSummary {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	items := make([]paneSummary, 0, len(w.panes))
+	for _, tab := range w.tabs {
+		for _, paneID := range tab.PaneIDs {
+			if pane := w.panes[paneID]; pane != nil {
+				items = append(items, pane.summary())
+			}
+		}
+	}
+	return items
 }
 
 func (w *terminalWorkspace) createTabLocked(cols, rows int) error {
@@ -617,6 +730,36 @@ func (w *terminalWorkspace) movePaneToTabLocked(tabID, paneID string) error {
 		PaneIDs:      []string{paneID},
 	}
 	w.tabs = append(w.tabs, tab)
+	w.activeTab = tab.ID
+	return nil
+}
+
+func (w *terminalWorkspace) moveTabLocked(tabID, position string) error {
+	index, tab := w.findTabIndexLocked(tabID)
+	if tab == nil {
+		return errors.New("tab not found")
+	}
+	if len(w.tabs) <= 1 {
+		return nil
+	}
+	target := index
+	switch position {
+	case "first":
+		target = 0
+	case "left":
+		target = max(0, index-1)
+	case "right":
+		target = min(len(w.tabs)-1, index+1)
+	case "last":
+		target = len(w.tabs) - 1
+	default:
+		return errors.New("invalid tab position")
+	}
+	if target == index {
+		return nil
+	}
+	w.tabs = append(w.tabs[:index], w.tabs[index+1:]...)
+	w.tabs = append(w.tabs[:target], append([]*terminalTab{tab}, w.tabs[target:]...)...)
 	w.activeTab = tab.ID
 	return nil
 }
@@ -825,7 +968,11 @@ func (p *terminalPane) appendOutput(data []byte) {
 	if len(data) == 0 {
 		return
 	}
-	copied := append([]byte(nil), data...)
+	filtered := p.filterPrivateControlOutput(data)
+	if len(filtered) == 0 {
+		return
+	}
+	copied := append([]byte(nil), filtered...)
 	var clients []*paneClient
 
 	p.workspace.mu.Lock()
@@ -847,6 +994,82 @@ func (p *terminalPane) appendOutput(data []byte) {
 	for _, client := range clients {
 		client.enqueue(paneOutbound{messageType: websocket.BinaryMessage, payload: copied})
 	}
+}
+
+var privateTTYPattern = regexp.MustCompile(`^/dev/pts/[0-9]+$`)
+
+func (p *terminalPane) filterPrivateControlOutput(data []byte) []byte {
+	const maxPendingControl = 512
+	prefix := []byte("\x1b]777;webshell-tty=")
+
+	p.mu.Lock()
+	buffer := append(p.controlPending, data...)
+	p.controlPending = nil
+	p.mu.Unlock()
+
+	var output []byte
+	for len(buffer) > 0 {
+		index := bytes.Index(buffer, prefix)
+		if index < 0 {
+			keep := privatePrefixSuffixLen(buffer, prefix)
+			emit := len(buffer) - keep
+			if emit > 0 {
+				output = append(output, buffer[:emit]...)
+			}
+			p.mu.Lock()
+			p.controlPending = append(p.controlPending[:0], buffer[emit:]...)
+			p.mu.Unlock()
+			return output
+		}
+		if index > 0 {
+			output = append(output, buffer[:index]...)
+			buffer = buffer[index:]
+		}
+		end, terminatorLength := findPrivateControlTerminator(buffer[len(prefix):])
+		if end < 0 {
+			if len(buffer) > maxPendingControl {
+				output = append(output, buffer[0])
+				buffer = buffer[1:]
+				continue
+			}
+			p.mu.Lock()
+			p.controlPending = append(p.controlPending[:0], buffer...)
+			p.mu.Unlock()
+			return output
+		}
+		value := string(buffer[len(prefix) : len(prefix)+end])
+		if privateTTYPattern.MatchString(value) {
+			p.mu.Lock()
+			p.tty = value
+			p.mu.Unlock()
+		}
+		buffer = buffer[len(prefix)+end+terminatorLength:]
+	}
+	return output
+}
+
+func privatePrefixSuffixLen(buffer, prefix []byte) int {
+	maxKeep := min(len(buffer), len(prefix)-1)
+	for keep := maxKeep; keep > 0; keep-- {
+		if bytes.Equal(buffer[len(buffer)-keep:], prefix[:keep]) {
+			return keep
+		}
+	}
+	return 0
+}
+
+func findPrivateControlTerminator(data []byte) (int, int) {
+	for index := 0; index < len(data); index++ {
+		switch data[index] {
+		case '\a':
+			return index, 1
+		case '\x1b':
+			if index+1 < len(data) && data[index+1] == '\\' {
+				return index, 2
+			}
+		}
+	}
+	return -1, 0
 }
 
 func (p *terminalPane) markExited(err error) {
@@ -969,11 +1192,205 @@ func (p *terminalPane) summary() paneSummary {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return paneSummary{
-		ID:       p.id,
-		Cols:     p.cols,
-		Rows:     p.rows,
-		Exited:   p.exited,
-		ExitCode: p.exitCode,
+		ID:                p.id,
+		Cols:              p.cols,
+		Rows:              p.rows,
+		TTY:               p.tty,
+		Busy:              p.busy,
+		Command:           p.command,
+		Exited:            p.exited,
+		ExitCode:          p.exitCode,
+		ActivityCheckedAt: unixMillis(p.activityCheckedAt),
+	}
+}
+
+func unixMillis(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixNano() / int64(time.Millisecond)
+}
+
+type procInfo struct {
+	PID   int
+	Comm  string
+	Cmd   string
+	FD0   string
+	Pgrp  int
+	TTYNr int
+	TPgid int
+}
+
+const procScanScript = `for d in /proc/[0-9]*; do
+  pid="${d##*/}"
+  stat="$(cat "$d/stat" 2>/dev/null)" || continue
+  fd0="$(readlink "$d/fd/0" 2>/dev/null || true)"
+  cmd="$(tr '\000\011\012\015' '    ' < "$d/cmdline" 2>/dev/null || true)"
+  printf 'P\t%s\t%s\t%s\t%s\n' "$pid" "$fd0" "$cmd" "$stat"
+done`
+
+func scanContainerActivities(ctx context.Context, selector string, ttys []string) (map[string]paneActivity, error) {
+	result := make(map[string]paneActivity, len(ttys))
+	uniqueTTYs := make([]string, 0, len(ttys))
+	seen := make(map[string]struct{}, len(ttys))
+	for _, tty := range ttys {
+		tty = strings.TrimSpace(tty)
+		if !privateTTYPattern.MatchString(tty) {
+			continue
+		}
+		if _, ok := seen[tty]; ok {
+			continue
+		}
+		seen[tty] = struct{}{}
+		uniqueTTYs = append(uniqueTTYs, tty)
+		result[tty] = paneActivity{TTY: tty}
+	}
+	if len(uniqueTTYs) == 0 {
+		return result, nil
+	}
+
+	scanCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	defer cancel()
+	output, err := exec.CommandContext(scanCtx, lightosctlPath, "exec", selector, "/bin/sh", "-lc", procScanScript).CombinedOutput()
+	if err != nil {
+		text := strings.TrimSpace(string(output))
+		if text == "" {
+			return result, err
+		}
+		return result, fmt.Errorf("%w: %s", err, text)
+	}
+	processes := parseProcScanOutput(output)
+	for _, tty := range uniqueTTYs {
+		result[tty] = resolveTTYActivity(tty, processes)
+	}
+	return result, nil
+}
+
+func parseProcScanOutput(output []byte) []procInfo {
+	lines := strings.Split(string(output), "\n")
+	processes := make([]procInfo, 0, len(lines))
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "P\t") {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 5)
+		if len(parts) != 5 {
+			continue
+		}
+		pid, err := strconv.Atoi(parts[1])
+		if err != nil {
+			continue
+		}
+		info, err := parseProcStat(parts[4])
+		if err != nil {
+			continue
+		}
+		info.PID = pid
+		info.FD0 = strings.TrimSpace(parts[2])
+		info.Cmd = strings.TrimSpace(parts[3])
+		processes = append(processes, info)
+	}
+	sort.Slice(processes, func(i, j int) bool {
+		return processes[i].PID < processes[j].PID
+	})
+	return processes
+}
+
+func parseProcStat(stat string) (procInfo, error) {
+	stat = strings.TrimSpace(stat)
+	open := strings.IndexByte(stat, '(')
+	close := strings.LastIndexByte(stat, ')')
+	if open < 0 || close <= open {
+		return procInfo{}, errors.New("invalid proc stat")
+	}
+	rest := strings.Fields(strings.TrimSpace(stat[close+1:]))
+	if len(rest) < 6 {
+		return procInfo{}, errors.New("short proc stat")
+	}
+	pgrp, err := strconv.Atoi(rest[2])
+	if err != nil {
+		return procInfo{}, err
+	}
+	ttyNr, err := strconv.Atoi(rest[4])
+	if err != nil {
+		return procInfo{}, err
+	}
+	tpgid, err := strconv.Atoi(rest[5])
+	if err != nil {
+		return procInfo{}, err
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(stat[:open]))
+	return procInfo{
+		PID:   pid,
+		Comm:  stat[open+1 : close],
+		Pgrp:  pgrp,
+		TTYNr: ttyNr,
+		TPgid: tpgid,
+	}, nil
+}
+
+func resolveTTYActivity(tty string, processes []procInfo) paneActivity {
+	activity := paneActivity{TTY: tty}
+	var anchor *procInfo
+	for index := range processes {
+		process := &processes[index]
+		if process.FD0 == tty && process.TTYNr != 0 && process.TPgid > 0 {
+			anchor = process
+			if process.Pgrp == process.TPgid {
+				break
+			}
+		}
+	}
+	if anchor == nil {
+		return activity
+	}
+
+	var fallback string
+	for index := range processes {
+		process := processes[index]
+		if process.TTYNr != anchor.TTYNr || process.Pgrp != anchor.TPgid {
+			continue
+		}
+		display := displayCommand(process)
+		if fallback == "" {
+			fallback = display
+		}
+		if !isIdleShellCommand(display, process.Comm) {
+			activity.Busy = true
+			activity.Command = display
+			return activity
+		}
+	}
+	activity.Command = fallback
+	return activity
+}
+
+func displayCommand(process procInfo) string {
+	fields := strings.Fields(process.Cmd)
+	if len(fields) > 0 {
+		command := filepath.Base(fields[0])
+		command = strings.TrimPrefix(command, "-")
+		if command != "" {
+			return command
+		}
+	}
+	command := strings.TrimPrefix(strings.TrimSpace(process.Comm), "-")
+	if command != "" {
+		return command
+	}
+	return ""
+}
+
+func isIdleShellCommand(command, comm string) bool {
+	name := strings.TrimPrefix(strings.TrimSpace(command), "-")
+	if name == "" {
+		name = strings.TrimPrefix(strings.TrimSpace(comm), "-")
+	}
+	switch name {
+	case "", "sh", "bash", "dash", "ash", "zsh", "fish", "ksh", "csh", "tcsh", "login", "su", "sudo":
+		return true
+	default:
+		return false
 	}
 }
 
