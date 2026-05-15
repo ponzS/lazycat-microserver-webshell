@@ -1190,6 +1190,19 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       .map((button) => tabs.get(button.dataset.tabId))
       .filter(Boolean);
 
+  const scrollTabButtonIntoView = (button) => {
+    if (!button || !tabsEl.contains(button)) {
+      return;
+    }
+    const containerRect = tabsEl.getBoundingClientRect();
+    const buttonRect = button.getBoundingClientRect();
+    if (buttonRect.left < containerRect.left) {
+      tabsEl.scrollLeft -= containerRect.left - buttonRect.left;
+    } else if (buttonRect.right > containerRect.right) {
+      tabsEl.scrollLeft += buttonRect.right - containerRect.right;
+    }
+  };
+
   const isTabOverviewOpen = () => Boolean(tabOverview && !tabOverview.hidden);
 
   const readTabOverviewColors = () => {
@@ -3660,7 +3673,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     syncCursorBlinkState();
     clearTabNotification(tab);
     rememberActiveTab();
-    window.requestAnimationFrame(() => resizeTab(tab));
+    window.requestAnimationFrame(() => {
+      scrollTabButtonIntoView(tab.button);
+      resizeTab(tab);
+    });
     if (!applyingWorkspaceState && !wasActive) {
       postWorkspaceAction("activate_tab", { tab_id: tab.id }).catch((error) => showToast(error.message));
     }
