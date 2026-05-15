@@ -254,6 +254,10 @@ button {
   fill: currentColor;
 }
 
+.mobile-active-tab-title {
+  display: none;
+}
+
 .header-actions {
   display: flex;
   align-items: center;
@@ -331,9 +335,24 @@ button {
 }
 
 .instance-switcher-chevron {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
   color: var(--chrome-text-muted);
-  font-size: 10px;
   transition: transform 0.16s ease;
+}
+
+.instance-switcher-chevron .icon {
+  display: block;
+  width: 14px;
+  height: 14px;
+}
+
+.instance-switcher-chevron .icon path {
+  fill: currentColor;
 }
 
 .instance-switcher.is-open .instance-switcher-chevron {
@@ -1397,11 +1416,11 @@ body.split-resize-active * {
 }
 
 .tab-overview-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 32px;
   flex: 0 0 auto;
   min-height: 54px;
   align-items: center;
-  justify-content: space-between;
   padding: 0 18px;
   border-bottom: 1px solid var(--chrome-line);
   color: var(--terminal-fg);
@@ -1412,9 +1431,32 @@ body.split-resize-active * {
   margin: 0;
   font-size: 18px;
   font-weight: 700;
+  text-align: center;
 }
 
-.tab-overview-close {
+.tab-overview-back {
+  display: inline-flex;
+  width: 44px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.tab-overview-back .icon {
+  display: block;
+  width: 20px;
+  height: 20px;
+  fill: currentColor;
+}
+
+.tab-overview-add {
   display: inline-flex;
   width: 32px;
   height: 32px;
@@ -1429,9 +1471,11 @@ body.split-resize-active * {
   line-height: 1;
 }
 
-.tab-overview-close:hover,
-.tab-overview-close:focus-visible {
-  background: var(--chrome-hover-bg);
+.tab-overview-back:hover,
+.tab-overview-back:focus-visible,
+.tab-overview-add:hover,
+.tab-overview-add:focus-visible {
+  background: var(--panel-hover-bg);
   outline: none;
 }
 
@@ -1490,6 +1534,7 @@ body.split-resize-active * {
 }
 
 .tab-overview-card {
+  position: relative;
   display: flex;
   min-width: 0;
   min-height: 0;
@@ -1507,7 +1552,7 @@ body.split-resize-active * {
 }
 
 .tab-overview-card:hover,
-.tab-overview-card:focus-visible {
+.tab-overview-card:focus-within {
   border-color: var(--accent);
   outline: none;
 }
@@ -1515,6 +1560,52 @@ body.split-resize-active * {
 .tab-overview-card.active {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent), 0 14px 36px rgba(0, 0, 0, 0.22);
+}
+
+.tab-overview-card-main {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+  flex: 1 1 auto;
+  flex-direction: column;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.tab-overview-card-main:focus-visible {
+  outline: none;
+}
+
+.tab-overview-card-close {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  z-index: 1;
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.48);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.tab-overview-card-close:hover,
+.tab-overview-card-close:focus-visible {
+  border-color: var(--accent);
+  background: rgba(0, 0, 0, 0.72);
+  outline: none;
 }
 
 .tab-overview-preview {
@@ -1687,6 +1778,10 @@ body.split-resize-active * {
   display: none;
 }
 
+.mobile-close-confirm-sheet {
+  display: none;
+}
+
 .selection-sheet {
   position: fixed;
   left: 50%;
@@ -1729,25 +1824,85 @@ body.split-resize-active * {
 
 @media (max-width: 640px) {
   .tabs-bar {
-    gap: 4px;
-    padding: 0 6px;
+    gap: 6px;
+    height: 42px;
+    min-height: 42px;
+    padding: 0 8px;
   }
 
-  .tab {
-    min-width: 104px;
-    max-width: 190px;
+  .tabs-strip {
+    align-items: center;
+    gap: 6px;
   }
 
-  .tab-content {
-    padding-left: 12px;
+  .tabs {
+    display: none;
+  }
+
+  .mobile-active-tab-title {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    flex: 1 1 auto;
+    color: var(--chrome-text-strong);
+    font-size: 13px;
+    font-weight: 650;
+    line-height: 42px;
+    text-align: center;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .tab-overview-toggle,
+  .tab-add {
+    width: 34px;
+    height: 34px;
+    margin: 0;
+  }
+
+  .tab-add {
+    color: var(--terminal-fg);
+    font-size: 22px;
+  }
+
+  .header-actions {
+    flex: 0 0 auto;
   }
 
   .instance-switcher {
-    max-width: 40vw;
+    max-width: none;
+  }
+
+  .instance-switcher-btn {
+    width: 34px;
+    height: 34px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .instance-switcher-current {
+    gap: 0;
   }
 
   .instance-switcher-name {
-    max-width: 30vw;
+    display: none;
+  }
+
+  .instance-switcher-status-dot {
+    width: 9px;
+    height: 9px;
+  }
+
+  .instance-switcher-chevron {
+    margin-left: 6px;
+    width: 14px;
+    height: 14px;
+  }
+
+  .instance-switcher-panel {
+    right: 0;
+    width: min(360px, calc(100vw - 16px));
+    max-height: calc(100dvh - 54px);
   }
 
   .theme-picker-panel {
@@ -1810,11 +1965,22 @@ body.split-resize-active * {
 
   .tab-overview-header {
     min-height: 46px;
-    padding: 0 12px;
+    grid-template-columns: 44px minmax(0, 1fr) 34px;
+    padding: 0 10px;
   }
 
   .tab-overview-header h2 {
     font-size: 16px;
+  }
+
+  .tab-overview-back {
+    width: 44px;
+    height: 44px;
+  }
+
+  .tab-overview-add {
+    width: 34px;
+    height: 34px;
   }
 
   .tab-overview-grid {
@@ -1836,6 +2002,13 @@ body.split-resize-active * {
 
   .tab-overview-name {
     font-size: 12px;
+  }
+
+  .tab-overview-card-close {
+    top: 5px;
+    right: 5px;
+    width: 30px;
+    height: 30px;
   }
 
   .app-shell {
@@ -1957,6 +2130,105 @@ body.split-resize-active * {
   .mobile-shortcuts button[data-kind="feedback"][aria-pressed="true"] {
     background: transparent;
     color: var(--accent);
+  }
+
+  .mobile-close-confirm-sheet {
+    position: fixed;
+    inset: 0;
+    z-index: 99;
+    display: block;
+    color: var(--text);
+  }
+
+  .mobile-close-confirm-sheet[hidden] {
+    display: none;
+  }
+
+  .mobile-close-confirm-scrim {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: rgba(0, 0, 0, 0.22);
+    cursor: default;
+  }
+
+  .mobile-close-confirm-panel {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    padding: 0 16px calc(16px + env(safe-area-inset-bottom, 0px));
+    border-top: 1px solid var(--panel-border);
+    background: var(--panel-bg);
+    box-shadow: 0 -22px 48px var(--panel-shadow);
+    box-sizing: border-box;
+  }
+
+  .mobile-close-confirm-handle {
+    display: flex;
+    width: 100%;
+    height: 32px;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .mobile-close-confirm-handle span {
+    display: block;
+    width: 38px;
+    height: 4px;
+    border-radius: 999px;
+    background: currentColor;
+    opacity: 0.72;
+  }
+
+  .mobile-close-confirm-title {
+    margin: 0;
+    color: var(--text);
+    font-size: 16px;
+    font-weight: 700;
+  }
+
+  .mobile-close-confirm-message {
+    margin: 9px 0 16px;
+    color: var(--chrome-text);
+    font-size: 13px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+  }
+
+  .mobile-close-confirm-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .mobile-close-confirm-actions button {
+    min-width: 0;
+    height: 42px;
+    border: 0;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 700;
+  }
+
+  .mobile-close-confirm-cancel {
+    background: var(--panel-subtle-bg);
+    color: var(--text);
+  }
+
+  .mobile-close-confirm-ok {
+    background: rgba(248, 113, 113, 0.16);
+    color: var(--danger);
   }
 
   .mobile-action-sheet {

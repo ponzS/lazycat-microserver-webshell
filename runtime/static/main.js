@@ -9,6 +9,8 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const tabOverview = document.getElementById("tabOverview");
   const tabOverviewGrid = document.getElementById("tabOverviewGrid");
   const tabOverviewClose = document.getElementById("tabOverviewClose");
+  const tabOverviewNewTab = document.getElementById("tabOverviewNewTab");
+  const mobileActiveTabTitle = document.getElementById("mobileActiveTabTitle");
   const terminalArea = document.getElementById("terminalArea");
   const emptyState = document.getElementById("emptyState");
   const emptyStateAction = document.getElementById("emptyStateAction");
@@ -58,6 +60,13 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const mobileActionSheetScrim = document.getElementById("mobileActionSheetScrim");
   const mobileActionSheetHandle = document.getElementById("mobileActionSheetHandle");
   const mobileActionGrid = document.getElementById("mobileActionGrid");
+  const mobileCloseConfirmSheet = document.getElementById("mobileCloseConfirmSheet");
+  const mobileCloseConfirmScrim = document.getElementById("mobileCloseConfirmScrim");
+  const mobileCloseConfirmHandle = document.getElementById("mobileCloseConfirmHandle");
+  const mobileCloseConfirmTitle = document.getElementById("mobileCloseConfirmTitle");
+  const mobileCloseConfirmMessage = document.getElementById("mobileCloseConfirmMessage");
+  const mobileCloseConfirmCancel = document.getElementById("mobileCloseConfirmCancel");
+  const mobileCloseConfirmOK = document.getElementById("mobileCloseConfirmOK");
   const selectionSheet = document.getElementById("selectionSheet");
   const networkBanner = document.getElementById("networkBanner");
   const contextMenu = document.getElementById("contextMenu");
@@ -290,6 +299,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   let lightOSHomeURL = "";
   let lightOSHomeURLPromise = null;
   let mobileActionSheetIgnoreClicksUntil = 0;
+  let mobileCloseConfirmResolve = null;
   let themePickerEdgeSwipe = null;
   let resolvedThemeCardWidth = themeCardWidth;
   let themePickerScrollbarSyncScheduled = false;
@@ -336,7 +346,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       { id: "sticky-ctrl", label: "Ctrl+", ariaLabel: "Sticky Control", action: "sticky_ctrl", kind: "modifier" },
       { id: "sticky-alt", label: "Alt+", ariaLabel: "Sticky Alt", action: "sticky_alt", kind: "modifier" },
       { id: "sticky-shift", label: "Shift+", ariaLabel: "Sticky Shift", action: "sticky_shift", kind: "modifier" },
-      { id: "ctrl-c", label: "Ctrl+C", ariaLabel: "Control C", data: "\x03", inputKey: "c", inputModifiers: { ctrl: true }, kind: "primary" },
+      { id: "return", label: "Return", ariaLabel: "Return", data: "\r", inputKey: "enter", kind: "primary" },
       { id: "tab", label: "Tab", ariaLabel: "Tab", data: "\t", inputKey: "tab" },
       { id: "arrow-up", label: "\u2191", ariaLabel: "Up Arrow", data: "\x1b[A", inputKey: "arrow_up", kind: "nav" },
       { id: "arrow-down", label: "\u2193", ariaLabel: "Down Arrow", data: "\x1b[B", inputKey: "arrow_down", kind: "nav" },
@@ -351,7 +361,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       { id: "mobile-menu", label: "Menu", ariaLabel: "Menu", action: "open_mobile_menu", kind: "menu", icon: "menu" },
       { id: "esc", label: "Esc", ariaLabel: "Escape", data: "\x1b", inputKey: "escape", kind: "primary" },
       { id: "ctrl-e", label: "Ctrl+E", ariaLabel: "Control E", data: "\x05", inputKey: "e", inputModifiers: { ctrl: true } },
-      { id: "return", label: "Return", ariaLabel: "Return", data: "\r", inputKey: "enter", kind: "primary" },
+      { id: "ctrl-c", label: "Ctrl+C", ariaLabel: "Control C", data: "\x03", inputKey: "c", inputModifiers: { ctrl: true }, kind: "primary" },
       { id: "shift-tab", label: "Shift+Tab", ariaLabel: "Shift Tab", data: backtabSequence, inputKey: "tab", inputModifiers: { shift: true } },
       { id: "tilde", label: "~", ariaLabel: "Tilde", data: "~", inputKey: "~", kind: "symbol" },
       { id: "slash", label: "/", ariaLabel: "Slash", data: "/", inputKey: "/", kind: "symbol" },
@@ -1485,6 +1495,15 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
 
   const currentTab = () => tabs.get(activeTabId) || null;
 
+  const updateMobileActiveTabTitle = () => {
+    if (!mobileActiveTabTitle) {
+      return;
+    }
+    const label = String(currentTab()?.label || "终端").trim() || "终端";
+    mobileActiveTabTitle.textContent = label;
+    mobileActiveTabTitle.title = label;
+  };
+
   const isMobileLayout = () => Boolean(mobileLayoutQuery?.matches);
 
   const isThemePickerOpen = () => Boolean(themePickerBackdrop && !themePickerBackdrop.hidden);
@@ -1786,16 +1805,20 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     const previewItems = [];
     for (const tab of orderedTabs) {
       const label = String(tab.label || tab.id || "终端");
-      const card = document.createElement("button");
-      card.type = "button";
+      const card = document.createElement("div");
       card.className = "tab-overview-card";
       card.dataset.tabId = tab.id;
       card.title = label;
-      card.setAttribute("aria-label", `切换到 ${label}`);
       if (tab.id === activeTabId) {
         card.classList.add("active");
         card.setAttribute("aria-current", "true");
       }
+
+      const main = document.createElement("button");
+      main.type = "button";
+      main.className = "tab-overview-card-main";
+      main.dataset.tabId = tab.id;
+      main.setAttribute("aria-label", `切换到 ${label}`);
 
       const preview = document.createElement("div");
       preview.className = "tab-overview-preview";
@@ -1815,7 +1838,15 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         meta.appendChild(status);
       }
 
-      card.append(preview, meta);
+      const close = document.createElement("button");
+      close.type = "button";
+      close.className = "tab-overview-card-close";
+      close.dataset.tabOverviewClose = tab.id;
+      close.setAttribute("aria-label", `关闭 ${label}`);
+      close.textContent = "×";
+
+      main.append(preview, meta);
+      card.append(main, close);
       previewItems.push({ canvas, tab });
       fragment.appendChild(card);
     }
@@ -1867,8 +1898,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     renderTabOverview();
     window.requestAnimationFrame(() => {
       const activeCard = tabOverviewGrid?.querySelector(".tab-overview-card.active");
-      const firstCard = tabOverviewGrid?.querySelector(".tab-overview-card");
-      (activeCard || firstCard)?.focus?.({ preventScroll: true });
+      const activeButton = activeCard?.querySelector(".tab-overview-card-main");
+      const firstButton = tabOverviewGrid?.querySelector(".tab-overview-card-main");
+      (activeButton || firstButton)?.focus?.({ preventScroll: true });
       activeCard?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
     });
   };
@@ -1879,6 +1911,13 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     closeTabOverview();
     setActiveTab(tabId);
+  };
+
+  const closeTabFromOverview = (tabId) => {
+    if (!tabs.has(tabId)) {
+      return;
+    }
+    closeTab(tabId);
   };
 
   const setActiveTabByOffset = (offset) => {
@@ -1905,6 +1944,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       return;
     }
     emptyState.hidden = tabs.size > 0;
+    if (tabs.size === 0) {
+      updateMobileActiveTabTitle();
+    }
   };
 
   const syncCursorBlinkState = () => {
@@ -2992,6 +3034,56 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     return result === true;
   };
 
+  const closeMobileCloseConfirm = (value = false) => {
+    if (!mobileCloseConfirmResolve) {
+      return;
+    }
+    const resolve = mobileCloseConfirmResolve;
+    mobileCloseConfirmResolve = null;
+    if (mobileCloseConfirmSheet) {
+      mobileCloseConfirmSheet.hidden = true;
+    }
+    resolve(value);
+    window.setTimeout(() => activeSession()?.term?.focus(), 0);
+  };
+
+  const confirmMobileClose = ({ title = "关闭标签？", message = "", okText = "关闭", cancelText = "取消" } = {}) =>
+    new Promise((resolve) => {
+      if (
+        !mobileCloseConfirmSheet ||
+        !mobileCloseConfirmTitle ||
+        !mobileCloseConfirmMessage ||
+        !mobileCloseConfirmOK ||
+        !mobileCloseConfirmCancel
+      ) {
+        resolve(window.confirm(message || title));
+        return;
+      }
+      if (mobileCloseConfirmResolve) {
+        closeMobileCloseConfirm(false);
+      }
+      closeMobileActionSheet();
+      mobileCloseConfirmResolve = resolve;
+      mobileCloseConfirmTitle.textContent = title;
+      mobileCloseConfirmMessage.textContent = message;
+      mobileCloseConfirmOK.textContent = okText;
+      mobileCloseConfirmCancel.textContent = cancelText;
+      mobileCloseConfirmSheet.hidden = false;
+      window.setTimeout(() => mobileCloseConfirmCancel.focus(), 0);
+    });
+
+  const confirmCloseRunningCommand = (message, options = {}) => {
+    if (isMobileLayout()) {
+      return confirmMobileClose({
+        title: "检测到后台进程",
+        message,
+        okText: "关闭",
+        cancelText: "取消",
+      });
+    }
+    return confirmDialog(message, options);
+  };
+
   const promptDialog = async (title, value) => {
     const result = await openDialog({ mode: "prompt", title, value, okText: "Save", cancelText: "Cancel" });
     return result === null ? null : String(result || "").trim();
@@ -3100,7 +3192,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       return true;
     }
     const commands = busy.map((pane) => pane.command || pane.id).slice(0, 5).join(", ");
-    return confirmDialog(`${messagePrefix}\n\nRunning: ${commands}`, { title: "Running command", okText: "Close", danger: true });
+    return confirmCloseRunningCommand(`${messagePrefix}\n\n正在运行: ${commands}`, { title: "运行中命令", okText: "关闭", danger: true });
   };
 
   const hasCachedBusyPane = () => {
@@ -3135,6 +3227,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     const title = tab?.label || "WebShell";
     const hasNotification = Array.from(tabs.values()).some((item) => item.hasNotification);
     document.title = `${hasNotification ? "* " : ""}${title} - LightOS WebShell`;
+    updateMobileActiveTabTitle();
   };
 
   const markTabNotification = (tabId) => {
@@ -5298,7 +5391,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       return;
     }
     if (!applyingWorkspaceState) {
-      refreshAndConfirmClose([pane], "Close this pane and terminate the running command?").then((confirmed) => {
+      refreshAndConfirmClose([pane], "关闭此窗格并终止正在运行的命令？").then((confirmed) => {
         if (confirmed) {
           postWorkspaceAction("close_pane", { tab_id: tabId, pane_id: paneId }).catch((error) => showToast(error.message));
         }
@@ -5328,7 +5421,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       return;
     }
     if (!applyingWorkspaceState) {
-      refreshAndConfirmClose(targetPanesFromTab(tab), "Close this tab and terminate running commands?").then((confirmed) => {
+      refreshAndConfirmClose(targetPanesFromTab(tab), "关闭此标签并终止正在运行的命令？").then((confirmed) => {
         if (confirmed) {
           postWorkspaceAction("close_tab", { tab_id: tabId }).catch((error) => showToast(error.message));
         }
@@ -5364,7 +5457,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       const panes = Array.from(tabs.values())
         .filter((tab) => tab.id !== tabId)
         .flatMap((tab) => targetPanesFromTab(tab));
-      refreshAndConfirmClose(panes, "Close other tabs and terminate running commands?").then((confirmed) => {
+      refreshAndConfirmClose(panes, "关闭其他标签并终止正在运行的命令？").then((confirmed) => {
         if (confirmed) {
           postWorkspaceAction("close_other_tabs", { tab_id: tabId }).catch((error) => showToast(error.message));
         }
@@ -6094,11 +6187,33 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     closeTabOverview();
   });
 
+  tabOverviewNewTab?.addEventListener("click", (event) => {
+    event.preventDefault();
+    createUserTab()
+      .then(() => closeTabOverview())
+      .catch((error) => showToast(error.message));
+  });
+
   tabOverview?.addEventListener("click", (event) => {
     const target = event.target;
-    const card = target instanceof Element ? target.closest(".tab-overview-card") : null;
-    if (card) {
-      selectTabFromOverview(card.dataset.tabId);
+    if (target === tabOverview || target === tabOverviewGrid) {
+      closeTabOverview();
+      return;
+    }
+    const closeButton = target instanceof Element ? target.closest("[data-tab-overview-close]") : null;
+    if (closeButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeTabFromOverview(closeButton.dataset.tabOverviewClose);
+      return;
+    }
+    const cardButton = target instanceof Element ? target.closest(".tab-overview-card-main") : null;
+    if (cardButton) {
+      selectTabFromOverview(cardButton.dataset.tabId);
+      return;
+    }
+    if (target instanceof Element && !target.closest(".tab-overview-header")) {
+      closeTabOverview();
     }
   });
 
@@ -6124,6 +6239,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
 
   mobileActionSheetScrim?.addEventListener("click", () => closeMobileActionSheet());
   mobileActionSheetHandle?.addEventListener("click", () => closeMobileActionSheet());
+  mobileCloseConfirmScrim?.addEventListener("click", () => closeMobileCloseConfirm(false));
+  mobileCloseConfirmHandle?.addEventListener("click", () => closeMobileCloseConfirm(false));
+  mobileCloseConfirmCancel?.addEventListener("click", () => closeMobileCloseConfirm(false));
+  mobileCloseConfirmOK?.addEventListener("click", () => closeMobileCloseConfirm(true));
   mobileActionGrid?.addEventListener("click", (event) => {
     if (performance.now() < mobileActionSheetIgnoreClicksUntil) {
       event.preventDefault();
@@ -6168,6 +6287,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (event.key === "Escape") {
       closeContextMenu();
       closeMobileActionSheet();
+      closeMobileCloseConfirm(false);
       closeInstanceSwitcher();
       closeThemePicker();
       closeSettings();
@@ -6182,6 +6302,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   window.addEventListener("resize", () => {
     if (!isMobileLayout()) {
       closeMobileActionSheet();
+      closeMobileCloseConfirm(false);
     } else if (mobileActionSheet && !mobileActionSheet.hidden) {
       renderMobileActionSheet();
     }
