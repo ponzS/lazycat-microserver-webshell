@@ -146,19 +146,22 @@ button {
 .tab-content {
   display: flex;
   align-items: center;
+  justify-content: center;
   width: 100%;
   min-width: 0;
   height: 100%;
-  padding: 0 30px 0 18px;
+  padding: 0 30px;
   box-sizing: border-box;
 }
 
 .tab-label {
   display: block;
   min-width: 0;
+  width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  text-align: center;
   font-size: 13px;
   font-weight: 600;
 }
@@ -177,16 +180,26 @@ button {
   font-size: 13px;
   line-height: 1;
   opacity: 0;
+  pointer-events: none;
   transform: translateY(-50%);
 }
 
 .tab:hover .tab-close,
 .tab:focus-visible .tab-close {
   opacity: 0.82;
+  pointer-events: auto;
 }
 
 .tab-close:hover {
   background: var(--chrome-hover-bg);
+}
+
+@media (hover: none), (pointer: coarse) {
+  .tab.active .tab-close,
+  .tab:focus-within .tab-close {
+    opacity: 0.82;
+    pointer-events: auto;
+  }
 }
 
 .tab-add,

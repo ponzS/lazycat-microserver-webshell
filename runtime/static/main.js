@@ -229,6 +229,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   let activeTheme = themes.find((theme) => theme.id === window.localStorage.getItem(themeStorageKey)) || themes[0];
   let applyingWorkspaceState = false;
   let activityRefreshTimer = 0;
+  let activityRefreshDelayTimer = 0;
   let suppressLocationUpdate = false;
   const searchState = { open: false, query: "", matches: [], index: -1, sessionId: "" };
   const mobileSticky = { ctrl: false, alt: false, shift: false };
@@ -753,6 +754,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     for (const pane of tab.panes.values()) {
       pane.shellEl.classList.toggle("active", pane.id === paneId);
     }
+    refreshTabAutoLabel(tab);
     syncCursorBlinkState();
     if (focus) {
       const pane = tab.panes.get(paneId);
@@ -1211,6 +1213,47 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     return result === null ? null : String(result || "").trim();
   };
 
+  const displayPathLabel = (path) => {
+    const raw = String(path || "").trim();
+    if (!raw) {
+      return "";
+    }
+    if (raw === "/") {
+      return "ROOT";
+    }
+    const trimmed = raw.replace(/\/+$/g, "");
+    if (!trimmed || trimmed === "/") {
+      return "ROOT";
+    }
+    const parts = trimmed.split("/").filter(Boolean);
+    return parts.pop() || "";
+  };
+
+  const resolvePaneAutoLabel = (pane) => {
+    const pathLabel = displayPathLabel(pane?.cwd);
+    if (pathLabel) {
+      return pathLabel;
+    }
+    const titleLabel = String(pane?.title || "").trim();
+    if (titleLabel) {
+      return titleLabel;
+    }
+    return String(pane?.command || "").trim();
+  };
+
+  const refreshTabAutoLabel = (tab) => {
+    if (!tab || tab.customLabel) {
+      return;
+    }
+    const pane = tab.panes.get(tab.activePaneId) || Array.from(tab.panes.values())[0] || null;
+    const nextLabel = resolvePaneAutoLabel(pane);
+    if (!nextLabel || nextLabel === tab.label) {
+      return;
+    }
+    tab.label = nextLabel;
+    renderTabLabel(tab);
+  };
+
   const updatePaneActivity = (paneState) => {
     const paneId = paneState?.id;
     if (!paneId) {
@@ -1224,8 +1267,12 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       pane.tty = paneState.tty || pane.tty || "";
       pane.busy = Boolean(paneState.busy);
       pane.command = paneState.command || "";
+      pane.cwd = paneState.cwd || pane.cwd || "";
       pane.activityCheckedAt = Number(paneState.activity_checked_at || 0);
       pane.shellEl.dataset.busy = pane.busy ? "true" : "false";
+      if (tab.activePaneId === pane.id) {
+        refreshTabAutoLabel(tab);
+      }
       return;
     }
   };
@@ -1281,13 +1328,20 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     return false;
   };
 
+  const scheduleActivityRefresh = (delay = 700) => {
+    window.clearTimeout(activityRefreshDelayTimer);
+    activityRefreshDelayTimer = window.setTimeout(() => {
+      refreshActivity({ silent: true }).catch(() => {});
+    }, delay);
+  };
+
   const startActivityRefresh = () => {
     window.clearInterval(activityRefreshTimer);
     activityRefreshTimer = window.setInterval(() => {
       if (!document.hidden && navigator.onLine !== false) {
         refreshActivity({ silent: true }).catch(() => {});
       }
-    }, 5000);
+    }, 1800);
   };
 
   const updateDocumentTitle = () => {
@@ -1502,6 +1556,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (session.closed || session.exitExpected) {
       return;
     }
+    if (/[\r\n]/.test(data)) {
+      scheduleActivityRefresh(450);
+    }
     if (session.replayComplete) {
       if (session.socket?.readyState === WebSocket.OPEN) {
         sendSessionInput(session, data, { immediate: /[\r\n\x03\x04]/.test(data) });
@@ -1672,9 +1729,11 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       closed: false,
       baseTheme: activeTheme,
       selectAllBufferActive: false,
+      title: "",
       tty: "",
       busy: false,
       command: "",
+      cwd: "",
       activityCheckedAt: 0,
     };
 
@@ -1687,10 +1746,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     term.onTitleChange((title) => {
       const current = tabs.get(session.tabId);
       const normalized = String(title || "").trim();
-      if (normalized && current?.panes.size === 1 && !current.customLabel) {
-        current.label = normalized;
-        renderTabLabel(current);
-        updateDocumentTitle();
+      session.title = normalized;
+      if (current && !current.customLabel) {
+        refreshTabAutoLabel(current);
       }
     });
     term.onBell(() => markTabNotification(session.tabId));
@@ -2800,7 +2858,8 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       showToast("No running container is available.");
       return;
     }
-    await postWorkspaceAction("create_tab");
+    const tab = currentTab();
+    await postWorkspaceAction("create_tab", { tab_id: tab?.id || "", pane_id: tab?.activePaneId || "" });
   }
 
   newTabButton?.addEventListener("click", () => {

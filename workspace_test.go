@@ -6,7 +6,7 @@ import (
 )
 
 func TestBuildInstanceShellBootstrapScriptUsesConfiguredUser(t *testing.T) {
-	script := buildInstanceShellBootstrapScript("admin")
+	script := buildInstanceShellBootstrapScript("admin", "")
 	if !containsAll(script,
 		"user='admin'",
 		`setpriv --reuid "$uid" --regid "$gid" --init-groups "$__webshell_shell"`,
@@ -21,7 +21,7 @@ func TestBuildInstanceShellBootstrapScriptUsesConfiguredUser(t *testing.T) {
 }
 
 func TestBuildInstanceShellBootstrapScriptKeepsRootCompatibility(t *testing.T) {
-	script := buildInstanceShellBootstrapScript("root")
+	script := buildInstanceShellBootstrapScript("root", "")
 	if containsAll(script, "exec su -s") {
 		t.Fatalf("root compatibility script should not use su wrapper, got:\n%s", script)
 	}
@@ -31,9 +31,20 @@ func TestBuildInstanceShellBootstrapScriptKeepsRootCompatibility(t *testing.T) {
 }
 
 func TestBuildInstanceShellBootstrapScriptQuotesUsername(t *testing.T) {
-	script := buildInstanceShellBootstrapScript("dev'user")
+	script := buildInstanceShellBootstrapScript("dev'user", "")
 	if !containsAll(script, `user='dev'"'"'user'`) {
 		t.Fatalf("expected shell-quoted username, got:\n%s", script)
+	}
+}
+
+func TestBuildInstanceShellBootstrapScriptUsesInitialCWD(t *testing.T) {
+	script := buildInstanceShellBootstrapScript("root", "/home/demo/project")
+	if !containsAll(script, `__webshell_initial_cwd='/home/demo/project'`, `cd "$__webshell_initial_cwd"`) {
+		t.Fatalf("expected root shell bootstrap to cd to initial cwd, got:\n%s", script)
+	}
+	userScript := buildInstanceShellBootstrapScript("admin", "/home/demo/project")
+	if !containsAll(userScript, `__webshell_initial_cwd='/home/demo/project'`, `cd "$__webshell_initial_cwd"`, `setpriv --reuid "$uid"`) {
+		t.Fatalf("expected user shell bootstrap to cd before dropping privileges, got:\n%s", userScript)
 	}
 }
 
@@ -50,8 +61,8 @@ func TestParseProcStatWithSpacesAndParenInComm(t *testing.T) {
 
 func TestResolveTTYActivityUsesForegroundProcessGroup(t *testing.T) {
 	processes := []procInfo{
-		{PID: 10, Comm: "bash", Cmd: "/bin/bash", FD0: "/dev/pts/1", Pgrp: 10, TTYNr: 34816, TPgid: 20},
-		{PID: 20, Comm: "vim", Cmd: "/usr/bin/vim file.txt", FD0: "/dev/pts/1", Pgrp: 20, TTYNr: 34816, TPgid: 20},
+		{PID: 10, Comm: "bash", Cmd: "/bin/bash", CWD: "/home/demo", FD0: "/dev/pts/1", Pgrp: 10, TTYNr: 34816, TPgid: 20},
+		{PID: 20, Comm: "vim", Cmd: "/usr/bin/vim file.txt", CWD: "/home/demo/project", FD0: "/dev/pts/1", Pgrp: 20, TTYNr: 34816, TPgid: 20},
 		{PID: 30, Comm: "sleep", Cmd: "/usr/bin/sleep 9", FD0: "/dev/pts/2", Pgrp: 30, TTYNr: 34817, TPgid: 30},
 	}
 	activity := resolveTTYActivity("/dev/pts/1", processes)
@@ -61,11 +72,14 @@ func TestResolveTTYActivityUsesForegroundProcessGroup(t *testing.T) {
 	if activity.Command != "vim" {
 		t.Fatalf("expected foreground command vim, got %q", activity.Command)
 	}
+	if activity.CWD != "/home/demo/project" {
+		t.Fatalf("expected foreground cwd, got %q", activity.CWD)
+	}
 }
 
 func TestResolveTTYActivityTreatsIdleShellAsNotBusy(t *testing.T) {
 	processes := []procInfo{
-		{PID: 10, Comm: "bash", Cmd: "-bash", FD0: "/dev/pts/1", Pgrp: 10, TTYNr: 34816, TPgid: 10},
+		{PID: 10, Comm: "bash", Cmd: "-bash", CWD: "/home/demo", FD0: "/dev/pts/1", Pgrp: 10, TTYNr: 34816, TPgid: 10},
 	}
 	activity := resolveTTYActivity("/dev/pts/1", processes)
 	if activity.Busy {
@@ -73,6 +87,67 @@ func TestResolveTTYActivityTreatsIdleShellAsNotBusy(t *testing.T) {
 	}
 	if activity.Command != "bash" {
 		t.Fatalf("expected fallback command bash, got %q", activity.Command)
+	}
+	if activity.CWD != "/home/demo" {
+		t.Fatalf("expected idle shell cwd, got %q", activity.CWD)
+	}
+}
+
+func TestParseProcScanOutputIncludesCWD(t *testing.T) {
+	output := []byte("P\t10\t/dev/pts/1\t/home/demo/project\t/bin/bash\t10 (bash) S 1 10 10 34816 10 0 0\n")
+	processes := parseProcScanOutput(output)
+	if len(processes) != 1 {
+		t.Fatalf("expected one process, got %+v", processes)
+	}
+	if processes[0].CWD != "/home/demo/project" || processes[0].Cmd != "/bin/bash" {
+		t.Fatalf("unexpected parsed process: %+v", processes[0])
+	}
+}
+
+func TestRefreshAutoTabLabelsUsesActivePaneCWD(t *testing.T) {
+	workspace := &terminalWorkspace{
+		panes: map[string]*terminalPane{
+			"pane-1": {id: "pane-1", cwd: "/home/demo/project", command: "bash"},
+			"pane-2": {id: "pane-2", cwd: "/tmp", command: "bash"},
+		},
+		tabs: []*terminalTab{
+			{ID: "tab-1", Label: "Shell 1", ActivePaneID: "pane-2", PaneIDs: []string{"pane-1", "pane-2"}},
+			{ID: "tab-2", Label: "Manual", CustomLabel: true, ActivePaneID: "pane-1", PaneIDs: []string{"pane-1"}},
+		},
+	}
+	workspace.refreshAutoTabLabelsLocked()
+	if workspace.tabs[0].Label != "tmp" {
+		t.Fatalf("expected active pane path label tmp, got %q", workspace.tabs[0].Label)
+	}
+	if workspace.tabs[1].Label != "Manual" {
+		t.Fatalf("expected manual label to be preserved, got %q", workspace.tabs[1].Label)
+	}
+}
+
+func TestResolveSourcePaneCWDLockedUsesRequestedPane(t *testing.T) {
+	workspace := &terminalWorkspace{
+		panes: map[string]*terminalPane{
+			"pane-1": {id: "pane-1", cwd: "/home/demo/project"},
+		},
+		tabs:      []*terminalTab{{ID: "tab-1", ActivePaneID: "pane-1", PaneIDs: []string{"pane-1"}}},
+		activeTab: "tab-1",
+	}
+	if got := workspace.resolveSourcePaneCWDLocked("tab-1", "pane-1"); got != "/home/demo/project" {
+		t.Fatalf("expected source cwd, got %q", got)
+	}
+}
+
+func TestDisplayPathLabelMatchesLightOSAdminAutoRename(t *testing.T) {
+	cases := map[string]string{
+		"/":                   "ROOT",
+		"/home/demo/project":  "project",
+		"/home/demo/project/": "project",
+		"":                    "",
+	}
+	for input, want := range cases {
+		if got := displayPathLabel(input); got != want {
+			t.Fatalf("displayPathLabel(%q) = %q, want %q", input, got, want)
+		}
 	}
 }
 

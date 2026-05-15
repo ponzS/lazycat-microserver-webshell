@@ -210,12 +210,13 @@ func parsePositiveInt(text string) int {
 	return n
 }
 
-func buildShellBootstrapScript() string {
+func buildShellBootstrapScript(initialCWD string) string {
 	return strings.Join([]string{
 		`__webshell_tty="$(tty 2>/dev/null || true)"`,
 		`case "$__webshell_tty" in /dev/pts/[0-9]*) printf '\033]777;webshell-tty=%s\a' "$__webshell_tty";; esac`,
 		`unset __webshell_tty`,
 		"if [ -f /run/catlink/shell-env.sh ]; then . /run/catlink/shell-env.sh; fi",
+		buildInitialCWDChangeScript(initialCWD),
 		`exec "${SHELL:-/bin/sh}"`,
 	}, "\n")
 }

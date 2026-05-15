@@ -88,6 +88,7 @@ type terminalPane struct {
 	tty               string
 	busy              bool
 	command           string
+	cwd               string
 	activityCheckedAt time.Time
 	controlPending    []byte
 	exited            bool
@@ -133,6 +134,7 @@ type paneSummary struct {
 	TTY               string `json:"tty,omitempty"`
 	Busy              bool   `json:"busy"`
 	Command           string `json:"command,omitempty"`
+	CWD               string `json:"cwd,omitempty"`
 	ActivityCheckedAt int64  `json:"activity_checked_at,omitempty"`
 	Exited            bool   `json:"exited"`
 	ExitCode          int    `json:"exit_code"`
@@ -201,7 +203,7 @@ func (m *workspaceManager) getOrCreate(ctx context.Context, selector string, col
 		nextTabID:  1,
 		nextPaneID: 1,
 	}
-	if err := workspace.createTabLocked(normalizeCols(cols), normalizeRows(rows)); err != nil {
+	if err := workspace.createTabLocked("", "", normalizeCols(cols), normalizeRows(rows)); err != nil {
 		return nil, err
 	}
 	m.workspaces[selector] = workspace
@@ -243,6 +245,9 @@ func (s *pluginServer) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
+		}
+		if request.Action == "create_tab" || request.Action == "split_pane" {
+			_, _ = workspace.refreshActivity(r.Context())
 		}
 		if err := workspace.applyAction(request); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -445,7 +450,7 @@ func (w *terminalWorkspace) applyAction(request workspaceActionRequest) error {
 
 	switch request.Action {
 	case "create_tab":
-		return w.createTabLocked(normalizeCols(request.Cols), normalizeRows(request.Rows))
+		return w.createTabLocked(request.TabID, request.PaneID, normalizeCols(request.Cols), normalizeRows(request.Rows))
 	case "rename_tab":
 		return w.renameTabLocked(request.TabID, request.Label)
 	case "close_tab":
@@ -474,6 +479,7 @@ func (w *terminalWorkspace) applyAction(request workspaceActionRequest) error {
 func (w *terminalWorkspace) snapshot() workspaceState {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.refreshAutoTabLabelsLocked()
 
 	state := workspaceState{
 		Selector:    w.selector,
@@ -508,6 +514,7 @@ type paneActivity struct {
 	TTY     string
 	Busy    bool
 	Command string
+	CWD     string
 }
 
 func (w *terminalWorkspace) refreshActivity(ctx context.Context) (workspaceActivityState, error) {
@@ -540,9 +547,11 @@ func (w *terminalWorkspace) refreshActivity(ctx context.Context) (workspaceActiv
 			pane.mu.Lock()
 			pane.busy = activity.Busy
 			pane.command = activity.Command
+			pane.cwd = activity.CWD
 			pane.activityCheckedAt = checkedAt
 			pane.mu.Unlock()
 		}
+		w.refreshAutoTabLabelsLocked()
 		w.mu.Unlock()
 	}
 
@@ -566,15 +575,73 @@ func (w *terminalWorkspace) snapshotPaneSummaries() []paneSummary {
 	return items
 }
 
-func (w *terminalWorkspace) createTabLocked(cols, rows int) error {
-	pane, err := w.newPaneLocked(cols, rows)
+func (w *terminalWorkspace) refreshAutoTabLabelsLocked() {
+	for _, tab := range w.tabs {
+		if tab == nil || tab.CustomLabel {
+			continue
+		}
+		label := w.resolveAutoTabLabelLocked(tab)
+		if label != "" {
+			tab.Label = label
+		}
+	}
+}
+
+func (w *terminalWorkspace) resolveAutoTabLabelLocked(tab *terminalTab) string {
+	if tab == nil {
+		return ""
+	}
+	pane := w.panes[tab.ActivePaneID]
+	if pane == nil {
+		for _, paneID := range tab.PaneIDs {
+			if candidate := w.panes[paneID]; candidate != nil {
+				pane = candidate
+				break
+			}
+		}
+	}
+	if pane == nil {
+		return ""
+	}
+	pane.mu.Lock()
+	cwd := pane.cwd
+	command := pane.command
+	pane.mu.Unlock()
+	if label := displayPathLabel(cwd); label != "" {
+		return label
+	}
+	if command = strings.TrimSpace(command); command != "" {
+		return command
+	}
+	return ""
+}
+
+func displayPathLabel(path string) string {
+	cleaned := filepath.Clean(strings.TrimSpace(path))
+	switch cleaned {
+	case "", ".":
+		return ""
+	case string(filepath.Separator):
+		return "ROOT"
+	default:
+		return filepath.Base(cleaned)
+	}
+}
+
+func (w *terminalWorkspace) createTabLocked(sourceTabID, sourcePaneID string, cols, rows int) error {
+	initialCWD := w.resolveSourcePaneCWDLocked(sourceTabID, sourcePaneID)
+	pane, err := w.newPaneLocked(cols, rows, initialCWD)
 	if err != nil {
 		return err
 	}
 	tabID := w.nextTabIDStringLocked()
+	label := displayPathLabel(initialCWD)
+	if label == "" {
+		label = fmt.Sprintf("Shell %d", w.nextTabID-1)
+	}
 	tab := &terminalTab{
 		ID:           tabID,
-		Label:        fmt.Sprintf("Shell %d", w.nextTabID-1),
+		Label:        label,
 		ActivePaneID: pane.id,
 		Layout:       &layoutNode{Type: "leaf", PaneID: pane.id},
 		PaneIDs:      []string{pane.id},
@@ -584,9 +651,9 @@ func (w *terminalWorkspace) createTabLocked(cols, rows int) error {
 	return nil
 }
 
-func (w *terminalWorkspace) newPaneLocked(cols, rows int) (*terminalPane, error) {
+func (w *terminalWorkspace) newPaneLocked(cols, rows int, initialCWD string) (*terminalPane, error) {
 	paneID := w.nextPaneIDStringLocked()
-	pane, err := newTerminalPane(w, paneID, cols, rows)
+	pane, err := newTerminalPane(w, paneID, cols, rows, initialCWD)
 	if err != nil {
 		return nil, err
 	}
@@ -604,6 +671,27 @@ func (w *terminalWorkspace) nextPaneIDStringLocked() string {
 	id := fmt.Sprintf("pane-%d", w.nextPaneID)
 	w.nextPaneID++
 	return id
+}
+
+func (w *terminalWorkspace) resolveSourcePaneCWDLocked(tabID, paneID string) string {
+	sourcePaneID := strings.TrimSpace(paneID)
+	if sourcePaneID == "" {
+		tab := w.findTabLocked(tabID)
+		if tab == nil {
+			tab = w.findTabLocked(w.activeTab)
+		}
+		if tab == nil {
+			return ""
+		}
+		sourcePaneID = strings.TrimSpace(tab.ActivePaneID)
+	}
+	pane := w.panes[sourcePaneID]
+	if pane == nil {
+		return ""
+	}
+	pane.mu.Lock()
+	defer pane.mu.Unlock()
+	return pane.cwd
 }
 
 func (w *terminalWorkspace) renameTabLocked(tabID, label string) error {
@@ -667,7 +755,8 @@ func (w *terminalWorkspace) splitPaneLocked(tabID, paneID, direction string, col
 	if direction != "vertical" && direction != "horizontal" {
 		return errors.New("invalid split direction")
 	}
-	pane, err := w.newPaneLocked(cols, rows)
+	initialCWD := w.resolveSourcePaneCWDLocked(tabID, paneID)
+	pane, err := w.newPaneLocked(cols, rows, initialCWD)
 	if err != nil {
 		return err
 	}
@@ -928,8 +1017,8 @@ func (t *terminalTab) removePane(paneID string) {
 	t.PaneIDs = next
 }
 
-func newTerminalPane(workspace *terminalWorkspace, paneID string, cols, rows int) (*terminalPane, error) {
-	command := exec.Command(lightosctlPath, "exec", "-ti", workspace.selector, "/bin/sh", "-lc", buildInstanceShellBootstrapScript(workspace.username))
+func newTerminalPane(workspace *terminalWorkspace, paneID string, cols, rows int, initialCWD string) (*terminalPane, error) {
+	command := exec.Command(lightosctlPath, "exec", "-ti", workspace.selector, "/bin/sh", "-lc", buildInstanceShellBootstrapScript(workspace.username, initialCWD))
 	command.Dir = workspace.rootDir
 	command.Env = append(os.Environ(),
 		"TERM=xterm-256color",
@@ -951,6 +1040,7 @@ func newTerminalPane(workspace *terminalWorkspace, paneID string, cols, rows int
 		clients:   make(map[*paneClient]struct{}),
 		cols:      normalizeCols(cols),
 		rows:      normalizeRows(rows),
+		cwd:       strings.TrimSpace(initialCWD),
 		done:      make(chan struct{}),
 	}
 	_ = pty.Setsize(ptyFile, &pty.Winsize{Cols: uint16(pane.cols), Rows: uint16(pane.rows)})
@@ -958,11 +1048,11 @@ func newTerminalPane(workspace *terminalWorkspace, paneID string, cols, rows int
 	return pane, nil
 }
 
-func buildInstanceShellBootstrapScript(username string) string {
+func buildInstanceShellBootstrapScript(username, initialCWD string) string {
 	if instanceCommandNeedsUserSwitch(username) {
-		return buildUserLoginShellBootstrapScript(username)
+		return buildUserLoginShellBootstrapScript(username, initialCWD)
 	}
-	return buildShellBootstrapScript()
+	return buildShellBootstrapScript(initialCWD)
 }
 
 func instanceCommandNeedsUserSwitch(username string) bool {
@@ -1006,7 +1096,7 @@ fi
 `, shellScriptQuote(username))
 }
 
-func buildLoginShellBootstrapScript() string {
+func buildLoginShellBootstrapScript(initialCWD string) string {
 	return strings.Join([]string{
 		`__webshell_tty="$(tty 2>/dev/null || true)"`,
 		`case "$__webshell_tty" in /dev/pts/[0-9]*) printf '\033]777;webshell-tty=%s\a' "$__webshell_tty";; esac`,
@@ -1018,12 +1108,15 @@ func buildLoginShellBootstrapScript() string {
 		`export SHELL="$__webshell_shell"`,
 		`unset __webshell_user __webshell_entry`,
 		"if [ -f /run/catlink/shell-env.sh ]; then . /run/catlink/shell-env.sh; fi",
+		buildInitialCWDChangeScript(initialCWD),
 	}, "\n")
 }
 
-func buildUserLoginShellBootstrapScript(username string) string {
-	return buildUserShellBootstrapScript(username) + buildLoginShellBootstrapScript() + `
-cd "$home" 2>/dev/null || cd /
+func buildUserLoginShellBootstrapScript(username, initialCWD string) string {
+	return buildUserShellBootstrapScript(username) + buildLoginShellBootstrapScript(initialCWD) + `
+if [ -z "$__webshell_initial_cwd" ]; then
+  cd "$home" 2>/dev/null || cd /
+fi
 if command -v setpriv >/dev/null 2>&1; then
   exec env HOME="$home" USER="$user" LOGNAME="$user" SHELL="$__webshell_shell" setpriv --reuid "$uid" --regid "$gid" --init-groups "$__webshell_shell"
 fi
@@ -1034,6 +1127,15 @@ fi
 echo "setpriv or su is required for webshell login session."
 exit 127
 `
+}
+
+func buildInitialCWDChangeScript(initialCWD string) string {
+	cwd := strings.TrimSpace(initialCWD)
+	if cwd == "" || !strings.HasPrefix(cwd, "/") {
+		return `__webshell_initial_cwd=""`
+	}
+	return fmt.Sprintf(`__webshell_initial_cwd=%s
+cd "$__webshell_initial_cwd" 2>/dev/null || __webshell_initial_cwd=""`, shellScriptQuote(cwd))
 }
 
 func shellScriptQuote(value string) string {
@@ -1302,6 +1404,7 @@ func (p *terminalPane) summary() paneSummary {
 		TTY:               p.tty,
 		Busy:              p.busy,
 		Command:           p.command,
+		CWD:               p.cwd,
 		Exited:            p.exited,
 		ExitCode:          p.exitCode,
 		ActivityCheckedAt: unixMillis(p.activityCheckedAt),
@@ -1319,6 +1422,7 @@ type procInfo struct {
 	PID   int
 	Comm  string
 	Cmd   string
+	CWD   string
 	FD0   string
 	Pgrp  int
 	TTYNr int
@@ -1329,8 +1433,9 @@ const procScanScript = `for d in /proc/[0-9]*; do
   pid="${d##*/}"
   stat="$(cat "$d/stat" 2>/dev/null)" || continue
   fd0="$(readlink "$d/fd/0" 2>/dev/null || true)"
+  cwd="$(readlink "$d/cwd" 2>/dev/null || true)"
   cmd="$(tr '\000\011\012\015' '    ' < "$d/cmdline" 2>/dev/null || true)"
-  printf 'P\t%s\t%s\t%s\t%s\n' "$pid" "$fd0" "$cmd" "$stat"
+  printf 'P\t%s\t%s\t%s\t%s\t%s\n' "$pid" "$fd0" "$cwd" "$cmd" "$stat"
 done`
 
 func scanContainerActivities(ctx context.Context, selector string, ttys []string) (map[string]paneActivity, error) {
@@ -1377,21 +1482,22 @@ func parseProcScanOutput(output []byte) []procInfo {
 		if !strings.HasPrefix(line, "P\t") {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 5)
-		if len(parts) != 5 {
+		parts := strings.SplitN(line, "\t", 6)
+		if len(parts) != 6 {
 			continue
 		}
 		pid, err := strconv.Atoi(parts[1])
 		if err != nil {
 			continue
 		}
-		info, err := parseProcStat(parts[4])
+		info, err := parseProcStat(parts[5])
 		if err != nil {
 			continue
 		}
 		info.PID = pid
 		info.FD0 = strings.TrimSpace(parts[2])
-		info.Cmd = strings.TrimSpace(parts[3])
+		info.CWD = strings.TrimSpace(parts[3])
+		info.Cmd = strings.TrimSpace(parts[4])
 		processes = append(processes, info)
 	}
 	sort.Slice(processes, func(i, j int) bool {
@@ -1450,6 +1556,7 @@ func resolveTTYActivity(tty string, processes []procInfo) paneActivity {
 	}
 
 	var fallback string
+	var fallbackCWD string
 	for index := range processes {
 		process := processes[index]
 		if process.TTYNr != anchor.TTYNr || process.Pgrp != anchor.TPgid {
@@ -1459,13 +1566,21 @@ func resolveTTYActivity(tty string, processes []procInfo) paneActivity {
 		if fallback == "" {
 			fallback = display
 		}
+		if fallbackCWD == "" {
+			fallbackCWD = process.CWD
+		}
 		if !isIdleShellCommand(display, process.Comm) {
 			activity.Busy = true
 			activity.Command = display
+			activity.CWD = process.CWD
+			if activity.CWD == "" {
+				activity.CWD = fallbackCWD
+			}
 			return activity
 		}
 	}
 	activity.Command = fallback
+	activity.CWD = fallbackCWD
 	return activity
 }
 
