@@ -29,6 +29,8 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const settingsFontInput = document.getElementById("settingsFontInput");
   const settingsFontMeta = document.getElementById("settingsFontMeta");
   const settingsFeedback = document.getElementById("settingsFeedback");
+  const settingsTabs = Array.from(document.querySelectorAll("[data-settings-tab]"));
+  const settingsTabPanels = Array.from(document.querySelectorAll("[data-settings-panel]"));
   const searchPanel = document.getElementById("searchPanel");
   const searchInput = document.getElementById("searchInput");
   const searchCount = document.getElementById("searchCount");
@@ -408,6 +410,18 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     settingsFeedback.dataset.tone = tone;
   };
 
+  const setActiveSettingsTab = (tabID) => {
+    const nextTabID = String(tabID || "fonts").trim() || "fonts";
+    for (const tab of settingsTabs) {
+      const selected = tab.dataset.settingsTab === nextTabID;
+      tab.setAttribute("aria-selected", selected ? "true" : "false");
+      tab.tabIndex = selected ? 0 : -1;
+    }
+    for (const panel of settingsTabPanels) {
+      panel.hidden = panel.dataset.settingsPanel !== nextTabID;
+    }
+  };
+
   const registerUploadedFont = async (font) => {
     if (!font?.id || !font.family || registeredFontFaces.has(font.id) || typeof FontFace !== "function") {
       return;
@@ -547,20 +561,24 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     closeContextMenu();
     closeThemePicker();
     closeInstanceSwitcher();
+    setActiveSettingsTab("fonts");
     renderSettingsFonts();
     setSettingsFeedback("");
     if (settingsBackdrop) {
       settingsBackdrop.hidden = false;
-      window.setTimeout(() => settingsFontSelect?.focus(), 0);
+      window.setTimeout(() => settingsTabs.find((tab) => tab.getAttribute("aria-selected") === "true")?.focus(), 0);
     }
     loadSettings().catch((error) => setSettingsFeedback(error.message || "设置加载失败。", "error"));
   };
 
   const closeSettings = () => {
+    const wasOpen = settingsBackdrop && !settingsBackdrop.hidden;
     if (settingsBackdrop) {
       settingsBackdrop.hidden = true;
     }
-    window.setTimeout(() => activeSession()?.term?.focus(), 0);
+    if (wasOpen) {
+      window.setTimeout(() => activeSession()?.term?.focus(), 0);
+    }
   };
 
   const instanceSelector = (item) => {
@@ -4369,6 +4387,22 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       closeSettings();
     }
   });
+  for (const tab of settingsTabs) {
+    tab.addEventListener("click", () => setActiveSettingsTab(tab.dataset.settingsTab));
+    tab.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+        return;
+      }
+      event.preventDefault();
+      const currentIndex = Math.max(0, settingsTabs.indexOf(tab));
+      const offset = event.key === "ArrowRight" ? 1 : -1;
+      const next = settingsTabs[(currentIndex + offset + settingsTabs.length) % settingsTabs.length];
+      if (next) {
+        setActiveSettingsTab(next.dataset.settingsTab);
+        next.focus();
+      }
+    });
+  }
   settingsFontSelect?.addEventListener("change", () => {
     const fontID = settingsFontSelect.value || "";
     settingsFontSelect.disabled = true;

@@ -783,14 +783,105 @@ body.split-resize-active * {
   background: var(--accent);
 }
 
+.settings-modal {
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.48);
+  box-sizing: border-box;
+}
+
 .settings-panel {
   display: flex;
   flex-direction: column;
-  width: min(440px, 100vw);
-  height: 100%;
-  border-left: 1px solid var(--panel-border);
+  width: min(680px, calc(100vw - 48px));
+  max-height: min(720px, calc(100dvh - 48px));
+  min-height: min(420px, calc(100dvh - 48px));
+  overflow: hidden;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
   background: var(--panel-bg);
-  box-shadow: -28px 0 80px var(--panel-shadow);
+  box-shadow: 0 24px 72px var(--panel-shadow);
+  box-sizing: border-box;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 54px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.settings-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.settings-close {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.settings-close:hover,
+.settings-close:focus-visible {
+  background: var(--panel-hover-bg);
+  outline: none;
+}
+
+.settings-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 10px 14px 0;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.settings-tab {
+  position: relative;
+  min-width: 72px;
+  height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 7px 7px 0 0;
+  background: transparent;
+  color: var(--chrome-text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.settings-tab:hover,
+.settings-tab:focus-visible {
+  background: var(--panel-hover-bg);
+  color: var(--text);
+  outline: none;
+}
+
+.settings-tab[aria-selected="true"] {
+  color: var(--text);
+}
+
+.settings-tab[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  right: 10px;
+  bottom: -1px;
+  left: 10px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--accent);
 }
 
 .settings-body {
@@ -798,8 +889,7 @@ body.split-resize-active * {
   min-height: 0;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 14px;
-  padding: 16px;
+  padding: 0;
   overflow: auto;
   scrollbar-color: rgba(148, 163, 184, 0.5) transparent;
   scrollbar-width: thin;
@@ -818,6 +908,17 @@ body.split-resize-active * {
   border-radius: 999px;
   background: rgba(148, 163, 184, 0.52);
   background-clip: padding-box;
+}
+
+.settings-tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+}
+
+.settings-tab-panel[hidden] {
+  display: none;
 }
 
 .settings-section {
@@ -1246,8 +1347,23 @@ body.split-resize-active * {
     width: 100vw;
   }
 
+  .settings-modal {
+    padding: 10px;
+  }
+
   .settings-panel {
-    width: 100vw;
+    width: 100%;
+    max-height: calc(100dvh - 20px);
+    min-height: 0;
+  }
+
+  .settings-tabs {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .settings-tabs::-webkit-scrollbar {
+    display: none;
   }
 
   .settings-font-row {
