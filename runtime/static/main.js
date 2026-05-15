@@ -97,6 +97,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const touchSelectionLongPressDelayMs = 450;
   const mobileKeyboardDoubleTapDelayMs = 320;
   const mobileKeyboardFocusAllowWindowMs = 600;
+  const mobileKeyboardFocusPrompt = "双击屏幕开启键盘输入";
   const desktopSelectionCopyMoveThresholdPx = 4;
   const terminalSizeReassertIntervalMs = 250;
   const mobileLayoutQuery = window.matchMedia?.("(max-width: 640px)");
@@ -1579,11 +1580,23 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
 
   const currentTab = () => tabs.get(activeTabId) || null;
 
+  const shouldShowMobileKeyboardFocusPrompt = () => {
+    if (!mobileLayoutQuery?.matches) {
+      return false;
+    }
+    const tab = currentTab();
+    const session = tab?.panes.get(tab.activePaneId) || null;
+    const textarea = session?.term?.textarea;
+    return Boolean(textarea && document.activeElement !== textarea);
+  };
+
   const updateMobileActiveTabTitle = () => {
     if (!mobileActiveTabTitle) {
       return;
     }
-    const label = String(currentTab()?.label || "终端").trim() || "终端";
+    const label = shouldShowMobileKeyboardFocusPrompt()
+      ? mobileKeyboardFocusPrompt
+      : String(currentTab()?.label || "终端").trim() || "终端";
     mobileActiveTabTitle.textContent = label;
     mobileActiveTabTitle.title = label;
   };
@@ -2215,6 +2228,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     prepareTerminalTextareaForInput(session);
     resetTerminalHostViewport(session, { clean: true });
+    updateMobileActiveTabTitle();
   };
 
   const blurTerminalInput = (session) => {
@@ -2234,6 +2248,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (activeElement instanceof HTMLElement && (host?.contains(activeElement) || shell?.contains(activeElement))) {
       activeElement.blur();
     }
+    updateMobileActiveTabTitle();
   };
 
   const blurMobileKeyboard = () => {
@@ -2357,6 +2372,8 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     textarea.setAttribute("inputmode", "text");
     textarea.setAttribute("enterkeyhint", "enter");
     term.focus = () => focusTerminalInput(session);
+    textarea.addEventListener("focus", updateMobileActiveTabTitle);
+    textarea.addEventListener("blur", updateMobileActiveTabTitle);
     let lastMobileTapAt = 0;
     let lastMobileTapX = 0;
     let lastMobileTapY = 0;
@@ -6594,6 +6611,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     measureThemeCardWidth();
     redrawThemePickerOptions();
     resizeAllTabsForCurrentDevice();
+    updateMobileActiveTabTitle();
     scheduleTabOverviewRender();
   });
   window.visualViewport?.addEventListener("resize", scheduleTabOverviewRender);
