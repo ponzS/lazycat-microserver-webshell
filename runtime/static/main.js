@@ -437,6 +437,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       uploadedAt: String(font?.uploaded_at || "").trim(),
       url: String(font?.url || `/api/settings/fonts/${id}/file`).trim(),
       sourceName: String(font?.source_name || "").trim(),
+      builtin: font?.builtin === true,
     };
   };
 
@@ -577,8 +578,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       const active = font.id === activeTerminalFontID;
       const card = document.createElement("button");
       card.type = "button";
-      card.className = "settings-font-card";
+      card.className = font.builtin ? "settings-font-card builtin" : "settings-font-card";
       card.dataset.fontId = font.id;
+      card.dataset.builtin = font.builtin ? "true" : "false";
       card.setAttribute("role", "option");
       card.setAttribute("aria-selected", active ? "true" : "false");
       card.setAttribute("aria-pressed", selectedForDelete ? "true" : "false");
@@ -588,7 +590,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       title.textContent = font.label || font.filename || font.family;
       const meta = document.createElement("span");
       meta.className = "settings-font-card-meta";
-      meta.textContent = [font.filename, size].filter(Boolean).join(" · ");
+      meta.textContent = [font.builtin ? "预装字体" : font.filename, size].filter(Boolean).join(" · ");
       const state = document.createElement("span");
       state.className = "settings-font-card-state";
       state.textContent = active ? "当前使用" : "";

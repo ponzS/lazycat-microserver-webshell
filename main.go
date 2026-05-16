@@ -106,7 +106,7 @@ func computeServerRevision(rootDir string) string {
 		}
 	}
 
-	staticRoot := filepath.Join(rootDir, "runtime", "static")
+	staticRoot := filepath.Join(rootDir, "runtime")
 	var paths []string
 	_ = filepath.WalkDir(staticRoot, func(path string, entry fs.DirEntry, err error) error {
 		if err == nil && entry != nil && !entry.IsDir() {

@@ -5,13 +5,17 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"lcmd-webshell/internal/pkg/fonts"
 )
 
 func (s *pluginServer) fontStore() fonts.Store {
-	return fonts.Store{Dir: s.fontDir}
+	return fonts.Store{
+		Dir:        s.fontDir,
+		BundledDir: filepath.Join(s.rootDir, "runtime", "fonts", "preinstalled"),
+	}
 }
 
 func (s *pluginServer) handleSettings(w http.ResponseWriter, r *http.Request) {

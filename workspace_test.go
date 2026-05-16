@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -71,11 +72,113 @@ func TestHandleSettingsFontsUploadsMultipleFonts(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&state); err != nil {
 		t.Fatalf("decode response error = %v", err)
 	}
-	if len(state.Fonts) != 2 {
-		t.Fatalf("uploaded font count = %d, want 2: %+v", len(state.Fonts), state.Fonts)
+	uploadedFonts := make([]fonts.Descriptor, 0)
+	for _, font := range state.Fonts {
+		if !font.Builtin {
+			uploadedFonts = append(uploadedFonts, font)
+		}
 	}
-	if state.TerminalFontID == "" || state.TerminalFontID != state.Fonts[1].ID {
-		t.Fatalf("TerminalFontID = %q, want last uploaded font %q", state.TerminalFontID, state.Fonts[1].ID)
+	if len(uploadedFonts) != 2 {
+		t.Fatalf("uploaded font count = %d, want 2: %+v", len(uploadedFonts), state.Fonts)
+	}
+	if state.TerminalFontID == "" || state.TerminalFontID != uploadedFonts[1].ID {
+		t.Fatalf("TerminalFontID = %q, want last uploaded font %q", state.TerminalFontID, uploadedFonts[1].ID)
+	}
+}
+
+func TestHandleSettingsServesBundledFonts(t *testing.T) {
+	rootDir := t.TempDir()
+	bundledDir := filepath.Join(rootDir, "runtime", "fonts", "preinstalled")
+	if err := os.MkdirAll(bundledDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll bundled font dir error = %v", err)
+	}
+	for _, item := range []struct {
+		name string
+		data string
+	}{
+		{name: "SourceCodePro-Regular.woff2", data: "source"},
+		{name: "FiraCode-Regular.woff2", data: "fira"},
+		{name: "Hack-Regular.woff2", data: "hack"},
+	} {
+		if err := os.WriteFile(filepath.Join(bundledDir, item.name), []byte(item.data), 0o644); err != nil {
+			t.Fatalf("write bundled font %q error = %v", item.name, err)
+		}
+	}
+	server := &pluginServer{rootDir: rootDir, fontDir: t.TempDir()}
+
+	recorder := httptest.NewRecorder()
+	server.handleSettings(recorder, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("handleSettings(GET) status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var state fonts.State
+	if err := json.NewDecoder(recorder.Body).Decode(&state); err != nil {
+		t.Fatalf("decode settings response error = %v", err)
+	}
+	if len(state.Fonts) != 3 {
+		t.Fatalf("bundled font count = %d, want 3: %+v", len(state.Fonts), state.Fonts)
+	}
+	if state.Fonts[0].Label != "Source Code Pro" || !state.Fonts[0].Builtin {
+		t.Fatalf("first bundled font = %+v, want Source Code Pro builtin", state.Fonts[0])
+	}
+
+	selectedID := state.Fonts[0].ID
+	body := strings.NewReader(`{"terminal_font_id":"` + selectedID + `"}`)
+	recorder = httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, "/api/settings", body)
+	request.Header.Set("Content-Type", "application/json")
+	server.handleSettings(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("handleSettings(PUT) status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	state = fonts.State{}
+	if err := json.NewDecoder(recorder.Body).Decode(&state); err != nil {
+		t.Fatalf("decode saved settings response error = %v", err)
+	}
+	if state.TerminalFontID != selectedID {
+		t.Fatalf("TerminalFontID = %q, want %q", state.TerminalFontID, selectedID)
+	}
+
+	recorder = httptest.NewRecorder()
+	server.handleSettingsFont(recorder, httptest.NewRequest(http.MethodGet, "/api/settings/fonts/"+selectedID+"/file", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("handleSettingsFont(file) status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if contentType := recorder.Header().Get("Content-Type"); contentType != "font/woff2" {
+		t.Fatalf("Content-Type = %q, want font/woff2", contentType)
+	}
+
+	recorder = httptest.NewRecorder()
+	server.handleSettingsFont(recorder, httptest.NewRequest(http.MethodDelete, "/api/settings/fonts/"+selectedID, nil))
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("handleSettingsFont(DELETE) status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	server.handleSettings(recorder, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("handleSettings(GET after DELETE) status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	state = fonts.State{}
+	if err := json.NewDecoder(recorder.Body).Decode(&state); err != nil {
+		t.Fatalf("decode settings after delete response error = %v", err)
+	}
+	if state.TerminalFontID != "" {
+		t.Fatalf("TerminalFontID after bundled delete = %q, want empty", state.TerminalFontID)
+	}
+	if len(state.Fonts) != 2 {
+		t.Fatalf("bundled font count after delete = %d, want 2: %+v", len(state.Fonts), state.Fonts)
+	}
+	for _, font := range state.Fonts {
+		if font.ID == selectedID {
+			t.Fatalf("deleted bundled font still listed: %+v", state.Fonts)
+		}
+	}
+
+	recorder = httptest.NewRecorder()
+	server.handleSettingsFont(recorder, httptest.NewRequest(http.MethodGet, "/api/settings/fonts/"+selectedID+"/file", nil))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("handleSettingsFont(deleted file) status = %d, want 404, body = %s", recorder.Code, recorder.Body.String())
 	}
 }
 
