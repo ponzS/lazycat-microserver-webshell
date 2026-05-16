@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -27,8 +28,9 @@ const (
 )
 
 var (
-	ErrBadRequest = errors.New("bad font request")
-	idPattern     = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	ErrBadRequest           = errors.New("bad font request")
+	idPattern               = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	mobileShortcutIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 )
 
 type Store struct {
@@ -37,17 +39,38 @@ type Store struct {
 }
 
 type State struct {
-	TerminalFontID               string       `json:"terminal_font_id"`
-	TerminalScrollback           int          `json:"terminal_scrollback"`
-	DesktopMouseClipboardEnabled bool         `json:"desktop_mouse_clipboard_enabled"`
-	Fonts                        []Descriptor `json:"fonts"`
+	TerminalFontID               string             `json:"terminal_font_id"`
+	TerminalScrollback           int                `json:"terminal_scrollback"`
+	DesktopMouseClipboardEnabled bool               `json:"desktop_mouse_clipboard_enabled"`
+	MobileShortcuts              MobileShortcutRows `json:"mobile_shortcuts"`
+	Fonts                        []Descriptor       `json:"fonts"`
 }
 
 type Settings struct {
-	TerminalFontID               string   `json:"terminal_font_id"`
-	TerminalScrollback           int      `json:"terminal_scrollback"`
-	DesktopMouseClipboardEnabled *bool    `json:"desktop_mouse_clipboard_enabled,omitempty"`
-	DeletedBuiltinFontIDs        []string `json:"deleted_builtin_font_ids,omitempty"`
+	TerminalFontID               string              `json:"terminal_font_id"`
+	TerminalScrollback           int                 `json:"terminal_scrollback"`
+	DesktopMouseClipboardEnabled *bool               `json:"desktop_mouse_clipboard_enabled,omitempty"`
+	MobileShortcuts              *MobileShortcutRows `json:"mobile_shortcuts,omitempty"`
+	DeletedBuiltinFontIDs        []string            `json:"deleted_builtin_font_ids,omitempty"`
+}
+
+type MobileShortcutRows [][]MobileShortcut
+
+type MobileShortcut struct {
+	ID             string                  `json:"id"`
+	Label          string                  `json:"label"`
+	Action         string                  `json:"action,omitempty"`
+	InputKey       string                  `json:"input_key,omitempty"`
+	InputModifiers MobileShortcutModifiers `json:"input_modifiers,omitempty"`
+	Kind           string                  `json:"kind,omitempty"`
+	Icon           string                  `json:"icon,omitempty"`
+	AriaLabel      string                  `json:"aria_label,omitempty"`
+}
+
+type MobileShortcutModifiers struct {
+	Ctrl  bool `json:"ctrl,omitempty"`
+	Alt   bool `json:"alt,omitempty"`
+	Shift bool `json:"shift,omitempty"`
 }
 
 type Metadata struct {
@@ -116,6 +139,67 @@ var bundledFonts = []bundledFont{
 	},
 }
 
+var defaultMobileShortcuts = MobileShortcutRows{
+	{
+		{ID: "sticky-ctrl", Label: "Ctrl+", Action: "sticky_ctrl", Kind: "modifier", AriaLabel: "Sticky Control"},
+		{ID: "sticky-alt", Label: "Alt+", Action: "sticky_alt", Kind: "modifier", AriaLabel: "Sticky Alt"},
+		{ID: "sticky-shift", Label: "Shift+", Action: "sticky_shift", Kind: "modifier", AriaLabel: "Sticky Shift"},
+		{ID: "return", Label: "Return", InputKey: "enter", Kind: "primary", AriaLabel: "Return"},
+		{ID: "tab", Label: "Tab", InputKey: "tab", AriaLabel: "Tab"},
+		{ID: "arrow-up", Label: "\u2191", InputKey: "arrow_up", Kind: "nav", AriaLabel: "Up Arrow"},
+		{ID: "arrow-down", Label: "\u2193", InputKey: "arrow_down", Kind: "nav", AriaLabel: "Down Arrow"},
+		{ID: "arrow-left", Label: "\u2190", InputKey: "arrow_left", Kind: "nav", AriaLabel: "Left Arrow"},
+		{ID: "arrow-right", Label: "\u2192", InputKey: "arrow_right", Kind: "nav", AriaLabel: "Right Arrow"},
+		{ID: "copy", Label: "Copy", Action: "copy", AriaLabel: "Copy"},
+		{ID: "paste", Label: "Paste", Action: "paste", AriaLabel: "Paste"},
+		{ID: "page-up", Label: "PageUp", Action: "page_up", AriaLabel: "Page Up"},
+		{ID: "page-down", Label: "PageDown", Action: "page_down", AriaLabel: "Page Down"},
+	},
+	{
+		{ID: "mobile-menu", Label: "Menu", Action: "open_mobile_menu", Kind: "menu", Icon: "menu", AriaLabel: "Menu"},
+		{ID: "esc", Label: "Esc", InputKey: "escape", Kind: "primary", AriaLabel: "Escape"},
+		{ID: "ctrl-e", Label: "Ctrl+E", InputKey: "e", InputModifiers: MobileShortcutModifiers{Ctrl: true}, AriaLabel: "Control E"},
+		{ID: "ctrl-c", Label: "Ctrl+C", InputKey: "c", InputModifiers: MobileShortcutModifiers{Ctrl: true}, Kind: "primary", AriaLabel: "Control C"},
+		{ID: "shift-tab", Label: "Shift+Tab", InputKey: "tab", InputModifiers: MobileShortcutModifiers{Shift: true}, AriaLabel: "Shift Tab"},
+		{ID: "tilde", Label: "~", InputKey: "~", Kind: "symbol", AriaLabel: "Tilde"},
+		{ID: "slash", Label: "/", InputKey: "/", Kind: "symbol", AriaLabel: "Slash"},
+		{ID: "dash", Label: "-", InputKey: "-", Kind: "symbol", AriaLabel: "Dash"},
+		{ID: "dollar", Label: "$", InputKey: "$", Kind: "symbol", AriaLabel: "Dollar Sign"},
+		{ID: "zoom-in", Label: "Zoom+", Action: "zoom_in", Kind: "modifier", AriaLabel: "Zoom In"},
+		{ID: "zoom-out", Label: "Zoom-", Action: "zoom_out", Kind: "modifier", AriaLabel: "Zoom Out"},
+		{ID: "home", Label: "Home", InputKey: "home", AriaLabel: "Home"},
+		{ID: "end", Label: "End", InputKey: "end", AriaLabel: "End"},
+		{ID: "touch-feedback", Label: "Shock On", Action: "toggle_touch_feedback", Kind: "feedback", AriaLabel: "Shock On"},
+	},
+}
+
+var allowedMobileShortcutInputKeys = map[string]bool{
+	"space":       true,
+	"arrow_up":    true,
+	"arrow_down":  true,
+	"arrow_left":  true,
+	"arrow_right": true,
+	"tab":         true,
+	"enter":       true,
+	"escape":      true,
+	"home":        true,
+	"end":         true,
+}
+
+var allowedMobileShortcutActions = map[string]bool{
+	"sticky_ctrl":           true,
+	"sticky_alt":            true,
+	"sticky_shift":          true,
+	"copy":                  true,
+	"paste":                 true,
+	"page_up":               true,
+	"page_down":             true,
+	"zoom_in":               true,
+	"zoom_out":              true,
+	"toggle_touch_feedback": true,
+	"open_mobile_menu":      true,
+}
+
 func ResolveDir(rootDir string) string {
 	if dir := strings.TrimSpace(os.Getenv(DirEnv)); dir != "" {
 		return dir
@@ -153,6 +237,7 @@ func (s Store) State() (State, error) {
 		TerminalFontID:               selected,
 		TerminalScrollback:           settings.TerminalScrollback,
 		DesktopMouseClipboardEnabled: desktopMouseClipboardEnabled(settings),
+		MobileShortcuts:              effectiveMobileShortcuts(settings),
 		Fonts:                        fonts,
 	}, nil
 }
@@ -163,6 +248,7 @@ func (s Store) ReadSettings() (Settings, error) {
 		return Settings{
 			TerminalScrollback:           DefaultTerminalScrollback,
 			DesktopMouseClipboardEnabled: boolPtr(true),
+			MobileShortcuts:              nil,
 		}, nil
 	}
 	if err != nil {
@@ -175,6 +261,14 @@ func (s Store) ReadSettings() (Settings, error) {
 	settings.TerminalFontID = strings.TrimSpace(settings.TerminalFontID)
 	settings.TerminalScrollback = normalizeTerminalScrollback(settings.TerminalScrollback)
 	settings.DesktopMouseClipboardEnabled = normalizeDesktopMouseClipboardEnabled(settings.DesktopMouseClipboardEnabled)
+	if settings.MobileShortcuts != nil {
+		normalized, err := normalizeMobileShortcuts(*settings.MobileShortcuts)
+		if err != nil {
+			settings.MobileShortcuts = nil
+		} else {
+			settings.MobileShortcuts = &normalized
+		}
+	}
 	settings.DeletedBuiltinFontIDs = normalizeDeletedBuiltinFontIDs(settings.DeletedBuiltinFontIDs)
 	return settings, nil
 }
@@ -381,6 +475,13 @@ func (s Store) WriteSettings(settings Settings) error {
 	settings.TerminalFontID = strings.TrimSpace(settings.TerminalFontID)
 	settings.TerminalScrollback = normalizeTerminalScrollback(settings.TerminalScrollback)
 	settings.DesktopMouseClipboardEnabled = normalizeDesktopMouseClipboardEnabled(settings.DesktopMouseClipboardEnabled)
+	if settings.MobileShortcuts != nil {
+		normalized, err := normalizeMobileShortcuts(*settings.MobileShortcuts)
+		if err != nil {
+			return err
+		}
+		settings.MobileShortcuts = &normalized
+	}
 	settings.DeletedBuiltinFontIDs = normalizeDeletedBuiltinFontIDs(settings.DeletedBuiltinFontIDs)
 	if err := s.ensureDir(); err != nil {
 		return err
@@ -415,6 +516,13 @@ func (s Store) WriteSettings(settings Settings) error {
 func (s Store) SaveSettings(settings Settings) error {
 	settings.TerminalFontID = strings.TrimSpace(settings.TerminalFontID)
 	settings.DesktopMouseClipboardEnabled = normalizeDesktopMouseClipboardEnabled(settings.DesktopMouseClipboardEnabled)
+	if settings.MobileShortcuts != nil {
+		normalized, err := normalizeMobileShortcuts(*settings.MobileShortcuts)
+		if err != nil {
+			return err
+		}
+		settings.MobileShortcuts = &normalized
+	}
 	settings.DeletedBuiltinFontIDs = normalizeDeletedBuiltinFontIDs(settings.DeletedBuiltinFontIDs)
 	if err := ValidateTerminalScrollback(settings.TerminalScrollback); err != nil {
 		return err
@@ -428,6 +536,13 @@ func (s Store) SaveSettings(settings Settings) error {
 func (s Store) MergeSettings(settings Settings, pruneMissingSelection bool) (Settings, error) {
 	settings.TerminalFontID = strings.TrimSpace(settings.TerminalFontID)
 	settings.DesktopMouseClipboardEnabled = normalizeDesktopMouseClipboardEnabled(settings.DesktopMouseClipboardEnabled)
+	if settings.MobileShortcuts != nil {
+		normalized, err := normalizeMobileShortcuts(*settings.MobileShortcuts)
+		if err != nil {
+			return Settings{}, err
+		}
+		settings.MobileShortcuts = &normalized
+	}
 	settings.DeletedBuiltinFontIDs = normalizeDeletedBuiltinFontIDs(settings.DeletedBuiltinFontIDs)
 	if pruneMissingSelection {
 		fonts, err := s.List()
@@ -570,6 +685,109 @@ func normalizeDesktopMouseClipboardEnabled(value *bool) *bool {
 	}
 	enabled := *value
 	return &enabled
+}
+
+func DefaultMobileShortcuts() MobileShortcutRows {
+	return cloneMobileShortcuts(defaultMobileShortcuts)
+}
+
+func effectiveMobileShortcuts(settings Settings) MobileShortcutRows {
+	if settings.MobileShortcuts == nil {
+		return DefaultMobileShortcuts()
+	}
+	normalized, err := normalizeMobileShortcuts(*settings.MobileShortcuts)
+	if err != nil {
+		return DefaultMobileShortcuts()
+	}
+	return normalized
+}
+
+func cloneMobileShortcuts(rows MobileShortcutRows) MobileShortcutRows {
+	cloned := make(MobileShortcutRows, 2)
+	for rowIndex := 0; rowIndex < 2; rowIndex++ {
+		if rowIndex >= len(rows) || rows[rowIndex] == nil {
+			cloned[rowIndex] = []MobileShortcut{}
+			continue
+		}
+		cloned[rowIndex] = append([]MobileShortcut(nil), rows[rowIndex]...)
+	}
+	return cloned
+}
+
+func normalizeMobileShortcuts(rows MobileShortcutRows) (MobileShortcutRows, error) {
+	if len(rows) != 2 {
+		return nil, fmt.Errorf("%w: mobile shortcuts must contain exactly two rows", ErrBadRequest)
+	}
+	normalized := make(MobileShortcutRows, 2)
+	seen := make(map[string]struct{})
+	total := 0
+	for rowIndex := 0; rowIndex < 2; rowIndex++ {
+		normalized[rowIndex] = make([]MobileShortcut, 0, len(rows[rowIndex]))
+		for _, shortcut := range rows[rowIndex] {
+			next, err := normalizeMobileShortcut(shortcut)
+			if err != nil {
+				return nil, err
+			}
+			if _, ok := seen[next.ID]; ok {
+				return nil, fmt.Errorf("%w: duplicate mobile shortcut id", ErrBadRequest)
+			}
+			seen[next.ID] = struct{}{}
+			normalized[rowIndex] = append(normalized[rowIndex], next)
+			total++
+			if total > 64 {
+				return nil, fmt.Errorf("%w: too many mobile shortcuts", ErrBadRequest)
+			}
+		}
+	}
+	return normalized, nil
+}
+
+func normalizeMobileShortcut(shortcut MobileShortcut) (MobileShortcut, error) {
+	next := MobileShortcut{
+		ID:             strings.TrimSpace(shortcut.ID),
+		Label:          strings.TrimSpace(shortcut.Label),
+		Action:         strings.TrimSpace(shortcut.Action),
+		InputKey:       strings.TrimSpace(shortcut.InputKey),
+		InputModifiers: shortcut.InputModifiers,
+		Kind:           strings.TrimSpace(shortcut.Kind),
+		Icon:           strings.TrimSpace(shortcut.Icon),
+		AriaLabel:      strings.TrimSpace(shortcut.AriaLabel),
+	}
+	if !mobileShortcutIDPattern.MatchString(next.ID) {
+		return MobileShortcut{}, fmt.Errorf("%w: invalid mobile shortcut id", ErrBadRequest)
+	}
+	labelLen := utf8.RuneCountInString(next.Label)
+	if labelLen < 1 || labelLen > 16 {
+		return MobileShortcut{}, fmt.Errorf("%w: mobile shortcut label must be 1-16 characters", ErrBadRequest)
+	}
+	hasAction := next.Action != ""
+	hasInputKey := next.InputKey != ""
+	if hasAction == hasInputKey {
+		return MobileShortcut{}, fmt.Errorf("%w: mobile shortcut must have exactly one action or input key", ErrBadRequest)
+	}
+	if hasAction {
+		if next.InputModifiers.Ctrl || next.InputModifiers.Alt || next.InputModifiers.Shift {
+			return MobileShortcut{}, fmt.Errorf("%w: mobile shortcut action cannot have input modifiers", ErrBadRequest)
+		}
+		if !allowedMobileShortcutActions[next.Action] {
+			return MobileShortcut{}, fmt.Errorf("%w: invalid mobile shortcut action", ErrBadRequest)
+		}
+		next.InputModifiers = MobileShortcutModifiers{}
+	} else if !validMobileShortcutInputKey(next.InputKey) {
+		return MobileShortcut{}, fmt.Errorf("%w: invalid mobile shortcut input key", ErrBadRequest)
+	}
+	return next, nil
+}
+
+func validMobileShortcutInputKey(key string) bool {
+	if allowedMobileShortcutInputKeys[key] {
+		return true
+	}
+	if utf8.RuneCountInString(key) != 1 {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(key)
+	return r >= 0x20 && r != 0x7f
 }
 
 func desktopMouseClipboardEnabled(settings Settings) bool {

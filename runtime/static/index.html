@@ -131,10 +131,12 @@
           <h2 id="settingsTitle">设置</h2>
           <button class="settings-close" id="settingsClose" type="button" aria-label="关闭设置">&times;</button>
         </div>
+        <div class="settings-feedback" id="settingsFeedback" hidden></div>
         <div class="settings-main">
           <div class="settings-tabs" role="tablist" aria-label="设置分类" aria-orientation="vertical">
             <button class="settings-tab" id="settingsTabTerminal" type="button" role="tab" aria-selected="true" aria-controls="settingsPanelTerminal" data-settings-tab="terminal">终端设置</button>
             <button class="settings-tab" id="settingsTabTheme" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelTheme" data-settings-tab="theme">主题设置</button>
+            <button class="settings-tab" id="settingsTabMobileShortcuts" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelMobileShortcuts" data-settings-tab="mobile-shortcuts">手机快捷键设置</button>
           </div>
           <div class="settings-body">
             <div class="settings-tab-panel" id="settingsPanelTerminal" role="tabpanel" aria-labelledby="settingsTabTerminal" data-settings-panel="terminal">
@@ -195,9 +197,70 @@
                 <div class="settings-theme-list" id="settingsThemeList" role="listbox" aria-label="终端主题"></div>
               </section>
             </div>
+            <div class="settings-tab-panel" id="settingsPanelMobileShortcuts" role="tabpanel" aria-labelledby="settingsTabMobileShortcuts" data-settings-panel="mobile-shortcuts" hidden>
+              <section class="settings-section settings-mobile-shortcuts-section" aria-labelledby="settingsMobileShortcutsTitle">
+                <div class="settings-section-head">
+                  <h3 id="settingsMobileShortcutsTitle">手机快捷键</h3>
+                  <div class="settings-mobile-shortcut-actions">
+                    <button class="settings-icon-button settings-mobile-shortcut-add-button" id="settingsMobileShortcutAddButton" type="button" aria-label="新增快捷键" title="新增快捷键">
+                      <svg class="icon settings-mobile-shortcut-add-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2.4"></path></svg>
+                    </button>
+                    <button class="settings-icon-button settings-mobile-shortcut-reset-button" id="settingsMobileShortcutResetButton" type="button" aria-label="恢复默认手机快捷键" title="恢复默认">
+                      <svg t="1778915656350" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="8293" width="200" height="200" aria-hidden="true"><path d="M566.4 80c-195.2 0-358.4 131.2-412.8 307.2l-41.6-60.8c-16-19.2-44.8-25.6-67.2-9.6-22.4 16-25.6 44.8-12.8 67.2l108.8 153.6c6.4 9.6 12.8 16 22.4 19.2 3.2 0 6.4 3.2 6.4 3.2h6.4c3.2 0 9.6 0 12.8-3.2H192c3.2 0 6.4-3.2 9.6-6.4l156.8-112c22.4-16 25.6-44.8 12.8-67.2-16-22.4-44.8-25.6-67.2-12.8l-64 44.8c44.8-134.4 169.6-230.4 320-230.4 185.6 0 336 150.4 336 336s-150.4 336-336 336c-83.2 0-166.4-32-227.2-89.6-19.2-19.2-51.2-16-67.2 3.2-19.2 19.2-16 51.2 3.2 67.2 80 73.6 182.4 115.2 291.2 115.2 236.8 0 432-195.2 432-432S806.4 80 566.4 80z" fill="currentColor" p-id="8294"></path></svg>
+                    </button>
+                  </div>
+                </div>
+                <div class="settings-mobile-shortcut-list" id="settingsMobileShortcutList" aria-label="手机快捷键列表"></div>
+              </section>
+            </div>
           </div>
         </div>
       </div>
+    </div>
+    <div class="mobile-shortcut-editor" id="mobileShortcutEditor" hidden>
+      <button class="mobile-shortcut-editor-scrim" id="mobileShortcutEditorScrim" type="button" aria-label="关闭"></button>
+      <form class="mobile-shortcut-editor-panel" id="mobileShortcutEditorPanel" role="dialog" aria-modal="true" aria-labelledby="mobileShortcutEditorTitle">
+        <h2 id="mobileShortcutEditorTitle">编辑快捷键</h2>
+        <label class="mobile-shortcut-editor-field">
+          <span>名称</span>
+          <input id="mobileShortcutLabelInput" type="text" maxlength="16" autocomplete="off" />
+        </label>
+        <fieldset class="mobile-shortcut-editor-type" id="mobileShortcutTypeField">
+          <legend>类型</legend>
+          <label class="mobile-shortcut-type-card">
+            <input class="mobile-shortcut-type-input" type="radio" name="mobileShortcutType" value="input" checked />
+            <span>发送按键</span>
+          </label>
+          <label class="mobile-shortcut-type-card">
+            <input class="mobile-shortcut-type-input" type="radio" name="mobileShortcutType" value="action" />
+            <span>执行动作</span>
+          </label>
+        </fieldset>
+        <label class="mobile-shortcut-editor-field" id="mobileShortcutKeyField">
+          <span>按键</span>
+          <select id="mobileShortcutKeySelect"></select>
+        </label>
+        <label class="mobile-shortcut-editor-field" id="mobileShortcutCustomKeyField" hidden>
+          <span>字符</span>
+          <input id="mobileShortcutCustomKeyInput" type="text" maxlength="2" autocomplete="off" />
+        </label>
+        <fieldset class="mobile-shortcut-editor-modifiers" id="mobileShortcutModifiersField">
+          <legend>修饰键</legend>
+          <label><input id="mobileShortcutCtrlInput" type="checkbox" /> Ctrl</label>
+          <label><input id="mobileShortcutAltInput" type="checkbox" /> Alt</label>
+          <label><input id="mobileShortcutShiftInput" type="checkbox" /> Shift</label>
+        </fieldset>
+        <label class="mobile-shortcut-editor-field" id="mobileShortcutActionField" hidden>
+          <span>动作</span>
+          <select id="mobileShortcutActionSelect"></select>
+        </label>
+        <div class="mobile-shortcut-editor-actions">
+          <button class="settings-text-button danger" id="mobileShortcutEditorDelete" type="button" hidden>删除</button>
+          <span class="mobile-shortcut-editor-action-spacer" aria-hidden="true"></span>
+          <button class="settings-text-button" id="mobileShortcutEditorCancel" type="button">取消</button>
+          <button class="settings-text-button" type="submit">保存</button>
+        </div>
+      </form>
     </div>
     <div class="tab-overview" id="tabOverview" hidden>
       <div class="tab-overview-panel" role="dialog" aria-modal="true" aria-label="终端总览">

@@ -14,9 +14,10 @@ import (
 )
 
 type settingsPatch struct {
-	TerminalFontID               optionalString `json:"terminal_font_id"`
-	TerminalScrollback           optionalInt    `json:"terminal_scrollback"`
-	DesktopMouseClipboardEnabled optionalBool   `json:"desktop_mouse_clipboard_enabled"`
+	TerminalFontID               optionalString          `json:"terminal_font_id"`
+	TerminalScrollback           optionalInt             `json:"terminal_scrollback"`
+	DesktopMouseClipboardEnabled optionalBool            `json:"desktop_mouse_clipboard_enabled"`
+	MobileShortcuts              optionalMobileShortcuts `json:"mobile_shortcuts"`
 }
 
 type optionalString struct {
@@ -33,6 +34,12 @@ type optionalInt struct {
 
 type optionalBool struct {
 	Value bool
+	Set   bool
+	Null  bool
+}
+
+type optionalMobileShortcuts struct {
+	Value fonts.MobileShortcutRows
 	Set   bool
 	Null  bool
 }
@@ -64,6 +71,16 @@ func (o *optionalInt) UnmarshalJSON(data []byte) error {
 func (o *optionalBool) UnmarshalJSON(data []byte) error {
 	o.Set = true
 	o.Value = false
+	o.Null = bytes.Equal(bytes.TrimSpace(data), []byte("null"))
+	if o.Null {
+		return nil
+	}
+	return json.Unmarshal(data, &o.Value)
+}
+
+func (o *optionalMobileShortcuts) UnmarshalJSON(data []byte) error {
+	o.Set = true
+	o.Value = nil
 	o.Null = bytes.Equal(bytes.TrimSpace(data), []byte("null"))
 	if o.Null {
 		return nil
@@ -120,6 +137,13 @@ func (s *pluginServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			if payload.DesktopMouseClipboardEnabled.Set && !payload.DesktopMouseClipboardEnabled.Null {
 				settings.DesktopMouseClipboardEnabled = &payload.DesktopMouseClipboardEnabled.Value
+			}
+			if payload.MobileShortcuts.Set {
+				if payload.MobileShortcuts.Null {
+					settings.MobileShortcuts = nil
+				} else {
+					settings.MobileShortcuts = &payload.MobileShortcuts.Value
+				}
 			}
 			_, err = store.MergeSettings(settings, !updateFont)
 		}

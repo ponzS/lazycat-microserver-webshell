@@ -202,6 +202,132 @@ func TestHandleSettingsPatchFontPreservesScrollback(t *testing.T) {
 	}
 }
 
+func TestHandleSettingsDefaultsMobileShortcuts(t *testing.T) {
+	server := &pluginServer{fontDir: t.TempDir()}
+
+	recorder := httptest.NewRecorder()
+	server.handleSettings(recorder, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("handleSettings() status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var state fonts.State
+	if err := json.NewDecoder(recorder.Body).Decode(&state); err != nil {
+		t.Fatalf("decode response error = %v", err)
+	}
+	if len(state.MobileShortcuts) != 2 || len(state.MobileShortcuts[0]) == 0 || len(state.MobileShortcuts[1]) == 0 {
+		t.Fatalf("MobileShortcuts = %+v, want default two non-empty rows", state.MobileShortcuts)
+	}
+}
+
+func TestHandleSettingsPatchMobileShortcutsPreservesExistingSettings(t *testing.T) {
+	server := &pluginServer{fontDir: t.TempDir()}
+	store := server.fontStore()
+	font, err := store.StoreUpload("Mono.woff2", "font/woff2", strings.NewReader("font-data"))
+	if err != nil {
+		t.Fatalf("StoreUpload() error = %v", err)
+	}
+	disabled := false
+	settings := fonts.Settings{
+		TerminalFontID:               font.ID,
+		TerminalScrollback:           33000,
+		DesktopMouseClipboardEnabled: &disabled,
+	}
+	if err := store.SaveSettings(settings); err != nil {
+		t.Fatalf("SaveSettings() error = %v", err)
+	}
+
+	body := `{"mobile_shortcuts":[[{"id":"custom-a","label":"Ctrl+C","input_key":"c","input_modifiers":{"ctrl":true}}],[{"id":"custom-paste","label":"Paste","action":"paste"}]]}`
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	server.handleSettings(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("handleSettings() status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var state fonts.State
+	if err := json.NewDecoder(recorder.Body).Decode(&state); err != nil {
+		t.Fatalf("decode response error = %v", err)
+	}
+	if state.TerminalFontID != font.ID || state.TerminalScrollback != 33000 || state.DesktopMouseClipboardEnabled {
+		t.Fatalf("State = %+v, want preserved existing settings", state)
+	}
+	if got := state.MobileShortcuts[0][0]; got.ID != "custom-a" || !got.InputModifiers.Ctrl {
+		t.Fatalf("MobileShortcuts[0][0] = %+v, want custom ctrl shortcut", got)
+	}
+}
+
+func TestHandleSettingsMobileShortcutsNullRestoresDefaultAndEmptyRowsAreExplicit(t *testing.T) {
+	server := &pluginServer{fontDir: t.TempDir()}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"mobile_shortcuts":[[],[]]}`))
+	request.Header.Set("Content-Type", "application/json")
+	server.handleSettings(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("handleSettings(empty) status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var state fonts.State
+	if err := json.NewDecoder(recorder.Body).Decode(&state); err != nil {
+		t.Fatalf("decode empty response error = %v", err)
+	}
+	if len(state.MobileShortcuts) != 2 || len(state.MobileShortcuts[0]) != 0 || len(state.MobileShortcuts[1]) != 0 {
+		t.Fatalf("MobileShortcuts after empty save = %+v, want two empty rows", state.MobileShortcuts)
+	}
+
+	recorder = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"mobile_shortcuts":null}`))
+	request.Header.Set("Content-Type", "application/json")
+	server.handleSettings(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("handleSettings(reset) status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	state = fonts.State{}
+	if err := json.NewDecoder(recorder.Body).Decode(&state); err != nil {
+		t.Fatalf("decode reset response error = %v", err)
+	}
+	if len(state.MobileShortcuts) != 2 || len(state.MobileShortcuts[0]) == 0 || len(state.MobileShortcuts[1]) == 0 {
+		t.Fatalf("MobileShortcuts after reset = %+v, want default two non-empty rows", state.MobileShortcuts)
+	}
+}
+
+func TestHandleSettingsRejectsInvalidMobileShortcutsWithoutWriting(t *testing.T) {
+	for _, body := range []string{
+		`{"mobile_shortcuts":[[{"id":"dup","label":"A","input_key":"a"}],[{"id":"dup","label":"B","input_key":"b"}]]}`,
+		`{"mobile_shortcuts":[[{"id":"bad space","label":"A","input_key":"a"}],[]]}`,
+		`{"mobile_shortcuts":[[{"id":"bad-action","label":"A","action":"unknown"}],[]]}`,
+		`{"mobile_shortcuts":[[{"id":"bad-action-mod","label":"A","action":"copy","input_modifiers":{"ctrl":true}}],[]]}`,
+		`{"mobile_shortcuts":[[{"id":"bad-label","label":"","input_key":"a"}],[]]}`,
+		`{"mobile_shortcuts":[[{"id":"bad-shape","label":"A","input_key":"a"}]]}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			server := &pluginServer{fontDir: t.TempDir()}
+			initial := fonts.MobileShortcutRows{{{ID: "keep", Label: "Keep", InputKey: "k"}}, {}}
+			settings := fonts.Settings{TerminalScrollback: fonts.DefaultTerminalScrollback, MobileShortcuts: &initial}
+			if err := server.fontStore().SaveSettings(settings); err != nil {
+				t.Fatalf("SaveSettings() error = %v", err)
+			}
+
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body))
+			request.Header.Set("Content-Type", "application/json")
+			server.handleSettings(recorder, request)
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("handleSettings() status = %d, body = %s", recorder.Code, recorder.Body.String())
+			}
+			state, err := server.fontStore().State()
+			if err != nil {
+				t.Fatalf("State() error = %v", err)
+			}
+			if got := state.MobileShortcuts[0][0]; got.ID != "keep" {
+				t.Fatalf("MobileShortcuts after rejected write = %+v, want preserved keep", state.MobileShortcuts)
+			}
+		})
+	}
+}
+
 func TestHandleSettingsRejectsInvalidScrollbackWithoutWriting(t *testing.T) {
 	for _, body := range []string{
 		`{"terminal_scrollback":99}`,

@@ -900,6 +900,25 @@ body.split-resize-active * {
   font-weight: 700;
 }
 
+.settings-feedback {
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--panel-border);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.settings-feedback[data-tone="error"] {
+  color: var(--danger);
+}
+
+.settings-feedback[data-tone="success"] {
+  color: var(--accent);
+}
+
+.settings-feedback[hidden] {
+  display: none;
+}
+
 .settings-close {
   display: inline-flex;
   width: 32px;
@@ -1006,7 +1025,9 @@ body.split-resize-active * {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
+  align-self: center;
   gap: 14px;
+  width: 80%;
   min-height: 0;
   overflow: auto;
   padding: 16px 18px;
@@ -1047,6 +1068,10 @@ body.split-resize-active * {
   border-bottom: 0;
 }
 
+[data-settings-panel="terminal"] > .settings-section {
+  border-bottom: 0;
+}
+
 .settings-section-head {
   display: flex;
   align-items: center;
@@ -1071,6 +1096,27 @@ body.split-resize-active * {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.settings-mobile-shortcut-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.settings-mobile-shortcut-add-button {
+  color: var(--text);
+}
+
+.settings-icon-button.settings-mobile-shortcut-add-button .settings-mobile-shortcut-add-icon {
+  fill: none;
+  stroke: currentColor;
+}
+
+.settings-icon-button.settings-mobile-shortcut-reset-button .icon {
+  width: 16px;
+  height: 16px;
 }
 
 .settings-font-row {
@@ -1421,19 +1467,16 @@ body.split-resize-active * {
 
 .settings-theme-section {
   min-height: 0;
-  flex: 1 1 auto;
-  padding-bottom: 0;
-  border-bottom: 0;
+  flex: 0 0 auto;
 }
 
 .settings-theme-list {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(var(--theme-picker-card-width), 1fr));
   align-items: start;
-  flex: 1 1 auto;
   gap: var(--theme-picker-card-gap);
   min-height: 0;
-  overflow-y: auto;
+  overflow: visible;
   padding: 2px 2px 8px;
   scrollbar-color: rgba(148, 163, 184, 0.5) transparent;
   scrollbar-width: thin;
@@ -1452,6 +1495,426 @@ body.split-resize-active * {
   border-radius: 999px;
   background: rgba(148, 163, 184, 0.52);
   background-clip: padding-box;
+}
+
+[data-settings-panel="theme"],
+.settings-theme-list {
+  scrollbar-width: none;
+}
+
+[data-settings-panel="theme"].is-scrolling,
+.settings-theme-list.is-scrolling {
+  scrollbar-color: rgba(148, 163, 184, 0.5) transparent;
+  scrollbar-width: thin;
+}
+
+[data-settings-panel="theme"]::-webkit-scrollbar,
+.settings-theme-list::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+[data-settings-panel="theme"].is-scrolling::-webkit-scrollbar,
+.settings-theme-list.is-scrolling::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+[data-settings-panel="mobile-shortcuts"] {
+  align-self: stretch;
+  width: 100%;
+  scrollbar-width: none;
+}
+
+[data-settings-panel="mobile-shortcuts"] > .settings-section {
+  width: 80%;
+  align-self: center;
+  box-sizing: border-box;
+}
+
+[data-settings-panel="mobile-shortcuts"].is-scrolling {
+  scrollbar-color: rgba(148, 163, 184, 0.5) transparent;
+  scrollbar-width: thin;
+}
+
+[data-settings-panel="mobile-shortcuts"]::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+[data-settings-panel="mobile-shortcuts"].is-scrolling::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+[data-settings-panel="mobile-shortcuts"]::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+[data-settings-panel="mobile-shortcuts"]::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.52);
+  background-clip: padding-box;
+}
+
+.settings-mobile-shortcuts-section {
+  min-height: 0;
+  flex: 0 0 auto;
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.settings-mobile-shortcut-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 46px;
+  padding: 8px;
+  border: 1px dashed var(--panel-border);
+  border-radius: 8px;
+  background: var(--panel-subtle-bg);
+  box-sizing: border-box;
+}
+
+.settings-mobile-shortcut-empty {
+  min-height: 28px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 28px;
+  text-align: center;
+}
+
+.settings-mobile-shortcut-item {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 6px;
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  background: var(--panel-bg);
+  color: var(--text);
+  box-sizing: border-box;
+}
+
+.settings-mobile-shortcut-item.is-dragging {
+  border-color: var(--accent);
+  box-shadow: 0 12px 28px var(--panel-shadow);
+  opacity: 0.96;
+}
+
+.settings-mobile-shortcut-placeholder {
+  min-height: 44px;
+  border: 1px dashed var(--accent);
+  border-radius: 7px;
+  background: var(--panel-hover-bg);
+  box-sizing: border-box;
+}
+
+.settings-mobile-shortcut-divider {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.settings-mobile-shortcut-divider::before,
+.settings-mobile-shortcut-divider::after {
+  content: "";
+  height: 1px;
+  background: var(--panel-border);
+}
+
+.settings-mobile-shortcut-divider span {
+  justify-self: center;
+}
+
+.settings-mobile-shortcut-drag {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  cursor: grab;
+  font-size: 18px;
+  line-height: 1;
+  touch-action: none;
+}
+
+.settings-mobile-shortcut-drag:active {
+  cursor: grabbing;
+}
+
+.settings-mobile-shortcut-main {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.settings-mobile-shortcut-name,
+.settings-mobile-shortcut-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-mobile-shortcut-name {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.settings-mobile-shortcut-summary {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-mobile-shortcut-edit {
+  display: inline-flex;
+  min-width: 44px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.settings-mobile-shortcut-edit:hover,
+.settings-mobile-shortcut-edit:focus-visible,
+.settings-mobile-shortcut-drag:hover,
+.settings-mobile-shortcut-drag:focus-visible {
+  border-color: var(--panel-border);
+  background: var(--panel-hover-bg);
+  outline: none;
+}
+
+.mobile-shortcut-editor {
+  position: fixed;
+  inset: 0;
+  z-index: 130;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  box-sizing: border-box;
+}
+
+.mobile-shortcut-editor[hidden] {
+  display: none;
+}
+
+.mobile-shortcut-editor-scrim {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgba(0, 0, 0, 0.48);
+  cursor: pointer;
+}
+
+.mobile-shortcut-editor-panel {
+  position: relative;
+  display: grid;
+  width: min(420px, calc(100vw - 36px));
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--panel-bg);
+  color: var(--text);
+  box-shadow: 0 24px 72px var(--panel-shadow);
+  box-sizing: border-box;
+}
+
+.mobile-shortcut-editor-panel h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.mobile-shortcut-editor-field {
+  display: grid;
+  gap: 6px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.mobile-shortcut-editor-field[hidden],
+.mobile-shortcut-editor-modifiers[hidden] {
+  display: none;
+}
+
+.mobile-shortcut-editor-type {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.mobile-shortcut-editor-type legend {
+  grid-column: 1 / -1;
+  margin: 0 0 4px;
+  padding: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.mobile-shortcut-type-card {
+  position: relative;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.mobile-shortcut-type-card > span {
+  display: flex;
+  height: 38px;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+  box-sizing: border-box;
+}
+
+.mobile-shortcut-type-card:hover > span,
+.mobile-shortcut-type-input:focus-visible + span {
+  border-color: rgba(148, 163, 184, 0.68);
+  background: var(--panel-hover-bg);
+}
+
+.mobile-shortcut-type-input:checked + span {
+  border-color: var(--accent);
+  background: var(--panel-subtle-bg);
+  color: var(--text);
+}
+
+.mobile-shortcut-type-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.mobile-shortcut-editor-field input,
+.mobile-shortcut-editor-field select {
+  width: 100%;
+  height: 34px;
+  min-width: 0;
+  padding: 0 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  background: var(--panel-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  box-sizing: border-box;
+}
+
+.mobile-shortcut-editor-field input:focus,
+.mobile-shortcut-editor-field select:focus {
+  border-color: rgba(148, 163, 184, 0.68);
+  outline: none;
+}
+
+.mobile-shortcut-editor-modifiers {
+  display: flex;
+  gap: 12px;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.mobile-shortcut-editor-modifiers legend {
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.mobile-shortcut-editor-modifiers label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.mobile-shortcut-editor-modifiers input[type="checkbox"] {
+  position: relative;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  appearance: none;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.mobile-shortcut-editor-modifiers input[type="checkbox"]:checked {
+  border-color: var(--accent);
+  background: transparent;
+}
+
+.mobile-shortcut-editor-modifiers input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid currentColor;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.mobile-shortcut-editor-modifiers input[type="checkbox"]:focus-visible {
+  border-color: var(--accent);
+  outline: 2px solid rgba(96, 165, 250, 0.32);
+  outline-offset: 2px;
+}
+
+.mobile-shortcut-editor-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.mobile-shortcut-editor-action-spacer {
+  flex: 1 1 auto;
+}
+
+body.is-mobile-shortcut-dragging {
+  cursor: grabbing;
+  user-select: none;
 }
 
 .theme-picker-option {
@@ -1871,7 +2334,7 @@ body.split-resize-active * {
 .dialog-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 100;
+  z-index: 170;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2160,6 +2623,15 @@ body.split-resize-active * {
     height: 2px;
   }
 
+  .settings-tab-panel {
+    align-self: stretch;
+    width: 100%;
+  }
+
+  [data-settings-panel="mobile-shortcuts"] > .settings-section {
+    width: 100%;
+  }
+
   .settings-number-row {
     align-items: stretch;
     flex-direction: column;
@@ -2168,6 +2640,21 @@ body.split-resize-active * {
   .settings-number-control {
     justify-content: flex-start;
     flex-wrap: wrap;
+  }
+
+  .settings-mobile-shortcut-item {
+    grid-template-columns: 32px minmax(0, 1fr) auto;
+  }
+
+  .mobile-shortcut-editor {
+    align-items: flex-end;
+    padding: 10px;
+  }
+
+  .mobile-shortcut-editor-panel {
+    width: 100%;
+    max-height: calc(100dvh - 20px);
+    overflow: auto;
   }
 
   .tab-overview-header {
@@ -2222,6 +2709,10 @@ body.split-resize-active * {
     inset: 0 0 calc(76px + var(--lzc-safe-area-inset-bottom)) 0;
   }
 
+  body.mobile-shortcuts-empty .app-shell {
+    inset: 0;
+  }
+
   .search-panel {
     top: 8px;
     right: 8px;
@@ -2248,6 +2739,10 @@ body.split-resize-active * {
     background: var(--terminal-bg);
     color: var(--terminal-fg);
     box-sizing: border-box;
+  }
+
+  .mobile-shortcuts.is-empty {
+    display: none;
   }
 
   body.mobile-action-sheet-open .mobile-shortcuts {

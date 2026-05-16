@@ -38,6 +38,29 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const settingsScrollbackInput = document.getElementById("settingsScrollbackInput");
   const settingsScrollbackResetButton = document.getElementById("settingsScrollbackResetButton");
   const settingsDesktopMouseClipboardToggle = document.getElementById("settingsDesktopMouseClipboardToggle");
+  const settingsMobileShortcutAddButton = document.getElementById("settingsMobileShortcutAddButton");
+  const settingsMobileShortcutResetButton = document.getElementById("settingsMobileShortcutResetButton");
+  const settingsMobileShortcutList = document.getElementById("settingsMobileShortcutList");
+  const mobileShortcutEditor = document.getElementById("mobileShortcutEditor");
+  const mobileShortcutEditorScrim = document.getElementById("mobileShortcutEditorScrim");
+  const mobileShortcutEditorPanel = document.getElementById("mobileShortcutEditorPanel");
+  const mobileShortcutEditorTitle = document.getElementById("mobileShortcutEditorTitle");
+  const mobileShortcutLabelInput = document.getElementById("mobileShortcutLabelInput");
+  const mobileShortcutTypeInputs = Array.from(document.querySelectorAll('input[name="mobileShortcutType"]'));
+  const mobileShortcutKeyField = document.getElementById("mobileShortcutKeyField");
+  const mobileShortcutKeySelect = document.getElementById("mobileShortcutKeySelect");
+  const mobileShortcutCustomKeyField = document.getElementById("mobileShortcutCustomKeyField");
+  const mobileShortcutCustomKeyInput = document.getElementById("mobileShortcutCustomKeyInput");
+  const mobileShortcutModifiersField = document.getElementById("mobileShortcutModifiersField");
+  const mobileShortcutCtrlInput = document.getElementById("mobileShortcutCtrlInput");
+  const mobileShortcutAltInput = document.getElementById("mobileShortcutAltInput");
+  const mobileShortcutShiftInput = document.getElementById("mobileShortcutShiftInput");
+  const mobileShortcutActionField = document.getElementById("mobileShortcutActionField");
+  const mobileShortcutActionSelect = document.getElementById("mobileShortcutActionSelect");
+  const mobileShortcutEditorCancel = document.getElementById("mobileShortcutEditorCancel");
+  const mobileShortcutEditorDelete = document.getElementById("mobileShortcutEditorDelete");
+  const settingsThemePanel = document.getElementById("settingsPanelTheme");
+  const settingsMobileShortcutsPanel = document.getElementById("settingsPanelMobileShortcuts");
   const settingsThemeList = document.getElementById("settingsThemeList");
   const settingsFeedback = document.getElementById("settingsFeedback");
   const settingsTabs = Array.from(document.querySelectorAll("[data-settings-tab]"));
@@ -114,7 +137,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const themeCardNameLineY = 40;
   const themeCardBackgroundAlpha = 0.8;
   const themePickerScrollbarMinThumbPx = 100;
-  const repeatableMobileShortcutIds = new Set(["arrow-up", "arrow-down", "arrow-left", "arrow-right"]);
   const contextPaneActions = new Set(["copy", "paste", "select-all", "search", "split-vertical", "split-horizontal", "move-pane-new-tab", "close-pane"]);
   const contextTabActions = new Set(["rename-tab", "move-tab-first", "move-tab-left", "move-tab-right", "move-tab-last", "close-other-tabs", "close-tab"]);
   const contextLinkActions = new Set(["open-link", "copy-link"]);
@@ -319,9 +341,16 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   let themePickerScrollbarDragging = false;
   let themePickerScrollbarPointerId = null;
   let themePickerScrollbarThumbPointerOffset = 0;
+  let settingsThemeScrollbarHideTimer = 0;
+  let settingsMobileShortcutsScrollbarHideTimer = 0;
   let settingsScrollbackSaveTimer = 0;
   let settingsScrollbackSaveRequestSeq = 0;
   let settingsDesktopMouseClipboardRequestSeq = 0;
+  let mobileShortcutsSaveRequestSeq = 0;
+  let mobileShortcutsSaveVersion = 0;
+  let mobileShortcutsPersistChain = Promise.resolve();
+  let mobileShortcutEditorState = null;
+  let mobileShortcutDragState = null;
   const searchState = { open: false, query: "", matches: [], index: -1, sessionId: "" };
   const mobileSticky = { ctrl: false, alt: false, shift: false };
   let touchShortcutFeedbackEnabled = loadTouchShortcutFeedbackEnabled();
@@ -357,7 +386,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     [".", ">"],
     ["/", "?"],
   ]);
-  const mobileShortcutRowsConfig = [
+  const defaultMobileShortcutRowsConfig = [
     [
       { id: "sticky-ctrl", label: "Ctrl+", ariaLabel: "Sticky Control", action: "sticky_ctrl", kind: "modifier" },
       { id: "sticky-alt", label: "Alt+", ariaLabel: "Sticky Alt", action: "sticky_alt", kind: "modifier" },
@@ -389,6 +418,34 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       { id: "end", label: "End", ariaLabel: "End", data: "\x1b[F", inputKey: "end" },
       { id: "touch-feedback", label: "Shock On", ariaLabel: "Shock On", action: "toggle_touch_feedback", kind: "feedback" },
     ],
+  ];
+  let mobileShortcutRowsConfig = cloneMobileShortcutRows(defaultMobileShortcutRowsConfig);
+  let lastSavedMobileShortcutRowsConfig = cloneMobileShortcutRows(defaultMobileShortcutRowsConfig);
+  const mobileShortcutKeyOptions = [
+    { value: "custom", label: "普通字符" },
+    { value: "space", label: "Space" },
+    { value: "arrow_up", label: "方向键 ↑" },
+    { value: "arrow_down", label: "方向键 ↓" },
+    { value: "arrow_left", label: "方向键 ←" },
+    { value: "arrow_right", label: "方向键 →" },
+    { value: "tab", label: "Tab" },
+    { value: "enter", label: "Enter" },
+    { value: "escape", label: "Esc" },
+    { value: "home", label: "Home" },
+    { value: "end", label: "End" },
+  ];
+  const mobileShortcutActionOptions = [
+    { value: "sticky_ctrl", label: "Ctrl 粘滞键" },
+    { value: "sticky_alt", label: "Alt 粘滞键" },
+    { value: "sticky_shift", label: "Shift 粘滞键" },
+    { value: "copy", label: "复制" },
+    { value: "paste", label: "粘贴" },
+    { value: "page_up", label: "PageUp" },
+    { value: "page_down", label: "PageDown" },
+    { value: "zoom_in", label: "放大" },
+    { value: "zoom_out", label: "缩小" },
+    { value: "open_mobile_menu", label: "菜单" },
+    { value: "toggle_touch_feedback", label: "触感开关" },
   ];
   const urlPattern = /(?:https?:\/\/|mailto:|ftp:\/\/|ssh:\/\/|git:\/\/|tel:|magnet:|gemini:\/\/|gopher:\/\/|news:)[\w\-.~:\/?#@!$&*+,;=%]+/gi;
   const trailingURLPunctuation = /[.,;!?)\]]+$/;
@@ -427,6 +484,95 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const readResponseText = async (response, fallback) => {
     const text = await response.text().catch(() => "");
     return text.trim() || fallback;
+  };
+
+  function cloneMobileShortcutRows(rows) {
+    return [0, 1].map((rowIndex) => Array.isArray(rows?.[rowIndex])
+      ? rows[rowIndex].map((shortcut) => ({
+        ...shortcut,
+        inputKey: String(shortcut.inputKey || shortcut.input_key || "").trim(),
+        ariaLabel: String(shortcut.ariaLabel || shortcut.aria_label || "").trim(),
+        inputModifiers: {
+          ctrl: (shortcut.inputModifiers || shortcut.input_modifiers)?.ctrl === true,
+          shift: (shortcut.inputModifiers || shortcut.input_modifiers)?.shift === true,
+          alt: (shortcut.inputModifiers || shortcut.input_modifiers)?.alt === true,
+        },
+      }))
+      : []);
+  }
+
+  const toClientMobileShortcut = (shortcut) => {
+    const id = String(shortcut?.id || "").trim();
+    const label = String(shortcut?.label || "").trim();
+    const action = String(shortcut?.action || "").trim();
+    const inputKey = String(shortcut?.inputKey || shortcut?.input_key || "").trim();
+    if (!id || !label || (!action && !inputKey)) {
+      return null;
+    }
+    const next = {
+      id,
+      label,
+      ariaLabel: String(shortcut?.ariaLabel || shortcut?.aria_label || label).trim() || label,
+      kind: String(shortcut?.kind || "").trim(),
+      icon: String(shortcut?.icon || "").trim(),
+      inputModifiers: normalizeShortcutInputModifiers(shortcut?.inputModifiers || shortcut?.input_modifiers),
+    };
+    if (action) {
+      next.action = action;
+    } else {
+      next.inputKey = inputKey;
+      next.data = encodeMobileShortcutKeyInput(inputKey, next.inputModifiers);
+    }
+    return next;
+  };
+
+  const normalizeMobileShortcutRows = (rows) => {
+    if (!Array.isArray(rows) || rows.length !== 2) {
+      return cloneMobileShortcutRows(defaultMobileShortcutRowsConfig);
+    }
+    return [0, 1].map((rowIndex) => Array.isArray(rows[rowIndex])
+      ? rows[rowIndex].map(toClientMobileShortcut).filter(Boolean)
+      : []);
+  };
+
+  const serializeMobileShortcutRows = (rows) => cloneMobileShortcutRows(rows).map((row) => row.map((shortcut) => {
+    const item = {
+      id: String(shortcut.id || "").trim(),
+      label: String(shortcut.label || "").trim(),
+    };
+    const action = String(shortcut.action || "").trim();
+    const inputKey = String(shortcut.inputKey || "").trim();
+    if (action) {
+      item.action = action;
+    } else {
+      item.input_key = inputKey;
+      const modifiers = normalizeShortcutInputModifiers(shortcut.inputModifiers);
+      if (modifiers.ctrl || modifiers.alt || modifiers.shift) {
+        item.input_modifiers = modifiers;
+      }
+    }
+    const kind = String(shortcut.kind || "").trim();
+    const icon = String(shortcut.icon || "").trim();
+    const ariaLabel = String(shortcut.ariaLabel || "").trim();
+    if (kind) {
+      item.kind = kind;
+    }
+    if (icon) {
+      item.icon = icon;
+    }
+    if (ariaLabel && ariaLabel !== item.label) {
+      item.aria_label = ariaLabel;
+    }
+    return item;
+  }));
+
+  const applyMobileShortcutRows = (rows, { remember = false } = {}) => {
+    mobileShortcutRowsConfig = cloneMobileShortcutRows(rows);
+    if (remember) {
+      lastSavedMobileShortcutRowsConfig = cloneMobileShortcutRows(rows);
+    }
+    renderMobileShortcuts();
+    renderSettingsMobileShortcuts();
   };
 
   const normalizeUploadedFont = (font) => {
@@ -505,6 +651,18 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
   };
 
+  const setMobileShortcutSaving = (saving) => {
+    for (const button of [
+      settingsMobileShortcutAddButton,
+      settingsMobileShortcutResetButton,
+      ...Array.from(settingsMobileShortcutList?.querySelectorAll("button") || []),
+    ]) {
+      if (button) {
+        button.disabled = saving;
+      }
+    }
+  };
+
   const setSettingsDesktopMouseClipboardSaving = (saving) => {
     if (settingsDesktopMouseClipboardToggle) {
       settingsDesktopMouseClipboardToggle.disabled = saving;
@@ -519,6 +677,32 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     settingsFeedback.hidden = !text;
     settingsFeedback.textContent = text;
     settingsFeedback.dataset.tone = tone;
+  };
+
+  const hideSettingsThemeScrollbar = () => {
+    window.clearTimeout(settingsThemeScrollbarHideTimer);
+    settingsThemeScrollbarHideTimer = 0;
+    settingsThemePanel?.classList.remove("is-scrolling");
+    settingsThemeList?.classList.remove("is-scrolling");
+  };
+
+  const showSettingsThemeScrollbarDuringScroll = () => {
+    window.clearTimeout(settingsThemeScrollbarHideTimer);
+    settingsThemePanel?.classList.add("is-scrolling");
+    settingsThemeList?.classList.add("is-scrolling");
+    settingsThemeScrollbarHideTimer = window.setTimeout(hideSettingsThemeScrollbar, 800);
+  };
+
+  const hideSettingsMobileShortcutsScrollbar = () => {
+    window.clearTimeout(settingsMobileShortcutsScrollbarHideTimer);
+    settingsMobileShortcutsScrollbarHideTimer = 0;
+    settingsMobileShortcutsPanel?.classList.remove("is-scrolling");
+  };
+
+  const showSettingsMobileShortcutsScrollbarDuringScroll = () => {
+    window.clearTimeout(settingsMobileShortcutsScrollbarHideTimer);
+    settingsMobileShortcutsPanel?.classList.add("is-scrolling");
+    settingsMobileShortcutsScrollbarHideTimer = window.setTimeout(hideSettingsMobileShortcutsScrollbar, 800);
   };
 
   const setActiveSettingsTab = (tabID) => {
@@ -536,6 +720,13 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     if (nextTabID === "theme") {
       renderSettingsThemeList();
+    } else {
+      hideSettingsThemeScrollbar();
+    }
+    if (nextTabID === "mobile-shortcuts") {
+      renderSettingsMobileShortcuts();
+    } else {
+      hideSettingsMobileShortcutsScrollbar();
     }
   };
 
@@ -655,6 +846,88 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     syncFontEditControls();
   };
 
+  const shortcutAt = (rows, rowIndex, index) => rows?.[rowIndex]?.[index] || null;
+
+  const updateMobileShortcutRows = (mutator, { persist = true } = {}) => {
+    const nextRows = cloneMobileShortcutRows(mobileShortcutRowsConfig);
+    mutator(nextRows);
+    applyMobileShortcutRows(nextRows);
+    if (persist) {
+      saveMobileShortcuts(nextRows).catch((error) => setSettingsFeedback(error.message || "手机快捷键保存失败。", "error"));
+    }
+  };
+
+  const mobileShortcutByID = (id) => {
+    for (let rowIndex = 0; rowIndex < 2; rowIndex += 1) {
+      const index = (mobileShortcutRowsConfig[rowIndex] || []).findIndex((shortcut) => shortcut.id === id);
+      if (index >= 0) {
+        return { rowIndex, index, shortcut: mobileShortcutRowsConfig[rowIndex][index] };
+      }
+    }
+    return null;
+  };
+
+  const createMobileShortcutDivider = () => {
+    const divider = document.createElement("div");
+    divider.className = "settings-mobile-shortcut-divider";
+    divider.dataset.mobileShortcutDivider = "true";
+    const label = document.createElement("span");
+    label.textContent = "第二行";
+    divider.appendChild(label);
+    return divider;
+  };
+
+  const createSettingsMobileShortcutItem = (shortcut, rowIndex, index) => {
+    const item = document.createElement("div");
+    item.className = "settings-mobile-shortcut-item";
+    item.dataset.rowIndex = String(rowIndex);
+    item.dataset.shortcutIndex = String(index);
+    item.dataset.shortcutId = shortcut.id;
+    const drag = document.createElement("button");
+    drag.type = "button";
+    drag.className = "settings-mobile-shortcut-drag";
+    drag.textContent = "\u2630";
+    drag.setAttribute("aria-label", "拖拽排序");
+    drag.title = "拖拽排序";
+    const main = document.createElement("div");
+    main.className = "settings-mobile-shortcut-main";
+    const name = document.createElement("div");
+    name.className = "settings-mobile-shortcut-name";
+    name.textContent = shortcut.label;
+    const summary = document.createElement("div");
+    summary.className = "settings-mobile-shortcut-summary";
+    summary.textContent = describeMobileShortcut(shortcut);
+    main.append(name, summary);
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "settings-mobile-shortcut-edit";
+    edit.dataset.action = "edit";
+    edit.textContent = "编辑";
+    edit.setAttribute("aria-label", `编辑 ${shortcut.label}`);
+    item.append(drag, main, edit);
+    return item;
+  };
+
+  const renderSettingsMobileShortcuts = () => {
+    if (!settingsMobileShortcutList) {
+      return;
+    }
+    settingsMobileShortcutList.textContent = "";
+    (mobileShortcutRowsConfig[0] || []).forEach((shortcut, index) => {
+      settingsMobileShortcutList.appendChild(createSettingsMobileShortcutItem(shortcut, 0, index));
+    });
+    settingsMobileShortcutList.appendChild(createMobileShortcutDivider());
+    (mobileShortcutRowsConfig[1] || []).forEach((shortcut, index) => {
+      settingsMobileShortcutList.appendChild(createSettingsMobileShortcutItem(shortcut, 1, index));
+    });
+    if ((mobileShortcutRowsConfig[0] || []).length === 0 && (mobileShortcutRowsConfig[1] || []).length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "settings-mobile-shortcut-empty";
+      empty.textContent = "暂无快捷键";
+      settingsMobileShortcutList.appendChild(empty);
+    }
+  };
+
   const applySettingsState = async (state, { syncScrollbackInput = true } = {}) => {
     const fonts = Array.isArray(state?.fonts)
       ? state.fonts.map(normalizeUploadedFont).filter(Boolean)
@@ -664,6 +937,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     activeTerminalFontID = uploadedFonts.some((font) => font.id === nextFontID) ? nextFontID : "";
     terminalOptionsBase.scrollback = normalizeTerminalScrollback(state?.terminal_scrollback);
     desktopMouseClipboardEnabled = state?.desktop_mouse_clipboard_enabled !== false;
+    applyMobileShortcutRows(normalizeMobileShortcutRows(state?.mobile_shortcuts), { remember: true });
     if (syncScrollbackInput) {
       syncSettingsScrollbackInput();
     }
@@ -717,6 +991,348 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       throw new Error(await readResponseText(response, `鼠标复制粘贴设置保存失败 (${response.status})`));
     }
     await applySettingsState(await response.json(), { syncScrollbackInput: false });
+  };
+
+  const saveMobileShortcuts = (rows, { reset = false } = {}) => {
+    const nextRows = cloneMobileShortcutRows(rows);
+    const saveVersion = ++mobileShortcutsSaveVersion;
+    mobileShortcutsPersistChain = mobileShortcutsPersistChain.catch(() => {}).then(async () => {
+      const previousRows = cloneMobileShortcutRows(lastSavedMobileShortcutRowsConfig);
+      const requestSeq = ++mobileShortcutsSaveRequestSeq;
+      setMobileShortcutSaving(true);
+      try {
+        const response = await fetch("./api/settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mobile_shortcuts: reset ? null : serializeMobileShortcutRows(nextRows) }),
+        });
+        if (!response.ok) {
+          if (saveVersion === mobileShortcutsSaveVersion && requestSeq === mobileShortcutsSaveRequestSeq) {
+            applyMobileShortcutRows(previousRows, { remember: true });
+          }
+          throw new Error(await readResponseText(response, `手机快捷键保存失败 (${response.status})`));
+        }
+        if (saveVersion === mobileShortcutsSaveVersion && requestSeq === mobileShortcutsSaveRequestSeq) {
+          await applySettingsState(await response.json(), { syncScrollbackInput: false });
+        } else {
+          lastSavedMobileShortcutRowsConfig = cloneMobileShortcutRows(nextRows);
+          await response.text().catch(() => "");
+        }
+      } finally {
+        if (requestSeq === mobileShortcutsSaveRequestSeq) {
+          setMobileShortcutSaving(false);
+        }
+      }
+    });
+    return mobileShortcutsPersistChain;
+  };
+
+  const populateMobileShortcutEditorOptions = () => {
+    if (mobileShortcutKeySelect && mobileShortcutKeySelect.options.length === 0) {
+      for (const item of mobileShortcutKeyOptions) {
+        const option = document.createElement("option");
+        option.value = item.value;
+        option.textContent = item.label;
+        mobileShortcutKeySelect.appendChild(option);
+      }
+    }
+    if (mobileShortcutActionSelect && mobileShortcutActionSelect.options.length === 0) {
+      for (const item of mobileShortcutActionOptions) {
+        const option = document.createElement("option");
+        option.value = item.value;
+        option.textContent = item.label;
+        mobileShortcutActionSelect.appendChild(option);
+      }
+    }
+  };
+
+  const selectedMobileShortcutType = () => mobileShortcutTypeInputs.find((input) => input.checked)?.value || "input";
+
+  const setSelectedMobileShortcutType = (type) => {
+    const nextType = type === "action" ? "action" : "input";
+    for (const input of mobileShortcutTypeInputs) {
+      input.checked = input.value === nextType;
+    }
+  };
+
+  const syncMobileShortcutEditorFields = () => {
+    const type = selectedMobileShortcutType();
+    const isInput = type === "input";
+    if (mobileShortcutKeyField) {
+      mobileShortcutKeyField.hidden = !isInput;
+    }
+    if (mobileShortcutActionField) {
+      mobileShortcutActionField.hidden = isInput;
+    }
+    if (mobileShortcutModifiersField) {
+      mobileShortcutModifiersField.hidden = !isInput;
+    }
+    if (mobileShortcutCustomKeyField) {
+      mobileShortcutCustomKeyField.hidden = !isInput || mobileShortcutKeySelect?.value !== "custom";
+    }
+  };
+
+  const closeMobileShortcutEditor = () => {
+    mobileShortcutEditorState = null;
+    if (mobileShortcutEditor) {
+      mobileShortcutEditor.hidden = true;
+    }
+  };
+
+  const openMobileShortcutEditor = ({ rowIndex = 0, index = -1 } = {}) => {
+    populateMobileShortcutEditorOptions();
+    const existing = shortcutAt(mobileShortcutRowsConfig, rowIndex, index);
+    mobileShortcutEditorState = { rowIndex, index };
+    if (mobileShortcutEditorTitle) {
+      mobileShortcutEditorTitle.textContent = existing ? "编辑快捷键" : "新增快捷键";
+    }
+    if (mobileShortcutEditorDelete) {
+      mobileShortcutEditorDelete.hidden = !existing;
+    }
+    const label = existing?.label || "";
+    if (mobileShortcutLabelInput) {
+      mobileShortcutLabelInput.value = label;
+    }
+    const isAction = Boolean(existing?.action);
+    setSelectedMobileShortcutType(isAction ? "action" : "input");
+    if (mobileShortcutActionSelect) {
+      mobileShortcutActionSelect.value = existing?.action || "copy";
+    }
+    const inputKey = existing?.inputKey || "tab";
+    const isKnownKey = inputKey !== "" && mobileShortcutKeyOptions.some((item) => item.value === inputKey);
+    if (mobileShortcutKeySelect) {
+      mobileShortcutKeySelect.value = isKnownKey ? inputKey : "custom";
+    }
+    if (mobileShortcutCustomKeyInput) {
+      mobileShortcutCustomKeyInput.value = isKnownKey ? "" : inputKey;
+    }
+    const modifiers = normalizeShortcutInputModifiers(existing?.inputModifiers);
+    if (mobileShortcutCtrlInput) {
+      mobileShortcutCtrlInput.checked = modifiers.ctrl;
+    }
+    if (mobileShortcutAltInput) {
+      mobileShortcutAltInput.checked = modifiers.alt;
+    }
+    if (mobileShortcutShiftInput) {
+      mobileShortcutShiftInput.checked = modifiers.shift;
+    }
+    syncMobileShortcutEditorFields();
+    if (mobileShortcutEditor) {
+      mobileShortcutEditor.hidden = false;
+      window.setTimeout(() => mobileShortcutLabelInput?.focus(), 0);
+    }
+  };
+
+  const readMobileShortcutEditorValue = () => {
+    const label = String(mobileShortcutLabelInput?.value || "").trim();
+    if (!label || Array.from(label).length > 16) {
+      throw new Error("快捷键名称必须是 1-16 个字符。");
+    }
+    if (serializeMobileShortcutRows(mobileShortcutRowsConfig).flat().length >= 64 && Number(mobileShortcutEditorState?.index ?? -1) < 0) {
+      throw new Error("手机快捷键最多 64 个。");
+    }
+    const type = selectedMobileShortcutType();
+    const id = shortcutAt(mobileShortcutRowsConfig, mobileShortcutEditorState?.rowIndex, mobileShortcutEditorState?.index)?.id
+      || `custom-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const shortcut = { id, label, ariaLabel: label };
+    if (type === "action") {
+      const action = String(mobileShortcutActionSelect?.value || "").trim();
+      if (!mobileShortcutActionOptions.some((item) => item.value === action)) {
+        throw new Error("请选择有效动作。");
+      }
+      shortcut.action = action;
+      if (action === "open_mobile_menu") {
+        shortcut.kind = "menu";
+      } else if (action === "toggle_touch_feedback") {
+        shortcut.kind = "feedback";
+      } else if (action.startsWith("sticky_") || action.startsWith("zoom_")) {
+        shortcut.kind = "modifier";
+      }
+      return shortcut;
+    }
+    let inputKey = String(mobileShortcutKeySelect?.value || "").trim();
+    if (inputKey === "custom") {
+      inputKey = Array.from(String(mobileShortcutCustomKeyInput?.value || ""))[0] || "";
+    }
+    if (!inputKey) {
+      throw new Error("请输入或选择按键。");
+    }
+    shortcut.inputKey = inputKey;
+    shortcut.inputModifiers = {
+      ctrl: mobileShortcutCtrlInput?.checked === true,
+      alt: mobileShortcutAltInput?.checked === true,
+      shift: mobileShortcutShiftInput?.checked === true,
+    };
+    if (["enter", "escape"].includes(inputKey)) {
+      shortcut.kind = "primary";
+    } else if (inputKey.startsWith("arrow_")) {
+      shortcut.kind = "nav";
+    } else if (inputKey.length === 1 && !/[A-Za-z0-9]/.test(inputKey)) {
+      shortcut.kind = "symbol";
+    }
+    shortcut.data = encodeMobileShortcutKeyInput(inputKey, shortcut.inputModifiers);
+    return shortcut;
+  };
+
+  const submitMobileShortcutEditor = () => {
+    let shortcut;
+    try {
+      shortcut = readMobileShortcutEditorValue();
+    } catch (error) {
+      setSettingsFeedback(error.message || "快捷键设置无效。", "error");
+      return;
+    }
+    const rowIndex = Math.max(0, Math.min(1, Number(mobileShortcutEditorState?.rowIndex || 0)));
+    const index = Number(mobileShortcutEditorState?.index ?? -1);
+    updateMobileShortcutRows((rows) => {
+      if (index >= 0 && rows[rowIndex]?.[index]) {
+        rows[rowIndex][index] = shortcut;
+      } else {
+        rows[rowIndex].push(shortcut);
+      }
+    });
+    closeMobileShortcutEditor();
+  };
+
+  const deleteMobileShortcut = async (rowIndex, index) => {
+    const shortcut = shortcutAt(mobileShortcutRowsConfig, rowIndex, index);
+    if (!shortcut) {
+      return false;
+    }
+    const confirmed = await confirmDialog(`删除快捷键「${shortcut.label}」？`, {
+      title: "删除快捷键",
+      okText: "删除",
+      cancelText: "取消",
+      danger: true,
+    });
+    if (!confirmed) {
+      return false;
+    }
+    updateMobileShortcutRows((rows) => {
+      rows[rowIndex].splice(index, 1);
+    });
+    return true;
+  };
+
+  const collectMobileShortcutRowsFromList = () => {
+    const rows = [[], []];
+    if (!settingsMobileShortcutList) {
+      return cloneMobileShortcutRows(mobileShortcutRowsConfig);
+    }
+    let rowIndex = 0;
+    for (const child of settingsMobileShortcutList.children) {
+      if (child.dataset?.mobileShortcutDivider === "true") {
+        rowIndex = 1;
+        continue;
+      }
+      if (!child.classList?.contains("settings-mobile-shortcut-item")) {
+        continue;
+      }
+      const found = mobileShortcutByID(child.dataset.shortcutId || "");
+      if (found?.shortcut) {
+        rows[rowIndex].push(found.shortcut);
+      }
+    }
+    return rows;
+  };
+
+  const cleanupMobileShortcutDrag = () => {
+    document.removeEventListener("pointermove", updateMobileShortcutDragTarget);
+    document.removeEventListener("pointerup", finishMobileShortcutDrag);
+    document.removeEventListener("pointercancel", cancelMobileShortcutDrag);
+    document.body.classList.remove("is-mobile-shortcut-dragging");
+  };
+
+  const startMobileShortcutDrag = (event, item) => {
+    if (!(event instanceof PointerEvent) || event.button !== 0) {
+      return;
+    }
+    if (!settingsMobileShortcutList || !item?.parentElement) {
+      return;
+    }
+    event.preventDefault();
+    const rect = item.getBoundingClientRect();
+    const placeholder = document.createElement("div");
+    placeholder.className = "settings-mobile-shortcut-placeholder";
+    placeholder.style.height = `${rect.height}px`;
+    item.parentElement.insertBefore(placeholder, item);
+    item.classList.add("is-dragging");
+    item.style.position = "fixed";
+    item.style.left = `${rect.left}px`;
+    item.style.top = `${rect.top}px`;
+    item.style.width = `${rect.width}px`;
+    item.style.zIndex = "140";
+    item.style.pointerEvents = "none";
+    document.body.appendChild(item);
+    document.body.classList.add("is-mobile-shortcut-dragging");
+    mobileShortcutDragState = {
+      pointerId: event.pointerId,
+      item,
+      placeholder,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+    };
+    document.addEventListener("pointermove", updateMobileShortcutDragTarget);
+    document.addEventListener("pointerup", finishMobileShortcutDrag);
+    document.addEventListener("pointercancel", cancelMobileShortcutDrag);
+  };
+
+  const updateMobileShortcutDragTarget = (event) => {
+    if (!mobileShortcutDragState || !(event instanceof PointerEvent)) {
+      return;
+    }
+    event.preventDefault();
+    const { item, placeholder, offsetX, offsetY } = mobileShortcutDragState;
+    item.style.left = `${event.clientX - offsetX}px`;
+    item.style.top = `${event.clientY - offsetY}px`;
+    if (!settingsMobileShortcutList || !placeholder) {
+      return;
+    }
+    const listRect = settingsMobileShortcutList.getBoundingClientRect();
+    const children = Array.from(settingsMobileShortcutList.children)
+      .filter((child) => child !== placeholder && !child.classList.contains("settings-mobile-shortcut-empty"));
+    if (event.clientY <= listRect.top) {
+      settingsMobileShortcutList.insertBefore(placeholder, children[0] || null);
+      return;
+    }
+    for (const child of children) {
+      const rect = child.getBoundingClientRect();
+      if (event.clientY < rect.top + rect.height / 2) {
+        settingsMobileShortcutList.insertBefore(placeholder, child);
+        return;
+      }
+    }
+    settingsMobileShortcutList.appendChild(placeholder);
+  };
+
+  const finishMobileShortcutDrag = (event) => {
+    if (!mobileShortcutDragState || !(event instanceof PointerEvent) || event.pointerId !== mobileShortcutDragState.pointerId) {
+      return;
+    }
+    const state = mobileShortcutDragState;
+    mobileShortcutDragState = null;
+    cleanupMobileShortcutDrag();
+    state.item.classList.remove("is-dragging");
+    state.item.removeAttribute("style");
+    state.placeholder.parentElement?.insertBefore(state.item, state.placeholder);
+    state.placeholder.remove();
+    const nextRows = collectMobileShortcutRowsFromList();
+    applyMobileShortcutRows(nextRows);
+    saveMobileShortcuts(nextRows).catch((error) => setSettingsFeedback(error.message || "手机快捷键保存失败。", "error"));
+  };
+
+  const cancelMobileShortcutDrag = () => {
+    if (!mobileShortcutDragState) {
+      return;
+    }
+    const state = mobileShortcutDragState;
+    mobileShortcutDragState = null;
+    cleanupMobileShortcutDrag();
+    state.item.classList.remove("is-dragging");
+    state.item.removeAttribute("style");
+    state.placeholder.parentElement?.insertBefore(state.item, state.placeholder);
+    state.placeholder.remove();
+    renderSettingsMobileShortcuts();
   };
 
   const saveTerminalScrollbackFromInput = () => {
@@ -829,7 +1445,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     setActiveSettingsTab(tabID);
     renderSettingsFonts();
     renderSettingsThemeList();
+    renderSettingsMobileShortcuts();
     syncSettingsScrollbackInput();
+    syncSettingsDesktopMouseClipboardToggle();
     syncSettingsDesktopMouseClipboardToggle();
     setSettingsFeedback("");
     if (settingsBackdrop) {
@@ -849,6 +1467,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
 
   const closeSettings = () => {
     const wasOpen = settingsBackdrop && !settingsBackdrop.hidden;
+    hideSettingsThemeScrollbar();
     if (settingsBackdrop) {
       settingsBackdrop.hidden = true;
     }
@@ -4041,6 +4660,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     return Array.from(upper).length === 1 ? upper : firstChar;
   };
 
+  const mobileShortcutInputKeyLabels = new Map(mobileShortcutKeyOptions.map((item) => [item.value, item.label]));
+  const mobileShortcutActionLabels = new Map(mobileShortcutActionOptions.map((item) => [item.value, item.label]));
+
   const applyStickyModifierInput = (value, { ctrl = false, shift = false, alt = false } = {}) => {
     const raw = String(value || "");
     if (!ctrl && !shift && !alt) {
@@ -4085,6 +4707,8 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     const normalizedKey = String(inputKey || "").trim();
     const normalizedModifiers = normalizeShortcutInputModifiers(modifiers);
     switch (normalizedKey) {
+      case "space":
+        return applyStickyModifierInput(" ", normalizedModifiers);
       case "arrow_up":
         return buildModifiedCsiFinalSequence("A", normalizedModifiers);
       case "arrow_down":
@@ -4143,13 +4767,29 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     const feedbackLabel = touchShortcutFeedbackEnabled ? "Shock On" : "Shock Off";
     for (const button of mobileShortcuts?.querySelectorAll('[data-mobile-action="toggle_touch_feedback"]') || []) {
-      button.textContent = feedbackLabel;
       button.classList.toggle("active", touchShortcutFeedbackEnabled);
       button.setAttribute("aria-pressed", touchShortcutFeedbackEnabled ? "true" : "false");
-      button.setAttribute("aria-label", feedbackLabel);
-      button.setAttribute("title", feedbackLabel);
+      button.setAttribute("aria-label", button.dataset.customLabel || feedbackLabel);
+      button.setAttribute("title", button.dataset.customLabel || feedbackLabel);
     }
     syncMobileMenuSelectionState();
+  };
+
+  const isMobileShortcutRepeatable = (shortcut) => ["arrow_up", "arrow_down", "arrow_left", "arrow_right"].includes(String(shortcut?.inputKey || ""));
+
+  const describeMobileShortcut = (shortcut) => {
+    if (shortcut?.action) {
+      return mobileShortcutActionLabels.get(shortcut.action) || shortcut.action;
+    }
+    const key = String(shortcut?.inputKey || "");
+    const keyLabel = key.length === 1 ? key : (mobileShortcutInputKeyLabels.get(key) || key);
+    const modifiers = normalizeShortcutInputModifiers(shortcut?.inputModifiers);
+    return [
+      modifiers.ctrl ? "Ctrl" : "",
+      modifiers.alt ? "Alt" : "",
+      modifiers.shift ? "Shift" : "",
+      keyLabel,
+    ].filter(Boolean).join("+");
   };
 
   const clearMobileSticky = () => {
@@ -4279,7 +4919,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
   };
 
-  const isRepeatableMobileShortcut = (shortcut) => repeatableMobileShortcutIds.has(String(shortcut?.id || ""));
+  const isRepeatableMobileShortcut = (shortcut) => isMobileShortcutRepeatable(shortcut);
 
   const bindMobileShortcutButton = (button, shortcut) => {
     let activePointerId = -1;
@@ -4416,6 +5056,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (!mobileShortcuts || mobileShortcutRows.length === 0) {
       return;
     }
+    const hasShortcuts = mobileShortcutRowsConfig.some((row) => Array.isArray(row) && row.length > 0);
+    mobileShortcuts.classList.toggle("is-empty", !hasShortcuts);
+    document.body.classList.toggle("mobile-shortcuts-empty", !hasShortcuts);
     mobileShortcutRows.forEach((row, rowIndex) => {
       row.textContent = "";
       for (const shortcut of mobileShortcutRowsConfig[rowIndex] || []) {
@@ -4437,6 +5080,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         }
         button.setAttribute("aria-label", shortcut.ariaLabel || shortcut.label);
         button.setAttribute("title", shortcut.ariaLabel || shortcut.label);
+        button.dataset.customLabel = shortcut.ariaLabel || shortcut.label;
         if (shortcut.action === "open_mobile_menu") {
           button.setAttribute("aria-haspopup", "dialog");
           button.setAttribute("aria-expanded", "false");
@@ -6531,6 +7175,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     applyTheme(option.dataset.theme);
   });
+  settingsThemePanel?.addEventListener("scroll", showSettingsThemeScrollbarDuringScroll, { passive: true });
+  settingsThemeList?.addEventListener("scroll", showSettingsThemeScrollbarDuringScroll, { passive: true });
+  settingsMobileShortcutsPanel?.addEventListener("scroll", showSettingsMobileShortcutsScrollbarDuringScroll, { passive: true });
   themePickerList?.addEventListener("scroll", scheduleThemePickerScrollbarSync, { passive: true });
   themePickerScrollbarSensor?.addEventListener("pointerenter", () => {
     setThemePickerScrollbarHovering(true);
@@ -6691,6 +7338,60 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         }
       });
   });
+  settingsMobileShortcutAddButton?.addEventListener("click", () => openMobileShortcutEditor({ rowIndex: 0, index: -1 }));
+  settingsMobileShortcutResetButton?.addEventListener("click", async () => {
+    const confirmed = await confirmDialog("恢复默认手机快捷键？当前自定义配置会被替换。", {
+      title: "恢复默认",
+      okText: "恢复",
+      cancelText: "取消",
+    });
+    if (!confirmed) {
+      return;
+    }
+    applyMobileShortcutRows(defaultMobileShortcutRowsConfig);
+    saveMobileShortcuts(defaultMobileShortcutRowsConfig, { reset: true })
+      .catch((error) => setSettingsFeedback(error.message || "手机快捷键恢复默认失败。", "error"));
+  });
+  settingsMobileShortcutList?.addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest(".settings-mobile-shortcut-edit") : null;
+    if (!button) {
+      return;
+    }
+    const item = button.closest(".settings-mobile-shortcut-item");
+    const rowIndex = Number(item?.dataset.rowIndex || 0);
+    const index = Number(item?.dataset.shortcutIndex || 0);
+    openMobileShortcutEditor({ rowIndex, index });
+  });
+  settingsMobileShortcutList?.addEventListener("pointerdown", (event) => {
+    const handle = event.target instanceof Element ? event.target.closest(".settings-mobile-shortcut-drag") : null;
+    const item = handle?.closest(".settings-mobile-shortcut-item");
+    if (item) {
+      startMobileShortcutDrag(event, item);
+    }
+  });
+  mobileShortcutEditorPanel?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitMobileShortcutEditor();
+  });
+  mobileShortcutEditorCancel?.addEventListener("click", closeMobileShortcutEditor);
+  mobileShortcutEditorDelete?.addEventListener("click", () => {
+    if (!mobileShortcutEditorState || Number(mobileShortcutEditorState.index ?? -1) < 0) {
+      return;
+    }
+    const { rowIndex, index } = mobileShortcutEditorState;
+    deleteMobileShortcut(rowIndex, index)
+      .then((deleted) => {
+        if (deleted) {
+          closeMobileShortcutEditor();
+        }
+      })
+      .catch((error) => setSettingsFeedback(error.message || "删除快捷键失败。", "error"));
+  });
+  mobileShortcutEditorScrim?.addEventListener("click", closeMobileShortcutEditor);
+  for (const input of mobileShortcutTypeInputs) {
+    input.addEventListener("change", syncMobileShortcutEditorFields);
+  }
+  mobileShortcutKeySelect?.addEventListener("change", syncMobileShortcutEditorFields);
 
   searchInput?.addEventListener("input", () => setSearchQuery(searchInput.value));
   searchInput?.addEventListener("keydown", (event) => {
@@ -6721,6 +7422,11 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
   });
   document.addEventListener("keydown", (event) => {
+    if (mobileShortcutEditor && !mobileShortcutEditor.hidden && event.key === "Escape") {
+      event.preventDefault();
+      closeMobileShortcutEditor();
+      return;
+    }
     if (dialogResolve && event.key === "Escape") {
       event.preventDefault();
       closeDialog(dialogBackdrop?.dataset.mode === "prompt" ? null : false);
