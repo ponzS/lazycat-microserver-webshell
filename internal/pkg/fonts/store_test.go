@@ -207,6 +207,9 @@ func TestStoreListsSelectsServesAndDeletesBundledFonts(t *testing.T) {
 	if len(state.Fonts) != 3 {
 		t.Fatalf("bundled font count = %d, want 3: %+v", len(state.Fonts), state.Fonts)
 	}
+	if state.TerminalFontID != DefaultTerminalFontID {
+		t.Fatalf("default TerminalFontID = %q, want Hack %q", state.TerminalFontID, DefaultTerminalFontID)
+	}
 	for index, want := range []string{"Source Code Pro", "Fira Code", "Hack"} {
 		if state.Fonts[index].Label != want {
 			t.Fatalf("font[%d].Label = %q, want %q", index, state.Fonts[index].Label, want)
@@ -260,6 +263,31 @@ func TestStoreListsSelectsServesAndDeletesBundledFonts(t *testing.T) {
 	}
 	if err := store.SaveSelection(selectedID); !errors.Is(err, ErrBadRequest) {
 		t.Fatalf("SaveSelection(deleted bundled) error = %v, want ErrBadRequest", err)
+	}
+}
+
+func TestStoreExplicitSystemDefaultOverridesDefaultHack(t *testing.T) {
+	bundledDir := t.TempDir()
+	writeBundledFont(t, bundledDir, "Hack-Regular.woff2", "hack")
+	store := Store{Dir: t.TempDir(), BundledDir: bundledDir}
+
+	state, err := store.State()
+	if err != nil {
+		t.Fatalf("State() error = %v", err)
+	}
+	if state.TerminalFontID != DefaultTerminalFontID {
+		t.Fatalf("default TerminalFontID = %q, want Hack %q", state.TerminalFontID, DefaultTerminalFontID)
+	}
+
+	if err := store.SaveSelection(""); err != nil {
+		t.Fatalf("SaveSelection(system default) error = %v", err)
+	}
+	state, err = store.State()
+	if err != nil {
+		t.Fatalf("State() after SaveSelection error = %v", err)
+	}
+	if state.TerminalFontID != "" {
+		t.Fatalf("TerminalFontID after explicit system default = %q, want empty", state.TerminalFontID)
 	}
 }
 

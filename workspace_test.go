@@ -393,6 +393,9 @@ func TestHandleSettingsServesBundledFonts(t *testing.T) {
 	if len(state.Fonts) != 3 {
 		t.Fatalf("bundled font count = %d, want 3: %+v", len(state.Fonts), state.Fonts)
 	}
+	if state.TerminalFontID != fonts.DefaultTerminalFontID {
+		t.Fatalf("default TerminalFontID = %q, want Hack %q", state.TerminalFontID, fonts.DefaultTerminalFontID)
+	}
 	if state.Fonts[0].Label != "Source Code Pro" || !state.Fonts[0].Builtin {
 		t.Fatalf("first bundled font = %+v, want Source Code Pro builtin", state.Fonts[0])
 	}

@@ -25,6 +25,7 @@ const (
 	DefaultTerminalScrollback = 5000
 	MinTerminalScrollback     = 100
 	MaxTerminalScrollback     = 100000
+	DefaultTerminalFontID     = "8a463de46a8fe098f88b5ae22239889eccce14767918d9d6a132d61e6635e3c2"
 )
 
 var (
@@ -49,6 +50,7 @@ type State struct {
 
 type Settings struct {
 	TerminalFontID               string              `json:"terminal_font_id"`
+	TerminalFontSystemDefault    bool                `json:"terminal_font_system_default,omitempty"`
 	TerminalScrollback           int                 `json:"terminal_scrollback"`
 	DesktopMouseClipboardEnabled *bool               `json:"desktop_mouse_clipboard_enabled,omitempty"`
 	MobileShortcuts              *MobileShortcutRows `json:"mobile_shortcuts,omitempty"`
@@ -266,6 +268,9 @@ func (s Store) State() (State, error) {
 	if selected != "" && !fontExists(fonts, selected) {
 		selected = ""
 	}
+	if selected == "" && !settings.TerminalFontSystemDefault && fontExists(fonts, DefaultTerminalFontID) {
+		selected = DefaultTerminalFontID
+	}
 	return State{
 		TerminalFontID:               selected,
 		TerminalSymbolFont:           symbolFont,
@@ -314,6 +319,7 @@ func (s Store) SaveSelection(id string) error {
 		return err
 	}
 	settings.TerminalFontID = id
+	settings.TerminalFontSystemDefault = id == ""
 	return s.SaveSettings(settings)
 }
 
@@ -461,6 +467,7 @@ func (s Store) Delete(id string) error {
 		settings.DeletedBuiltinFontIDs = append(settings.DeletedBuiltinFontIDs, id)
 		if settings.TerminalFontID == id {
 			settings.TerminalFontID = ""
+			settings.TerminalFontSystemDefault = true
 		}
 		return s.WriteSettings(settings)
 	}

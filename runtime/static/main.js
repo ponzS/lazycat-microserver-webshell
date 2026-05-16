@@ -28,6 +28,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const themePickerScrollbarTrack = document.getElementById("themePickerScrollbarTrack");
   const themePickerScrollbarThumb = document.getElementById("themePickerScrollbarThumb");
   const settingsBackdrop = document.getElementById("settingsBackdrop");
+  const settingsBack = document.getElementById("settingsBack");
   const settingsClose = document.getElementById("settingsClose");
   const settingsFontUploadButton = document.getElementById("settingsFontUploadButton");
   const settingsFontEditButton = document.getElementById("settingsFontEditButton");
@@ -7957,6 +7958,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     setThemePickerScrollbarHovering(true);
   });
 
+  settingsBack?.addEventListener("click", closeSettings);
   settingsClose?.addEventListener("click", closeSettings);
   settingsBackdrop?.addEventListener("click", (event) => {
     if (event.target === settingsBackdrop) {

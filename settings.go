@@ -131,6 +131,7 @@ func (s *pluginServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			if updateFont {
 				settings.TerminalFontID = strings.TrimSpace(payload.TerminalFontID.Value)
+				settings.TerminalFontSystemDefault = settings.TerminalFontID == ""
 			}
 			if payload.TerminalScrollback.Set && !payload.TerminalScrollback.Null {
 				settings.TerminalScrollback = payload.TerminalScrollback.Value
