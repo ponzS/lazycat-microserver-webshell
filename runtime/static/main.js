@@ -4838,9 +4838,97 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
   };
 
+  const installSelectionManagerStringDoubleClickPatch = (session) => {
+    const manager = session?.term?.selectionManager;
+    if (!manager || manager.webshellStringDoubleClickPatched) {
+      return;
+    }
+    manager.webshellStringDoubleClickPatched = true;
+    manager.webshellOriginalHasSelection = manager.hasSelection;
+    manager.webshellOriginalClearSelection = manager.clearSelection;
+    manager.hasSelection = function (...args) {
+      if (this.webshellForceSelection && this.selectionStart && this.selectionEnd) {
+        return true;
+      }
+      return this.webshellOriginalHasSelection.apply(this, args);
+    };
+    manager.clearSelection = function (...args) {
+      const result = this.webshellOriginalClearSelection.apply(this, args);
+      this.webshellForceSelection = false;
+      return result;
+    };
+    const canvas = session?.term?.canvas || session?.term?.renderer?.getCanvas?.();
+    if (!canvas) {
+      return;
+    }
+
+    const isStringCell = (cell) => {
+      if (!cell || cell.codepoint === 0) {
+        return false;
+      }
+      return /\S/.test(String.fromCodePoint(cell.codepoint));
+    };
+    const lineAtAbsoluteRow = (absoluteRow) => {
+      const scrollback = manager.wasmTerm?.getScrollbackLength?.() || 0;
+      return absoluteRow < scrollback
+        ? manager.wasmTerm?.getScrollbackLine?.(absoluteRow)
+        : manager.wasmTerm?.getLine?.(absoluteRow - scrollback);
+    };
+    const stringAtCell = (col, row) => {
+      const absoluteRow = manager.viewportRowToAbsolute?.(row);
+      if (typeof absoluteRow !== "number") {
+        return null;
+      }
+      const line = lineAtAbsoluteRow(absoluteRow);
+      if (!line || !isStringCell(line[col])) {
+        return null;
+      }
+      let startCol = col;
+      while (startCol > 0 && isStringCell(line[startCol - 1])) {
+        startCol -= 1;
+      }
+      let endCol = col;
+      while (endCol < line.length - 1 && isStringCell(line[endCol + 1])) {
+        endCol += 1;
+      }
+      return { startCol, endCol, absoluteRow };
+    };
+    const handleDoubleClick = (event) => {
+      if (event.button !== 0 || isMobileLayout() || session.closed) {
+        return;
+      }
+      const cell = manager.pixelToCell?.(event.offsetX, event.offsetY);
+      const stringRange = cell ? stringAtCell(cell.col, cell.row) : null;
+      if (!stringRange) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation?.();
+      session.selectAllBufferActive = false;
+      manager.markCurrentSelectionDirty?.();
+      manager.selectionStart = { col: stringRange.startCol, absoluteRow: stringRange.absoluteRow };
+      manager.selectionEnd = { col: stringRange.endCol, absoluteRow: stringRange.absoluteRow };
+      manager.isSelecting = false;
+      manager.webshellForceSelection = true;
+      manager.markCurrentSelectionDirty?.();
+      renderTerminalSelection(session);
+      emitTerminalSelectionChange(session);
+      if (desktopMouseClipboardEnabled) {
+        window.setTimeout(() => copyCurrentMouseSelection(session), 0);
+      }
+    };
+    canvas.addEventListener("dblclick", handleDoubleClick, { capture: true });
+    addSessionCleanup(session, () => canvas.removeEventListener("dblclick", handleDoubleClick, { capture: true }));
+  };
+
   const disableSelectionManagerAutoCopy = (session) => {
     const manager = session?.term?.selectionManager;
-    if (!manager || manager.webshellAutoCopyDisabled) {
+    if (!manager) {
+      return;
+    }
+    installSelectionManagerStringDoubleClickPatch(session);
+    if (manager.webshellAutoCopyDisabled) {
       return;
     }
     manager.webshellAutoCopyDisabled = true;
@@ -4905,16 +4993,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       }
     };
 
-    const handleDoubleClick = (event) => {
-      if (!desktopMouseClipboardEnabled || event.button !== 0 || isMobileLayout() || !isTerminalMouseTarget(event.target)) {
-        return;
-      }
-      session.selectAllBufferActive = false;
-      if (!session.closed) {
-        copyCurrentMouseSelection(session);
-      }
-    };
-
     const handleAuxClick = async (event) => {
       if (!desktopMouseClipboardEnabled || event.button !== 1 || !isTerminalMouseTarget(event.target)) {
         return;
@@ -4929,13 +5007,11 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     };
 
     shell.addEventListener("mousedown", handleMouseDown, { capture: true });
-    shell.addEventListener("dblclick", handleDoubleClick);
     shell.addEventListener("auxclick", handleAuxClick);
     document.addEventListener("mousemove", handleMouseMove);
     document.addEventListener("mouseup", handleMouseUp);
     addSessionCleanup(session, () => {
       shell.removeEventListener("mousedown", handleMouseDown, { capture: true });
-      shell.removeEventListener("dblclick", handleDoubleClick);
       shell.removeEventListener("auxclick", handleAuxClick);
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
