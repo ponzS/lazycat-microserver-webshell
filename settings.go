@@ -50,30 +50,53 @@ func (s *pluginServer) handleSettingsFonts(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseMultipartForm(fonts.MaxBytes + (1 << 20)); err != nil {
+	const maxFontUploadCount = 32
+	if err := r.ParseMultipartForm((fonts.MaxBytes * maxFontUploadCount) + (1 << 20)); err != nil {
 		http.Error(w, "invalid upload", http.StatusBadRequest)
 		return
 	}
-	file, header, err := r.FormFile("font")
-	if err != nil {
+	headers := r.MultipartForm.File["font"]
+	if len(headers) == 0 {
 		http.Error(w, "font file is required", http.StatusBadRequest)
 		return
 	}
-	defer file.Close()
+	if len(headers) > maxFontUploadCount {
+		http.Error(w, "too many font files", http.StatusBadRequest)
+		return
+	}
 
 	store := s.fontStore()
-	font, err := store.StoreUpload(header.Filename, header.Header.Get("Content-Type"), file)
-	if err != nil {
+	var selectedFontID string
+	for _, header := range headers {
+		file, err := header.Open()
+		if err != nil {
+			writeSettingsError(w, err)
+			return
+		}
+		font, err := store.StoreUpload(header.Filename, header.Header.Get("Content-Type"), file)
+		closeErr := file.Close()
+		if err != nil {
+			writeSettingsError(w, err)
+			return
+		}
+		if closeErr != nil {
+			writeSettingsError(w, closeErr)
+			return
+		}
+		selectedFontID = font.ID
+	}
+	if err := store.SaveSelection(selectedFontID); err != nil {
 		writeSettingsError(w, err)
 		return
 	}
-	if err := store.SaveSelection(font.ID); err != nil {
-		writeSettingsError(w, err)
+	state, err := store.State()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(font)
+	_ = json.NewEncoder(w).Encode(state)
 }
 
 func (s *pluginServer) handleSettingsFont(w http.ResponseWriter, r *http.Request) {

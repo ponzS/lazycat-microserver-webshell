@@ -22,9 +22,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const instanceSwitcherList = document.getElementById("instanceSwitcherList");
   const instanceSwitcherFeedback = document.getElementById("instanceSwitcherFeedback");
   const homeMenuButton = document.getElementById("homeMenuButton");
-  const themeMenuButton = document.getElementById("themeMenuButton");
   const settingsMenuButton = document.getElementById("settingsMenuButton");
-  const themePickerButton = document.getElementById("themePickerButton");
   const themePickerBackdrop = document.getElementById("themePickerBackdrop");
   const themePickerClose = document.getElementById("themePickerClose");
   const themePickerList = document.getElementById("themePickerList");
@@ -33,11 +31,13 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const themePickerScrollbarThumb = document.getElementById("themePickerScrollbarThumb");
   const settingsBackdrop = document.getElementById("settingsBackdrop");
   const settingsClose = document.getElementById("settingsClose");
-  const settingsFontSelect = document.getElementById("settingsFontSelect");
+  const settingsFontUploadButton = document.getElementById("settingsFontUploadButton");
+  const settingsFontEditButton = document.getElementById("settingsFontEditButton");
+  const settingsFontEditButtonHTML = settingsFontEditButton?.innerHTML || "";
+  const settingsFontDeleteSelectedButton = document.getElementById("settingsFontDeleteSelectedButton");
+  const settingsFontCards = document.getElementById("settingsFontCards");
   const settingsFontInput = document.getElementById("settingsFontInput");
-  const settingsFontFilename = document.getElementById("settingsFontFilename");
-  const settingsFontMeta = document.getElementById("settingsFontMeta");
-  const settingsFontList = document.getElementById("settingsFontList");
+  const settingsThemeList = document.getElementById("settingsThemeList");
   const settingsFeedback = document.getElementById("settingsFeedback");
   const settingsTabs = Array.from(document.querySelectorAll("[data-settings-tab]"));
   const settingsTabPanels = Array.from(document.querySelectorAll("[data-settings-panel]"));
@@ -290,6 +290,8 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   let activeTheme = themes.find((theme) => theme.id === window.localStorage.getItem(themeStorageKey)) || themes[0];
   let uploadedFonts = [];
   let activeTerminalFontID = "";
+  let fontEditMode = false;
+  const selectedFontDeleteIDs = new Set();
   const registeredFontFaces = new Map();
   let applyingWorkspaceState = false;
   let activityRefreshTimer = 0;
@@ -467,7 +469,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const setActiveSettingsTab = (tabID) => {
-    const nextTabID = String(tabID || "font-settings").trim() || "font-settings";
+    const requestedTabID = String(tabID || "terminal").trim() || "terminal";
+    const nextTabID = settingsTabs.some((tab) => tab.dataset.settingsTab === requestedTabID)
+      ? requestedTabID
+      : "terminal";
     for (const tab of settingsTabs) {
       const selected = tab.dataset.settingsTab === nextTabID;
       tab.setAttribute("aria-selected", selected ? "true" : "false");
@@ -475,6 +480,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     for (const panel of settingsTabPanels) {
       panel.hidden = panel.dataset.settingsPanel !== nextTabID;
+    }
+    if (nextTabID === "theme") {
+      renderSettingsThemeList();
     }
   };
 
@@ -518,65 +526,79 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
   };
 
-  const renderSettingsFonts = () => {
-    if (!settingsFontSelect) {
-      return;
+  const syncFontEditControls = () => {
+    if (settingsFontEditButton) {
+      settingsFontEditButton.disabled = !fontEditMode && uploadedFonts.length === 0;
+      settingsFontEditButton.classList.toggle("settings-icon-button", !fontEditMode);
+      settingsFontEditButton.classList.toggle("settings-text-button", fontEditMode);
+      settingsFontEditButton.setAttribute("aria-pressed", fontEditMode ? "true" : "false");
+      settingsFontEditButton.setAttribute("aria-label", fontEditMode ? "完成编辑" : "编辑字体");
+      settingsFontEditButton.title = fontEditMode ? "完成编辑" : "编辑字体";
+      settingsFontEditButton.innerHTML = fontEditMode ? "完成" : settingsFontEditButtonHTML;
     }
-    const selected = uploadedFonts.find((font) => font.id === activeTerminalFontID);
-    settingsFontSelect.textContent = "";
-    const defaultOption = document.createElement("option");
-    defaultOption.value = "";
-    defaultOption.textContent = "系统默认";
-    settingsFontSelect.appendChild(defaultOption);
-    for (const font of uploadedFonts) {
-      const option = document.createElement("option");
-      option.value = font.id;
-      option.textContent = font.label || font.filename || font.family;
-      settingsFontSelect.appendChild(option);
+    if (settingsFontUploadButton) {
+      settingsFontUploadButton.hidden = fontEditMode;
     }
-    settingsFontSelect.value = selected ? selected.id : "";
-    if (settingsFontMeta) {
-      const size = selected ? formatBytes(selected.size) : "";
-      settingsFontMeta.textContent = selected
-        ? [selected.filename, size].filter(Boolean).join(" · ")
-        : "当前使用系统默认字体。";
+    if (settingsFontDeleteSelectedButton) {
+      const count = selectedFontDeleteIDs.size;
+      settingsFontDeleteSelectedButton.hidden = !fontEditMode;
+      settingsFontDeleteSelectedButton.disabled = count === 0;
+      settingsFontDeleteSelectedButton.textContent = count > 0 ? `删除 ${count}` : "删除";
     }
-    renderSettingsFontList();
+    settingsFontCards?.classList.toggle("is-editing", fontEditMode);
   };
 
-  const renderSettingsFontList = () => {
-    if (!settingsFontList) {
+  const renderSettingsFonts = () => {
+    if (!settingsFontCards) {
       return;
     }
-    settingsFontList.textContent = "";
-    if (uploadedFonts.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "settings-font-empty";
-      empty.textContent = "还没有上传字体。";
-      settingsFontList.appendChild(empty);
-      return;
+    for (const id of [...selectedFontDeleteIDs]) {
+      if (!uploadedFonts.some((font) => font.id === id)) {
+        selectedFontDeleteIDs.delete(id);
+      }
     }
+    settingsFontCards.textContent = "";
+    const defaultCard = document.createElement("button");
+    defaultCard.type = "button";
+    defaultCard.className = "settings-font-card system";
+    defaultCard.dataset.fontId = "";
+    defaultCard.setAttribute("role", "option");
+    defaultCard.setAttribute("aria-selected", activeTerminalFontID ? "false" : "true");
+    defaultCard.setAttribute("aria-disabled", fontEditMode ? "true" : "false");
+    defaultCard.innerHTML = `
+      <span class="settings-font-card-check" aria-hidden="true"></span>
+      <span class="settings-font-card-title">系统默认</span>
+      <span class="settings-font-card-meta">内置终端字体</span>
+      <span class="settings-font-card-state">${activeTerminalFontID ? "" : "当前使用"}</span>
+    `;
+    settingsFontCards.appendChild(defaultCard);
     for (const font of uploadedFonts) {
-      const item = document.createElement("div");
-      item.className = "settings-font-item";
-      const body = document.createElement("div");
-      body.className = "settings-font-item-body";
-      const title = document.createElement("div");
-      title.className = "settings-font-item-name";
-      title.textContent = font.label || font.filename || font.family;
-      const meta = document.createElement("div");
-      meta.className = "settings-font-item-meta";
+      const selectedForDelete = selectedFontDeleteIDs.has(font.id);
+      const active = font.id === activeTerminalFontID;
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "settings-font-card";
+      card.dataset.fontId = font.id;
+      card.setAttribute("role", "option");
+      card.setAttribute("aria-selected", active ? "true" : "false");
+      card.setAttribute("aria-pressed", selectedForDelete ? "true" : "false");
       const size = formatBytes(font.size);
-      meta.textContent = [font.filename, size, font.id === activeTerminalFontID ? "当前使用" : ""].filter(Boolean).join(" · ");
-      body.append(title, meta);
-      const action = document.createElement("button");
-      action.className = "settings-secondary danger";
-      action.type = "button";
-      action.dataset.fontDelete = font.id;
-      action.textContent = "删除";
-      item.append(body, action);
-      settingsFontList.appendChild(item);
+      const title = document.createElement("span");
+      title.className = "settings-font-card-title";
+      title.textContent = font.label || font.filename || font.family;
+      const meta = document.createElement("span");
+      meta.className = "settings-font-card-meta";
+      meta.textContent = [font.filename, size].filter(Boolean).join(" · ");
+      const state = document.createElement("span");
+      state.className = "settings-font-card-state";
+      state.textContent = active ? "当前使用" : "";
+      const check = document.createElement("span");
+      check.className = "settings-font-card-check";
+      check.setAttribute("aria-hidden", "true");
+      card.append(check, title, meta, state);
+      settingsFontCards.appendChild(card);
     }
+    syncFontEditControls();
   };
 
   const applySettingsState = async (state) => {
@@ -611,9 +633,15 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     await applySettingsState(await response.json());
   };
 
-  const uploadTerminalFont = async (file) => {
+  const uploadTerminalFonts = async (files) => {
+    const selectedFiles = Array.from(files || []).filter(Boolean);
+    if (selectedFiles.length === 0) {
+      return;
+    }
     const form = new FormData();
-    form.append("font", file);
+    for (const file of selectedFiles) {
+      form.append("font", file);
+    }
     const response = await fetch("./api/settings/fonts", {
       method: "POST",
       body: form,
@@ -621,7 +649,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (!response.ok) {
       throw new Error(await readResponseText(response, `字体上传失败 (${response.status})`));
     }
-    await loadSettings();
+    await applySettingsState(await response.json());
   };
 
   const deleteFont = async (fontID) => {
@@ -647,18 +675,57 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     setSettingsFeedback("字体已删除。", "success");
   };
 
-  const openSettings = () => {
+  const deleteSelectedFonts = async () => {
+    const ids = [...selectedFontDeleteIDs].filter((id) => uploadedFonts.some((font) => font.id === id));
+    if (ids.length === 0) {
+      syncFontEditControls();
+      return;
+    }
+    const suffix = ids.includes(activeTerminalFontID) ? "\n删除当前字体后终端将恢复系统默认字体。" : "";
+    const confirmed = await confirmDialog(`删除选中的 ${ids.length} 个字体？${suffix}`, {
+      title: "批量删除字体",
+      okText: "删除",
+      cancelText: "取消",
+      danger: true,
+    });
+    if (!confirmed) {
+      return;
+    }
+    if (settingsFontDeleteSelectedButton) {
+      settingsFontDeleteSelectedButton.disabled = true;
+    }
+    await Promise.all(ids.map(async (id) => {
+      const response = await fetch(`./api/settings/fonts/${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error(await readResponseText(response, `字体删除失败 (${response.status})`));
+      }
+    }));
+    selectedFontDeleteIDs.clear();
+    await loadSettings();
+    syncFontEditControls();
+  };
+
+  const openSettings = (tabID = "terminal") => {
     closeContextMenu();
     closeThemePicker();
     closeInstanceSwitcher();
-    setActiveSettingsTab("font-settings");
+    setActiveSettingsTab(tabID);
     renderSettingsFonts();
+    renderSettingsThemeList();
     setSettingsFeedback("");
     if (settingsBackdrop) {
       settingsBackdrop.hidden = false;
       window.setTimeout(() => settingsTabs.find((tab) => tab.getAttribute("aria-selected") === "true")?.focus(), 0);
     }
     loadSettings().catch((error) => setSettingsFeedback(error.message || "设置加载失败。", "error"));
+  };
+
+  const openThemeSettings = () => {
+    if (isMobileLayout()) {
+      openThemePicker();
+      return;
+    }
+    openSettings("theme");
   };
 
   const closeSettings = () => {
@@ -1212,6 +1279,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     document.documentElement.style.setProperty("--panel-subtle-bg", themeRGBA(activeTheme.foreground, 0.08));
     document.documentElement.style.setProperty("--panel-input-bg", themeRGBA(activeTheme.foreground, 0.1));
     document.documentElement.style.setProperty("--modal-backdrop-bg", themeRGBA(activeTheme.background, 0.28, "#000000"));
+    document.documentElement.style.setProperty("--dialog-button-bg", themeRGBA(activeTheme.foreground, 0.14));
+    document.documentElement.style.setProperty("--dialog-button-hover-bg", themeRGBA(activeTheme.foreground, 0.22));
+    document.documentElement.style.setProperty("--dialog-button-border", themeRGBA(activeTheme.foreground, 0.28));
+    document.documentElement.style.setProperty("--dialog-button-text", activeTheme.foreground);
     document.documentElement.style.setProperty("--text", activeTheme.foreground);
     document.documentElement.style.setProperty("--muted", themeRGBA(activeTheme.foreground, 0.68));
     document.documentElement.style.setProperty("--theme-picker-scrollbar", themeRGBA(activeTheme.foreground, 0.3));
@@ -1395,26 +1466,26 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const redrawThemePickerOptions = () => {
-    if (!themePickerList) {
-      return;
-    }
-    const options = Array.from(themePickerList.querySelectorAll(".theme-picker-option"));
-    options.forEach((option) => {
-      const theme = themes.find((item) => item.id === option.dataset.theme);
-      const selected = theme?.id === activeTheme.id;
-      option.setAttribute("aria-selected", selected ? "true" : "false");
-      option.setAttribute("aria-pressed", selected ? "true" : "false");
-      drawThemePreviewCard(option.querySelector(".theme-picker-canvas"), theme, selected);
+    const lists = [themePickerList, settingsThemeList].filter(Boolean);
+    lists.forEach((list) => {
+      const options = Array.from(list.querySelectorAll(".theme-picker-option"));
+      options.forEach((option) => {
+        const theme = themes.find((item) => item.id === option.dataset.theme);
+        const selected = theme?.id === activeTheme.id;
+        option.setAttribute("aria-selected", selected ? "true" : "false");
+        option.setAttribute("aria-pressed", selected ? "true" : "false");
+        drawThemePreviewCard(option.querySelector(".theme-picker-canvas"), theme, selected);
+      });
     });
     scheduleThemePickerScrollbarSync();
   };
 
-  const renderThemePicker = () => {
-    if (!themePickerList) {
+  const renderThemeOptions = (list) => {
+    if (!list) {
       return;
     }
     measureThemeCardWidth();
-    themePickerList.textContent = "";
+    list.textContent = "";
     for (const theme of themes) {
       const option = document.createElement("button");
       option.type = "button";
@@ -1428,11 +1499,17 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       const canvas = document.createElement("canvas");
       canvas.className = "theme-picker-canvas";
       option.appendChild(canvas);
-      themePickerList.appendChild(option);
+      list.appendChild(option);
       drawThemePreviewCard(canvas, theme, selected);
     }
-    scheduleThemePickerScrollbarSync();
+    if (list === themePickerList) {
+      scheduleThemePickerScrollbarSync();
+    }
   };
+
+  const renderThemePicker = () => renderThemeOptions(themePickerList);
+
+  const renderSettingsThemeList = () => renderThemeOptions(settingsThemeList);
 
   const focusSelectedThemeOption = () => {
     themePickerList?.querySelector('.theme-picker-option[aria-selected="true"]')?.focus();
@@ -1545,6 +1622,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     window.localStorage.setItem(themeStorageKey, activeTheme.id);
     applyThemeDocumentState();
     renderThemePicker();
+    renderSettingsThemeList();
     for (const tab of tabs.values()) {
       for (const pane of tab.panes.values()) {
         applyThemeToSession(pane);
@@ -5953,7 +6031,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         closeTab(target.tabId);
         break;
       case "theme":
-        openThemePicker();
+        openThemeSettings();
         break;
     }
   };
@@ -6065,7 +6143,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         }
         return;
       case "theme":
-        openThemePicker();
+        openThemeSettings();
         return;
       case "switch_container":
         await openInstanceSwitcher();
@@ -6263,6 +6341,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     await loadThemeCatalog();
     applyThemeDocumentState();
     renderThemePicker();
+    renderSettingsThemeList();
     await loadSettings().catch((error) => showToast(error.message || "设置加载失败。"));
     await refreshInstances();
     await refreshWorkspace({ focus: true });
@@ -6311,12 +6390,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   homeMenuButton?.addEventListener("click", () => {
     navigateHome().catch((error) => showToast(error.message || "无法返回首页"));
   });
-  themeMenuButton?.addEventListener("click", () => {
-    closeInstanceSwitcher();
-    openThemePicker();
-  });
-  settingsMenuButton?.addEventListener("click", openSettings);
-  themePickerButton?.addEventListener("click", openThemePicker);
+  settingsMenuButton?.addEventListener("click", () => openSettings());
   themePickerClose?.addEventListener("click", closeThemePicker);
   themePickerBackdrop?.addEventListener("click", (event) => {
     if (event.target === themePickerBackdrop) {
@@ -6330,6 +6404,13 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   themePickerBackdrop?.addEventListener("touchend", resetThemePickerEdgeSwipe, { passive: true });
   themePickerBackdrop?.addEventListener("touchcancel", resetThemePickerEdgeSwipe, { passive: true });
   themePickerList?.addEventListener("click", (event) => {
+    const option = event.target.closest(".theme-picker-option");
+    if (!option) {
+      return;
+    }
+    applyTheme(option.dataset.theme);
+  });
+  settingsThemeList?.addEventListener("click", (event) => {
     const option = event.target.closest(".theme-picker-option");
     if (!option) {
       return;
@@ -6379,12 +6460,12 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   for (const tab of settingsTabs) {
     tab.addEventListener("click", () => setActiveSettingsTab(tab.dataset.settingsTab));
     tab.addEventListener("keydown", (event) => {
-      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+      if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
         return;
       }
       event.preventDefault();
       const currentIndex = Math.max(0, settingsTabs.indexOf(tab));
-      const offset = event.key === "ArrowRight" ? 1 : -1;
+      const offset = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : -1;
       const next = settingsTabs[(currentIndex + offset + settingsTabs.length) % settingsTabs.length];
       if (next) {
         setActiveSettingsTab(next.dataset.settingsTab);
@@ -6392,51 +6473,64 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       }
     });
   }
-  settingsFontSelect?.addEventListener("change", () => {
-    const fontID = settingsFontSelect.value || "";
-    settingsFontSelect.disabled = true;
+  settingsFontCards?.addEventListener("click", (event) => {
+    const card = event.target.closest(".settings-font-card");
+    if (!card) {
+      return;
+    }
+    const fontID = String(card.dataset.fontId || "");
+    if (fontEditMode) {
+      if (!fontID) {
+        return;
+      }
+      if (selectedFontDeleteIDs.has(fontID)) {
+        selectedFontDeleteIDs.delete(fontID);
+      } else {
+        selectedFontDeleteIDs.add(fontID);
+      }
+      renderSettingsFonts();
+      return;
+    }
     saveTerminalFontSelection(fontID)
-      .then(() => setSettingsFeedback(fontID ? "终端字体已更新。" : "已恢复系统默认字体。", "success"))
-      .catch((error) => setSettingsFeedback(error.message || "字体设置保存失败。", "error"))
-      .finally(() => {
-        settingsFontSelect.disabled = false;
-        renderSettingsFonts();
-      });
+      .catch((error) => setSettingsFeedback(error.message || "字体设置保存失败。", "error"));
+  });
+  settingsFontEditButton?.addEventListener("click", () => {
+    fontEditMode = !fontEditMode;
+    if (!fontEditMode) {
+      selectedFontDeleteIDs.clear();
+    }
+    renderSettingsFonts();
+  });
+  settingsFontDeleteSelectedButton?.addEventListener("click", () => {
+    deleteSelectedFonts()
+      .catch((error) => setSettingsFeedback(error.message || "字体删除失败。", "error"))
+      .finally(() => renderSettingsFonts());
+  });
+  settingsFontUploadButton?.addEventListener("click", () => {
+    if (fontEditMode || settingsFontInput?.disabled) {
+      return;
+    }
+    settingsFontInput?.click();
   });
   settingsFontInput?.addEventListener("change", () => {
-    const file = settingsFontInput.files?.[0];
-    if (settingsFontFilename) {
-      settingsFontFilename.textContent = file?.name || "未选择文件";
-    }
-    if (!file) {
+    const files = Array.from(settingsFontInput.files || []);
+    if (files.length === 0) {
       return;
     }
     settingsFontInput.disabled = true;
-    setSettingsFeedback("正在上传字体...", "info");
-    uploadTerminalFont(file)
+    if (settingsFontUploadButton) {
+      settingsFontUploadButton.disabled = true;
+    }
+    uploadTerminalFonts(files)
       .then(() => {
         settingsFontInput.value = "";
-        if (settingsFontFilename) {
-          settingsFontFilename.textContent = "未选择文件";
-        }
-        setSettingsFeedback("字体已上传并应用。", "success");
       })
       .catch((error) => setSettingsFeedback(error.message || "字体上传失败。", "error"))
       .finally(() => {
         settingsFontInput.disabled = false;
-      });
-  });
-  settingsFontList?.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-font-delete]");
-    if (!button) {
-      return;
-    }
-    button.disabled = true;
-    deleteFont(button.dataset.fontDelete)
-      .catch((error) => setSettingsFeedback(error.message || "字体删除失败。", "error"))
-      .finally(() => {
-        button.disabled = false;
-        renderSettingsFonts();
+        if (settingsFontUploadButton) {
+          settingsFontUploadButton.disabled = false;
+        }
       });
   });
 

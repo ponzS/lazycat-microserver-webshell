@@ -4,10 +4,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
 	"testing"
+
+	"lcmd-webshell/internal/pkg/fonts"
 )
 
 func TestBuildInstanceShellBootstrapScriptUsesConfiguredUser(t *testing.T) {
@@ -28,6 +33,49 @@ func TestBuildInstanceShellBootstrapScriptUsesConfiguredUser(t *testing.T) {
 	}
 	if containsAll(script, `su -s /bin/sh -c`) {
 		t.Fatalf("configured user login script should not use non-interactive su -c wrapper, got:\n%s", script)
+	}
+}
+
+func TestHandleSettingsFontsUploadsMultipleFonts(t *testing.T) {
+	server := &pluginServer{fontDir: t.TempDir()}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for _, item := range []struct {
+		filename string
+		data     string
+	}{
+		{filename: "First.woff2", data: "first-font-data"},
+		{filename: "Second.woff2", data: "second-font-data"},
+	} {
+		part, err := writer.CreateFormFile("font", item.filename)
+		if err != nil {
+			t.Fatalf("CreateFormFile(%q) error = %v", item.filename, err)
+		}
+		if _, err := io.WriteString(part, item.data); err != nil {
+			t.Fatalf("writing %q error = %v", item.filename, err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("multipart close error = %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/settings/fonts", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	recorder := httptest.NewRecorder()
+	server.handleSettingsFonts(recorder, request)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("handleSettingsFonts() status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var state fonts.State
+	if err := json.NewDecoder(recorder.Body).Decode(&state); err != nil {
+		t.Fatalf("decode response error = %v", err)
+	}
+	if len(state.Fonts) != 2 {
+		t.Fatalf("uploaded font count = %d, want 2: %+v", len(state.Fonts), state.Fonts)
+	}
+	if state.TerminalFontID == "" || state.TerminalFontID != state.Fonts[1].ID {
+		t.Fatalf("TerminalFontID = %q, want last uploaded font %q", state.TerminalFontID, state.Fonts[1].ID)
 	}
 }
 
