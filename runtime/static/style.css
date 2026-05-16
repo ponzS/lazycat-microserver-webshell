@@ -2906,6 +2906,7 @@ body.is-mobile-shortcut-dragging {
   .tabs-strip {
     align-items: center;
     gap: 6px;
+    justify-content: space-between;
   }
 
   .tabs {
@@ -2914,20 +2915,27 @@ body.is-mobile-shortcut-dragging {
 
   .mobile-active-tab-title {
     display: block;
+    position: absolute;
+    left: 50%;
+    z-index: 0;
+    width: min(58vw, 280px);
     min-width: 0;
     overflow: hidden;
-    flex: 1 1 auto;
     color: var(--chrome-text-strong);
     font-size: 13px;
     font-weight: 650;
     line-height: 42px;
     text-align: center;
     text-overflow: ellipsis;
+    transform: translateX(-50%);
     white-space: nowrap;
+    pointer-events: none;
   }
 
   .tab-overview-toggle,
   .tab-add {
+    position: relative;
+    z-index: 1;
     width: 34px;
     height: 34px;
     margin: 0;
@@ -2938,6 +2946,8 @@ body.is-mobile-shortcut-dragging {
   }
 
   .header-actions {
+    position: relative;
+    z-index: 1;
     flex: 0 0 auto;
   }
 
