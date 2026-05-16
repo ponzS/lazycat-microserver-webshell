@@ -650,6 +650,58 @@ func TestTerminalPaneFirstAttachAllowsGeneratedInputDuringReplay(t *testing.T) {
 	pane.detachClient(client)
 }
 
+func TestHistoryLimitBytesForTerminalScrollback(t *testing.T) {
+	if got, want := historyLimitBytesForTerminalScrollback(5000), 5000*averageHistoryBytesPerLine; got != want {
+		t.Fatalf("historyLimitBytesForTerminalScrollback(5000) = %d, want %d", got, want)
+	}
+	if got, want := historyLimitBytesForTerminalScrollback(fonts.MinTerminalScrollback), fonts.MinTerminalScrollback*averageHistoryBytesPerLine; got != want {
+		t.Fatalf("historyLimitBytesForTerminalScrollback(min) = %d, want %d", got, want)
+	}
+	if got, want := historyLimitBytesForTerminalScrollback(0), fonts.DefaultTerminalScrollback*averageHistoryBytesPerLine; got != want {
+		t.Fatalf("historyLimitBytesForTerminalScrollback(0) = %d, want default %d", got, want)
+	}
+}
+
+func TestTerminalPaneAppendOutputUsesDynamicHistoryLimit(t *testing.T) {
+	workspace := &terminalWorkspace{}
+	pane := &terminalPane{
+		workspace:         workspace,
+		clients:           make(map[*paneClient]struct{}),
+		historyLimitBytes: 5,
+	}
+
+	pane.appendOutput([]byte("hello"))
+	pane.appendOutput([]byte(" world"))
+
+	if got, want := string(pane.history), "world"; got != want {
+		t.Fatalf("pane history = %q, want %q", got, want)
+	}
+}
+
+func TestTerminalWorkspaceSetHistoryLimitTrimsExistingPanes(t *testing.T) {
+	workspace := &terminalWorkspace{
+		panes: map[string]*terminalPane{
+			"pane-1": {id: "pane-1", history: []byte("1234567890"), historyLimitBytes: 10},
+			"pane-2": {id: "pane-2", history: []byte("abcdef"), historyLimitBytes: 10},
+		},
+	}
+
+	workspace.setHistoryLimitBytesLocked(4)
+
+	if got := workspace.historyLimitBytes; got != 4 {
+		t.Fatalf("workspace historyLimitBytes = %d, want 4", got)
+	}
+	if got, want := string(workspace.panes["pane-1"].history), "7890"; got != want {
+		t.Fatalf("pane-1 history = %q, want %q", got, want)
+	}
+	if got, want := string(workspace.panes["pane-2"].history), "cdef"; got != want {
+		t.Fatalf("pane-2 history = %q, want %q", got, want)
+	}
+	if got := workspace.panes["pane-1"].historyLimitBytes; got != 4 {
+		t.Fatalf("pane-1 historyLimitBytes = %d, want 4", got)
+	}
+}
+
 func TestTerminalPaneRespondsToPrimaryDeviceAttributes(t *testing.T) {
 	pane, reader, cleanup := newTerminalQueryTestPane(t)
 	defer cleanup()

@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 
+	"lcmd-webshell/internal/pkg/fonts"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -33,14 +35,15 @@ const (
 )
 
 type agentRequest struct {
-	Type      string                  `json:"type"`
-	Selector  string                  `json:"selector,omitempty"`
-	Username  string                  `json:"username,omitempty"`
-	PaneID    string                  `json:"pane_id,omitempty"`
-	Cols      int                     `json:"cols,omitempty"`
-	Rows      int                     `json:"rows,omitempty"`
-	Action    *workspaceActionRequest `json:"action,omitempty"`
-	CloseIdle bool                    `json:"close_idle,omitempty"`
+	Type               string                  `json:"type"`
+	Selector           string                  `json:"selector,omitempty"`
+	Username           string                  `json:"username,omitempty"`
+	PaneID             string                  `json:"pane_id,omitempty"`
+	Cols               int                     `json:"cols,omitempty"`
+	Rows               int                     `json:"rows,omitempty"`
+	TerminalScrollback int                     `json:"terminal_scrollback,omitempty"`
+	Action             *workspaceActionRequest `json:"action,omitempty"`
+	CloseIdle          bool                    `json:"close_idle,omitempty"`
 }
 
 type agentResponse struct {
@@ -101,10 +104,11 @@ func runAgentCommand(args []string) error {
 		paneID := fs.String("pane", "", "pane id")
 		cols := fs.Int("cols", 0, "terminal columns")
 		rows := fs.Int("rows", 0, "terminal rows")
+		terminalScrollback := fs.Int("terminal-scrollback", fonts.DefaultTerminalScrollback, "terminal scrollback lines")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		return runAgentAttachClient(*socketPath, *selector, *paneID, *cols, *rows)
+		return runAgentAttachClient(*socketPath, *selector, *paneID, *cols, *rows, *terminalScrollback)
 	default:
 		return fmt.Errorf("unknown agent command %q", args[0])
 	}
@@ -198,15 +202,17 @@ func (d *agentDaemon) ensureWorkspaceLocked(request agentRequest) (*terminalWork
 	if username := strings.TrimSpace(request.Username); username != "" || d.username == "" {
 		d.username = username
 	}
+	historyLimitBytes := historyLimitBytesForTerminalScrollback(request.TerminalScrollback)
 	if d.workspace == nil {
 		workspace := &terminalWorkspace{
-			selector:   d.selector,
-			username:   d.username,
-			rootDir:    "/",
-			localPTY:   true,
-			panes:      make(map[string]*terminalPane),
-			nextTabID:  1,
-			nextPaneID: 1,
+			selector:          d.selector,
+			username:          d.username,
+			rootDir:           "/",
+			localPTY:          true,
+			historyLimitBytes: historyLimitBytes,
+			panes:             make(map[string]*terminalPane),
+			nextTabID:         1,
+			nextPaneID:        1,
 		}
 		if err := workspace.createTabLocked("", "", normalizeCols(request.Cols), normalizeRows(request.Rows)); err != nil {
 			return nil, err
@@ -219,6 +225,7 @@ func (d *agentDaemon) ensureWorkspaceLocked(request agentRequest) (*terminalWork
 	if d.workspace.username == "" || strings.TrimSpace(request.Username) != "" {
 		d.workspace.username = d.username
 	}
+	d.workspace.setHistoryLimitBytes(historyLimitBytes)
 	if len(d.workspace.tabs) == 0 {
 		if err := d.workspace.createTabLocked("", "", normalizeCols(request.Cols), normalizeRows(request.Rows)); err != nil {
 			return nil, err
@@ -384,7 +391,7 @@ func runAgentRequestClient(socketPath, encodedRequest string) error {
 	return err
 }
 
-func runAgentAttachClient(socketPath, selector, paneID string, cols, rows int) error {
+func runAgentAttachClient(socketPath, selector, paneID string, cols, rows, terminalScrollback int) error {
 	if strings.TrimSpace(paneID) == "" {
 		return errors.New("pane is required")
 	}
@@ -393,7 +400,14 @@ func runAgentAttachClient(socketPath, selector, paneID string, cols, rows int) e
 		return err
 	}
 	defer conn.Close()
-	request := agentRequest{Type: "attach", Selector: strings.TrimSpace(selector), PaneID: paneID, Cols: cols, Rows: rows}
+	request := agentRequest{
+		Type:               "attach",
+		Selector:           strings.TrimSpace(selector),
+		PaneID:             paneID,
+		Cols:               cols,
+		Rows:               rows,
+		TerminalScrollback: terminalScrollback,
+	}
 	data, err := json.Marshal(request)
 	if err != nil {
 		return err

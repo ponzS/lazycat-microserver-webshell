@@ -3081,18 +3081,21 @@ body.is-mobile-shortcut-dragging {
   }
 
   .settings-number-row {
-    align-items: center;
-    flex-direction: row;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
   }
 
   .settings-number-control {
-    margin-left: auto;
-    justify-content: flex-end;
+    width: 100%;
+    margin-left: 0;
+    justify-content: space-between;
     flex-wrap: nowrap;
   }
 
   .settings-number-input {
-    width: clamp(150px, 46vw, 196px);
+    width: auto;
+    flex: 1 1 auto;
   }
 
   .settings-mobile-shortcut-item {

@@ -62,11 +62,12 @@ var persistentAgentCache = struct {
 	username:  make(map[string]string),
 }
 
-func requestAgentWorkspaceState(ctx context.Context, selector string, cols, rows int) (workspaceState, error) {
+func requestAgentWorkspaceState(ctx context.Context, selector string, cols, rows, terminalScrollback int) (workspaceState, error) {
 	response, err := requestPersistentAgent(ctx, selector, agentRequest{
-		Type: "state",
-		Cols: cols,
-		Rows: rows,
+		Type:               "state",
+		Cols:               cols,
+		Rows:               rows,
+		TerminalScrollback: terminalScrollback,
 	})
 	if err != nil {
 		return workspaceState{}, err
@@ -77,12 +78,13 @@ func requestAgentWorkspaceState(ctx context.Context, selector string, cols, rows
 	return *response.State, nil
 }
 
-func requestAgentWorkspaceAction(ctx context.Context, selector string, cols, rows int, action workspaceActionRequest) (workspaceState, error) {
+func requestAgentWorkspaceAction(ctx context.Context, selector string, cols, rows, terminalScrollback int, action workspaceActionRequest) (workspaceState, error) {
 	response, err := requestPersistentAgent(ctx, selector, agentRequest{
-		Type:   "action",
-		Cols:   cols,
-		Rows:   rows,
-		Action: &action,
+		Type:               "action",
+		Cols:               cols,
+		Rows:               rows,
+		TerminalScrollback: terminalScrollback,
+		Action:             &action,
 	})
 	if err != nil {
 		return workspaceState{}, err
@@ -93,11 +95,12 @@ func requestAgentWorkspaceAction(ctx context.Context, selector string, cols, row
 	return *response.State, nil
 }
 
-func requestAgentWorkspaceActivity(ctx context.Context, selector string, cols, rows int) (workspaceActivityState, error) {
+func requestAgentWorkspaceActivity(ctx context.Context, selector string, cols, rows, terminalScrollback int) (workspaceActivityState, error) {
 	response, err := requestPersistentAgent(ctx, selector, agentRequest{
-		Type: "activity",
-		Cols: cols,
-		Rows: rows,
+		Type:               "activity",
+		Cols:               cols,
+		Rows:               rows,
+		TerminalScrollback: terminalScrollback,
 	})
 	if err != nil {
 		return workspaceActivityState{}, err
@@ -373,7 +376,7 @@ printf '%%s\n' %s
 	return nil
 }
 
-func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, selector, paneID string, cols, rows int) error {
+func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, selector, paneID string, cols, rows, terminalScrollback int) error {
 	if _, err := ensurePersistentAgent(r.Context(), selector); err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return nil
@@ -409,6 +412,8 @@ func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, s
 		strconv.Itoa(normalizeCols(cols)),
 		"--rows",
 		strconv.Itoa(normalizeRows(rows)),
+		"--terminal-scrollback",
+		strconv.Itoa(terminalScrollback),
 	)
 	stdout, err := command.StdoutPipe()
 	if err != nil {

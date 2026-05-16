@@ -112,6 +112,16 @@ func (s *pluginServer) fontStore() fonts.Store {
 	}
 }
 
+func (s *pluginServer) currentTerminalScrollback() int {
+	s.settingsMu.Lock()
+	settings, err := s.fontStore().ReadSettings()
+	s.settingsMu.Unlock()
+	if err != nil {
+		return fonts.DefaultTerminalScrollback
+	}
+	return settings.TerminalScrollback
+}
+
 func (s *pluginServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 	store := s.fontStore()
 	switch r.Method {

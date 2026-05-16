@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"lcmd-webshell/internal/pkg/fonts"
+
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 )
@@ -26,11 +28,11 @@ const (
 	defaultTerminalCols = 120
 	defaultTerminalRows = 32
 
-	paneHistoryLimit      = 16 << 20
-	workspaceHistoryLimit = 256 << 20
-	clientQueueLimit      = 8 << 20
-	historyReplayChunk    = 256 << 10
-	websocketReadLimit    = 10 << 20
+	averageHistoryBytesPerLine = 350
+	workspaceHistoryLimit      = 256 << 20
+	clientQueueLimit           = 8 << 20
+	historyReplayChunk         = 256 << 10
+	websocketReadLimit         = 10 << 20
 )
 
 type workspaceManager struct {
@@ -41,11 +43,12 @@ type workspaceManager struct {
 }
 
 type terminalWorkspace struct {
-	manager  *workspaceManager
-	selector string
-	username string
-	rootDir  string
-	localPTY bool
+	manager           *workspaceManager
+	selector          string
+	username          string
+	rootDir           string
+	localPTY          bool
+	historyLimitBytes int
 
 	mu         sync.Mutex
 	tabs       []*terminalTab
@@ -84,6 +87,7 @@ type terminalPane struct {
 	ptyFile              *os.File
 	clients              map[*paneClient]struct{}
 	history              []byte
+	historyLimitBytes    int
 	cols                 int
 	rows                 int
 	tty                  string
@@ -182,6 +186,13 @@ func newWorkspaceManager(rootDir string) *workspaceManager {
 	}
 }
 
+func historyLimitBytesForTerminalScrollback(scrollback int) int {
+	if err := fonts.ValidateTerminalScrollback(scrollback); err != nil {
+		scrollback = fonts.DefaultTerminalScrollback
+	}
+	return scrollback * averageHistoryBytesPerLine
+}
+
 func (m *workspaceManager) getOrCreate(ctx context.Context, selector string, cols, rows int) (*terminalWorkspace, error) {
 	if err := validateInstanceSelector(selector); err != nil {
 		return nil, err
@@ -204,13 +215,14 @@ func (m *workspaceManager) getOrCreate(ctx context.Context, selector string, col
 		return workspace, nil
 	}
 	workspace := &terminalWorkspace{
-		manager:    m,
-		selector:   selector,
-		username:   username,
-		rootDir:    m.rootDir,
-		panes:      make(map[string]*terminalPane),
-		nextTabID:  1,
-		nextPaneID: 1,
+		manager:           m,
+		selector:          selector,
+		username:          username,
+		rootDir:           m.rootDir,
+		historyLimitBytes: historyLimitBytesForTerminalScrollback(fonts.DefaultTerminalScrollback),
+		panes:             make(map[string]*terminalPane),
+		nextTabID:         1,
+		nextPaneID:        1,
 	}
 	if err := workspace.createTabLocked("", "", normalizeCols(cols), normalizeRows(rows)); err != nil {
 		return nil, err
@@ -243,7 +255,7 @@ func (s *pluginServer) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		state, err := requestAgentWorkspaceState(r.Context(), selector, cols, rows)
+		state, err := requestAgentWorkspaceState(r.Context(), selector, cols, rows, s.currentTerminalScrollback())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -256,7 +268,7 @@ func (s *pluginServer) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		state, err := requestAgentWorkspaceAction(r.Context(), selector, cols, rows, request)
+		state, err := requestAgentWorkspaceAction(r.Context(), selector, cols, rows, s.currentTerminalScrollback(), request)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -279,7 +291,7 @@ func (s *pluginServer) handleWorkspaceActivity(w http.ResponseWriter, r *http.Re
 		return
 	}
 	cols, rows := parseTerminalSize(r.URL.Query().Get("cols"), r.URL.Query().Get("rows"))
-	state, err := requestAgentWorkspaceActivity(r.Context(), selector, cols, rows)
+	state, err := requestAgentWorkspaceActivity(r.Context(), selector, cols, rows, s.currentTerminalScrollback())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -299,7 +311,7 @@ func (s *pluginServer) attachPersistentPane(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "pane is required", http.StatusBadRequest)
 		return nil
 	}
-	return s.attachAgentPane(w, r, selector, paneID, cols, rows)
+	return s.attachAgentPane(w, r, selector, paneID, cols, rows, s.currentTerminalScrollback())
 }
 
 func writeJSON(w http.ResponseWriter, payload any) {
@@ -914,6 +926,25 @@ func (w *terminalWorkspace) getPane(paneID string) *terminalPane {
 	return w.panes[paneID]
 }
 
+func (w *terminalWorkspace) setHistoryLimitBytes(limit int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.setHistoryLimitBytesLocked(limit)
+}
+
+func (w *terminalWorkspace) setHistoryLimitBytesLocked(limit int) {
+	if limit <= 0 {
+		limit = historyLimitBytesForTerminalScrollback(fonts.DefaultTerminalScrollback)
+	}
+	w.historyLimitBytes = limit
+	for _, pane := range w.panes {
+		pane.mu.Lock()
+		pane.historyLimitBytes = limit
+		pane.trimHistoryLocked()
+		pane.mu.Unlock()
+	}
+}
+
 func (w *terminalWorkspace) findTabLocked(tabID string) *terminalTab {
 	_, tab := w.findTabIndexLocked(tabID)
 	return tab
@@ -999,18 +1030,23 @@ func newTerminalPane(workspace *terminalWorkspace, paneID string, cols, rows int
 	if err != nil {
 		return nil, err
 	}
+	historyLimitBytes := workspace.historyLimitBytes
+	if historyLimitBytes <= 0 {
+		historyLimitBytes = historyLimitBytesForTerminalScrollback(fonts.DefaultTerminalScrollback)
+	}
 	pane := &terminalPane{
-		workspace: workspace,
-		id:        paneID,
-		selector:  workspace.selector,
-		rootDir:   workspace.rootDir,
-		cmd:       command,
-		ptyFile:   ptyFile,
-		clients:   make(map[*paneClient]struct{}),
-		cols:      normalizeCols(cols),
-		rows:      normalizeRows(rows),
-		cwd:       strings.TrimSpace(initialCWD),
-		done:      make(chan struct{}),
+		workspace:         workspace,
+		id:                paneID,
+		selector:          workspace.selector,
+		rootDir:           workspace.rootDir,
+		cmd:               command,
+		ptyFile:           ptyFile,
+		clients:           make(map[*paneClient]struct{}),
+		historyLimitBytes: historyLimitBytes,
+		cols:              normalizeCols(cols),
+		rows:              normalizeRows(rows),
+		cwd:               strings.TrimSpace(initialCWD),
+		done:              make(chan struct{}),
 	}
 	_ = pty.Setsize(ptyFile, &pty.Winsize{Cols: uint16(pane.cols), Rows: uint16(pane.rows)})
 	go pane.readLoop()
@@ -1157,9 +1193,7 @@ func (p *terminalPane) appendOutput(data []byte) {
 	p.mu.Lock()
 	if !p.exited {
 		p.history = append(p.history, copied...)
-		if len(p.history) > paneHistoryLimit {
-			p.history = append([]byte(nil), p.history[len(p.history)-paneHistoryLimit:]...)
-		}
+		p.trimHistoryLocked()
 		clients = make([]*paneClient, 0, len(p.clients))
 		for client := range p.clients {
 			clients = append(clients, client)
@@ -1171,6 +1205,17 @@ func (p *terminalPane) appendOutput(data []byte) {
 
 	for _, client := range clients {
 		client.enqueue(paneOutbound{messageType: websocket.BinaryMessage, payload: copied})
+	}
+}
+
+func (p *terminalPane) trimHistoryLocked() {
+	limit := p.historyLimitBytes
+	if limit <= 0 {
+		limit = historyLimitBytesForTerminalScrollback(fonts.DefaultTerminalScrollback)
+		p.historyLimitBytes = limit
+	}
+	if len(p.history) > limit {
+		p.history = append([]byte(nil), p.history[len(p.history)-limit:]...)
 	}
 }
 
