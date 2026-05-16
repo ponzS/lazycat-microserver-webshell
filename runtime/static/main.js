@@ -1,11 +1,7 @@
 import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
 
 (async () => {
-  const params = new URLSearchParams(window.location.search);
-  const structuredRendererEnabled = params.get("renderer") === "structured";
-  if (!structuredRendererEnabled) {
-    await initGhostty();
-  }
+  await initGhostty();
 
   const tabsEl = document.getElementById("tabs");
   const newTabButton = document.getElementById("newTab");
@@ -143,6 +139,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     throw new Error("webshell host not found");
   }
 
+  const params = new URLSearchParams(window.location.search);
   const tabs = new Map();
   const storagePrefix = "webshell";
   const themeStorageKey = `${storagePrefix}.theme`;
@@ -150,7 +147,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const fontSizeVersionStorageKey = `${storagePrefix}.fontSizeVersion`;
   const fontSizeStorageVersion = "2";
   const lastTabStorageKey = (name) => `${storagePrefix}.lastTab.${name || "default"}`;
-  const paneViewportStorageKey = (name, paneId) => `${storagePrefix}.paneViewport.${name || "default"}.${paneId || "pane"}`;
   const restartTabStorageKey = `${storagePrefix}.restartTab`;
   const touchShortcutFeedbackStorageKey = `${storagePrefix}.touchShortcutFeedback`;
   const defaultFontSize = 16;
@@ -463,7 +459,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       { id: "page-down", label: "PageDown", ariaLabel: "Page Down", action: "page_down" },
     ],
     [
-      { id: "mobile-menu", label: "Menu", ariaLabel: "Menu", action: "open_mobile_menu", kind: "menu" },
+      { id: "mobile-menu", label: "Menu", ariaLabel: "Menu", action: "open_mobile_menu", kind: "menu", icon: "menu" },
       { id: "esc", label: "Esc", ariaLabel: "Escape", data: "\x1b", inputKey: "escape", kind: "primary" },
       { id: "ctrl-e", label: "Ctrl+E", ariaLabel: "Control E", data: "\x05", inputKey: "e", inputModifiers: { ctrl: true } },
       { id: "ctrl-c", label: "Ctrl+C", ariaLabel: "Control C", data: "\x03", inputKey: "c", inputModifiers: { ctrl: true }, kind: "primary" },
@@ -516,21 +512,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     return nextTheme;
   };
   const terminalOptions = () => ({ ...terminalOptionsBase, fontSize: terminalFontSize, theme: cloneTheme(activeTheme) });
-
-  const measureStructuredTerminalMetrics = () => {
-    const canvas = measureStructuredTerminalMetrics.canvas || (measureStructuredTerminalMetrics.canvas = document.createElement("canvas"));
-    const context = canvas.getContext("2d");
-    if (!context) {
-      return { width: Math.max(8, terminalFontSize * 0.6), height: Math.max(14, terminalFontSize + 2), baseline: Math.ceil(terminalFontSize * 0.8) };
-    }
-    context.font = `${terminalFontSize}px ${terminalOptionsBase.fontFamily}`;
-    const sample = context.measureText("M");
-    const width = Math.max(1, Math.ceil(sample.width));
-    const ascent = sample.actualBoundingBoxAscent || terminalFontSize * 0.8;
-    const descent = sample.actualBoundingBoxDescent || terminalFontSize * 0.2;
-    const height = Math.max(1, Math.ceil(ascent + descent) + 2);
-    return { width, height, baseline: Math.ceil(ascent) + 1 };
-  };
 
   const selectStoredTheme = () => {
     activeTheme = themes.find((theme) => theme.id === window.localStorage.getItem(themeStorageKey)) || themes[0];
@@ -958,9 +939,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     terminalOptionsBase.fontFamily = buildTerminalFontFamily(selected);
     for (const tab of tabs.values()) {
       for (const pane of tab.panes.values()) {
-        if (pane.term?.options) {
-          pane.term.options.fontFamily = terminalOptionsBase.fontFamily;
-        }
+        pane.term.options.fontFamily = terminalOptionsBase.fontFamily;
         refreshTerminalMetrics(pane);
       }
     }
@@ -2582,14 +2561,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     return /\bMacintosh\b|\bMac OS X\b/i.test(String(navigator.userAgent || ""));
   };
-  const isIOSPlatform = () => {
-    const platform = String(navigator.userAgentData?.platform || navigator.platform || "");
-    const userAgent = String(navigator.userAgent || "");
-    if (/\b(iPhone|iPad|iPod)\b/i.test(platform) || /\b(iPhone|iPad|iPod)\b/i.test(userAgent)) {
-      return true;
-    }
-    return /\bMac/i.test(platform) && Number(navigator.maxTouchPoints || 0) > 1;
-  };
   const macShortcut = (mac, fallback) => isMacPlatform() ? mac : fallback;
   const shortcutDefinitions = {
     fullscreen: "F11",
@@ -3561,9 +3532,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       return;
     }
     const nextTheme = cloneTheme(activeTheme);
-    if (session.renderer !== "structured") {
-      installRendererThemeMapper(session);
-    }
+    installRendererThemeMapper(session);
     if (!session.baseTheme) {
       session.baseTheme = activeTheme;
     }
@@ -3575,8 +3544,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       session.term.renderer.setTheme(nextTheme);
       if (session.term.wasmTerm && typeof session.term.renderer.render === "function") {
         session.term.renderer.render(session.term.wasmTerm, true, session.term.viewportY || 0, session.term);
-      } else if (typeof session.term.renderer.render === "function") {
-        session.term.renderer.render();
       }
     }
     refreshTerminalMetrics(session);
@@ -4098,7 +4065,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       const tabIsActive = tab.id === activeTabId;
       for (const pane of tab.panes.values()) {
         const shouldBlink = tabIsActive && pane.id === tab.activePaneId;
-        if (pane.term?.options && pane.term.options.cursorBlink !== shouldBlink) {
+        if (pane.term && pane.term.options.cursorBlink !== shouldBlink) {
           pane.term.options.cursorBlink = shouldBlink;
         }
       }
@@ -4152,402 +4119,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     setActivePane(tab, paneId, { focus: true });
     return true;
-  };
-
-  const structuredRendererColor = (color, fallback) => {
-    const normalized = String(color || "").trim();
-    return /^#[0-9a-f]{6}$/i.test(normalized) ? normalized : fallback;
-  };
-
-  const restoreStructuredViewport = (session) => {
-    if (session?.renderer !== "structured" || !session.term) {
-      return;
-    }
-    try {
-      const value = Number(window.localStorage.getItem(paneViewportStorageKey(session.name, session.id)));
-      if (Number.isFinite(value) && value > 0) {
-        session.term.scrollToLine?.(value);
-      }
-    } catch (error) {
-    }
-  };
-
-  const persistStructuredViewport = (session) => {
-    if (session?.renderer !== "structured" || !session.term) {
-      return;
-    }
-    try {
-      const value = Math.max(0, Math.floor(Number(session.term.getViewportY?.() || session.term.viewportY || 0)));
-      window.localStorage.setItem(paneViewportStorageKey(session.name, session.id), String(value));
-    } catch (error) {
-    }
-  };
-
-  const createStructuredTerminal = (host) => {
-    const canvas = document.createElement("canvas");
-    canvas.className = "structured-terminal-canvas";
-    host.appendChild(canvas);
-    host.setAttribute("role", "textbox");
-    host.setAttribute("aria-label", "Terminal");
-    host.setAttribute("aria-multiline", "true");
-    const textarea = document.createElement("textarea");
-    textarea.setAttribute("autocorrect", "off");
-    textarea.setAttribute("autocapitalize", "off");
-    textarea.setAttribute("spellcheck", "false");
-    textarea.setAttribute("tabindex", "0");
-    textarea.setAttribute("aria-label", "Terminal input");
-    textarea.style.position = "absolute";
-    textarea.style.left = "0";
-    textarea.style.top = "0";
-    textarea.style.width = "1px";
-    textarea.style.height = "1px";
-    textarea.style.padding = "0";
-    textarea.style.border = "0";
-    textarea.style.margin = "0";
-    textarea.style.opacity = "0";
-    textarea.style.clipPath = "inset(50%)";
-    textarea.style.overflow = "hidden";
-    textarea.style.whiteSpace = "nowrap";
-    textarea.style.resize = "none";
-    host.appendChild(textarea);
-
-    const state = {
-      element: host,
-      canvas,
-      textarea,
-      options: { ...terminalOptionsBase, fontSize: terminalFontSize, theme: cloneTheme(activeTheme) },
-      cols: defaultTerminalCols,
-      rows: defaultTerminalRows,
-      viewportY: 0,
-      screen: [],
-      scrollback: [],
-      cursor: { x: 0, y: 0, visible: true },
-      rendererMode: "structured",
-      renderer: null,
-      disposed: false,
-      onDataHandlers: [],
-      onResizeHandlers: [],
-      onScrollHandlers: [],
-      onSelectionHandlers: [],
-      onTitleHandlers: [],
-      onBellHandlers: [],
-      customKeyEventHandlers: [],
-    };
-
-    const metrics = () => measureStructuredTerminalMetrics();
-
-    const emit = (handlers, payload) => {
-      for (const handler of handlers) {
-        try {
-          handler(payload);
-        } catch (error) {
-        }
-      }
-    };
-
-    const clampViewport = () => {
-      state.viewportY = Math.max(0, Math.min(state.scrollback.length, Math.floor(Number(state.viewportY) || 0)));
-    };
-
-    const cellAt = (line, col) => {
-      if (!line) {
-        return {};
-      }
-      if (typeof line.text === "string") {
-        return { text: line.text[col] || " " };
-      }
-      const cells = Array.isArray(line.cells) ? line.cells : [];
-      return cells[col] || {};
-    };
-
-    const materializeRows = () => {
-      clampViewport();
-      const combined = [...state.scrollback, ...state.screen];
-      const start = Math.max(0, combined.length - state.rows - state.viewportY);
-      const visible = combined.slice(start, start + state.rows);
-      while (visible.length < state.rows) {
-        visible.push({ cells: [] });
-      }
-      return visible;
-    };
-
-    const drawUnderline = (context, x, y, width, style, color) => {
-      if (!style) {
-        return;
-      }
-      context.strokeStyle = color;
-      context.lineWidth = Math.max(1, Math.floor(metrics().height * 0.08));
-      context.beginPath();
-      if (style === "double") {
-        context.moveTo(x, y - 2);
-        context.lineTo(x + width, y - 2);
-        context.moveTo(x, y + 1);
-        context.lineTo(x + width, y + 1);
-      } else {
-        context.moveTo(x, y);
-        context.lineTo(x + width, y);
-      }
-      context.stroke();
-    };
-
-    const draw = () => {
-      if (state.disposed) {
-        return;
-      }
-      const context = canvas.getContext("2d");
-      if (!context) {
-        return;
-      }
-      const item = metrics();
-      const pixelRatio = Math.max(1, window.devicePixelRatio || 1);
-      const width = Math.max(1, state.cols * item.width);
-      const height = Math.max(1, state.rows * item.height);
-      if (canvas.width !== Math.round(width * pixelRatio) || canvas.height !== Math.round(height * pixelRatio)) {
-        canvas.width = Math.round(width * pixelRatio);
-        canvas.height = Math.round(height * pixelRatio);
-        canvas.style.width = `${width}px`;
-        canvas.style.height = `${height}px`;
-      }
-      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-      const theme = state.options.theme || cloneTheme(activeTheme);
-      const background = structuredRendererColor(theme.background, activeTheme.background);
-      const foreground = structuredRendererColor(theme.foreground, activeTheme.foreground);
-      context.fillStyle = background;
-      context.fillRect(0, 0, width, height);
-      context.textBaseline = "alphabetic";
-      const rows = materializeRows();
-      for (let row = 0; row < state.rows; row += 1) {
-        const line = rows[row] || { cells: [] };
-        for (let col = 0; col < state.cols; col += 1) {
-          const cell = cellAt(line, col);
-          const cellWidth = Math.max(1, Number(cell.width) || 1);
-          const x = col * item.width;
-          const y = row * item.height;
-          const attrs = cell.attrs || {};
-          let fg = structuredRendererColor(cell.fg, foreground);
-          let bg = structuredRendererColor(cell.bg, background);
-          if (attrs.reverse) {
-            [fg, bg] = [bg, fg];
-          }
-          if (bg !== background) {
-            context.fillStyle = bg;
-            context.fillRect(x, y, item.width * cellWidth, item.height);
-          }
-          const text = cell.text || "";
-          if (text && text !== " " && !attrs.conceal && cellWidth > 0) {
-            context.font = `${attrs.italic ? "italic " : ""}${attrs.bold ? "bold " : ""}${terminalFontSize}px ${terminalOptionsBase.fontFamily}`;
-            context.fillStyle = fg;
-            context.fillText(text, x, y + item.baseline);
-            drawUnderline(context, x, y + item.baseline + 2, item.width * cellWidth, cell.underline || (attrs.strikethrough ? "single" : ""), fg);
-          }
-        }
-      }
-      if (state.cursor.visible !== false && state.viewportY === 0) {
-        const cursorX = Math.max(0, Math.min(state.cols - 1, Number(state.cursor.x) || 0));
-        const cursorY = Math.max(0, Math.min(state.rows - 1, Number(state.cursor.y) || 0));
-        context.fillStyle = theme.cursor || foreground;
-        context.globalAlpha = 0.78;
-        context.fillRect(cursorX * item.width, cursorY * item.height, item.width, item.height);
-        context.globalAlpha = 1;
-      }
-      positionTerminalInput({ term: state, composingIME: false });
-    };
-
-    const resize = (cols, rows) => {
-      const nextCols = Math.max(2, Math.floor(Number(cols) || defaultTerminalCols));
-      const nextRows = Math.max(1, Math.floor(Number(rows) || defaultTerminalRows));
-      if (state.cols === nextCols && state.rows === nextRows) {
-        draw();
-        return;
-      }
-      state.cols = nextCols;
-      state.rows = nextRows;
-      state.screen = Array.from({ length: nextRows }, (_, index) => state.screen[index] || { cells: [] });
-      emit(state.onResizeHandlers, { cols: nextCols, rows: nextRows });
-      draw();
-    };
-
-    const fitAddon = {
-      fit() {
-        const item = metrics();
-        const width = host.clientWidth || 0;
-        const height = host.clientHeight || 0;
-        if (width <= 0 || height <= 0) {
-          return;
-        }
-        resize(Math.max(2, Math.floor(width / item.width)), Math.max(1, Math.floor(height / item.height)));
-      },
-      observeResize() {
-        if (typeof ResizeObserver !== "function") {
-          return;
-        }
-        const observer = new ResizeObserver(() => fitAddon.fit());
-        observer.observe(host);
-        state._resizeObserver = observer;
-      },
-      dispose() {
-        state._resizeObserver?.disconnect?.();
-      },
-    };
-
-    state.renderer = {
-      getMetrics: metrics,
-      get charWidth() {
-        return metrics().width;
-      },
-      get charHeight() {
-        return metrics().height;
-      },
-      render() {
-        draw();
-      },
-      setTheme(theme) {
-        state.options.theme = theme;
-        draw();
-      },
-      setFontFamily(fontFamily) {
-        state.options.fontFamily = fontFamily;
-        draw();
-      },
-    };
-
-    state.focus = () => textarea.focus({ preventScroll: true });
-    state.onData = (handler) => state.onDataHandlers.push(handler);
-    state.onResize = (handler) => state.onResizeHandlers.push(handler);
-    state.onScroll = (handler) => state.onScrollHandlers.push(handler);
-    state.onSelectionChange = (handler) => state.onSelectionHandlers.push(handler);
-    state.onTitleChange = (handler) => state.onTitleHandlers.push(handler);
-    state.onBell = (handler) => state.onBellHandlers.push(handler);
-    state.loadAddon = () => {};
-    state.open = () => {};
-    state.attachCustomKeyEventHandler = (handler) => {
-      if (typeof handler !== "function") {
-        return { dispose() {} };
-      }
-      state.customKeyEventHandlers.push(handler);
-      return {
-        dispose() {
-          state.customKeyEventHandlers = state.customKeyEventHandlers.filter((item) => item !== handler);
-        },
-      };
-    };
-    state.hasSelection = () => false;
-    state.clearSelection = () => {};
-    state.selectLines = () => {};
-    state.select = () => {};
-    state.getSelection = () => "";
-    state.scrollToBottom = () => {
-      state.viewportY = 0;
-      emit(state.onScrollHandlers, state.viewportY);
-      draw();
-    };
-    state.scrollToLine = (value) => {
-      state.viewportY = Math.max(0, Math.min(state.scrollback.length, Math.floor(Number(value) || 0)));
-      emit(state.onScrollHandlers, state.viewportY);
-      draw();
-    };
-    state.scrollPages = (pages) => {
-      state.scrollLines(Number(pages || 0) * state.rows);
-    };
-    state.scrollLines = (amount) => {
-      state.viewportY = Math.max(0, Math.min(state.scrollback.length, state.viewportY - Math.floor(Number(amount) || 0)));
-      emit(state.onScrollHandlers, state.viewportY);
-      draw();
-    };
-    state.getViewportY = () => state.viewportY;
-    state.write = () => {};
-    state.input = (data, wasUserInput = false) => {
-      if (wasUserInput) {
-        emit(state.onDataHandlers, data);
-      }
-    };
-    state.paste = (text) => emit(state.onDataHandlers, String(text || ""));
-    state.dispose = () => {
-      state.disposed = true;
-      fitAddon.dispose();
-      canvas.remove();
-      textarea.remove();
-    };
-    state.applySnapshot = (snapshot) => {
-      state.cols = Number(snapshot?.cols) || state.cols;
-      state.rows = Number(snapshot?.rows) || state.rows;
-      state.scrollback = Array.isArray(snapshot?.scrollback) ? snapshot.scrollback : [];
-      state.screen = Array.isArray(snapshot?.screen) ? snapshot.screen : [];
-      state.cursor = snapshot?.cursor || state.cursor;
-      while (state.screen.length < state.rows) {
-        state.screen.push({ cells: [] });
-      }
-      clampViewport();
-      draw();
-    };
-    state.applyFrame = (frame) => {
-      const scrollback = frame?.scrollback_update || frame?.scrollbackUpdate;
-      if (scrollback) {
-        if (scrollback.reset) {
-          state.scrollback = Array.isArray(scrollback.lines) ? scrollback.lines : [];
-        } else {
-          const drop = Math.max(0, Math.floor(Number(scrollback.drop) || 0));
-          if (drop > 0) {
-            state.scrollback = state.scrollback.slice(Math.min(drop, state.scrollback.length));
-          }
-          if (Array.isArray(scrollback.append) && scrollback.append.length > 0) {
-            state.scrollback = state.scrollback.concat(scrollback.append);
-          }
-        }
-        const expectedLen = Math.max(0, Math.floor(Number(scrollback.len) || state.scrollback.length));
-        if (state.scrollback.length > expectedLen) {
-          state.scrollback = state.scrollback.slice(state.scrollback.length - expectedLen);
-        }
-        clampViewport();
-      }
-      if (Number(frame?.cols) > 0 && Number(frame?.rows) > 0 && (state.cols !== Number(frame.cols) || state.rows !== Number(frame.rows))) {
-        state.cols = Number(frame.cols);
-        state.rows = Number(frame.rows);
-        state.screen = Array.from({ length: state.rows }, (_, index) => state.screen[index] || { cells: [] });
-      }
-      for (const row of frame?.rows_data || []) {
-        const y = Number(row?.y);
-        if (Number.isInteger(y) && y >= 0 && y < state.rows) {
-          state.screen[y] = row.line || { cells: [] };
-        }
-      }
-      if (frame?.cursor) {
-        state.cursor = frame.cursor;
-      }
-      draw();
-    };
-    canvas.addEventListener("wheel", (event) => {
-      event.preventDefault();
-      const lineHeight = metrics().height || 18;
-      const lines = event.deltaMode === WheelEvent.DOM_DELTA_LINE
-        ? event.deltaY
-        : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
-          ? event.deltaY * state.rows
-          : event.deltaY / lineHeight;
-      state.scrollLines(-lines);
-    }, { passive: false });
-    host.addEventListener("keydown", (event) => {
-      if (!(event instanceof KeyboardEvent)) {
-        return;
-      }
-      for (const handler of state.customKeyEventHandlers) {
-        if (handler(event) === true) {
-          event.preventDefault();
-          event.stopPropagation();
-          return;
-        }
-      }
-      const data = encodeTerminalKeyboardEvent(event);
-      if (!data) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      emit(state.onDataHandlers, data);
-    }, { capture: true });
-
-    fitAddon.fit();
-    return { term: state, fitAddon };
   };
 
   // IME composition can make the contenteditable host scroll and clip the canvas.
@@ -4625,7 +4196,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     const term = session?.term;
     const textarea = term?.textarea;
     const renderer = term?.renderer;
-    const cursor = term?.wasmTerm?.getCursor?.() || term?.cursor;
+    const cursor = term?.wasmTerm?.getCursor?.();
     const metrics = renderer?.getMetrics?.();
     if (!textarea || !cursor || !metrics) {
       return;
@@ -5032,18 +4603,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const syncMobileVisualViewport = () => {
-    const useKeyboardInset = isIOSPlatform();
-    if (!useKeyboardInset) {
-      const insetChanged = mobileKeyboardInsetBottom !== 0;
-      mobileKeyboardInsetBottom = 0;
-      document.documentElement.style.removeProperty("--mobile-visual-viewport-height");
-      document.documentElement.style.setProperty("--mobile-keyboard-inset-bottom", "0px");
-      document.body.classList.remove("mobile-keyboard-visible");
-      if (insetChanged) {
-        scheduleMobileViewportResize();
-      }
-      return;
-    }
     const visualViewport = window.visualViewport;
     const nextHeight = Math.max(0, Math.round(visualViewport?.height || window.innerHeight || 0));
     const nextInset = visualViewport
@@ -5073,8 +4632,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     try {
       if (session.term.renderer && session.term.wasmTerm && typeof session.term.renderer.render === "function") {
         session.term.renderer.render(session.term.wasmTerm, true, session.term.viewportY || 0, session.term);
-      } else if (session.term.renderer && typeof session.term.renderer.render === "function") {
-        session.term.renderer.render();
       }
       resizePane(session);
     } catch (error) {
@@ -5088,9 +4645,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     window.localStorage.setItem(fontSizeStorageKey, String(terminalFontSize));
     for (const tab of tabs.values()) {
       for (const pane of tab.panes.values()) {
-        if (pane.term?.options) {
-          pane.term.options.fontSize = terminalFontSize;
-        }
+        pane.term.options.fontSize = terminalFontSize;
         refreshTerminalMetrics(pane);
       }
     }
@@ -5101,32 +4656,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const resetTerminalFontSize = () => setTerminalFontSize(defaultFontSize);
 
   const lineToTextAndMap = (line, { trimEnd = false } = {}) => {
-    if (typeof line?.text === "string") {
-      const text = trimEnd ? line.text.trimEnd() : line.text;
-      return {
-        text,
-        map: Array.from({ length: text.length }, (_, index) => index),
-      };
-    }
-    if (Array.isArray(line?.cells)) {
-      let text = "";
-      const map = [];
-      line.cells.forEach((cell, col) => {
-        if (Number(cell?.width) === 0) {
-          return;
-        }
-        const chars = cell?.text || " ";
-        for (let index = 0; index < chars.length; index += 1) {
-          map.push(col);
-        }
-        text += chars;
-      });
-      if (trimEnd) {
-        const trimmed = text.trimEnd();
-        return { text: trimmed, map: map.slice(0, trimmed.length) };
-      }
-      return { text, map };
-    }
     const length = Number(line?.length || 0);
     let text = "";
     const map = [];
@@ -5152,17 +4681,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const buildLogicalLines = (term) => {
-    if (term?.rendererMode === "structured" || Array.isArray(term?.screen)) {
-      return [...(term.scrollback || []), ...(term.screen || [])].map((line, row) => {
-        const { text, map } = lineToTextAndMap(line, { trimEnd: true });
-        return {
-          text,
-          positions: map.map((col) => ({ row, col })),
-          startRow: row,
-          endRow: row,
-        };
-      });
-    }
     const buffer = term?.buffer?.active;
     const length = Number(buffer?.length || 0);
     const scrollback = term?.wasmTerm?.getScrollbackLength?.() || Math.max(0, length - (term?.rows || 0));
@@ -5435,7 +4953,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const scrollToAbsoluteRow = (term, absoluteRow, preferredViewportRow = 2) => {
-    const scrollback = term.wasmTerm?.getScrollbackLength?.() || term.scrollback?.length || 0;
+    const scrollback = term.wasmTerm?.getScrollbackLength?.() || 0;
     const viewportY = Math.max(0, Math.min(scrollback, scrollback + preferredViewportRow - absoluteRow));
     term.scrollToLine?.(viewportY);
     return Math.max(0, Math.min(term.rows - 1, absoluteRow - scrollback + Math.floor(term.getViewportY?.() || term.viewportY || 0)));
@@ -5546,7 +5064,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (viewportRow < 0 || viewportRow >= term.rows) {
       return null;
     }
-    const scrollback = term.wasmTerm?.getScrollbackLength?.() || term.scrollback?.length || 0;
+    const scrollback = term.wasmTerm?.getScrollbackLength?.() || 0;
     const absoluteRow = scrollback + viewportRow - Math.floor(term.getViewportY?.() || term.viewportY || 0);
     const logical = logicalLineAt(term, absoluteRow);
     if (!logical) {
@@ -5582,7 +5100,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     const y = Math.max(rect.top, Math.min(clientY, rect.bottom - 1));
     const col = Math.max(0, Math.min(term.cols - 1, Math.floor((x - rect.left) / metrics.width)));
     const row = Math.max(0, Math.min(term.rows - 1, Math.floor((y - rect.top) / metrics.height)));
-    const scrollback = term.wasmTerm?.getScrollbackLength?.() || term.scrollback?.length || 0;
+    const scrollback = term.wasmTerm?.getScrollbackLength?.() || 0;
     const viewportY = Math.floor(term.getViewportY?.() || term.viewportY || 0);
     return { col, row, absoluteRow: scrollback + row - viewportY };
   };
@@ -5628,15 +5146,11 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
 
   const renderTerminalSelection = (session) => {
     const term = session?.term;
-    if (!term?.renderer) {
+    if (!term?.renderer || !term?.wasmTerm) {
       return;
     }
     try {
-      if (term.wasmTerm) {
-        term.renderer.render(term.wasmTerm, true, term.viewportY || 0, term);
-      } else {
-        term.renderer.render();
-      }
+      term.renderer.render(term.wasmTerm, true, term.viewportY || 0, term);
     } catch (error) {
     }
   };
@@ -6467,73 +5981,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     return `\x1b[1;${resolveTerminalModifierParameter(normalized)}${finalChar}`;
   };
 
-  const encodeTerminalKeyboardEvent = (event) => {
-    if (!(event instanceof KeyboardEvent) || event.isComposing || event.key === "Process") {
-      return "";
-    }
-    const modifiers = { ctrl: event.ctrlKey, shift: event.shiftKey, alt: event.altKey };
-    switch (event.key) {
-      case "ArrowUp":
-        return buildModifiedCsiFinalSequence("A", modifiers);
-      case "ArrowDown":
-        return buildModifiedCsiFinalSequence("B", modifiers);
-      case "ArrowRight":
-        return buildModifiedCsiFinalSequence("C", modifiers);
-      case "ArrowLeft":
-        return buildModifiedCsiFinalSequence("D", modifiers);
-      case "Home":
-        return buildModifiedCsiFinalSequence("H", modifiers);
-      case "End":
-        return buildModifiedCsiFinalSequence("F", modifiers);
-      case "PageUp":
-        return event.ctrlKey || event.altKey || event.shiftKey ? `\x1b[5;${resolveTerminalModifierParameter(modifiers)}~` : "\x1b[5~";
-      case "PageDown":
-        return event.ctrlKey || event.altKey || event.shiftKey ? `\x1b[6;${resolveTerminalModifierParameter(modifiers)}~` : "\x1b[6~";
-      case "Insert":
-        return event.ctrlKey || event.altKey || event.shiftKey ? `\x1b[2;${resolveTerminalModifierParameter(modifiers)}~` : "\x1b[2~";
-      case "Delete":
-        return event.ctrlKey || event.altKey || event.shiftKey ? `\x1b[3;${resolveTerminalModifierParameter(modifiers)}~` : "\x1b[3~";
-      case "Backspace":
-        return event.altKey ? "\x1b\x7f" : "\x7f";
-      case "Tab":
-        if (event.shiftKey) {
-          if (!event.ctrlKey && !event.altKey) {
-            return backtabSequence;
-          }
-          return `\x1b[1;${resolveTerminalModifierParameter(modifiers)}Z`;
-        }
-        return event.altKey ? applyStickyAltInput("\t") : "\t";
-      case "Enter":
-        return event.altKey ? "\x1b\r" : "\r";
-      case "Escape":
-        return event.altKey ? "\x1b\x1b" : "\x1b";
-      default:
-        break;
-    }
-    if (/^F\d{1,2}$/.test(event.key)) {
-      const number = Number(event.key.slice(1));
-      const base = {
-        1: "P", 2: "Q", 3: "R", 4: "S",
-      }[number];
-      if (base) {
-        return event.ctrlKey || event.altKey || event.shiftKey ? `\x1b[1;${resolveTerminalModifierParameter(modifiers)}${base}` : `\x1bO${base}`;
-      }
-      const code = {
-        5: 15, 6: 17, 7: 18, 8: 19, 9: 20, 10: 21, 11: 23, 12: 24,
-      }[number];
-      if (code) {
-        return event.ctrlKey || event.altKey || event.shiftKey ? `\x1b[${code};${resolveTerminalModifierParameter(modifiers)}~` : `\x1b[${code}~`;
-      }
-    }
-    if (event.metaKey) {
-      return "";
-    }
-    if (event.key && Array.from(event.key).length === 1) {
-      return applyStickyModifierInput(event.key, modifiers);
-    }
-    return "";
-  };
-
   const encodeMobileShortcutKeyInput = (inputKey, modifiers = {}) => {
     const normalizedKey = String(inputKey || "").trim();
     const normalizedModifiers = normalizeShortcutInputModifiers(modifiers);
@@ -6904,7 +6351,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         if (shortcut.kind) {
           button.dataset.kind = shortcut.kind;
         }
-        if (shortcut.icon && shortcut.action !== "open_mobile_menu") {
+        if (shortcut.icon) {
           button.appendChild(createSVGIcon(shortcut.icon, "mobile-shortcut-icon"));
         } else {
           button.textContent = shortcut.label;
@@ -7428,18 +6875,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (/[\r\n]/.test(data)) {
       scheduleActivityRefresh(450);
     }
-    if (session.renderer === "structured") {
-      if (session.socket?.readyState === WebSocket.OPEN) {
-        sendSessionInput(session, data, { immediate: /[\r\n\x03\x04]/.test(data) });
-      } else {
-        if (session.pendingInputSize + byteLength > maxPendingInput) {
-          return;
-        }
-        session.pendingInput.push(data);
-        session.pendingInputSize += byteLength;
-      }
-      return;
-    }
     if (session.replayComplete) {
       if (session.socket?.readyState === WebSocket.OPEN) {
         sendSessionInput(session, data, { immediate: /[\r\n\x03\x04]/.test(data) });
@@ -7483,28 +6918,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
   };
 
-  const applyStructuredSnapshot = (session, message) => {
-    if (!session?.term || session.closed || session.name !== activeName) {
-      return;
-    }
-    session.structuredReady = true;
-    session.replayComplete = true;
-    session.replayVerified = false;
-    session.allowGeneratedInputDuringReplay = false;
-    session.term.applySnapshot?.(message);
-    restoreStructuredViewport(session);
-    session.shellEl.dataset.connection = "open";
-    flushPendingInput(session);
-  };
-
-  const applyStructuredFrame = (session, message) => {
-    if (!session?.term || session.closed || session.name !== activeName) {
-      return;
-    }
-    session.term.applyFrame?.(message);
-    session.shellEl.dataset.connection = "open";
-  };
-
   const scheduleReconnect = (session) => {
     if (disposed || session.closed || session.reconnectPending || session.name !== activeName) {
       return;
@@ -7523,7 +6936,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       }
       connectSession(session).catch((error) => {
         if (!session.closed && session.name === activeName) {
-          session.term.write?.(`\r\n[webshell error] ${error.message}\r\n`);
+          session.term.write(`\r\n[webshell error] ${error.message}\r\n`);
         }
       });
     }, 240);
@@ -7547,12 +6960,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     socketUrl.searchParams.set("client_id", serverRevisionClientID);
     socketUrl.searchParams.set("cols", String(session.term.cols || 120));
     socketUrl.searchParams.set("rows", String(session.term.rows || 32));
-    if (session.renderer === "structured") {
-      socketUrl.searchParams.set("renderer", "structured");
-    }
     const currentSocket = new WebSocket(socketUrl.toString());
     session.socket = currentSocket;
-    session.replayComplete = session.renderer === "structured";
+    session.replayComplete = false;
     session.replayVerified = false;
     session.allowGeneratedInputDuringReplay = false;
     currentSocket.binaryType = "arraybuffer";
@@ -7614,20 +7024,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
           const message = JSON.parse(event.data);
           if (message && typeof message.type === "string") {
             switch (message.type) {
-              case "terminal-snapshot":
-                if (!validateReplayMessage(message)) {
-                  rejectMismatchedReplay(message);
-                  return;
-                }
-                applyStructuredSnapshot(session, message);
-                return;
-              case "terminal-frame":
-                if (!validateReplayMessage(message)) {
-                  rejectMismatchedReplay(message);
-                  return;
-                }
-                applyStructuredFrame(session, message);
-                return;
               case "history-replay-start":
                 if (!validateReplayMessage(message)) {
                   rejectMismatchedReplay(message);
@@ -7724,14 +7120,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     terminalHost.className = "terminal-host";
     shellEl.appendChild(terminalHost);
 
-    const renderer = structuredRendererEnabled ? "structured" : "ghostty";
-    const structured = renderer === "structured" ? createStructuredTerminal(terminalHost) : null;
-    const term = structured?.term || new Terminal(terminalOptions());
-    const fitAddon = structured?.fitAddon || new FitAddon();
-    if (!structured) {
-      term.loadAddon(fitAddon);
-      term.open(terminalHost);
-    }
+    const term = new Terminal(terminalOptions());
+    const fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(terminalHost);
     if (typeof fitAddon.observeResize === "function") {
       fitAddon.observeResize();
     }
@@ -7744,7 +7136,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       terminalHost,
       term,
       fitAddon,
-      renderer,
       socket: null,
       reconnectTimer: 0,
       reconnectPending: false,
@@ -7780,14 +7171,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     installTerminalInputFocus(session);
     installTerminalKeyOverrides(session);
     installTerminalHostViewportGuard(session);
-    if (renderer !== "structured") {
-      installRendererThemeMapper(session);
-      installMobileTouchSelection(session);
-      installDesktopMouseClipboard(session);
-    } else {
-      term.onScroll?.(() => persistStructuredViewport(session));
-      addSessionCleanup(session, () => persistStructuredViewport(session));
-    }
+    installRendererThemeMapper(session);
+    installMobileTouchSelection(session);
+    installDesktopMouseClipboard(session);
 
     term.onData((data) => {
       if (isTerminalInputBlocked()) {
@@ -7874,7 +7260,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (connect) {
       connectSession(session).catch((error) => {
         if (!session.closed && session.name === activeName) {
-          session.term.write?.(`\r\n[webshell error] ${error.message}\r\n`);
+          session.term.write(`\r\n[webshell error] ${error.message}\r\n`);
         }
       });
     }
@@ -9624,11 +9010,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     updateMobileActiveTabTitle();
     scheduleTabOverviewRender();
   });
-  if (isIOSPlatform()) {
-    window.visualViewport?.addEventListener("resize", syncMobileVisualViewport);
-    window.visualViewport?.addEventListener("scroll", syncMobileVisualViewport);
-    window.addEventListener("orientationchange", syncMobileVisualViewport);
-  }
+  window.visualViewport?.addEventListener("resize", syncMobileVisualViewport);
+  window.visualViewport?.addEventListener("scroll", syncMobileVisualViewport);
+  window.addEventListener("orientationchange", syncMobileVisualViewport);
   syncMobileVisualViewport();
   document.fonts?.ready?.then(() => {
     for (const tab of tabs.values()) {
@@ -9690,7 +9074,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     window.clearInterval(serverRevisionRefreshTimer);
     for (const tab of tabs.values()) {
       for (const pane of tab.panes.values()) {
-        persistStructuredViewport(pane);
         pane.closed = true;
         clearReconnectTimer(pane);
         pane.socket?.close();

@@ -94,7 +94,6 @@ type terminalPane struct {
 	activityCheckedAt    time.Time
 	controlPending       []byte
 	terminalQueryPending []byte
-	structured           *terminalStructuredState
 	hasAttached          bool
 	inputBlockers        map[string]struct{}
 	exited               bool
@@ -104,10 +103,9 @@ type terminalPane struct {
 }
 
 type paneClient struct {
-	send       chan paneOutbound
-	done       chan struct{}
-	once       sync.Once
-	structured bool
+	send chan paneOutbound
+	done chan struct{}
+	once sync.Once
 
 	mu          sync.Mutex
 	queuedBytes int
@@ -1002,18 +1000,17 @@ func newTerminalPane(workspace *terminalWorkspace, paneID string, cols, rows int
 		return nil, err
 	}
 	pane := &terminalPane{
-		workspace:  workspace,
-		id:         paneID,
-		selector:   workspace.selector,
-		rootDir:    workspace.rootDir,
-		cmd:        command,
-		ptyFile:    ptyFile,
-		clients:    make(map[*paneClient]struct{}),
-		cols:       normalizeCols(cols),
-		rows:       normalizeRows(rows),
-		cwd:        strings.TrimSpace(initialCWD),
-		structured: newTerminalStructuredState(cols, rows),
-		done:       make(chan struct{}),
+		workspace: workspace,
+		id:        paneID,
+		selector:  workspace.selector,
+		rootDir:   workspace.rootDir,
+		cmd:       command,
+		ptyFile:   ptyFile,
+		clients:   make(map[*paneClient]struct{}),
+		cols:      normalizeCols(cols),
+		rows:      normalizeRows(rows),
+		cwd:       strings.TrimSpace(initialCWD),
+		done:      make(chan struct{}),
 	}
 	_ = pty.Setsize(ptyFile, &pty.Winsize{Cols: uint16(pane.cols), Rows: uint16(pane.rows)})
 	go pane.readLoop()
@@ -1154,7 +1151,6 @@ func (p *terminalPane) appendOutput(data []byte) {
 		return
 	}
 	copied := append([]byte(nil), filtered...)
-	frame := p.updateStructuredOutput(copied)
 	var clients []*paneClient
 
 	p.workspace.mu.Lock()
@@ -1174,53 +1170,7 @@ func (p *terminalPane) appendOutput(data []byte) {
 	p.workspace.mu.Unlock()
 
 	for _, client := range clients {
-		if client.structured {
-			p.enqueueStructuredFrameForClient(client, frame)
-			continue
-		}
 		client.enqueue(paneOutbound{messageType: websocket.BinaryMessage, payload: copied})
-	}
-}
-
-func (p *terminalPane) updateStructuredOutput(data []byte) terminalFrameMessage {
-	p.mu.Lock()
-	structured := p.structured
-	p.mu.Unlock()
-	if structured == nil {
-		return terminalFrameMessage{}
-	}
-	return structured.write(data)
-}
-
-func (p *terminalPane) enqueueStructuredFrameForClient(client *paneClient, frame terminalFrameMessage) {
-	if client == nil || !client.structured || len(frame.RowsData) == 0 {
-		return
-	}
-	frame.Selector = p.selector
-	frame.PaneID = p.id
-	data, err := json.Marshal(frame)
-	if err != nil {
-		return
-	}
-	client.enqueue(paneOutbound{messageType: websocket.TextMessage, payload: data})
-}
-
-func (p *terminalPane) broadcastStructuredFrame(frame terminalFrameMessage) {
-	if len(frame.RowsData) == 0 {
-		return
-	}
-	var clients []*paneClient
-	p.mu.Lock()
-	if !p.exited {
-		for client := range p.clients {
-			if client.structured {
-				clients = append(clients, client)
-			}
-		}
-	}
-	p.mu.Unlock()
-	for _, client := range clients {
-		p.enqueueStructuredFrameForClient(client, frame)
 	}
 }
 
@@ -1430,7 +1380,7 @@ func (p *terminalPane) markExited(err error) {
 	close(p.done)
 }
 
-func (p *terminalPane) attachClient(renderer string) ([]byte, *paneClient, bool, error) {
+func (p *terminalPane) attachClient() ([]byte, *paneClient, bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.exited {
@@ -1440,9 +1390,8 @@ func (p *terminalPane) attachClient(renderer string) ([]byte, *paneClient, bool,
 	allowGeneratedInputDuringReplay := !p.hasAttached
 	p.hasAttached = true
 	client := &paneClient{
-		send:       make(chan paneOutbound, 256),
-		done:       make(chan struct{}),
-		structured: strings.TrimSpace(renderer) == "structured",
+		send: make(chan paneOutbound, 256),
+		done: make(chan struct{}),
 	}
 	p.clients[client] = struct{}{}
 	return history, client, allowGeneratedInputDuringReplay, nil
@@ -1518,11 +1467,7 @@ func (p *terminalPane) resize(cols, rows int) error {
 	p.rows = rows
 	ptyFile := p.ptyFile
 	exited := p.exited
-	structured := p.structured
 	p.mu.Unlock()
-	if structured != nil {
-		p.broadcastStructuredFrame(structured.resize(cols, rows))
-	}
 	if exited || ptyFile == nil {
 		return nil
 	}
