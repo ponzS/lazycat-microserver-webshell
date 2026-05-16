@@ -628,7 +628,7 @@ func TestTerminalPaneFirstAttachAllowsGeneratedInputDuringReplay(t *testing.T) {
 		history: []byte("\x1b[c"),
 	}
 
-	history, client, allowGeneratedInput, err := pane.attachClient()
+	history, client, allowGeneratedInput, err := pane.attachClient("")
 	if err != nil {
 		t.Fatalf("attachClient returned error: %v", err)
 	}
@@ -640,7 +640,7 @@ func TestTerminalPaneFirstAttachAllowsGeneratedInputDuringReplay(t *testing.T) {
 	}
 	pane.detachClient(client)
 
-	_, client, allowGeneratedInput, err = pane.attachClient()
+	_, client, allowGeneratedInput, err = pane.attachClient("")
 	if err != nil {
 		t.Fatalf("second attachClient returned error: %v", err)
 	}
@@ -648,6 +648,69 @@ func TestTerminalPaneFirstAttachAllowsGeneratedInputDuringReplay(t *testing.T) {
 		t.Fatal("expected later attaches to suppress generated terminal input during replay")
 	}
 	pane.detachClient(client)
+}
+
+func TestTerminalPaneStructuredAttachMarksClientWithoutReplayHistory(t *testing.T) {
+	pane := &terminalPane{
+		id:         "pane-1",
+		clients:    make(map[*paneClient]struct{}),
+		history:    []byte("raw history"),
+		structured: newTerminalStructuredState(8, 3),
+	}
+	_ = pane.structured.write([]byte("ready"))
+
+	history, client, _, err := pane.attachClient("structured")
+	if err != nil {
+		t.Fatalf("attachClient returned error: %v", err)
+	}
+	defer pane.detachClient(client)
+	if !client.structured {
+		t.Fatal("expected structured renderer client")
+	}
+	if string(history) != "raw history" {
+		t.Fatalf("attachClient should keep legacy history available for fallback, got %q", string(history))
+	}
+
+	var out bytes.Buffer
+	if !writeAgentStructuredSnapshot(&out, pane, "demo@owner") {
+		t.Fatal("writeAgentStructuredSnapshot returned false")
+	}
+	frameType, payload, err := readAgentFrame(&out)
+	if err != nil {
+		t.Fatalf("reading structured snapshot returned error: %v", err)
+	}
+	if frameType != agentFrameText {
+		t.Fatalf("expected text snapshot frame, got %q", frameType)
+	}
+	var snapshot terminalSnapshotMessage
+	if err := json.Unmarshal(payload, &snapshot); err != nil {
+		t.Fatalf("unmarshal structured snapshot returned error: %v", err)
+	}
+	if snapshot.Type != "terminal-snapshot" || snapshot.Selector != "demo@owner" || snapshot.PaneID != pane.id {
+		t.Fatalf("unexpected structured snapshot identity: %+v", snapshot)
+	}
+	if len(snapshot.Screen) != 3 {
+		t.Fatalf("expected 3 screen rows, got %d", len(snapshot.Screen))
+	}
+}
+
+func TestTerminalStructuredStateFrameIncludesScrollbackAppend(t *testing.T) {
+	state := newTerminalStructuredState(8, 2)
+	_ = state.snapshot("", "")
+	frame := state.write([]byte("one\r\ntwo\r\nthree"))
+	if frame.Type != "terminal-frame" {
+		t.Fatalf("unexpected frame type %q", frame.Type)
+	}
+	if frame.Scrollback == nil {
+		t.Fatal("expected scrollback update")
+	}
+	if frame.Scrollback.Len == 1 {
+		if len(frame.Scrollback.Append) != 1 {
+			t.Fatalf("expected one appended scrollback line, got %+v", frame.Scrollback)
+		}
+	} else if !frame.Scrollback.Reset || len(frame.Scrollback.Lines) != frame.Scrollback.Len {
+		t.Fatalf("unexpected scrollback update: %+v", frame.Scrollback)
+	}
 }
 
 func TestTerminalPaneRespondsToPrimaryDeviceAttributes(t *testing.T) {

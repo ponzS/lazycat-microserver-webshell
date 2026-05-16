@@ -39,6 +39,7 @@ type agentRequest struct {
 	PaneID    string                  `json:"pane_id,omitempty"`
 	Cols      int                     `json:"cols,omitempty"`
 	Rows      int                     `json:"rows,omitempty"`
+	Renderer  string                  `json:"renderer,omitempty"`
 	Action    *workspaceActionRequest `json:"action,omitempty"`
 	CloseIdle bool                    `json:"close_idle,omitempty"`
 }
@@ -101,10 +102,11 @@ func runAgentCommand(args []string) error {
 		paneID := fs.String("pane", "", "pane id")
 		cols := fs.Int("cols", 0, "terminal columns")
 		rows := fs.Int("rows", 0, "terminal rows")
+		renderer := fs.String("renderer", "", "terminal renderer")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		return runAgentAttachClient(*socketPath, *selector, *paneID, *cols, *rows)
+		return runAgentAttachClient(*socketPath, *selector, *paneID, *cols, *rows, *renderer)
 	default:
 		return fmt.Errorf("unknown agent command %q", args[0])
 	}
@@ -298,7 +300,8 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 	if request.Cols > 0 && request.Rows > 0 {
 		_ = pane.resize(request.Cols, request.Rows)
 	}
-	history, client, allowGeneratedInputDuringReplay, err := pane.attachClient()
+	renderer := strings.TrimSpace(request.Renderer)
+	history, client, allowGeneratedInputDuringReplay, err := pane.attachClient(renderer)
 	if err != nil {
 		_ = writeAgentControlFrame(conn, map[string]any{"type": "process-exit", "message": err.Error(), "exit_code": -1})
 		return
@@ -313,8 +316,14 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 	writerDone := make(chan struct{})
 	go func() {
 		defer close(writerDone)
-		if !writeAgentHistoryReplay(conn, workspace.selector, pane.id, history, allowGeneratedInputDuringReplay) {
-			return
+		if renderer == "structured" {
+			if !writeAgentStructuredSnapshot(conn, pane, workspace.selector) {
+				return
+			}
+		} else {
+			if !writeAgentHistoryReplay(conn, workspace.selector, pane.id, history, allowGeneratedInputDuringReplay) {
+				return
+			}
 		}
 		for {
 			select {
@@ -384,7 +393,7 @@ func runAgentRequestClient(socketPath, encodedRequest string) error {
 	return err
 }
 
-func runAgentAttachClient(socketPath, selector, paneID string, cols, rows int) error {
+func runAgentAttachClient(socketPath, selector, paneID string, cols, rows int, renderer string) error {
 	if strings.TrimSpace(paneID) == "" {
 		return errors.New("pane is required")
 	}
@@ -393,7 +402,7 @@ func runAgentAttachClient(socketPath, selector, paneID string, cols, rows int) e
 		return err
 	}
 	defer conn.Close()
-	request := agentRequest{Type: "attach", Selector: strings.TrimSpace(selector), PaneID: paneID, Cols: cols, Rows: rows}
+	request := agentRequest{Type: "attach", Selector: strings.TrimSpace(selector), PaneID: paneID, Cols: cols, Rows: rows, Renderer: strings.TrimSpace(renderer)}
 	data, err := json.Marshal(request)
 	if err != nil {
 		return err
@@ -440,6 +449,20 @@ func writeAgentHistoryReplay(w io.Writer, selector, paneID string, history []byt
 		"selector": selector,
 		"pane_id":  paneID,
 	}) == nil
+}
+
+func writeAgentStructuredSnapshot(w io.Writer, pane *terminalPane, selector string) bool {
+	if pane == nil {
+		return false
+	}
+	pane.mu.Lock()
+	structured := pane.structured
+	paneID := pane.id
+	pane.mu.Unlock()
+	if structured == nil {
+		return writeAgentControlFrame(w, map[string]any{"type": "terminal-structured-unavailable", "selector": selector, "pane_id": paneID}) == nil
+	}
+	return writeAgentControlFrame(w, structured.snapshot(selector, paneID)) == nil
 }
 
 func writeAgentControlFrame(w io.Writer, payload any) error {

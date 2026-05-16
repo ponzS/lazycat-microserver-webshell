@@ -382,6 +382,10 @@ func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, s
 	if clientID == "" {
 		clientID = strings.TrimSpace(r.URL.Query().Get("client"))
 	}
+	renderer := strings.TrimSpace(r.URL.Query().Get("renderer"))
+	if renderer != "structured" {
+		renderer = ""
+	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return err
@@ -410,6 +414,9 @@ func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, s
 		"--rows",
 		strconv.Itoa(normalizeRows(rows)),
 	)
+	if renderer != "" {
+		command.Args = append(command.Args, "--renderer", renderer)
+	}
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		_ = writeWebSocketJSON(conn, map[string]any{"type": "process-exit", "message": err.Error(), "exit_code": -1})
