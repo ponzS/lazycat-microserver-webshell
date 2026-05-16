@@ -2582,6 +2582,14 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     return /\bMacintosh\b|\bMac OS X\b/i.test(String(navigator.userAgent || ""));
   };
+  const isIOSPlatform = () => {
+    const platform = String(navigator.userAgentData?.platform || navigator.platform || "");
+    const userAgent = String(navigator.userAgent || "");
+    if (/\b(iPhone|iPad|iPod)\b/i.test(platform) || /\b(iPhone|iPad|iPod)\b/i.test(userAgent)) {
+      return true;
+    }
+    return /\bMac/i.test(platform) && Number(navigator.maxTouchPoints || 0) > 1;
+  };
   const macShortcut = (mac, fallback) => isMacPlatform() ? mac : fallback;
   const shortcutDefinitions = {
     fullscreen: "F11",
@@ -5024,6 +5032,18 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const syncMobileVisualViewport = () => {
+    const useKeyboardInset = isIOSPlatform();
+    if (!useKeyboardInset) {
+      const insetChanged = mobileKeyboardInsetBottom !== 0;
+      mobileKeyboardInsetBottom = 0;
+      document.documentElement.style.removeProperty("--mobile-visual-viewport-height");
+      document.documentElement.style.setProperty("--mobile-keyboard-inset-bottom", "0px");
+      document.body.classList.remove("mobile-keyboard-visible");
+      if (insetChanged) {
+        scheduleMobileViewportResize();
+      }
+      return;
+    }
     const visualViewport = window.visualViewport;
     const nextHeight = Math.max(0, Math.round(visualViewport?.height || window.innerHeight || 0));
     const nextInset = visualViewport
@@ -9604,9 +9624,11 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     updateMobileActiveTabTitle();
     scheduleTabOverviewRender();
   });
-  window.visualViewport?.addEventListener("resize", syncMobileVisualViewport);
-  window.visualViewport?.addEventListener("scroll", syncMobileVisualViewport);
-  window.addEventListener("orientationchange", syncMobileVisualViewport);
+  if (isIOSPlatform()) {
+    window.visualViewport?.addEventListener("resize", syncMobileVisualViewport);
+    window.visualViewport?.addEventListener("scroll", syncMobileVisualViewport);
+    window.addEventListener("orientationchange", syncMobileVisualViewport);
+  }
   syncMobileVisualViewport();
   document.fonts?.ready?.then(() => {
     for (const tab of tabs.values()) {

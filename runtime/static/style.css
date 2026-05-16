@@ -39,7 +39,7 @@
   --lzc-safe-area-inset-top: var(--lzc-safe-area-top, env(safe-area-inset-top, 0px));
   --lzc-safe-area-inset-left: var(--lzc-safe-area-left, env(safe-area-inset-left, 0px));
   --lzc-safe-area-inset-right: var(--lzc-safe-area-right, env(safe-area-inset-right, 0px));
-  --mobile-visual-viewport-height: 100vh;
+  --mobile-visual-viewport-height: 100dvh;
   --mobile-keyboard-inset-bottom: 0px;
 }
 
