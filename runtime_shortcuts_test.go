@@ -1,0 +1,41 @@
+package main
+
+import (
+	"os"
+	"strings"
+	"testing"
+)
+
+func TestRuntimeShortcutDefaultsGuardMacAndAltMappings(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+
+	wantSnippets := []string{
+		"const isMacPlatform = () => {",
+		"navigator.userAgentData?.platform",
+		"const macShortcut = (mac, fallback) => isMacPlatform() ? mac : fallback;",
+		`command: "super",`,
+		`cmd: "super",`,
+		`option: "alt",`,
+		"const shortcutKeyFromEventCode = (event) => {",
+		"if (isMacPlatform() && event.altKey) {",
+		"key = shortcutKeyFromEventCode(event) || key;",
+		`copy_terminal: macShortcut("Command + c", "Ctrl + Shift + c"),`,
+		`paste_terminal: macShortcut("Command + v", "Ctrl + Shift + v"),`,
+		`last_tab: macShortcut("Option + 0", "Alt + 0"),`,
+		`select_up: macShortcut("Option + k", "Alt + k"),`,
+		`select_down: macShortcut("Option + j", "Alt + j"),`,
+		`select_left: macShortcut("Option + h", "Alt + h"),`,
+		`select_right: macShortcut("Option + l", "Alt + l"),`,
+		`close_pane: macShortcut("Ctrl + Option + q", "Ctrl + Alt + q"),`,
+		"shortcutDefinitions[`tab_${index}`] = macShortcut(`Option + ${index}`, `Alt + ${index}`);",
+	}
+	for _, want := range wantSnippets {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime shortcut guard missing %q", want)
+		}
+	}
+}

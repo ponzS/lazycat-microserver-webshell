@@ -2175,35 +2175,43 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       throw new Error(`${label} selector mismatch: expected ${expected}, got ${selector}`);
     }
   };
+  const isMacPlatform = () => {
+    const platform = String(navigator.userAgentData?.platform || navigator.platform || "");
+    if (/mac/i.test(platform)) {
+      return true;
+    }
+    return /\bMacintosh\b|\bMac OS X\b/i.test(String(navigator.userAgent || ""));
+  };
+  const macShortcut = (mac, fallback) => isMacPlatform() ? mac : fallback;
   const shortcutDefinitions = {
     fullscreen: "F11",
     new_tab: "Ctrl + Shift + t",
     close_tab: "Ctrl + Shift + w",
     next_tab: "Ctrl + Tab",
     previous_tab: "Ctrl + Shift + Tab",
-    last_tab: "Alt + 0",
+    last_tab: macShortcut("Option + 0", "Alt + 0"),
     move_tab_to_first: "Ctrl + Shift + Home",
     move_tab_left: "Ctrl + Shift + Page_Up",
     move_tab_right: "Ctrl + Shift + Page_Down",
     move_tab_to_last: "Ctrl + Shift + End",
     vertical_split: "Ctrl + Shift + j",
     horizontal_split: "Ctrl + Shift + h",
-    select_up: "Alt + k",
-    select_down: "Alt + j",
-    select_left: "Alt + h",
-    select_right: "Alt + l",
-    close_pane: "Ctrl + Alt + q",
+    select_up: macShortcut("Option + k", "Alt + k"),
+    select_down: macShortcut("Option + j", "Alt + j"),
+    select_left: macShortcut("Option + h", "Alt + h"),
+    select_right: macShortcut("Option + l", "Alt + l"),
+    close_pane: macShortcut("Ctrl + Option + q", "Ctrl + Alt + q"),
     theme: "Ctrl + Shift + p",
     switch_container: "Ctrl + Shift + o",
-    copy_terminal: "Ctrl + Shift + c",
-    paste_terminal: "Ctrl + Shift + v",
+    copy_terminal: macShortcut("Command + c", "Ctrl + Shift + c"),
+    paste_terminal: macShortcut("Command + v", "Ctrl + Shift + v"),
     search_terminal: "Ctrl + Shift + f",
     select_all_terminal: "Ctrl + Shift + a",
   };
   const shortcutActionMap = new Map();
 
   for (let index = 1; index <= 9; index += 1) {
-    shortcutDefinitions[`tab_${index}`] = `Alt + ${index}`;
+    shortcutDefinitions[`tab_${index}`] = macShortcut(`Option + ${index}`, `Alt + ${index}`);
   }
 
   const normalizeShortcutKeyToken = (token) => {
@@ -2217,6 +2225,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       meta: "super",
       command: "super",
       cmd: "super",
+      option: "alt",
       pageup: "page_up",
       pagedown: "page_down",
       escape: "escape",
@@ -2282,8 +2291,22 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     return serializeShortcut(state);
   };
 
+  const shortcutKeyFromEventCode = (event) => {
+    const code = String(event.code || "");
+    if (/^Key[A-Z]$/.test(code)) {
+      return code.slice(3).toLowerCase();
+    }
+    if (/^Digit\d$/.test(code)) {
+      return code.slice(5);
+    }
+    return "";
+  };
+
   const getShortcutKeyFromEvent = (event) => {
-    const key = normalizeShortcutKeyToken(event.key);
+    let key = normalizeShortcutKeyToken(event.key);
+    if (isMacPlatform() && event.altKey) {
+      key = shortcutKeyFromEventCode(event) || key;
+    }
     if (!key || ["ctrl", "shift", "alt", "super"].includes(key)) {
       return "";
     }
