@@ -39,6 +39,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const settingsScrollbackInput = document.getElementById("settingsScrollbackInput");
   const settingsScrollbackResetButton = document.getElementById("settingsScrollbackResetButton");
   const settingsDesktopMouseClipboardToggle = document.getElementById("settingsDesktopMouseClipboardToggle");
+  const settingsMobilePixelScrollToggle = document.getElementById("settingsMobilePixelScrollToggle");
   const settingsMobileShortcutAddButton = document.getElementById("settingsMobileShortcutAddButton");
   const settingsMobileShortcutResetButton = document.getElementById("settingsMobileShortcutResetButton");
   const settingsMobileShortcutList = document.getElementById("settingsMobileShortcutList");
@@ -358,6 +359,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   let activeTerminalFontID = "";
   let terminalSymbolFont = null;
   let desktopMouseClipboardEnabled = true;
+  let mobilePixelScrollEnabled = false;
   let fontEditMode = false;
   const selectedFontDeleteIDs = new Set();
   const registeredFontFaces = new Map();
@@ -394,6 +396,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   let settingsScrollbackSaveTimer = 0;
   let settingsScrollbackSaveRequestSeq = 0;
   let settingsDesktopMouseClipboardRequestSeq = 0;
+  let settingsMobilePixelScrollRequestSeq = 0;
   let mobileShortcutsSaveRequestSeq = 0;
   let mobileShortcutsSaveVersion = 0;
   let mobileShortcutsPersistChain = Promise.resolve();
@@ -771,6 +774,12 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
   };
 
+  const syncSettingsMobilePixelScrollToggle = () => {
+    if (settingsMobilePixelScrollToggle) {
+      settingsMobilePixelScrollToggle.checked = mobilePixelScrollEnabled;
+    }
+  };
+
   const setSettingsScrollbackSaving = (saving) => {
     if (settingsScrollbackResetButton) {
       settingsScrollbackResetButton.disabled = saving;
@@ -804,6 +813,12 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const setSettingsDesktopMouseClipboardSaving = (saving) => {
     if (settingsDesktopMouseClipboardToggle) {
       settingsDesktopMouseClipboardToggle.disabled = saving;
+    }
+  };
+
+  const setSettingsMobilePixelScrollSaving = (saving) => {
+    if (settingsMobilePixelScrollToggle) {
+      settingsMobilePixelScrollToggle.disabled = saving;
     }
   };
 
@@ -1750,6 +1765,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     activeTerminalFontID = uploadedFonts.some((font) => font.id === nextFontID) ? nextFontID : "";
     terminalOptionsBase.scrollback = normalizeTerminalScrollback(state?.terminal_scrollback);
     desktopMouseClipboardEnabled = state?.desktop_mouse_clipboard_enabled !== false;
+    mobilePixelScrollEnabled = state?.mobile_pixel_scroll_enabled === true;
     applyMobileShortcutRows(normalizeMobileShortcutRows(state?.mobile_shortcuts), { remember: true });
     const hasCustomDesktopShortcuts = Array.isArray(state?.desktop_shortcuts);
     applyDesktopShortcuts(hasCustomDesktopShortcuts ? state.desktop_shortcuts : defaultDesktopShortcutsConfig, { remember: true });
@@ -1757,6 +1773,8 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       syncSettingsScrollbackInput();
     }
     syncSettingsDesktopMouseClipboardToggle();
+    syncSettingsMobilePixelScrollToggle();
+    resizeAllTabsForCurrentDevice();
     await registerTerminalSymbolFont(terminalSymbolFont);
     await registerUploadedFonts(uploadedFonts);
     renderSettingsFonts();
@@ -1805,6 +1823,21 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     });
     if (!response.ok) {
       throw new Error(await readResponseText(response, `鼠标复制粘贴设置保存失败 (${response.status})`));
+    }
+    await applySettingsState(await response.json(), { syncScrollbackInput: false });
+  };
+
+  const saveMobilePixelScrollEnabled = async (enabled) => {
+    mobilePixelScrollEnabled = enabled;
+    syncSettingsMobilePixelScrollToggle();
+    resizeAllTabsForCurrentDevice();
+    const response = await fetch("./api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mobile_pixel_scroll_enabled: enabled }),
+    });
+    if (!response.ok) {
+      throw new Error(await readResponseText(response, `像素级滚动设置保存失败 (${response.status})`));
     }
     await applySettingsState(await response.json(), { syncScrollbackInput: false });
   };
@@ -3617,6 +3650,12 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
 
   const isMobileLayout = () => Boolean(mobileLayoutQuery?.matches);
 
+  const syncTerminalMobilePixelScroll = (session) => {
+    if (session?.term?.options) {
+      session.term.options.mobilePixelScroll = mobilePixelScrollEnabled && isMobileLayout();
+    }
+  };
+
   const isThemePickerOpen = () => Boolean(themePickerBackdrop && !themePickerBackdrop.hidden);
 
   const resetThemePickerEdgeSwipe = () => {
@@ -4575,6 +4614,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       tab.paneEl.classList.add("active");
     }
     for (const tab of tabs.values()) {
+      for (const session of tab.panes.values()) {
+        syncTerminalMobilePixelScroll(session);
+      }
       resizeTab(tab);
     }
     for (const tab of tabs.values()) {
@@ -7199,6 +7241,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     const term = new Terminal(terminalOptions());
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
+    if (term.options) {
+      term.options.mobilePixelScroll = isMobileLayout();
+    }
     term.open(terminalHost);
     if (typeof fitAddon.observeResize === "function") {
       fitAddon.observeResize();
@@ -8706,6 +8751,26 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       .finally(() => {
         if (requestSeq === settingsDesktopMouseClipboardRequestSeq) {
           setSettingsDesktopMouseClipboardSaving(false);
+        }
+      });
+  });
+  settingsMobilePixelScrollToggle?.addEventListener("change", () => {
+    const previous = mobilePixelScrollEnabled;
+    const enabled = settingsMobilePixelScrollToggle.checked;
+    const requestSeq = ++settingsMobilePixelScrollRequestSeq;
+    setSettingsMobilePixelScrollSaving(true);
+    saveMobilePixelScrollEnabled(enabled)
+      .catch((error) => {
+        if (requestSeq === settingsMobilePixelScrollRequestSeq) {
+          mobilePixelScrollEnabled = previous;
+          syncSettingsMobilePixelScrollToggle();
+          resizeAllTabsForCurrentDevice();
+        }
+        setSettingsFeedback(error.message || "像素级滚动设置保存失败。", "error");
+      })
+      .finally(() => {
+        if (requestSeq === settingsMobilePixelScrollRequestSeq) {
+          setSettingsMobilePixelScrollSaving(false);
         }
       });
   });

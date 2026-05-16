@@ -45,6 +45,7 @@ type State struct {
 	TerminalSymbolFont           *SymbolDescriptor    `json:"terminal_symbol_font,omitempty"`
 	TerminalScrollback           int                  `json:"terminal_scrollback"`
 	DesktopMouseClipboardEnabled bool                 `json:"desktop_mouse_clipboard_enabled"`
+	MobilePixelScrollEnabled     bool                 `json:"mobile_pixel_scroll_enabled"`
 	MobileShortcuts              MobileShortcutRows   `json:"mobile_shortcuts"`
 	DesktopShortcuts             *DesktopShortcutList `json:"desktop_shortcuts,omitempty"`
 	Fonts                        []Descriptor         `json:"fonts"`
@@ -55,6 +56,7 @@ type Settings struct {
 	TerminalFontSystemDefault    bool                 `json:"terminal_font_system_default,omitempty"`
 	TerminalScrollback           int                  `json:"terminal_scrollback"`
 	DesktopMouseClipboardEnabled *bool                `json:"desktop_mouse_clipboard_enabled,omitempty"`
+	MobilePixelScrollEnabled     *bool                `json:"mobile_pixel_scroll_enabled,omitempty"`
 	MobileShortcuts              *MobileShortcutRows  `json:"mobile_shortcuts,omitempty"`
 	DesktopShortcuts             *DesktopShortcutList `json:"desktop_shortcuts"`
 	DeletedBuiltinFontIDs        []string             `json:"deleted_builtin_font_ids,omitempty"`
@@ -320,6 +322,7 @@ func (s Store) State() (State, error) {
 		TerminalSymbolFont:           symbolFont,
 		TerminalScrollback:           settings.TerminalScrollback,
 		DesktopMouseClipboardEnabled: desktopMouseClipboardEnabled(settings),
+		MobilePixelScrollEnabled:     mobilePixelScrollEnabled(settings),
 		MobileShortcuts:              effectiveMobileShortcuts(settings),
 		DesktopShortcuts:             effectiveDesktopShortcuts(settings),
 		Fonts:                        fonts,
@@ -332,6 +335,7 @@ func (s Store) ReadSettings() (Settings, error) {
 		return Settings{
 			TerminalScrollback:           DefaultTerminalScrollback,
 			DesktopMouseClipboardEnabled: boolPtr(true),
+			MobilePixelScrollEnabled:     boolPtr(false),
 			MobileShortcuts:              nil,
 			DesktopShortcuts:             nil,
 		}, nil
@@ -624,6 +628,7 @@ func (s Store) WriteSettings(settings Settings) error {
 func (s Store) SaveSettings(settings Settings) error {
 	settings.TerminalFontID = strings.TrimSpace(settings.TerminalFontID)
 	settings.DesktopMouseClipboardEnabled = normalizeDesktopMouseClipboardEnabled(settings.DesktopMouseClipboardEnabled)
+	settings.MobilePixelScrollEnabled = normalizeMobilePixelScrollEnabled(settings.MobilePixelScrollEnabled)
 	if settings.MobileShortcuts != nil {
 		normalized, err := normalizeMobileShortcuts(*settings.MobileShortcuts)
 		if err != nil {
@@ -845,6 +850,14 @@ func normalizeTerminalScrollback(value int) int {
 func normalizeDesktopMouseClipboardEnabled(value *bool) *bool {
 	if value == nil {
 		return boolPtr(true)
+	}
+	enabled := *value
+	return &enabled
+}
+
+func normalizeMobilePixelScrollEnabled(value *bool) *bool {
+	if value == nil {
+		return boolPtr(false)
 	}
 	enabled := *value
 	return &enabled
@@ -1119,6 +1132,13 @@ func desktopMouseClipboardEnabled(settings Settings) bool {
 		return true
 	}
 	return *settings.DesktopMouseClipboardEnabled
+}
+
+func mobilePixelScrollEnabled(settings Settings) bool {
+	if settings.MobilePixelScrollEnabled == nil {
+		return false
+	}
+	return *settings.MobilePixelScrollEnabled
 }
 
 func boolPtr(value bool) *bool {
