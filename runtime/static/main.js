@@ -4536,6 +4536,19 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
   };
 
+  const focusMobileKeyboardFromShortcut = (session = activeSession()) => {
+    if (!isTouchShortcutLayout()) {
+      return;
+    }
+    const targetSession = session || activeSession();
+    const textarea = targetSession?.term?.textarea;
+    if (!textarea) {
+      return;
+    }
+    targetSession.allowMobileKeyboardFocusUntil = performance.now() + mobileKeyboardFocusAllowWindowMs;
+    focusTerminalInput(targetSession);
+  };
+
   const setTerminalInputComposing = (session, composing) => {
     session.composingIME = composing;
     if (session.term?.inputHandler) {
@@ -4543,19 +4556,24 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
   };
 
-  const sendTerminalTextInput = (session, data, { dedupe = false } = {}) => {
-    if (!session || !data) {
+  const sendTerminalTextInput = (session, data, { dedupe = false, applySticky = false } = {}) => {
+    const rawData = String(data || "");
+    if (!session || !rawData) {
       return;
     }
     const now = performance.now();
     const last = session.lastTextInput;
-    if (dedupe && last?.data === data && now - last.time < 80) {
+    if (dedupe && (last?.data === rawData || last?.rawData === rawData) && now - last.time < 80) {
+      return;
+    }
+    const inputData = applySticky ? consumeMobileStickyTextInput(rawData) : rawData;
+    if (!inputData) {
       return;
     }
     if (dedupe) {
-      session.lastTextInput = { data, time: now };
+      session.lastTextInput = { data: inputData, rawData, time: now };
     }
-    sendOrQueueInput(session, data);
+    sendOrQueueInput(session, inputData);
   };
 
   const resetTerminalTextareaValue = (session) => {
@@ -4610,6 +4628,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     sendTerminalTextInput(session, data, {
       dedupe: type === "insertText" || type === "insertReplacementText" || Boolean(event.data),
+      applySticky: shouldApplyMobileStickyTextInput(data, type),
     });
     resetTerminalHostViewport(session, { clean: true });
     positionTerminalInput(session);
@@ -4630,7 +4649,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       } else if (!value && isForwardDeleteInputType(type)) {
         sendTerminalTextInput(session, "\x1b[3~");
       } else if (value) {
-        sendTerminalTextInput(session, value, { dedupe: true });
+        sendTerminalTextInput(session, value, {
+          dedupe: true,
+          applySticky: shouldApplyMobileStickyTextInput(value, type),
+        });
       }
       textarea.value = terminalInputSentinel;
       moveTerminalTextareaCaretToEnd(textarea);
@@ -6336,6 +6358,33 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     return encoded;
   };
 
+  const shouldApplyMobileStickyTextInput = (value, inputType = "") => {
+    if (!hasMobileStickyModifiers()) {
+      return false;
+    }
+    const type = String(inputType || "");
+    if (type === "insertFromPaste" || type.includes("Composition")) {
+      return false;
+    }
+    return canApplyStickyModifierInput(value);
+  };
+
+  const consumeMobileStickyTextInput = (value) => {
+    if (!hasMobileStickyModifiers()) {
+      return String(value || "");
+    }
+    if (!canApplyStickyModifierInput(value)) {
+      return String(value || "");
+    }
+    const encoded = applyStickyModifierInput(value, {
+      ctrl: mobileSticky.ctrl,
+      shift: mobileSticky.shift,
+      alt: mobileSticky.alt,
+    });
+    clearMobileSticky();
+    return encoded;
+  };
+
   const resolveTerminalModifierParameter = (modifiers = {}) => {
     const normalized = normalizeShortcutInputModifiers(modifiers);
     return 1 + Number(normalized.shift) + Number(normalized.alt) * 2 + Number(normalized.ctrl) * 4;
@@ -6490,14 +6539,17 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       case "sticky_ctrl":
       case "ctrl":
         toggleMobileSticky("ctrl");
+        focusMobileKeyboardFromShortcut(session);
         return;
       case "sticky_alt":
       case "alt":
         toggleMobileSticky("alt");
+        focusMobileKeyboardFromShortcut(session);
         return;
       case "sticky_shift":
       case "shift":
         toggleMobileSticky("shift");
+        focusMobileKeyboardFromShortcut(session);
         return;
       case "copy":
         copyFromSession(session).catch((error) => showToast(error.message));
@@ -7631,6 +7683,16 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       return;
     }
     term.attachCustomKeyEventHandler((event) => {
+      if (
+        hasMobileStickyModifiers()
+        && !event.ctrlKey
+        && !event.altKey
+        && !event.metaKey
+        && canApplyStickyModifierInput(event.key)
+      ) {
+        sendTerminalTextInput(session, event.key, { applySticky: true });
+        return true;
+      }
       if (event.key !== "Tab" || !event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) {
         return false;
       }

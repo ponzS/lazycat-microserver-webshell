@@ -109,6 +109,39 @@ func TestRuntimeMobileReturnShortcutRepeats(t *testing.T) {
 	}
 }
 
+func TestRuntimeMobileStickyModifiersApplyToTextInput(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+
+	wantSnippets := []string{
+		`const shouldApplyMobileStickyTextInput = (value, inputType = "") => {`,
+		`type === "insertFromPaste" || type.includes("Composition")`,
+		`return canApplyStickyModifierInput(value);`,
+		`const consumeMobileStickyTextInput = (value) => {`,
+		`const encoded = applyStickyModifierInput(value, {`,
+		`clearMobileSticky();`,
+		`const focusMobileKeyboardFromShortcut = (session = activeSession()) => {`,
+		`targetSession.allowMobileKeyboardFocusUntil = performance.now() + mobileKeyboardFocusAllowWindowMs;`,
+		`focusTerminalInput(targetSession);`,
+		`const inputData = applySticky ? consumeMobileStickyTextInput(rawData) : rawData;`,
+		`last?.data === rawData || last?.rawData === rawData`,
+		`applySticky: shouldApplyMobileStickyTextInput(data, type),`,
+		`applySticky: shouldApplyMobileStickyTextInput(value, type),`,
+		`focusMobileKeyboardFromShortcut(session);`,
+		`hasMobileStickyModifiers()`,
+		`&& canApplyStickyModifierInput(event.key)`,
+		`sendTerminalTextInput(session, event.key, { applySticky: true });`,
+	}
+	for _, want := range wantSnippets {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime mobile sticky modifier guard missing %q", want)
+		}
+	}
+}
+
 func TestRuntimeTouchShortcutLayoutKeepsDesktopPCHidden(t *testing.T) {
 	mainData, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {
