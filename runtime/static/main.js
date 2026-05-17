@@ -129,6 +129,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const mobileCloseConfirmHandle = document.getElementById("mobileCloseConfirmHandle");
   const mobileCloseConfirmTitle = document.getElementById("mobileCloseConfirmTitle");
   const mobileCloseConfirmMessage = document.getElementById("mobileCloseConfirmMessage");
+  const mobileCloseConfirmActions = document.getElementById("mobileCloseConfirmActions");
   const mobileCloseConfirmCancel = document.getElementById("mobileCloseConfirmCancel");
   const mobileCloseConfirmOK = document.getElementById("mobileCloseConfirmOK");
   const selectionSheet = document.getElementById("selectionSheet");
@@ -5652,12 +5653,13 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     window.setTimeout(() => activeSession()?.term?.focus(), 0);
   };
 
-  const confirmMobileClose = ({ title = "关闭标签？", message = "", okText = "关闭", cancelText = "取消" } = {}) =>
+  const confirmMobileSheet = ({ title = "确认操作？", message = "", okText = "确认", cancelText = "取消", actionsLayout = "horizontal", initialFocus = "cancel" } = {}) =>
     new Promise((resolve) => {
       if (
         !mobileCloseConfirmSheet ||
         !mobileCloseConfirmTitle ||
         !mobileCloseConfirmMessage ||
+        !mobileCloseConfirmActions ||
         !mobileCloseConfirmOK ||
         !mobileCloseConfirmCancel
       ) {
@@ -5673,9 +5675,18 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       mobileCloseConfirmMessage.textContent = message;
       mobileCloseConfirmOK.textContent = okText;
       mobileCloseConfirmCancel.textContent = cancelText;
+      mobileCloseConfirmActions.dataset.layout = actionsLayout === "vertical-ok-first" ? "vertical-ok-first" : "horizontal";
       mobileCloseConfirmSheet.hidden = false;
-      window.setTimeout(() => mobileCloseConfirmCancel.focus(), 0);
+      window.setTimeout(() => (initialFocus === "ok" ? mobileCloseConfirmOK : mobileCloseConfirmCancel).focus(), 0);
     });
+
+  const confirmMobileClose = (options = {}) => confirmMobileSheet({
+    title: "关闭标签？",
+    message: "",
+    okText: "关闭",
+    cancelText: "取消",
+    ...options,
+  });
 
   const confirmCloseRunningCommand = (message, options = {}) => {
     if (isMobileLayout()) {
@@ -6139,13 +6150,16 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     discardAllTerminalInputBuffers();
     let shouldUnlock = true;
     try {
-      const restart = await openDialog({
+      const restartDialogOptions = {
         title: "WebShell 已更新",
         message: "检测到 WebShell 服务已更新，请重新加载页面以使用最新版本。",
         okText: "重新加载",
         cancelText: "取消",
         initialFocus: "ok",
-      });
+      };
+      const restart = isMobileLayout()
+        ? await confirmMobileSheet({ ...restartDialogOptions, actionsLayout: "vertical-ok-first" })
+        : await openDialog(restartDialogOptions);
       if (restart === true) {
         shouldUnlock = false;
         rememberRestartTabForReload(restartTargetName, restartTargetTabId);

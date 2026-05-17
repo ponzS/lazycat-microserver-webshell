@@ -326,6 +326,50 @@ func TestRuntimeTabOverviewRerendersAndFallsBackToWorkspaceTabs(t *testing.T) {
 	}
 }
 
+func TestRuntimeMobileDeployRestartUsesBottomSheet(t *testing.T) {
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	indexData, err := os.ReadFile("runtime/static/index.html")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
+	}
+	styleData, err := os.ReadFile("runtime/static/style.css")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/style.css) error = %v", err)
+	}
+	mainSource := string(mainData)
+	indexSource := string(indexData)
+	styleSource := string(styleData)
+
+	wantMainSnippets := []string{
+		`const mobileCloseConfirmActions = document.getElementById("mobileCloseConfirmActions");`,
+		`const confirmMobileSheet = ({ title = "确认操作？", message = "", okText = "确认", cancelText = "取消", actionsLayout = "horizontal", initialFocus = "cancel" } = {}) =>`,
+		`mobileCloseConfirmActions.dataset.layout = actionsLayout === "vertical-ok-first" ? "vertical-ok-first" : "horizontal";`,
+		`const restart = isMobileLayout()`,
+		`? await confirmMobileSheet({ ...restartDialogOptions, actionsLayout: "vertical-ok-first" })`,
+		`: await openDialog(restartDialogOptions);`,
+	}
+	for _, want := range wantMainSnippets {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime mobile deploy restart guard missing %q", want)
+		}
+	}
+	if !strings.Contains(indexSource, `class="mobile-close-confirm-actions" id="mobileCloseConfirmActions"`) {
+		t.Fatal("mobile close confirm actions container should have a stable id")
+	}
+	for _, want := range []string{
+		`.mobile-close-confirm-actions[data-layout="vertical-ok-first"]`,
+		`.mobile-close-confirm-actions[data-layout="vertical-ok-first"] .mobile-close-confirm-ok`,
+		`order: -1;`,
+	} {
+		if !strings.Contains(styleSource, want) {
+			t.Fatalf("runtime mobile deploy restart CSS guard missing %q", want)
+		}
+	}
+}
+
 func TestRuntimeMobileEdgeSwipeOpensTabOverview(t *testing.T) {
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {

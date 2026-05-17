@@ -3531,6 +3531,14 @@ body.is-mobile-shortcut-dragging {
     gap: 10px;
   }
 
+  .mobile-close-confirm-actions[data-layout="vertical-ok-first"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mobile-close-confirm-actions[data-layout="vertical-ok-first"] .mobile-close-confirm-ok {
+    order: -1;
+  }
+
   .mobile-close-confirm-actions button {
     min-width: 0;
     height: 42px;
