@@ -62,6 +62,13 @@ var persistentAgentCache = struct {
 	username:  make(map[string]string),
 }
 
+var agentRuntimeArchiveCache = struct {
+	sync.Mutex
+	ready    bool
+	payload  []byte
+	manifest string
+}{}
+
 func requestAgentWorkspaceState(ctx context.Context, selector string, cols, rows, terminalScrollback int) (workspaceState, error) {
 	response, err := requestPersistentAgent(ctx, selector, agentRequest{
 		Type:               "state",
@@ -236,7 +243,7 @@ func markPersistentAgentNotRunning(selector string) {
 }
 
 func ensureAgentBinaryInstalled(ctx context.Context, selector string) (string, error) {
-	payload, manifest, err := buildAgentRuntimeArchive()
+	payload, manifest, err := cachedAgentRuntimeArchive()
 	if err != nil {
 		return "", err
 	}
@@ -291,6 +298,23 @@ func ensureAgentBinaryInstalled(ctx context.Context, selector string) (string, e
 	persistentAgentCache.installed[selector] = manifest
 	persistentAgentCache.Unlock()
 	return manifest, nil
+}
+
+func cachedAgentRuntimeArchive() ([]byte, string, error) {
+	agentRuntimeArchiveCache.Lock()
+	defer agentRuntimeArchiveCache.Unlock()
+	if agentRuntimeArchiveCache.ready {
+		return agentRuntimeArchiveCache.payload, agentRuntimeArchiveCache.manifest, nil
+	}
+
+	payload, manifest, err := buildAgentRuntimeArchive()
+	if err != nil {
+		return nil, "", err
+	}
+	agentRuntimeArchiveCache.payload = payload
+	agentRuntimeArchiveCache.manifest = manifest
+	agentRuntimeArchiveCache.ready = true
+	return payload, manifest, nil
 }
 
 func buildAgentRuntimeArchive() ([]byte, string, error) {
