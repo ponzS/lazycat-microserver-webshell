@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	agentProtocolVersion = "lcmd-webshell-agent-v2"
+	agentProtocolVersion = "lcmd-webshell-agent-v3"
 
 	agentFrameBinary = byte('B')
 	agentFrameText   = byte('T')
@@ -37,6 +37,7 @@ const (
 type agentRequest struct {
 	Type               string                  `json:"type"`
 	Selector           string                  `json:"selector,omitempty"`
+	AccountID          string                  `json:"account_id,omitempty"`
 	Username           string                  `json:"username,omitempty"`
 	PaneID             string                  `json:"pane_id,omitempty"`
 	Cols               int                     `json:"cols,omitempty"`
@@ -57,6 +58,7 @@ type agentResponse struct {
 type agentDaemon struct {
 	mu        sync.Mutex
 	selector  string
+	accountID string
 	username  string
 	workspace *terminalWorkspace
 }
@@ -85,10 +87,11 @@ func runAgentCommand(args []string) error {
 		socketPath := fs.String("socket", defaultAgentSocketPath, "unix socket path")
 		username := fs.String("username", "", "instance login username")
 		selector := fs.String("selector", "", "instance selector")
+		accountID := fs.String("account", "", "webshell account id")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		return runAgentDaemon(*socketPath, *selector, *username)
+		return runAgentDaemon(*socketPath, *selector, *accountID, *username)
 	case "request":
 		fs := flag.NewFlagSet("agent request", flag.ContinueOnError)
 		socketPath := fs.String("socket", defaultAgentSocketPath, "unix socket path")
@@ -101,6 +104,7 @@ func runAgentCommand(args []string) error {
 		fs := flag.NewFlagSet("agent attach", flag.ContinueOnError)
 		socketPath := fs.String("socket", defaultAgentSocketPath, "unix socket path")
 		selector := fs.String("selector", "", "instance selector")
+		accountID := fs.String("account", "", "webshell account id")
 		paneID := fs.String("pane", "", "pane id")
 		cols := fs.Int("cols", 0, "terminal columns")
 		rows := fs.Int("rows", 0, "terminal rows")
@@ -108,13 +112,13 @@ func runAgentCommand(args []string) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		return runAgentAttachClient(*socketPath, *selector, *paneID, *cols, *rows, *terminalScrollback)
+		return runAgentAttachClient(*socketPath, *selector, *accountID, *paneID, *cols, *rows, *terminalScrollback)
 	default:
 		return fmt.Errorf("unknown agent command %q", args[0])
 	}
 }
 
-func runAgentDaemon(socketPath, selector, username string) error {
+func runAgentDaemon(socketPath, selector, accountID, username string) error {
 	socketPath = strings.TrimSpace(socketPath)
 	if socketPath == "" {
 		return errors.New("socket path is required")
@@ -131,8 +135,9 @@ func runAgentDaemon(socketPath, selector, username string) error {
 	_ = os.Chmod(socketPath, 0o600)
 
 	daemon := &agentDaemon{
-		selector: strings.TrimSpace(selector),
-		username: strings.TrimSpace(username),
+		selector:  strings.TrimSpace(selector),
+		accountID: strings.TrimSpace(accountID),
+		username:  strings.TrimSpace(username),
 	}
 	for {
 		conn, err := listener.Accept()
@@ -159,6 +164,9 @@ func (d *agentDaemon) handleConn(conn net.Conn) {
 	case "ping":
 		d.mu.Lock()
 		err := d.validateRequestSelectorLocked(request.Selector)
+		if err == nil {
+			err = d.validateRequestAccountLocked(request.AccountID)
+		}
 		d.mu.Unlock()
 		response := agentResponse{OK: err == nil, Version: agentProtocolVersion}
 		if err != nil {
@@ -197,6 +205,9 @@ func (d *agentDaemon) writeStateResponse(w io.Writer, state workspaceState, err 
 
 func (d *agentDaemon) ensureWorkspaceLocked(request agentRequest) (*terminalWorkspace, error) {
 	if err := d.validateRequestSelectorLocked(request.Selector); err != nil {
+		return nil, err
+	}
+	if err := d.validateRequestAccountLocked(request.AccountID); err != nil {
 		return nil, err
 	}
 	if username := strings.TrimSpace(request.Username); username != "" || d.username == "" {
@@ -246,6 +257,21 @@ func (d *agentDaemon) validateRequestSelectorLocked(selector string) error {
 		return fmt.Errorf("agent workspace selector mismatch: workspace %q, request %q", d.workspace.selector, selector)
 	}
 	d.selector = selector
+	return nil
+}
+
+func (d *agentDaemon) validateRequestAccountLocked(accountID string) error {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		if d.accountID != "" {
+			return errors.New("agent account is required")
+		}
+		return nil
+	}
+	if d.accountID != "" && d.accountID != accountID {
+		return fmt.Errorf("agent account mismatch: daemon %q, request %q", d.accountID, accountID)
+	}
+	d.accountID = accountID
 	return nil
 }
 
@@ -391,7 +417,7 @@ func runAgentRequestClient(socketPath, encodedRequest string) error {
 	return err
 }
 
-func runAgentAttachClient(socketPath, selector, paneID string, cols, rows, terminalScrollback int) error {
+func runAgentAttachClient(socketPath, selector, accountID, paneID string, cols, rows, terminalScrollback int) error {
 	if strings.TrimSpace(paneID) == "" {
 		return errors.New("pane is required")
 	}
@@ -403,6 +429,7 @@ func runAgentAttachClient(socketPath, selector, paneID string, cols, rows, termi
 	request := agentRequest{
 		Type:               "attach",
 		Selector:           strings.TrimSpace(selector),
+		AccountID:          strings.TrimSpace(accountID),
 		PaneID:             paneID,
 		Cols:               cols,
 		Rows:               rows,

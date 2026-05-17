@@ -64,6 +64,8 @@ type apiErrorResponse struct {
 	Error string `json:"error"`
 }
 
+const lightOSUserIDHeader = "X-HC-USER-ID"
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
@@ -310,22 +312,28 @@ func (s *pluginServer) handleServerRevision(w http.ResponseWriter, r *http.Reque
 	}
 	info := serverRevisionInfo{ServerRevision: s.serverRevision}
 	selector := strings.TrimSpace(r.URL.Query().Get("name"))
+	accountID := currentRequestAccountID(r)
 	clientID := strings.TrimSpace(r.URL.Query().Get("client_id"))
 	if clientID == "" {
 		clientID = strings.TrimSpace(r.URL.Query().Get("client"))
 	}
 	if selector != "" && clientID != "" {
-		if blockedText := strings.TrimSpace(r.URL.Query().Get("terminal_input_blocked")); blockedText != "" {
-			s.setTerminalInputBlocked(selector, serverRevisionInputLockOwner(clientID), parseBoolQuery(blockedText))
+		if accountID == "" {
+			http.Error(w, "account id is required", http.StatusUnauthorized)
+			return
 		}
-		changed, err := observeServerRevisionState(r.Context(), selector, clientID, s.serverRevision)
+		scope := normalizeAgentScope(selector, accountID)
+		if blockedText := strings.TrimSpace(r.URL.Query().Get("terminal_input_blocked")); blockedText != "" {
+			s.setTerminalInputBlocked(scope, serverRevisionInputLockOwner(clientID), parseBoolQuery(blockedText))
+		}
+		changed, err := observeServerRevisionState(r.Context(), scope, clientID, s.serverRevision)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 		info.ReloadRequired = changed
 		if changed {
-			s.setTerminalInputBlocked(selector, serverRevisionInputLockOwner(clientID), true)
+			s.setTerminalInputBlocked(scope, serverRevisionInputLockOwner(clientID), true)
 		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -346,37 +354,46 @@ func parseBoolQuery(value string) bool {
 	}
 }
 
-func (s *pluginServer) setTerminalInputBlocked(selector, owner string, blocked bool) {
-	selector = strings.TrimSpace(selector)
+func currentRequestAccountID(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	return strings.TrimSpace(r.Header.Get(lightOSUserIDHeader))
+}
+
+func (s *pluginServer) setTerminalInputBlocked(scope agentScope, owner string, blocked bool) {
+	scope = normalizeAgentScope(scope.Selector, scope.AccountID)
 	owner = strings.TrimSpace(owner)
-	if selector == "" || owner == "" {
+	if scope.Selector == "" || scope.AccountID == "" || owner == "" {
 		return
 	}
+	key := scope.cacheKey()
 	s.inputLocksMu.Lock()
 	defer s.inputLocksMu.Unlock()
 	if blocked {
 		if s.inputLocks == nil {
 			s.inputLocks = make(map[string]map[string]struct{})
 		}
-		if s.inputLocks[selector] == nil {
-			s.inputLocks[selector] = make(map[string]struct{})
+		if s.inputLocks[key] == nil {
+			s.inputLocks[key] = make(map[string]struct{})
 		}
-		s.inputLocks[selector][owner] = struct{}{}
+		s.inputLocks[key][owner] = struct{}{}
 		return
 	}
-	if s.inputLocks == nil || s.inputLocks[selector] == nil {
+	if s.inputLocks == nil || s.inputLocks[key] == nil {
 		return
 	}
-	delete(s.inputLocks[selector], owner)
-	if len(s.inputLocks[selector]) == 0 {
-		delete(s.inputLocks, selector)
+	delete(s.inputLocks[key], owner)
+	if len(s.inputLocks[key]) == 0 {
+		delete(s.inputLocks, key)
 	}
 }
 
-func (s *pluginServer) terminalInputBlocked(selector, clientID string) bool {
+func (s *pluginServer) terminalInputBlocked(scope agentScope, clientID string) bool {
+	scope = normalizeAgentScope(scope.Selector, scope.AccountID)
 	s.inputLocksMu.Lock()
 	defer s.inputLocksMu.Unlock()
-	locks := s.inputLocks[strings.TrimSpace(selector)]
+	locks := s.inputLocks[scope.cacheKey()]
 	if len(locks) == 0 {
 		return false
 	}
@@ -388,11 +405,15 @@ func (s *pluginServer) terminalInputBlocked(selector, clientID string) bool {
 	return blocked
 }
 
-func observeServerRevisionState(ctx context.Context, selector, clientID, revision string) (bool, error) {
-	if err := validateInstanceSelector(selector); err != nil {
+func observeServerRevisionState(ctx context.Context, scope agentScope, clientID, revision string) (bool, error) {
+	scope = normalizeAgentScope(scope.Selector, scope.AccountID)
+	if err := validateInstanceSelector(scope.Selector); err != nil {
 		return false, err
 	}
-	sum := sha256.Sum256([]byte(clientID))
+	if scope.AccountID == "" {
+		return false, errors.New("account id is required")
+	}
+	sum := sha256.Sum256([]byte(scope.cacheKey() + "\x00" + strings.TrimSpace(clientID)))
 	key := hex.EncodeToString(sum[:])
 	script := strings.Join([]string{
 		"set -eu",
@@ -407,7 +428,7 @@ func observeServerRevisionState(ctx context.Context, selector, clientID, revisio
 	}, "\n")
 	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(reqCtx, lightosctlPath, "exec", selector, "/bin/sh", "-lc", script).CombinedOutput()
+	output, err := exec.CommandContext(reqCtx, lightosctlPath, "exec", scope.Selector, "/bin/sh", "-lc", script).CombinedOutput()
 	if err != nil {
 		text := strings.TrimSpace(string(output))
 		if text == "" {

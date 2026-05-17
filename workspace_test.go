@@ -1089,29 +1089,41 @@ func TestTerminalControlInputLockTogglesPaneWrites(t *testing.T) {
 
 func TestPluginServerTerminalInputLockOwnersAreIndependent(t *testing.T) {
 	server := &pluginServer{}
-	server.setTerminalInputBlocked("demo@owner", "one", true)
-	server.setTerminalInputBlocked("demo@owner", "two", true)
-	server.setTerminalInputBlocked("demo@owner", "one", false)
-	if !server.terminalInputBlocked("demo@owner", "") {
+	scope := normalizeAgentScope("demo@owner", "user-a")
+	server.setTerminalInputBlocked(scope, "one", true)
+	server.setTerminalInputBlocked(scope, "two", true)
+	server.setTerminalInputBlocked(scope, "one", false)
+	if !server.terminalInputBlocked(scope, "") {
 		t.Fatal("expected terminal input to stay blocked while another owner holds the lock")
 	}
-	server.setTerminalInputBlocked("demo@owner", "two", false)
-	if server.terminalInputBlocked("demo@owner", "") {
+	server.setTerminalInputBlocked(scope, "two", false)
+	if server.terminalInputBlocked(scope, "") {
 		t.Fatal("expected terminal input to be unblocked after all owners release")
 	}
 }
 
 func TestPluginServerTerminalInputLockMatchesClient(t *testing.T) {
 	server := &pluginServer{}
-	server.setTerminalInputBlocked("demo@owner", serverRevisionInputLockOwner("client-one"), true)
-	if !server.terminalInputBlocked("demo@owner", "client-one") {
+	scope := normalizeAgentScope("demo@owner", "user-a")
+	server.setTerminalInputBlocked(scope, serverRevisionInputLockOwner("client-one"), true)
+	if !server.terminalInputBlocked(scope, "client-one") {
 		t.Fatal("expected matching client to be blocked")
 	}
-	if server.terminalInputBlocked("demo@owner", "client-two") {
+	if server.terminalInputBlocked(scope, "client-two") {
 		t.Fatal("expected different client to remain unblocked")
 	}
-	if !server.terminalInputBlocked("demo@owner", "") {
+	if !server.terminalInputBlocked(scope, "") {
 		t.Fatal("expected legacy websocket without client id to be blocked by any active lock")
+	}
+}
+
+func TestPluginServerTerminalInputLockIsAccountScoped(t *testing.T) {
+	server := &pluginServer{}
+	first := normalizeAgentScope("demo@owner", "user-a")
+	second := normalizeAgentScope("demo@owner", "user-b")
+	server.setTerminalInputBlocked(first, serverRevisionInputLockOwner("client-one"), true)
+	if server.terminalInputBlocked(second, "client-one") {
+		t.Fatal("expected input lock to stay scoped to the owning account")
 	}
 }
 
@@ -1132,6 +1144,28 @@ func TestAgentSocketPathIsSelectorScoped(t *testing.T) {
 	}
 }
 
+func TestScopedAgentSocketPathIncludesAccount(t *testing.T) {
+	first := normalizeAgentScope("demo@owner", "user-a")
+	second := normalizeAgentScope("demo@owner", "user-b")
+	if first.cacheKey() == second.cacheKey() {
+		t.Fatal("expected distinct cache keys for different accounts")
+	}
+	firstPath := scopedAgentSocketPath(first)
+	secondPath := scopedAgentSocketPath(second)
+	if firstPath == secondPath {
+		t.Fatalf("expected distinct scoped socket paths, got %q", firstPath)
+	}
+	if firstPath != scopedAgentSocketPath(normalizeAgentScope(" demo@owner ", " user-a ")) {
+		t.Fatal("expected scoped socket path to be stable after trimming")
+	}
+	if !strings.HasPrefix(firstPath, "/tmp/lcmd-webshell-agent-") || !strings.HasSuffix(firstPath, ".sock") {
+		t.Fatalf("unexpected scoped socket path %q", firstPath)
+	}
+	if len(firstPath) >= 108 {
+		t.Fatalf("scoped socket path is too long for common unix socket limits: %d", len(firstPath))
+	}
+}
+
 func TestAgentDaemonRejectsMismatchedSelector(t *testing.T) {
 	daemon := &agentDaemon{
 		selector: "a@owner",
@@ -1145,6 +1179,58 @@ func TestAgentDaemonRejectsMismatchedSelector(t *testing.T) {
 	}
 	if daemon.selector != "a@owner" {
 		t.Fatalf("mismatched request changed daemon selector to %q", daemon.selector)
+	}
+}
+
+func TestAgentDaemonRejectsMismatchedAccount(t *testing.T) {
+	daemon := &agentDaemon{accountID: "user-a"}
+	if err := daemon.validateRequestAccountLocked("user-b"); err == nil {
+		t.Fatal("expected mismatched account to be rejected")
+	}
+	if err := daemon.validateRequestAccountLocked(""); err == nil {
+		t.Fatal("expected empty account to be rejected when daemon is account-scoped")
+	}
+}
+
+func TestHandleWorkspaceRequiresAccountHeader(t *testing.T) {
+	server := &pluginServer{}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/workspace?name=demo@owner", nil)
+	server.handleWorkspace(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("handleWorkspace status = %d, want 401", recorder.Code)
+	}
+}
+
+func TestHandleWorkspaceActivityRequiresAccountHeader(t *testing.T) {
+	server := &pluginServer{}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/workspace/activity?name=demo@owner", nil)
+	server.handleWorkspaceActivity(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("handleWorkspaceActivity status = %d, want 401", recorder.Code)
+	}
+}
+
+func TestAttachPersistentPaneRequiresAccountHeader(t *testing.T) {
+	server := &pluginServer{}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/ws?name=demo@owner&pane=pane-1", nil)
+	if err := server.attachPersistentPane(recorder, request, 80, 24); err != nil {
+		t.Fatalf("attachPersistentPane returned error: %v", err)
+	}
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("attachPersistentPane status = %d, want 401", recorder.Code)
+	}
+}
+
+func TestHandleServerRevisionRequiresAccountHeaderForScopedState(t *testing.T) {
+	server := &pluginServer{}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/server-revision?name=demo@owner&client_id=client-one", nil)
+	server.handleServerRevision(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("handleServerRevision status = %d, want 401", recorder.Code)
 	}
 }
 

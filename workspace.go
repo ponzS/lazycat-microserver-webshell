@@ -260,11 +260,17 @@ func (s *pluginServer) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
+	accountID := currentRequestAccountID(r)
+	if accountID == "" {
+		http.Error(w, "account id is required", http.StatusUnauthorized)
+		return
+	}
+	scope := normalizeAgentScope(selector, accountID)
 	cols, rows := parseTerminalSize(r.URL.Query().Get("cols"), r.URL.Query().Get("rows"))
 
 	switch r.Method {
 	case http.MethodGet:
-		state, err := requestAgentWorkspaceState(r.Context(), selector, cols, rows, s.currentTerminalScrollback())
+		state, err := requestAgentWorkspaceState(r.Context(), scope, cols, rows, s.currentTerminalScrollback())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -277,7 +283,7 @@ func (s *pluginServer) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		state, err := requestAgentWorkspaceAction(r.Context(), selector, cols, rows, s.currentTerminalScrollback(), request)
+		state, err := requestAgentWorkspaceAction(r.Context(), scope, cols, rows, s.currentTerminalScrollback(), request)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -299,8 +305,14 @@ func (s *pluginServer) handleWorkspaceActivity(w http.ResponseWriter, r *http.Re
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
+	accountID := currentRequestAccountID(r)
+	if accountID == "" {
+		http.Error(w, "account id is required", http.StatusUnauthorized)
+		return
+	}
+	scope := normalizeAgentScope(selector, accountID)
 	cols, rows := parseTerminalSize(r.URL.Query().Get("cols"), r.URL.Query().Get("rows"))
-	state, err := requestAgentWorkspaceActivity(r.Context(), selector, cols, rows, s.currentTerminalScrollback())
+	state, err := requestAgentWorkspaceActivity(r.Context(), scope, cols, rows, s.currentTerminalScrollback())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -320,7 +332,12 @@ func (s *pluginServer) attachPersistentPane(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "pane is required", http.StatusBadRequest)
 		return nil
 	}
-	return s.attachAgentPane(w, r, selector, paneID, cols, rows, s.currentTerminalScrollback())
+	accountID := currentRequestAccountID(r)
+	if accountID == "" {
+		http.Error(w, "account id is required", http.StatusUnauthorized)
+		return nil
+	}
+	return s.attachAgentPane(w, r, normalizeAgentScope(selector, accountID), paneID, cols, rows, s.currentTerminalScrollback())
 }
 
 func writeJSON(w http.ResponseWriter, payload any) {
