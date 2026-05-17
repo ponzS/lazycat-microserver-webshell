@@ -430,7 +430,7 @@ func runAgentAttachClient(socketPath, selector, paneID string, cols, rows, termi
 	return <-done
 }
 
-func writeAgentHistoryReplay(w io.Writer, selector, paneID string, history []byte, allowGeneratedInput bool) bool {
+func writeAgentHistoryReplay(w io.Writer, selector, paneID string, history paneHistorySnapshot, allowGeneratedInput bool) bool {
 	if err := writeAgentControlFrame(w, map[string]any{
 		"type":                  "history-replay-start",
 		"selector":              selector,
@@ -439,15 +439,17 @@ func writeAgentHistoryReplay(w io.Writer, selector, paneID string, history []byt
 	}); err != nil {
 		return false
 	}
-	for len(history) > 0 {
-		chunkSize := historyReplayChunk
-		if len(history) < chunkSize {
-			chunkSize = len(history)
+	for _, chunk := range history.chunks {
+		for len(chunk) > 0 {
+			chunkSize := historyReplayChunk
+			if len(chunk) < chunkSize {
+				chunkSize = len(chunk)
+			}
+			if err := writeAgentFrame(w, agentFrameBinary, chunk[:chunkSize]); err != nil {
+				return false
+			}
+			chunk = chunk[chunkSize:]
 		}
-		if err := writeAgentFrame(w, agentFrameBinary, history[:chunkSize]); err != nil {
-			return false
-		}
-		history = history[chunkSize:]
 	}
 	return writeAgentControlFrame(w, map[string]any{
 		"type":     "history-replay-complete",

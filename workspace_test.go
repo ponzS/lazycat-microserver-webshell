@@ -25,6 +25,14 @@ func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error)
 	return fn(request)
 }
 
+func newTestPaneHistory(chunks ...string) paneHistory {
+	var history paneHistory
+	for _, chunk := range chunks {
+		history.append([]byte(chunk))
+	}
+	return history
+}
+
 func TestBuildInstanceShellBootstrapScriptUsesConfiguredUser(t *testing.T) {
 	script := buildInstanceShellBootstrapScript("admin", "")
 	if !containsAll(script,
@@ -775,15 +783,15 @@ func TestBuildInstanceShellBootstrapScriptUsesInitialCWD(t *testing.T) {
 func TestTerminalPaneFirstAttachAllowsGeneratedInputDuringReplay(t *testing.T) {
 	pane := &terminalPane{
 		clients: make(map[*paneClient]struct{}),
-		history: []byte("\x1b[c"),
+		history: newTestPaneHistory("\x1b[c"),
 	}
 
 	history, client, allowGeneratedInput, err := pane.attachClient()
 	if err != nil {
 		t.Fatalf("attachClient returned error: %v", err)
 	}
-	if string(history) != "\x1b[c" {
-		t.Fatalf("unexpected history: %q", string(history))
+	if got := string(history.bytes()); got != "\x1b[c" {
+		t.Fatalf("unexpected history: %q", got)
 	}
 	if !allowGeneratedInput {
 		t.Fatal("expected first attach to allow generated terminal input during replay")
@@ -823,7 +831,7 @@ func TestTerminalPaneAppendOutputUsesDynamicHistoryLimit(t *testing.T) {
 	pane.appendOutput([]byte("hello"))
 	pane.appendOutput([]byte(" world"))
 
-	if got, want := string(pane.history), "world"; got != want {
+	if got, want := string(pane.history.snapshot().bytes()), " world"; got != want {
 		t.Fatalf("pane history = %q, want %q", got, want)
 	}
 }
@@ -831,8 +839,8 @@ func TestTerminalPaneAppendOutputUsesDynamicHistoryLimit(t *testing.T) {
 func TestTerminalWorkspaceSetHistoryLimitTrimsExistingPanes(t *testing.T) {
 	workspace := &terminalWorkspace{
 		panes: map[string]*terminalPane{
-			"pane-1": {id: "pane-1", history: []byte("1234567890"), historyLimitBytes: 10},
-			"pane-2": {id: "pane-2", history: []byte("abcdef"), historyLimitBytes: 10},
+			"pane-1": {id: "pane-1", history: newTestPaneHistory("123456", "7890"), historyLimitBytes: 10},
+			"pane-2": {id: "pane-2", history: newTestPaneHistory("ab", "cdef"), historyLimitBytes: 10},
 		},
 	}
 
@@ -841,14 +849,138 @@ func TestTerminalWorkspaceSetHistoryLimitTrimsExistingPanes(t *testing.T) {
 	if got := workspace.historyLimitBytes; got != 4 {
 		t.Fatalf("workspace historyLimitBytes = %d, want 4", got)
 	}
-	if got, want := string(workspace.panes["pane-1"].history), "7890"; got != want {
+	if got, want := string(workspace.panes["pane-1"].history.snapshot().bytes()), "7890"; got != want {
 		t.Fatalf("pane-1 history = %q, want %q", got, want)
 	}
-	if got, want := string(workspace.panes["pane-2"].history), "cdef"; got != want {
+	if got, want := string(workspace.panes["pane-2"].history.snapshot().bytes()), "cdef"; got != want {
 		t.Fatalf("pane-2 history = %q, want %q", got, want)
 	}
 	if got := workspace.panes["pane-1"].historyLimitBytes; got != 4 {
 		t.Fatalf("pane-1 historyLimitBytes = %d, want 4", got)
+	}
+}
+
+func TestTerminalPaneAppendOutputSplitsOversizedHistoryChunks(t *testing.T) {
+	pane := &terminalPane{
+		clients:           make(map[*paneClient]struct{}),
+		historyLimitBytes: historyChunkMaxBytes * 3,
+	}
+	input := strings.Repeat("a", historyChunkMaxBytes+17)
+
+	pane.appendOutput([]byte(input))
+
+	if got, want := len(pane.history.chunks), 2; got != want {
+		t.Fatalf("history chunk count = %d, want %d", got, want)
+	}
+	if got, want := len(pane.history.chunks[0]), historyChunkMaxBytes; got != want {
+		t.Fatalf("first history chunk size = %d, want %d", got, want)
+	}
+	if got, want := len(pane.history.chunks[1]), 17; got != want {
+		t.Fatalf("second history chunk size = %d, want %d", got, want)
+	}
+	if len(pane.history.chunks[0]) > 0 && len(pane.history.chunks[1]) > 0 && &pane.history.chunks[0][0] == &pane.history.chunks[1][0] {
+		t.Fatal("expected oversized append to create independent chunk backing arrays")
+	}
+	if got := string(pane.history.snapshot().bytes()); got != input {
+		t.Fatal("history chunks did not preserve oversized input")
+	}
+}
+
+func TestTerminalPaneAppendOutputBroadcastsAllGeneratedChunks(t *testing.T) {
+	pane := &terminalPane{
+		clients:           make(map[*paneClient]struct{}),
+		historyLimitBytes: historyChunkMaxBytes * 3,
+	}
+	_, client, _, err := pane.attachClient()
+	if err != nil {
+		t.Fatalf("attachClient returned error: %v", err)
+	}
+	defer pane.detachClient(client)
+	input := strings.Repeat("b", historyChunkMaxBytes+11)
+
+	pane.appendOutput([]byte(input))
+
+	var got strings.Builder
+	for i := 0; i < 2; i++ {
+		select {
+		case outbound := <-client.send:
+			client.dequeued(len(outbound.payload))
+			got.Write(outbound.payload)
+		default:
+			t.Fatalf("expected generated chunk %d to be queued", i+1)
+		}
+	}
+	if got.String() != input {
+		t.Fatal("queued chunks did not preserve oversized output")
+	}
+}
+
+func TestPaneHistoryTrimRebuildsRemainingChunkSlice(t *testing.T) {
+	history := newTestPaneHistory("drop", "keep")
+	original := history.chunks
+
+	history.trim(4)
+
+	if got, want := string(history.snapshot().bytes()), "keep"; got != want {
+		t.Fatalf("history = %q, want %q", got, want)
+	}
+	if len(history.chunks) != cap(history.chunks) {
+		t.Fatalf("expected trim to rebuild chunk slice, len=%d cap=%d", len(history.chunks), cap(history.chunks))
+	}
+	if len(original) > 0 && original[0] != nil {
+		t.Fatal("expected dropped chunk reference to be cleared")
+	}
+}
+
+func TestTerminalPaneAttachSnapshotSurvivesLaterTrim(t *testing.T) {
+	pane := &terminalPane{
+		clients:           make(map[*paneClient]struct{}),
+		history:           newTestPaneHistory("old", "keep"),
+		historyLimitBytes: 4,
+	}
+
+	history, client, _, err := pane.attachClient()
+	if err != nil {
+		t.Fatalf("attachClient returned error: %v", err)
+	}
+	defer pane.detachClient(client)
+
+	pane.appendOutput([]byte("newer"))
+
+	if got, want := string(history.bytes()), "oldkeep"; got != want {
+		t.Fatalf("snapshot history = %q, want %q", got, want)
+	}
+	if got, want := string(pane.history.snapshot().bytes()), "newer"; got != want {
+		t.Fatalf("current history = %q, want %q", got, want)
+	}
+}
+
+func TestTerminalPaneAttachClientQueuesLaterOutput(t *testing.T) {
+	pane := &terminalPane{
+		clients:           make(map[*paneClient]struct{}),
+		history:           newTestPaneHistory("before"),
+		historyLimitBytes: 1024,
+	}
+
+	history, client, _, err := pane.attachClient()
+	if err != nil {
+		t.Fatalf("attachClient returned error: %v", err)
+	}
+	defer pane.detachClient(client)
+
+	pane.appendOutput([]byte("after"))
+
+	if got, want := string(history.bytes()), "before"; got != want {
+		t.Fatalf("snapshot history = %q, want %q", got, want)
+	}
+	select {
+	case outbound := <-client.send:
+		client.dequeued(len(outbound.payload))
+		if got, want := string(outbound.payload), "after"; got != want {
+			t.Fatalf("queued payload = %q, want %q", got, want)
+		}
+	default:
+		t.Fatal("expected attach-time client to receive later output")
 	}
 }
 
@@ -1004,7 +1136,8 @@ func TestAgentDaemonRejectsMismatchedSelector(t *testing.T) {
 
 func TestAgentHistoryReplayFramesIncludeSelectorAndPane(t *testing.T) {
 	var out bytes.Buffer
-	if !writeAgentHistoryReplay(&out, "demo@owner", "pane-1", []byte("hello"), false) {
+	history := paneHistorySnapshot{chunks: [][]byte{[]byte("hello")}}
+	if !writeAgentHistoryReplay(&out, "demo@owner", "pane-1", history, false) {
 		t.Fatal("writeAgentHistoryReplay returned false")
 	}
 
@@ -1043,6 +1176,75 @@ func TestAgentHistoryReplayFramesIncludeSelectorAndPane(t *testing.T) {
 		t.Fatalf("unmarshal replay complete returned error: %v", err)
 	}
 	if complete["type"] != "history-replay-complete" || complete["selector"] != "demo@owner" || complete["pane_id"] != "pane-1" {
+		t.Fatalf("unexpected replay complete payload: %+v", complete)
+	}
+}
+
+func TestAgentHistoryReplayWritesMultipleChunksInOrder(t *testing.T) {
+	var out bytes.Buffer
+	history := paneHistorySnapshot{chunks: [][]byte{[]byte("one"), []byte("two")}}
+	if !writeAgentHistoryReplay(&out, "demo@owner", "pane-1", history, false) {
+		t.Fatal("writeAgentHistoryReplay returned false")
+	}
+
+	frameType, _, err := readAgentFrame(&out)
+	if err != nil {
+		t.Fatalf("reading replay start returned error: %v", err)
+	}
+	if frameType != agentFrameText {
+		t.Fatalf("expected text start frame, got %q", frameType)
+	}
+	for _, want := range []string{"one", "two"} {
+		frameType, payload, err := readAgentFrame(&out)
+		if err != nil {
+			t.Fatalf("reading replay chunk returned error: %v", err)
+		}
+		if frameType != agentFrameBinary || string(payload) != want {
+			t.Fatalf("unexpected replay chunk: type=%q payload=%q want=%q", frameType, string(payload), want)
+		}
+	}
+	frameType, _, err = readAgentFrame(&out)
+	if err != nil {
+		t.Fatalf("reading replay complete returned error: %v", err)
+	}
+	if frameType != agentFrameText {
+		t.Fatalf("expected text complete frame, got %q", frameType)
+	}
+}
+
+func TestAgentHistoryReplayWritesStartAndCompleteForEmptyHistory(t *testing.T) {
+	var out bytes.Buffer
+	if !writeAgentHistoryReplay(&out, "demo@owner", "pane-1", paneHistorySnapshot{}, true) {
+		t.Fatal("writeAgentHistoryReplay returned false")
+	}
+
+	frameType, payload, err := readAgentFrame(&out)
+	if err != nil {
+		t.Fatalf("reading replay start returned error: %v", err)
+	}
+	if frameType != agentFrameText {
+		t.Fatalf("expected text start frame, got %q", frameType)
+	}
+	var start map[string]any
+	if err := json.Unmarshal(payload, &start); err != nil {
+		t.Fatalf("unmarshal replay start returned error: %v", err)
+	}
+	if start["type"] != "history-replay-start" || start["allow_generated_input"] != true {
+		t.Fatalf("unexpected replay start payload: %+v", start)
+	}
+
+	frameType, payload, err = readAgentFrame(&out)
+	if err != nil {
+		t.Fatalf("reading replay complete returned error: %v", err)
+	}
+	if frameType != agentFrameText {
+		t.Fatalf("expected text complete frame, got %q", frameType)
+	}
+	var complete map[string]any
+	if err := json.Unmarshal(payload, &complete); err != nil {
+		t.Fatalf("unmarshal replay complete returned error: %v", err)
+	}
+	if complete["type"] != "history-replay-complete" {
 		t.Fatalf("unexpected replay complete payload: %+v", complete)
 	}
 }

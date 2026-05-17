@@ -29,6 +29,7 @@ const (
 	defaultTerminalRows = 32
 
 	averageHistoryBytesPerLine = 350
+	historyChunkMaxBytes       = 32 << 10
 	clientQueueLimit           = 8 << 20
 	historyReplayChunk         = 256 << 10
 	websocketReadLimit         = 10 << 20
@@ -85,7 +86,7 @@ type terminalPane struct {
 	cmd                  *exec.Cmd
 	ptyFile              *os.File
 	clients              map[*paneClient]struct{}
-	history              []byte
+	history              paneHistory
 	historyLimitBytes    int
 	cols                 int
 	rows                 int
@@ -118,6 +119,15 @@ type paneOutbound struct {
 	messageType int
 	payload     []byte
 	closeAfter  bool
+}
+
+type paneHistory struct {
+	chunks [][]byte
+	bytes  int
+}
+
+type paneHistorySnapshot struct {
+	chunks [][]byte
 }
 
 type workspaceState struct {
@@ -318,32 +328,6 @@ func writeJSON(w http.ResponseWriter, payload any) {
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
-}
-
-func writeHistoryReplay(conn *websocket.Conn, selector, paneID string, history []byte, allowGeneratedInput bool) bool {
-	if err := writeWebSocketJSON(conn, map[string]any{
-		"type":                  "history-replay-start",
-		"selector":              selector,
-		"pane_id":               paneID,
-		"allow_generated_input": allowGeneratedInput,
-	}); err != nil {
-		return false
-	}
-	for len(history) > 0 {
-		chunkSize := historyReplayChunk
-		if len(history) < chunkSize {
-			chunkSize = len(history)
-		}
-		if err := conn.WriteMessage(websocket.BinaryMessage, history[:chunkSize]); err != nil {
-			return false
-		}
-		history = history[chunkSize:]
-	}
-	return writeWebSocketJSON(conn, map[string]any{
-		"type":     "history-replay-complete",
-		"selector": selector,
-		"pane_id":  paneID,
-	}) == nil
 }
 
 func writeWebSocketJSON(conn *websocket.Conn, payload any) error {
@@ -1153,12 +1137,14 @@ func (p *terminalPane) appendOutput(data []byte) {
 	if len(filtered) == 0 {
 		return
 	}
-	copied := append([]byte(nil), filtered...)
+	chunks := makeHistoryChunks(filtered)
 	var clients []*paneClient
 
 	p.mu.Lock()
 	if !p.exited {
-		p.history = append(p.history, copied...)
+		for _, chunk := range chunks {
+			p.history.append(chunk)
+		}
 		p.trimHistoryLocked()
 		clients = make([]*paneClient, 0, len(p.clients))
 		for client := range p.clients {
@@ -1168,8 +1154,24 @@ func (p *terminalPane) appendOutput(data []byte) {
 	p.mu.Unlock()
 
 	for _, client := range clients {
-		client.enqueue(paneOutbound{messageType: websocket.BinaryMessage, payload: copied})
+		for _, chunk := range chunks {
+			client.enqueue(paneOutbound{messageType: websocket.BinaryMessage, payload: chunk})
+		}
 	}
+}
+
+func makeHistoryChunks(data []byte) [][]byte {
+	if len(data) == 0 {
+		return nil
+	}
+	chunks := make([][]byte, 0, (len(data)+historyChunkMaxBytes-1)/historyChunkMaxBytes)
+	for len(data) > 0 {
+		chunkSize := min(len(data), historyChunkMaxBytes)
+		chunk := append([]byte(nil), data[:chunkSize]...)
+		chunks = append(chunks, chunk)
+		data = data[chunkSize:]
+	}
+	return chunks
 }
 
 func (p *terminalPane) trimHistoryLocked() {
@@ -1178,9 +1180,59 @@ func (p *terminalPane) trimHistoryLocked() {
 		limit = historyLimitBytesForTerminalScrollback(fonts.DefaultTerminalScrollback)
 		p.historyLimitBytes = limit
 	}
-	if len(p.history) > limit {
-		p.history = append([]byte(nil), p.history[len(p.history)-limit:]...)
+	p.history.trim(limit)
+}
+
+func (h *paneHistory) append(chunk []byte) {
+	if len(chunk) == 0 {
+		return
 	}
+	h.chunks = append(h.chunks, chunk)
+	h.bytes += len(chunk)
+}
+
+func (h *paneHistory) trim(limit int) {
+	if limit <= 0 || h.bytes <= limit {
+		return
+	}
+	dropCount := 0
+	dropBytes := 0
+	for len(h.chunks)-dropCount > 1 && h.bytes-dropBytes > limit {
+		chunk := h.chunks[dropCount]
+		dropBytes += len(chunk)
+		dropCount++
+	}
+	if dropCount == 0 {
+		return
+	}
+	for i := 0; i < dropCount; i++ {
+		h.chunks[i] = nil
+	}
+	remaining := append([][]byte(nil), h.chunks[dropCount:]...)
+	h.chunks = remaining
+	h.bytes -= dropBytes
+	if h.bytes < 0 {
+		h.bytes = 0
+	}
+}
+
+func (h *paneHistory) snapshot() paneHistorySnapshot {
+	return paneHistorySnapshot{chunks: append([][]byte(nil), h.chunks...)}
+}
+
+func (s paneHistorySnapshot) bytes() []byte {
+	var total int
+	for _, chunk := range s.chunks {
+		total += len(chunk)
+	}
+	if total == 0 {
+		return nil
+	}
+	data := make([]byte, 0, total)
+	for _, chunk := range s.chunks {
+		data = append(data, chunk...)
+	}
+	return data
 }
 
 const (
@@ -1389,13 +1441,13 @@ func (p *terminalPane) markExited(err error) {
 	close(p.done)
 }
 
-func (p *terminalPane) attachClient() ([]byte, *paneClient, bool, error) {
+func (p *terminalPane) attachClient() (paneHistorySnapshot, *paneClient, bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.exited {
-		return nil, nil, false, errors.New("pane has exited")
+		return paneHistorySnapshot{}, nil, false, errors.New("pane has exited")
 	}
-	history := append([]byte(nil), p.history...)
+	history := p.history.snapshot()
 	allowGeneratedInputDuringReplay := !p.hasAttached
 	p.hasAttached = true
 	client := &paneClient{
