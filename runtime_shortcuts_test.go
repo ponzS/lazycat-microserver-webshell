@@ -165,3 +165,35 @@ func TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeTabOverviewRerendersAndFallsBackToWorkspaceTabs(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+
+	wantSnippets := []string{
+		"const getOrderedTabs = () => {",
+		"const orderedIDs = new Set(ordered.map((tab) => tab.id));",
+		"for (const tab of tabs.values()) {",
+		"if (!orderedIDs.has(tab.id)) {",
+		"scheduleTabOverviewRender();",
+		"renderTabOverview();",
+	}
+	for _, want := range wantSnippets {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime tab overview guard missing %q", want)
+		}
+	}
+
+	openTabOverviewIndex := strings.Index(source, "const openTabOverview = () => {")
+	if openTabOverviewIndex < 0 {
+		t.Fatal("openTabOverview definition not found")
+	}
+	renderIndex := strings.Index(source[openTabOverviewIndex:], "renderTabOverview();")
+	scheduleIndex := strings.Index(source[openTabOverviewIndex:], "scheduleTabOverviewRender();")
+	if renderIndex < 0 || scheduleIndex < 0 || renderIndex > scheduleIndex {
+		t.Fatalf("openTabOverview should schedule a follow-up overview render after the initial render")
+	}
+}

@@ -3762,10 +3762,18 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     stopThemePickerScrollbarDrag();
   };
 
-  const getOrderedTabs = () =>
-    Array.from(tabsEl.querySelectorAll(".tab"))
+  const getOrderedTabs = () => {
+    const ordered = Array.from(tabsEl.querySelectorAll(".tab"))
       .map((button) => tabs.get(button.dataset.tabId))
       .filter(Boolean);
+    const orderedIDs = new Set(ordered.map((tab) => tab.id));
+    for (const tab of tabs.values()) {
+      if (!orderedIDs.has(tab.id)) {
+        ordered.push(tab);
+      }
+    }
+    return ordered;
+  };
 
   const scrollTabButtonIntoView = (button) => {
     if (!button || !tabsEl.contains(button)) {
@@ -4079,6 +4087,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     tabOverview.hidden = false;
     tabOverviewToggle?.setAttribute("aria-expanded", "true");
     renderTabOverview();
+    scheduleTabOverviewRender();
     window.requestAnimationFrame(() => {
       const activeCard = tabOverviewGrid?.querySelector(".tab-overview-card.active");
       const activeButton = activeCard?.querySelector(".tab-overview-card-main");
