@@ -1616,21 +1616,7 @@ const procScanScript = `for d in /proc/[0-9]*; do
 done`
 
 func scanContainerActivities(ctx context.Context, selector string, ttys []string) (map[string]paneActivity, error) {
-	result := make(map[string]paneActivity, len(ttys))
-	uniqueTTYs := make([]string, 0, len(ttys))
-	seen := make(map[string]struct{}, len(ttys))
-	for _, tty := range ttys {
-		tty = strings.TrimSpace(tty)
-		if !privateTTYPattern.MatchString(tty) {
-			continue
-		}
-		if _, ok := seen[tty]; ok {
-			continue
-		}
-		seen[tty] = struct{}{}
-		uniqueTTYs = append(uniqueTTYs, tty)
-		result[tty] = paneActivity{TTY: tty}
-	}
+	result, uniqueTTYs := normalizeActivityTTYs(ttys)
 	if len(uniqueTTYs) == 0 {
 		return result, nil
 	}
@@ -1653,6 +1639,12 @@ func scanContainerActivities(ctx context.Context, selector string, ttys []string
 }
 
 func scanLocalActivities(ctx context.Context, ttys []string) (map[string]paneActivity, error) {
+	scanCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	defer cancel()
+	return scanProcActivities(scanCtx, "/proc", ttys)
+}
+
+func scanProcActivities(ctx context.Context, procRoot string, ttys []string) (map[string]paneActivity, error) {
 	result := make(map[string]paneActivity, len(ttys))
 	uniqueTTYs := make([]string, 0, len(ttys))
 	seen := make(map[string]struct{}, len(ttys))
@@ -1671,21 +1663,126 @@ func scanLocalActivities(ctx context.Context, ttys []string) (map[string]paneAct
 	if len(uniqueTTYs) == 0 {
 		return result, nil
 	}
-	scanCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
-	defer cancel()
-	output, err := exec.CommandContext(scanCtx, "/bin/sh", "-lc", procScanScript).CombinedOutput()
+
+	ttySet := make(map[string]struct{}, len(uniqueTTYs))
+	for _, tty := range uniqueTTYs {
+		ttySet[tty] = struct{}{}
+	}
+
+	entries, err := os.ReadDir(procRoot)
 	if err != nil {
-		text := strings.TrimSpace(string(output))
-		if text == "" {
+		return result, err
+	}
+
+	type procCandidate struct {
+		info procInfo
+		dir  string
+	}
+	candidates := make([]procCandidate, 0, len(entries))
+	foregroundByTTYNr := make(map[int]int, len(uniqueTTYs))
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		return result, fmt.Errorf("%w: %s", err, text)
+		if !entry.IsDir() || !isProcPIDDirName(entry.Name()) {
+			continue
+		}
+		dir := filepath.Join(procRoot, entry.Name())
+		statData, err := os.ReadFile(filepath.Join(dir, "stat"))
+		if err != nil {
+			continue
+		}
+		info, err := parseProcStat(string(statData))
+		if err != nil || info.TTYNr == 0 || info.TPgid <= 0 {
+			continue
+		}
+		if fd0, err := os.Readlink(filepath.Join(dir, "fd", "0")); err == nil {
+			info.FD0 = strings.TrimSpace(fd0)
+		}
+		candidates = append(candidates, procCandidate{info: info, dir: dir})
+		if _, ok := ttySet[info.FD0]; ok {
+			foregroundByTTYNr[info.TTYNr] = info.TPgid
+		}
 	}
-	processes := parseProcScanOutput(output)
+	if len(foregroundByTTYNr) == 0 {
+		return result, nil
+	}
+
+	processes := make([]procInfo, 0, len(candidates))
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		_, isRequestedTTY := ttySet[candidate.info.FD0]
+		foregroundPgrp, hasTargetTTY := foregroundByTTYNr[candidate.info.TTYNr]
+		if !isRequestedTTY && (!hasTargetTTY || candidate.info.Pgrp != foregroundPgrp) {
+			continue
+		}
+		info := candidate.info
+		info.Cmd = readProcCmdline(filepath.Join(candidate.dir, "cmdline"))
+		info.CWD = readProcLink(filepath.Join(candidate.dir, "cwd"))
+		processes = append(processes, info)
+	}
+	sort.Slice(processes, func(i, j int) bool {
+		return processes[i].PID < processes[j].PID
+	})
 	for _, tty := range uniqueTTYs {
 		result[tty] = resolveTTYActivity(tty, processes)
 	}
 	return result, nil
+}
+
+func normalizeActivityTTYs(ttys []string) (map[string]paneActivity, []string) {
+	result := make(map[string]paneActivity, len(ttys))
+	uniqueTTYs := make([]string, 0, len(ttys))
+	seen := make(map[string]struct{}, len(ttys))
+	for _, tty := range ttys {
+		tty = strings.TrimSpace(tty)
+		if !privateTTYPattern.MatchString(tty) {
+			continue
+		}
+		if _, ok := seen[tty]; ok {
+			continue
+		}
+		seen[tty] = struct{}{}
+		uniqueTTYs = append(uniqueTTYs, tty)
+		result[tty] = paneActivity{TTY: tty}
+	}
+	return result, uniqueTTYs
+}
+
+func isProcPIDDirName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func readProcCmdline(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for i, b := range data {
+		switch b {
+		case 0, '\t', '\n', '\r':
+			data[i] = ' '
+		}
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func readProcLink(path string) string {
+	value, err := os.Readlink(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(value)
 }
 
 func parseProcScanOutput(output []byte) []procInfo {

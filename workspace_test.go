@@ -1457,6 +1457,117 @@ func TestParseProcScanOutputIncludesCWD(t *testing.T) {
 	}
 }
 
+func TestScanProcActivitiesUsesForegroundProcessGroup(t *testing.T) {
+	procRoot := t.TempDir()
+	writeFakeProc(t, procRoot, fakeProc{
+		pid:     10,
+		comm:    "bash",
+		pgrp:    10,
+		ttyNr:   34816,
+		tpgid:   20,
+		fd0:     "/dev/pts/1",
+		cwd:     "/home/demo",
+		cmdline: "/bin/bash\x00",
+	})
+	writeFakeProc(t, procRoot, fakeProc{
+		pid:     20,
+		comm:    "vim",
+		pgrp:    20,
+		ttyNr:   34816,
+		tpgid:   20,
+		fd0:     "/dev/pts/1",
+		cwd:     "/home/demo/project",
+		cmdline: "/usr/bin/vim\x00file.txt\x00",
+	})
+	writeFakeProc(t, procRoot, fakeProc{
+		pid:     30,
+		comm:    "sleep",
+		pgrp:    30,
+		ttyNr:   34817,
+		tpgid:   30,
+		fd0:     "/dev/pts/2",
+		cwd:     "/tmp",
+		cmdline: "/usr/bin/sleep\x009\x00",
+	})
+
+	activities, err := scanProcActivities(context.Background(), procRoot, []string{"/dev/pts/1"})
+	if err != nil {
+		t.Fatalf("scanProcActivities returned error: %v", err)
+	}
+	activity := activities["/dev/pts/1"]
+	if !activity.Busy {
+		t.Fatalf("expected tty to be busy: %+v", activity)
+	}
+	if activity.Command != "vim" {
+		t.Fatalf("expected foreground command vim, got %q", activity.Command)
+	}
+	if activity.CommandLine != "/usr/bin/vim file.txt" {
+		t.Fatalf("expected normalized command line, got %q", activity.CommandLine)
+	}
+	if activity.CWD != "/home/demo/project" {
+		t.Fatalf("expected foreground cwd, got %q", activity.CWD)
+	}
+	if _, ok := activities["/dev/pts/2"]; ok {
+		t.Fatalf("unexpected activity for unrequested tty: %+v", activities)
+	}
+}
+
+func TestScanProcActivitiesTreatsIdleShellAsNotBusy(t *testing.T) {
+	procRoot := t.TempDir()
+	writeFakeProc(t, procRoot, fakeProc{
+		pid:     10,
+		comm:    "bash",
+		pgrp:    10,
+		ttyNr:   34816,
+		tpgid:   10,
+		fd0:     "/dev/pts/1",
+		cwd:     "/home/demo",
+		cmdline: "-bash\x00",
+	})
+
+	activities, err := scanProcActivities(context.Background(), procRoot, []string{"/dev/pts/1"})
+	if err != nil {
+		t.Fatalf("scanProcActivities returned error: %v", err)
+	}
+	activity := activities["/dev/pts/1"]
+	if activity.Busy {
+		t.Fatalf("expected idle shell to be not busy: %+v", activity)
+	}
+	if activity.Command != "bash" || activity.CommandLine != "-bash" || activity.CWD != "/home/demo" {
+		t.Fatalf("unexpected idle shell activity: %+v", activity)
+	}
+}
+
+func TestScanProcActivitiesSkipsBrokenProcesses(t *testing.T) {
+	procRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(procRoot, "not-a-pid"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(procRoot, "99"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(procRoot, "99", "stat"), []byte("bad stat"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeProc(t, procRoot, fakeProc{
+		pid:   11,
+		comm:  "top",
+		pgrp:  11,
+		ttyNr: 34816,
+		tpgid: 11,
+		fd0:   "/dev/pts/1",
+	})
+
+	activities, err := scanProcActivities(context.Background(), procRoot, []string{"/dev/pts/1"})
+	if err != nil {
+		t.Fatalf("scanProcActivities returned error: %v", err)
+	}
+	activity := activities["/dev/pts/1"]
+	if !activity.Busy || activity.Command != "top" {
+		t.Fatalf("expected fallback command from stat comm, got %+v", activity)
+	}
+}
+
 func TestRefreshAutoTabLabelsUsesActivePaneCWD(t *testing.T) {
 	workspace := &terminalWorkspace{
 		panes: map[string]*terminalPane{
@@ -1487,6 +1598,44 @@ func TestResolveSourcePaneCWDLockedUsesRequestedPane(t *testing.T) {
 	}
 	if got := workspace.resolveSourcePaneCWDLocked("tab-1", "pane-1"); got != "/home/demo/project" {
 		t.Fatalf("expected source cwd, got %q", got)
+	}
+}
+
+type fakeProc struct {
+	pid     int
+	comm    string
+	pgrp    int
+	ttyNr   int
+	tpgid   int
+	fd0     string
+	cwd     string
+	cmdline string
+}
+
+func writeFakeProc(t *testing.T, procRoot string, proc fakeProc) {
+	t.Helper()
+	dir := filepath.Join(procRoot, strconv.Itoa(proc.pid))
+	if err := os.MkdirAll(filepath.Join(dir, "fd"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stat := strconv.Itoa(proc.pid) + " (" + proc.comm + ") S 1 " + strconv.Itoa(proc.pgrp) + " 3333 " + strconv.Itoa(proc.ttyNr) + " " + strconv.Itoa(proc.tpgid) + " 0 0 0 0 0 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(stat), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if proc.fd0 != "" {
+		if err := os.Symlink(proc.fd0, filepath.Join(dir, "fd", "0")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if proc.cwd != "" {
+		if err := os.Symlink(proc.cwd, filepath.Join(dir, "cwd")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if proc.cmdline != "" {
+		if err := os.WriteFile(filepath.Join(dir, "cmdline"), []byte(proc.cmdline), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
