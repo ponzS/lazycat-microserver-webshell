@@ -6245,7 +6245,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     syncMobileMenuSelectionState();
   };
 
-  const isMobileShortcutRepeatable = (shortcut) => ["arrow_up", "arrow_down", "arrow_left", "arrow_right"].includes(String(shortcut?.inputKey || ""));
+  const isMobileShortcutRepeatable = (shortcut) => ["enter", "arrow_up", "arrow_down", "arrow_left", "arrow_right"].includes(String(shortcut?.inputKey || ""));
 
   const describeMobileShortcut = (shortcut) => {
     if (shortcut?.action) {

@@ -88,6 +88,27 @@ func TestRuntimeDefaultMobileShortcutOrder(t *testing.T) {
 	}
 }
 
+func TestRuntimeMobileReturnShortcutRepeats(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+
+	wantSnippets := []string{
+		`const touchShortcutRepeatInitialDelayMs = 320;`,
+		`const touchShortcutRepeatIntervalMs = 80;`,
+		`["enter", "arrow_up", "arrow_down", "arrow_left", "arrow_right"].includes(String(shortcut?.inputKey || ""))`,
+		`repeatTimer = window.setInterval(() => {`,
+		`triggerMobileShortcut(shortcut, shortcutSession || activeSession(), { feedback: false });`,
+	}
+	for _, want := range wantSnippets {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime mobile return repeat guard missing %q", want)
+		}
+	}
+}
+
 func TestRuntimeTouchShortcutLayoutKeepsDesktopPCHidden(t *testing.T) {
 	mainData, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {
