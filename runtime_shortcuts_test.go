@@ -94,3 +94,27 @@ func TestRuntimeWebSocketURLUsesWebSocketProtocols(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeTerminalOutputBatchingGuard(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+
+	wantSnippets := []string{
+		"const terminalOutputFlushFallbackMs = 32;",
+		"const maxQueuedTerminalOutputBytes = 4 * 1024 * 1024;",
+		"const clearSessionOutputFlushSchedule = (session) => {",
+		"const flushSessionOutput = (session, { force = false } = {}) => {",
+		"window.requestAnimationFrame(flush);",
+		"session.outputQueue.push(entry);",
+		"flushSessionOutput(session, { force: true });",
+		"writeSessionImmediateOutput(session, `\\r\\n[webshell error] ${error.message}\\r\\n`);",
+	}
+	for _, want := range wantSnippets {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime terminal batching guard missing %q", want)
+		}
+	}
+}

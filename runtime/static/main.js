@@ -168,6 +168,8 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const mobileKeyboardInsetThresholdPx = 80;
   const desktopSelectionCopyMoveThresholdPx = 4;
   const terminalSizeReassertIntervalMs = 250;
+  const terminalOutputFlushFallbackMs = 32;
+  const maxQueuedTerminalOutputBytes = 4 * 1024 * 1024;
   const mobileLayoutQuery = window.matchMedia?.("(max-width: 640px)");
   const themeCardWidth = 280;
   const themeCardHeight = 60;
@@ -7045,28 +7047,191 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     session.pendingInputSize += byteLength;
   };
 
-  const writeSessionOutput = (session, data) => {
-    if (!session?.term || session.closed || session.name !== activeName) {
+  const clearSessionOutputFlushSchedule = (session) => {
+    if (!session) {
       return;
     }
-    // Replayed history may contain terminal queries. Only the first attach replays live startup output.
-    const suppressGeneratedInput = !session.replayComplete;
-    if (suppressGeneratedInput) {
-      armReplayGeneratedInputSuppression(session);
+    if (session.outputFlushFrame) {
+      window.cancelAnimationFrame(session.outputFlushFrame);
+      session.outputFlushFrame = 0;
     }
-    if (suppressGeneratedInput) {
+    if (session.outputFlushTimer) {
+      window.clearTimeout(session.outputFlushTimer);
+      session.outputFlushTimer = 0;
+    }
+  };
+
+  const terminalOutputKind = (data) => {
+    if (typeof data === "string") {
+      return "text";
+    }
+    if (data instanceof Uint8Array) {
+      return "bytes";
+    }
+    return "";
+  };
+
+  const terminalOutputByteLength = (data) => {
+    if (typeof data === "string") {
+      return textEncoder.encode(data).length;
+    }
+    if (data instanceof Uint8Array) {
+      return data.byteLength;
+    }
+    return 0;
+  };
+
+  const coalesceTerminalOutputBatch = (chunks, kind, byteLength) => {
+    if (chunks.length === 1) {
+      return chunks[0];
+    }
+    if (kind === "text") {
+      return chunks.join("");
+    }
+    const output = new Uint8Array(byteLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      output.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return output;
+  };
+
+  const writeTerminalOutputBatch = (session, data, replayOutput, allowGeneratedInput) => {
+    const kind = terminalOutputKind(data);
+    if (!kind || (kind === "text" ? data.length === 0 : data.byteLength === 0)) {
+      return false;
+    }
+    const previousAllowGeneratedInput = session.allowGeneratedInputDuringReplay;
+    if (replayOutput) {
+      session.allowGeneratedInputDuringReplay = allowGeneratedInput === true;
+      armReplayGeneratedInputSuppression(session);
       session.replayOutputDepth += 1;
     }
     try {
       session.term.write(data);
       drainGeneratedTerminalResponses(session);
+      return true;
     } finally {
-      if (suppressGeneratedInput) {
+      if (replayOutput) {
         session.replayOutputDepth = Math.max(0, session.replayOutputDepth - 1);
+        session.allowGeneratedInputDuringReplay = previousAllowGeneratedInput;
       }
+    }
+  };
+
+  const discardSessionOutputBuffers = (session) => {
+    if (!session) {
+      return;
+    }
+    clearSessionOutputFlushSchedule(session);
+    session.outputQueue = [];
+    session.outputQueueSize = 0;
+  };
+
+  const flushSessionOutput = (session, { force = false } = {}) => {
+    if (!session) {
+      return;
+    }
+    clearSessionOutputFlushSchedule(session);
+    const queue = Array.isArray(session.outputQueue) ? session.outputQueue : [];
+    if (queue.length === 0) {
+      return;
+    }
+    session.outputQueue = [];
+    session.outputQueueSize = 0;
+    if (!session.term || (!force && (session.closed || session.name !== activeName))) {
+      return;
+    }
+
+    let wrote = false;
+    let batch = null;
+    const flushBatch = () => {
+      if (!batch) {
+        return;
+      }
+      const data = coalesceTerminalOutputBatch(batch.chunks, batch.kind, batch.byteLength);
+      if (writeTerminalOutputBatch(session, data, batch.replayOutput, batch.allowGeneratedInput)) {
+        wrote = true;
+      }
+      batch = null;
+    };
+
+    for (const entry of queue) {
+      if (
+        !batch ||
+        batch.kind !== entry.kind ||
+        batch.replayOutput !== entry.replayOutput ||
+        batch.allowGeneratedInput !== entry.allowGeneratedInput
+      ) {
+        flushBatch();
+        batch = {
+          kind: entry.kind,
+          replayOutput: entry.replayOutput,
+          allowGeneratedInput: entry.allowGeneratedInput,
+          chunks: [],
+          byteLength: 0,
+        };
+      }
+      batch.chunks.push(entry.data);
+      batch.byteLength += entry.byteLength;
+    }
+    flushBatch();
+
+    if (wrote) {
       resetTerminalHostViewport(session, { clean: true });
       positionTerminalInput(session);
     }
+  };
+
+  const scheduleSessionOutputFlush = (session) => {
+    if (!session || session.closed || session.outputFlushFrame || session.outputFlushTimer) {
+      return;
+    }
+    const flush = () => flushSessionOutput(session);
+    session.outputFlushFrame = window.requestAnimationFrame(flush);
+    session.outputFlushTimer = window.setTimeout(flush, terminalOutputFlushFallbackMs);
+  };
+
+  const writeSessionOutput = (session, data) => {
+    if (!session?.term || session.closed || session.name !== activeName) {
+      return;
+    }
+    const outputData = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
+    const kind = terminalOutputKind(outputData);
+    if (!kind) {
+      return;
+    }
+    // Output chunks carry replay state because the replay-complete control frame can arrive before the next paint.
+    const replayOutput = !session.replayComplete;
+    const entry = {
+      data: outputData,
+      kind,
+      byteLength: terminalOutputByteLength(outputData),
+      replayOutput,
+      allowGeneratedInput: replayOutput && session.allowGeneratedInputDuringReplay === true,
+    };
+    session.outputQueue.push(entry);
+    session.outputQueueSize += entry.byteLength;
+    if (session.outputQueueSize >= maxQueuedTerminalOutputBytes) {
+      flushSessionOutput(session);
+    } else {
+      scheduleSessionOutputFlush(session);
+    }
+  };
+
+  const writeSessionImmediateOutput = (session, data) => {
+    if (!session?.term || session.closed) {
+      return;
+    }
+    flushSessionOutput(session, { force: true });
+    if (session.closed) {
+      return;
+    }
+    session.term.write(data);
+    drainGeneratedTerminalResponses(session);
+    resetTerminalHostViewport(session, { clean: true });
+    positionTerminalInput(session);
   };
 
   const scheduleReconnect = (session) => {
@@ -7079,18 +7244,18 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     session.reconnectPending = true;
     clearReconnectTimer(session);
-    session.reconnectTimer = window.setTimeout(() => {
-      session.reconnectTimer = 0;
-      session.reconnectPending = false;
-      if (session.name !== activeName) {
-        return;
-      }
-      connectSession(session).catch((error) => {
-        if (!session.closed && session.name === activeName) {
-          session.term.write(`\r\n[webshell error] ${error.message}\r\n`);
+      session.reconnectTimer = window.setTimeout(() => {
+        session.reconnectTimer = 0;
+        session.reconnectPending = false;
+        if (session.name !== activeName) {
+          return;
         }
-      });
-    }, 240);
+        connectSession(session).catch((error) => {
+          if (!session.closed && session.name === activeName) {
+            writeSessionImmediateOutput(session, `\r\n[webshell error] ${error.message}\r\n`);
+          }
+        });
+      }, 240);
   };
 
   const connectSession = async (session) => {
@@ -7190,6 +7355,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
                   rejectMismatchedReplay(message);
                   return;
                 }
+                flushSessionOutput(session);
                 session.replayComplete = true;
                 session.replayVerified = false;
                 session.allowGeneratedInputDuringReplay = false;
@@ -7226,6 +7392,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       }
       session.socket = null;
       session.shellEl.dataset.connection = "closed";
+      flushSessionOutput(session);
       if (session.exitExpected) {
         return;
       }
@@ -7238,6 +7405,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       }
       session.socket = null;
       session.shellEl.dataset.connection = "error";
+      flushSessionOutput(session);
     });
   };
 
@@ -7300,6 +7468,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       inputBuffer: "",
       inputBufferSize: 0,
       inputFlushTimer: 0,
+      outputQueue: [],
+      outputQueueSize: 0,
+      outputFlushFrame: 0,
+      outputFlushTimer: 0,
       replayOutputDepth: 0,
       allowGeneratedInputDuringReplay: false,
       suppressGeneratedTerminalInputUntil: 0,
@@ -7414,7 +7586,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     if (connect) {
       connectSession(session).catch((error) => {
         if (!session.closed && session.name === activeName) {
-          session.term.write(`\r\n[webshell error] ${error.message}\r\n`);
+          writeSessionImmediateOutput(session, `\r\n[webshell error] ${error.message}\r\n`);
         }
       });
     }
@@ -7960,6 +8132,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     pane.inputBufferSize = 0;
     clearInputFlushTimer(pane);
     clearReconnectTimer(pane);
+    flushSessionOutput(pane, { force: true });
     runSessionCleanups(pane);
     if (pane.socket) {
       const socket = pane.socket;
