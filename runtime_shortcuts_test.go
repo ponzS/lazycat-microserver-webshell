@@ -6,6 +6,20 @@ import (
 	"testing"
 )
 
+func sourceBetween(t *testing.T, source, start, end string) string {
+	t.Helper()
+	startIndex := strings.Index(source, start)
+	if startIndex < 0 {
+		t.Fatalf("source missing start marker %q", start)
+	}
+	bodyStart := startIndex + len(start)
+	endIndex := strings.Index(source[bodyStart:], end)
+	if endIndex < 0 {
+		t.Fatalf("source missing end marker %q after %q", end, start)
+	}
+	return source[bodyStart : bodyStart+endIndex]
+}
+
 func TestRuntimeShortcutDefaultsGuardMacAndAltMappings(t *testing.T) {
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {
@@ -151,8 +165,18 @@ func TestRuntimeMobileIMECompositionPreviewVisible(t *testing.T) {
 
 	wantSnippets := []string{
 		`const terminalTextareaCompositionText = (session) => {`,
+		`if (!clean) {`,
+		`const keep = new Set([session.term?.canvas, session.term?.textarea, session.compositionPreview].filter(Boolean));`,
+		`scheduleTerminalHostViewportReset(session, { clean: true });`,
+		`const textareaText = textarea ? stripTerminalInputSentinel(textarea.value) : "";`,
+		`if (session.composingIME && typeof session.compositionText === "string") {`,
+		`return session.compositionText || textareaText;`,
+		`const setTerminalTextareaCompositionText = (session, text) => {`,
+		`session.compositionText = normalized;`,
 		`const setTerminalCompositionPreviewVisible = (session, visible) => {`,
 		`const syncTerminalCompositionPreview = (session, { x = 0, y = 0, width = 1, height = 16 } = {}) => {`,
+		`if (session.terminalHost && preview.parentElement !== session.terminalHost) {`,
+		`session.terminalHost.appendChild(preview);`,
 		`const text = session.composingIME ? terminalTextareaCompositionText(session) : "";`,
 		`preview.textContent = text;`,
 		"preview.style.left = `${x}px`;",
@@ -163,11 +187,20 @@ func TestRuntimeMobileIMECompositionPreviewVisible(t *testing.T) {
 		`textarea.style.boxShadow = "none";`,
 		`textarea.style.webkitAppearance = "none";`,
 		`syncTerminalCompositionPreview(session, { x: left, y: top, width, height });`,
+		`const detachTerminalHostCompositionListeners = (session) => {`,
+		`["compositionstart", "compositionStartListener"],`,
+		`host.removeEventListener(type, listener);`,
+		`handler.webshellCompositionDetached = true;`,
+		`const installTerminalHostInputIsolation = (session) => {`,
+		`host.removeAttribute("contenteditable");`,
+		`detachTerminalHostCompositionListeners(session);`,
+		`const blockedHostInputEvents = ["beforeinput", "input", "compositionstart", "compositionupdate", "compositionend"];`,
+		`event.stopImmediatePropagation();`,
+		`installTerminalHostInputIsolation(session);`,
 		`const compositionPreview = document.createElement("span");`,
 		`compositionPreview.className = "terminal-composition-preview";`,
 		`terminalHost.appendChild(compositionPreview);`,
-		`if (event.data && terminalTextareaCompositionText(session) !== event.data) {`,
-		`textarea.value = event.data;`,
+		`setTerminalTextareaCompositionText(session, event.data);`,
 		`const committedText = event.data || terminalTextareaCompositionText(session);`,
 		`if (committedText) {`,
 		`sendTerminalTextInput(session, committedText, { dedupe: true });`,
@@ -175,6 +208,38 @@ func TestRuntimeMobileIMECompositionPreviewVisible(t *testing.T) {
 	for _, want := range wantSnippets {
 		if !strings.Contains(source, want) {
 			t.Fatalf("runtime mobile IME composition preview guard missing %q", want)
+		}
+	}
+	if strings.Contains(source, `textarea.value = event.data;`) {
+		t.Fatalf("runtime mobile IME preview should not mirror composition text into textarea.value")
+	}
+	if strings.Contains(source, `host.addEventListener("compositionupdate", () => scheduleTerminalHostViewportReset(session`) {
+		t.Fatalf("runtime mobile IME preview should not keep host composition listeners active")
+	}
+	compositionBeforeInputBranch := sourceBetween(t, source,
+		`if (type === "insertCompositionText" || type === "deleteCompositionText" || event.isComposing) {`,
+		`    positionTerminalInput(session);`,
+	)
+	for _, forbidden := range []string{
+		`event.preventDefault();`,
+		`textarea.value = "";`,
+		`textarea.value = event.data;`,
+	} {
+		if strings.Contains(compositionBeforeInputBranch, forbidden) {
+			t.Fatalf("runtime mobile IME beforeinput composition branch must not contain %q", forbidden)
+		}
+	}
+	compositionUpdateBranch := sourceBetween(t, source,
+		`textarea.addEventListener("compositionupdate", (event) => {`,
+		`    }, { capture: true });`,
+	)
+	for _, forbidden := range []string{
+		`event.preventDefault();`,
+		`textarea.value = "";`,
+		`textarea.value = event.data;`,
+	} {
+		if strings.Contains(compositionUpdateBranch, forbidden) {
+			t.Fatalf("runtime mobile IME compositionupdate handler must not contain %q", forbidden)
 		}
 	}
 	styleData, err := os.ReadFile("runtime/static/style.css")
