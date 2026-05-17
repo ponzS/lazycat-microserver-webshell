@@ -8188,9 +8188,20 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       case "copy":
         copyFromSession(tabs.get(target.tabId)?.panes.get(target.paneId)).catch((error) => showToast(error.message));
         break;
-      case "paste":
-        pasteIntoSession(tabs.get(target.tabId)?.panes.get(target.paneId)).catch((error) => showToast(error.message));
+      case "paste": {
+        const session = tabs.get(target.tabId)?.panes.get(target.paneId);
+        if (!isMobileLayout()) {
+          session?.term?.focus?.();
+        }
+        pasteIntoSession(session)
+          .finally(() => {
+            if (!isMobileLayout() && !session?.closed) {
+              session?.term?.focus?.();
+            }
+          })
+          .catch((error) => showToast(error.message));
         break;
+      }
       case "select-all":
         selectAllSessionBuffer(tabs.get(target.tabId)?.panes.get(target.paneId));
         break;
