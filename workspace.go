@@ -29,7 +29,6 @@ const (
 	defaultTerminalRows = 32
 
 	averageHistoryBytesPerLine = 350
-	workspaceHistoryLimit      = 256 << 20
 	clientQueueLimit           = 8 << 20
 	historyReplayChunk         = 256 << 10
 	websocketReadLimit         = 10 << 20
@@ -959,38 +958,6 @@ func (w *terminalWorkspace) findTabIndexLocked(tabID string) (int, *terminalTab)
 	return -1, nil
 }
 
-func (w *terminalWorkspace) trimHistoryLocked() {
-	for {
-		total := 0
-		var target *terminalPane
-		targetSize := 0
-		for _, pane := range w.panes {
-			pane.mu.Lock()
-			size := len(pane.history)
-			pane.mu.Unlock()
-			total += size
-			if size > targetSize {
-				target = pane
-				targetSize = size
-			}
-		}
-		if total <= workspaceHistoryLimit || target == nil || targetSize == 0 {
-			return
-		}
-		drop := min(total-workspaceHistoryLimit, targetSize)
-		if drop < 1<<20 && targetSize > 1<<20 {
-			drop = 1 << 20
-		}
-		target.mu.Lock()
-		if drop >= len(target.history) {
-			target.history = nil
-		} else {
-			target.history = append([]byte(nil), target.history[drop:]...)
-		}
-		target.mu.Unlock()
-	}
-}
-
 func (t *terminalTab) hasPane(paneID string) bool {
 	for _, id := range t.PaneIDs {
 		if id == paneID {
@@ -1189,7 +1156,6 @@ func (p *terminalPane) appendOutput(data []byte) {
 	copied := append([]byte(nil), filtered...)
 	var clients []*paneClient
 
-	p.workspace.mu.Lock()
 	p.mu.Lock()
 	if !p.exited {
 		p.history = append(p.history, copied...)
@@ -1200,8 +1166,6 @@ func (p *terminalPane) appendOutput(data []byte) {
 		}
 	}
 	p.mu.Unlock()
-	p.workspace.trimHistoryLocked()
-	p.workspace.mu.Unlock()
 
 	for _, client := range clients {
 		client.enqueue(paneOutbound{messageType: websocket.BinaryMessage, payload: copied})
