@@ -4396,6 +4396,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     const textarea = session?.term?.textarea;
     if (type === "insertCompositionText" || type === "deleteCompositionText" || event.isComposing) {
       setTerminalInputComposing(session, true);
+      scrollTerminalToBottomForUserInput(session);
       clearTerminalTextareaSentinel(session);
       positionTerminalInput(session);
       event.stopPropagation();
@@ -4484,6 +4485,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }, { capture: true });
     textarea.addEventListener("compositionstart", (event) => {
       event.stopPropagation();
+      scrollTerminalToBottomForUserInput(session);
       clearTerminalTextareaSentinel(session);
       setTerminalInputComposing(session, true);
       positionTerminalInput(session);
@@ -5646,6 +5648,31 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const markSessionUserInput = (session) => {
     if (session) {
       session.hasUserInputSinceFocus = true;
+    }
+  };
+
+  const scrollTerminalToBottomForUserInput = (session) => {
+    if (!session || session.closed || session.exitExpected || isTerminalInputBlocked()) {
+      return;
+    }
+    const term = session?.term;
+    if (!term || typeof term.scrollToBottom !== "function") {
+      return;
+    }
+    try {
+      term.stopTouchInertia?.();
+      if (term.scrollAnimationFrame) {
+        window.cancelAnimationFrame(term.scrollAnimationFrame);
+        term.scrollAnimationFrame = void 0;
+      }
+      term.scrollAnimationStartTime = void 0;
+      term.scrollAnimationStartY = void 0;
+      term.scrollAnimationLastFrameTime = void 0;
+      term.scrollToBottom();
+      if (term.renderer && term.wasmTerm && typeof term.renderer.render === "function") {
+        term.renderer.render(term.wasmTerm, true, term.viewportY || 0, term);
+      }
+    } catch (error) {
     }
   };
 
@@ -7022,13 +7049,14 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     flushInputBuffer(session);
   };
 
-  const sendOrQueueInput = (session, data) => {
+  const sendOrQueueInput = (session, data, { userInput = true } = {}) => {
     if (isTerminalInputBlocked()) {
       discardSessionInputBuffers(session);
       return;
     }
-    if (data) {
+    if (data && userInput) {
       markSessionUserInput(session);
+      scrollTerminalToBottomForUserInput(session);
     }
     const byteLength = textEncoder.encode(data).length;
     const maxPendingInput = 8 * 1024 * 1024;
@@ -7526,7 +7554,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         return;
       }
       reassertTerminalSize(session);
-      sendOrQueueInput(session, data);
+      sendOrQueueInput(session, data, { userInput: !isGeneratedTerminalResponse(data) });
     });
     term.onResize(() => {
       resetTerminalHostViewport(session, { clean: true });
