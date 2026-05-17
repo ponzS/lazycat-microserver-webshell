@@ -1777,7 +1777,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     syncSettingsDesktopMouseClipboardToggle();
     syncSettingsMobilePixelScrollToggle();
-    resizeAllTabsForCurrentDevice();
+    resizeActiveTabForCurrentDevice();
     await registerTerminalSymbolFont(terminalSymbolFont);
     await registerUploadedFonts(uploadedFonts);
     renderSettingsFonts();
@@ -1833,7 +1833,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const saveMobilePixelScrollEnabled = async (enabled) => {
     mobilePixelScrollEnabled = enabled;
     syncSettingsMobilePixelScrollToggle();
-    resizeAllTabsForCurrentDevice();
+    resizeActiveTabForCurrentDevice();
     const response = await fetch("./api/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -3680,6 +3680,15 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
   };
 
+  const syncTabMobilePixelScroll = (tab) => {
+    if (!tab) {
+      return;
+    }
+    for (const session of tab.panes.values()) {
+      syncTerminalMobilePixelScroll(session);
+    }
+  };
+
   const isThemePickerOpen = () => Boolean(themePickerBackdrop && !themePickerBackdrop.hidden);
 
   const resetThemePickerEdgeSwipe = () => {
@@ -4629,28 +4638,19 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     reassertTerminalSize(session, { force: true });
   };
 
-  const resizeAllTabsForCurrentDevice = () => {
-    if (tabs.size === 0) {
+  const resizeTabForCurrentDevice = (tab) => {
+    if (!tab) {
       return;
     }
-    const visibleTabId = activeTabId;
-    for (const tab of tabs.values()) {
-      tab.paneEl.classList.add("active");
-    }
-    for (const tab of tabs.values()) {
-      for (const session of tab.panes.values()) {
-        syncTerminalMobilePixelScroll(session);
-      }
-      resizeTab(tab);
-    }
-    for (const tab of tabs.values()) {
-      tab.paneEl.classList.toggle("active", tab.id === visibleTabId);
-    }
+    syncTabMobilePixelScroll(tab);
+    resizeTab(tab);
   };
+
+  const resizeActiveTabForCurrentDevice = () => resizeTabForCurrentDevice(currentTab());
 
   const handleMobileViewportResize = () => {
     mobileViewportResizeFrame = 0;
-    resizeAllTabsForCurrentDevice();
+    resizeActiveTabForCurrentDevice();
     const session = activeSession();
     positionTerminalInput(session);
     updateMobileSelectionHandles(session);
@@ -7444,7 +7444,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     if (term.options) {
-      term.options.mobilePixelScroll = isMobileLayout();
+      term.options.mobilePixelScroll = mobilePixelScrollEnabled && isMobileLayout();
     }
     term.open(terminalHost);
     if (typeof fitAddon.observeResize === "function") {
@@ -7707,7 +7707,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     window.requestAnimationFrame(() => {
       scrollTabButtonIntoView(tab.button);
-      resizeTab(tab);
+      resizeTabForCurrentDevice(tab);
     });
     if (!applyingWorkspaceState && !wasActive) {
       postWorkspaceAction("activate_tab", { tab_id: tab.id }).catch((error) => showToast(error.message));
@@ -7900,7 +7900,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       }
       updateEmptyState();
       scheduleTabOverviewRender();
-      window.requestAnimationFrame(() => resizeAllTabsForCurrentDevice());
+      window.requestAnimationFrame(() => resizeActiveTabForCurrentDevice());
       return true;
     } finally {
       clearRestartTabForReload();
@@ -8982,7 +8982,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
         if (requestSeq === settingsMobilePixelScrollRequestSeq) {
           mobilePixelScrollEnabled = previous;
           syncSettingsMobilePixelScrollToggle();
-          resizeAllTabsForCurrentDevice();
+          resizeActiveTabForCurrentDevice();
         }
         setSettingsFeedback(error.message || "像素级滚动设置保存失败。", "error");
       })
@@ -9365,7 +9365,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     }
     measureThemeCardWidth();
     redrawThemePickerOptions();
-    resizeAllTabsForCurrentDevice();
+    resizeActiveTabForCurrentDevice();
     updateMobileActiveTabTitle();
     scheduleTabOverviewRender();
   });

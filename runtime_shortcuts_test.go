@@ -118,3 +118,35 @@ func TestRuntimeTerminalOutputBatchingGuard(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+
+	wantSnippets := []string{
+		"const resizeTabForCurrentDevice = (tab) => {",
+		"const resizeActiveTabForCurrentDevice = () => resizeTabForCurrentDevice(currentTab());",
+		"syncTabMobilePixelScroll(tab);",
+		"resizeActiveTabForCurrentDevice();",
+	}
+	for _, want := range wantSnippets {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime tab resize guard missing %q", want)
+		}
+	}
+
+	forbiddenSnippets := []string{
+		"const resizeAllTabsForCurrentDevice = () => {",
+		"paneEl.classList.add(\"active\");",
+		"classList.toggle(\"active\", tab.id === visibleTabId)",
+		"visibleTabId = activeTabId",
+	}
+	for _, forbidden := range forbiddenSnippets {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("runtime tab resize regression detected: found %q", forbidden)
+		}
+	}
+}
