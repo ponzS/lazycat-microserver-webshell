@@ -170,6 +170,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const terminalSizeReassertIntervalMs = 250;
   const terminalOutputFlushFallbackMs = 32;
   const maxQueuedTerminalOutputBytes = 4 * 1024 * 1024;
+  const activityPollIntervalMs = 4000;
   const mobileLayoutQuery = window.matchMedia?.("(max-width: 640px)");
   const themeCardWidth = 280;
   const themeCardHeight = 60;
@@ -5603,7 +5604,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       if (!document.hidden && navigator.onLine !== false) {
         refreshActivity({ silent: true }).catch(() => {});
       }
-    }, 1800);
+    }, activityPollIntervalMs);
   };
 
   const updateDocumentTitle = () => {
