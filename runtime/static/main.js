@@ -172,6 +172,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   const maxQueuedTerminalOutputBytes = 4 * 1024 * 1024;
   const activityPollIntervalMs = 4000;
   const mobileLayoutQuery = window.matchMedia?.("(max-width: 640px)");
+  const touchShortcutLayoutQuery = window.matchMedia?.("(hover: none), (pointer: coarse)");
   const themeCardWidth = 280;
   const themeCardHeight = 60;
   const themeCardCornerRadius = 5;
@@ -3673,6 +3674,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const isMobileLayout = () => Boolean(mobileLayoutQuery?.matches);
+  const isTouchShortcutLayout = () => Boolean(touchShortcutLayoutQuery?.matches);
 
   const syncTerminalMobilePixelScroll = (session) => {
     if (session?.term?.options) {
@@ -6669,7 +6671,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const openMobileActionSheet = () => {
-    if (!mobileActionSheet || !mobileActionGrid || !isMobileLayout()) {
+    if (!mobileActionSheet || !mobileActionGrid || !isTouchShortcutLayout()) {
       return;
     }
     mobileActionSheetIgnoreClicksUntil = performance.now() + 350;
@@ -9394,11 +9396,13 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   window.addEventListener("pointercancel", handleThemePickerScrollbarPointerUp);
   window.addEventListener("resize", () => {
     syncMobileVisualViewport();
-    if (!isMobileLayout()) {
+    if (!isTouchShortcutLayout()) {
       closeMobileActionSheet();
-      closeMobileCloseConfirm(false);
     } else if (mobileActionSheet && !mobileActionSheet.hidden) {
       renderMobileActionSheet();
+    }
+    if (!isMobileLayout()) {
+      closeMobileCloseConfirm(false);
     }
     measureThemeCardWidth();
     redrawThemePickerOptions();

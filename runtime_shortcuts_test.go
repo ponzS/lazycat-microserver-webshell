@@ -88,6 +88,49 @@ func TestRuntimeDefaultMobileShortcutOrder(t *testing.T) {
 	}
 }
 
+func TestRuntimeTouchShortcutLayoutKeepsDesktopPCHidden(t *testing.T) {
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	mainSource := string(mainData)
+	mainWantSnippets := []string{
+		`const mobileLayoutQuery = window.matchMedia?.("(max-width: 640px)");`,
+		`const touchShortcutLayoutQuery = window.matchMedia?.("(hover: none), (pointer: coarse)");`,
+		`const isMobileLayout = () => Boolean(mobileLayoutQuery?.matches);`,
+		`const isTouchShortcutLayout = () => Boolean(touchShortcutLayoutQuery?.matches);`,
+		`if (!mobileActionSheet || !mobileActionGrid || !isTouchShortcutLayout()) {`,
+		`if (!isTouchShortcutLayout()) {`,
+	}
+	for _, want := range mainWantSnippets {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime touch shortcut guard missing %q", want)
+		}
+	}
+
+	styleData, err := os.ReadFile("runtime/static/style.css")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/style.css) error = %v", err)
+	}
+	styleSource := string(styleData)
+	styleWantSnippets := []string{
+		`@media (hover: none), (pointer: coarse) {`,
+		`  .mobile-shortcuts {`,
+		`    display: flex;`,
+		`@media (hover: none) and (min-width: 641px), (pointer: coarse) and (min-width: 641px) {`,
+		`  .mobile-shortcut-row {`,
+		`    justify-content: center;`,
+		`@media (hover: hover) and (pointer: fine) {`,
+		`  .mobile-shortcuts {`,
+		`    display: none;`,
+	}
+	for _, want := range styleWantSnippets {
+		if !strings.Contains(styleSource, want) {
+			t.Fatalf("runtime touch shortcut CSS guard missing %q", want)
+		}
+	}
+}
+
 func TestRuntimeWebSocketURLUsesWebSocketProtocols(t *testing.T) {
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {
