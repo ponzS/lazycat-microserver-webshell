@@ -1,5 +1,9 @@
 import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
 
+const params = new URLSearchParams(window.location.search);
+const isEmbedMode = params.has("embed");
+document.body?.classList.toggle("is-embed-mode", isEmbedMode);
+
 (async () => {
   await initGhostty();
 
@@ -141,7 +145,6 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
     throw new Error("webshell host not found");
   }
 
-  const params = new URLSearchParams(window.location.search);
   const tabs = new Map();
   const storagePrefix = "webshell";
   const themeStorageKey = `${storagePrefix}.theme`;
@@ -9089,7 +9092,7 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   };
 
   const openInstanceSwitcher = async () => {
-    if (!instanceSwitcher || !instanceSwitcherPanel || !instanceSwitcherButton) {
+    if (isEmbedMode || !instanceSwitcher || !instanceSwitcherPanel || !instanceSwitcherButton) {
       return;
     }
     closeContextMenu();
@@ -9201,6 +9204,9 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
   });
 
   instanceSwitcherButton?.addEventListener("click", () => {
+    if (isEmbedMode) {
+      return;
+    }
     if (instanceSwitcherPanel?.hidden) {
       openInstanceSwitcher();
     } else {

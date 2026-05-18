@@ -92,9 +92,8 @@ button {
 .tabs {
   display: flex;
   align-items: stretch;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
-  max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
@@ -471,6 +470,10 @@ button {
 
 .instance-switcher-feedback {
   padding: 9px;
+}
+
+body.is-embed-mode .header-actions {
+  display: none;
 }
 
 .terminal-area {
