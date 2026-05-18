@@ -98,6 +98,9 @@ type terminalPane struct {
 	activityCheckedAt          time.Time
 	controlPending             []byte
 	terminalQueryPending       []byte
+	pendingGeneratedInputs     map[string]int
+	pendingCursorReports       int
+	pendingCursorReportUntil   time.Time
 	generatedEchoPending       []terminalGeneratedEcho
 	generatedEchoOutputPending []byte
 	hasAttached                bool
@@ -1276,6 +1279,7 @@ const (
 	maxPendingTerminalQuery           = 64
 	primaryDeviceAttributesResponse   = "\x1b[?1;2c"
 	secondaryDeviceAttributesResponse = "\x1b[>0;0;0c"
+	generatedCursorReportWindow       = 2 * time.Second
 )
 
 type terminalGeneratedEcho struct {
@@ -1296,6 +1300,118 @@ func (p *terminalPane) addGeneratedEchoFilter(data []byte) {
 	p.mu.Lock()
 	p.generatedEchoPending = append(p.generatedEchoPending, echo)
 	p.mu.Unlock()
+}
+
+func (p *terminalPane) expectGeneratedInput(data []byte, count int) {
+	if len(data) == 0 || count <= 0 {
+		return
+	}
+	p.mu.Lock()
+	if p.pendingGeneratedInputs == nil {
+		p.pendingGeneratedInputs = make(map[string]int)
+	}
+	p.pendingGeneratedInputs[string(data)] += count
+	p.mu.Unlock()
+}
+
+func (p *terminalPane) expectGeneratedCursorReport(count int) {
+	if count <= 0 {
+		return
+	}
+	now := time.Now()
+	p.mu.Lock()
+	p.pendingCursorReports += count
+	p.pendingCursorReportUntil = now.Add(generatedCursorReportWindow)
+	p.mu.Unlock()
+}
+
+func (p *terminalPane) consumeExpectedGeneratedInput(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	key := string(data)
+	now := time.Now()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pendingGeneratedInputs == nil || p.pendingGeneratedInputs[key] <= 0 {
+		if p.cursorReportWindowActiveLocked(now) && p.pendingCursorReports > 0 && isCursorPositionReport(data) {
+			p.pendingCursorReports--
+			p.pendingCursorReportUntil = now.Add(generatedCursorReportWindow)
+			return true
+		}
+		return false
+	}
+	p.pendingGeneratedInputs[key]--
+	if p.pendingGeneratedInputs[key] <= 0 {
+		delete(p.pendingGeneratedInputs, key)
+	}
+	if len(p.pendingGeneratedInputs) == 0 {
+		p.pendingGeneratedInputs = nil
+	}
+	return true
+}
+
+func (p *terminalPane) cursorReportWindowActiveLocked(now time.Time) bool {
+	if p.pendingCursorReportUntil.IsZero() {
+		p.pendingCursorReports = 0
+		return false
+	}
+	if !now.Before(p.pendingCursorReportUntil) {
+		p.pendingCursorReports = 0
+		p.pendingCursorReportUntil = time.Time{}
+		return false
+	}
+	return true
+}
+
+var cursorPositionReportTailPattern = regexp.MustCompile(`^(?:\[\d{1,4};\d{1,4}R|\[\d{1,4}R|\d{1,4};\d{1,4}R|;\d{1,4}R|\d{1,4}R)+$`)
+
+func isCursorPositionReport(data []byte) bool {
+	if len(data) < len("\x1b[1;1R") || data[0] != '\x1b' || data[1] != '[' || data[len(data)-1] != 'R' {
+		return false
+	}
+	parts := bytes.Split(data[2:len(data)-1], []byte(";"))
+	if len(parts) != 2 {
+		return false
+	}
+	for _, part := range parts {
+		if len(part) == 0 || len(part) > 4 {
+			return false
+		}
+		for _, b := range part {
+			if b < '0' || b > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isCursorPositionReportTail(data []byte) bool {
+	return cursorPositionReportTailPattern.Match(data)
+}
+
+func (p *terminalPane) consumeGeneratedCursorReportInput(data []byte) (bool, []byte) {
+	if len(data) == 0 {
+		return false, nil
+	}
+	fullReport := isCursorPositionReport(data)
+	tailReport := isCursorPositionReportTail(data)
+	if !fullReport && !tailReport {
+		return false, nil
+	}
+	now := time.Now()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.cursorReportWindowActiveLocked(now) {
+		return false, nil
+	}
+	if fullReport && p.pendingCursorReports > 0 {
+		p.pendingCursorReports--
+		p.pendingCursorReportUntil = now.Add(generatedCursorReportWindow)
+		return false, append([]byte(nil), data...)
+	}
+	return true, nil
 }
 
 func (p *terminalPane) filterGeneratedInputEcho(data []byte) []byte {
@@ -1447,14 +1563,23 @@ func (p *terminalPane) filterTerminalQueryOutput(data []byte) []byte {
 			}
 			sequence := buffer[:final+1]
 			if response, ok := terminalQueryResponse(sequence); ok {
-				_ = p.writeGeneratedInput([]byte(response))
+				responseData := []byte(response)
+				p.expectGeneratedInput(responseData, 1)
+				_ = p.writeGeneratedInput(responseData)
 				buffer = buffer[final+1:]
 				continue
+			}
+			if response, ok := terminalClientGeneratedResponse(sequence); ok {
+				p.expectGeneratedInput([]byte(response), 1)
+			} else if isCursorPositionQuery(sequence) {
+				p.expectGeneratedCursorReport(1)
 			}
 			output = append(output, sequence...)
 			buffer = buffer[final+1:]
 		case 'Z':
-			_ = p.writeGeneratedInput([]byte(primaryDeviceAttributesResponse))
+			responseData := []byte(primaryDeviceAttributesResponse)
+			p.expectGeneratedInput(responseData, 1)
+			_ = p.writeGeneratedInput(responseData)
 			buffer = buffer[2:]
 		default:
 			output = append(output, buffer[0])
@@ -1483,6 +1608,17 @@ func terminalQueryResponse(sequence []byte) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func terminalClientGeneratedResponse(sequence []byte) (string, bool) {
+	if bytes.Equal(sequence, []byte("\x1b[5n")) {
+		return "\x1b[0n", true
+	}
+	return "", false
+}
+
+func isCursorPositionQuery(sequence []byte) bool {
+	return bytes.Equal(sequence, []byte("\x1b[6n"))
 }
 
 var privateTTYPattern = regexp.MustCompile(`^/dev/pts/[0-9]+$`)
@@ -1622,6 +1758,21 @@ func (p *terminalPane) writeInput(data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
+	dropInput, generatedInput := p.consumeGeneratedCursorReportInput(data)
+	if dropInput {
+		return nil
+	}
+	if len(generatedInput) > 0 {
+		p.addGeneratedEchoFilter(generatedInput)
+		data = generatedInput
+	}
+	return p.writePTYInput(data)
+}
+
+func (p *terminalPane) writePTYInput(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
 	p.mu.Lock()
 	ptyFile := p.ptyFile
 	inputBlocked := len(p.inputBlockers) > 0
@@ -1654,8 +1805,11 @@ func (p *terminalPane) writeGeneratedInput(data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
+	if !p.consumeExpectedGeneratedInput(data) {
+		return nil
+	}
 	p.addGeneratedEchoFilter(data)
-	return p.writeInput(data)
+	return p.writePTYInput(data)
 }
 
 func (p *terminalPane) setInputBlocked(blocked bool) {

@@ -534,10 +534,24 @@ func TestRuntimeGeneratedTerminalResponsesAreMarked(t *testing.T) {
 	source := string(data)
 
 	wantSnippets := []string{
+		"const generatedTerminalResponseTailPattern =",
+		`[\d{1,4};\d{1,4}R|\[\d{1,4}R`,
+		"const isGeneratedTerminalResponseTail = (data) => (",
+		"generatedTerminalResponseTailPattern.test(data)",
+		"const armGeneratedInputSuppression = (session, durationMs = 1000) => {",
+		"const armAllGeneratedInputSuppression = (durationMs = 1000) => {",
+		"const generatedResponseTail = isGeneratedTerminalResponseTail(data);",
+		"return generatedResponse || generatedResponseTail;",
+		"if (!generated && shouldSuppressGeneratedTerminalInput(session, data)) {",
+		"if (shouldSuppressGeneratedTerminalInput(session, data)) {",
 		"session.processingGeneratedTerminalResponses = true;",
 		"session.processingGeneratedTerminalResponses = false;",
 		"JSON.stringify({ type: \"input\", data, generated: true })",
+		"const generatedResponse = isGeneratedTerminalResponse(data);",
+		"if (generatedResponse || generatedResponseTail) {",
 		"sendSessionInput(session, data, { immediate: true, generated: true });",
+		"if (session.processingGeneratedTerminalResponses || generatedResponse) {",
+		"if (generatedResponseTail) {",
 	}
 	for _, want := range wantSnippets {
 		if !strings.Contains(source, want) {
@@ -631,14 +645,21 @@ func TestRuntimeMobileDeployRestartUsesBottomSheet(t *testing.T) {
 		`const mobileCloseConfirmActions = document.getElementById("mobileCloseConfirmActions");`,
 		`const confirmMobileSheet = ({ title = "确认操作？", message = "", okText = "确认", cancelText = "取消", actionsLayout = "horizontal", initialFocus = "cancel" } = {}) =>`,
 		`mobileCloseConfirmActions.dataset.layout = actionsLayout === "vertical-ok-first" ? "vertical-ok-first" : "horizontal";`,
+		`armAllGeneratedInputSuppression(2000);`,
 		`const restart = isMobileLayout()`,
 		`? await confirmMobileSheet({ ...restartDialogOptions, actionsLayout: "vertical-ok-first" })`,
 		`: await openDialog(restartDialogOptions);`,
+		`discardAllTerminalInputBuffers();`,
 	}
 	for _, want := range wantMainSnippets {
 		if !strings.Contains(mainSource, want) {
 			t.Fatalf("runtime mobile deploy restart guard missing %q", want)
 		}
+	}
+	if strings.Contains(mainSource, `setAllTerminalInputLocked(false);
+        deployRestartDialogOpen = false;
+        suppressBeforeUnloadForNavigation();`) {
+		t.Fatal("restart reload path should keep local input blocked until navigation")
 	}
 	if !strings.Contains(indexSource, `class="mobile-close-confirm-actions" id="mobileCloseConfirmActions"`) {
 		t.Fatal("mobile close confirm actions container should have a stable id")

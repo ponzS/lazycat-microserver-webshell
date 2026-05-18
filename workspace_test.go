@@ -1310,6 +1310,90 @@ func TestTerminalPaneKeepsNonDeviceAttributeCSI(t *testing.T) {
 	}
 }
 
+func TestTerminalPaneDedupesGeneratedCursorReports(t *testing.T) {
+	pane, reader, cleanup := newTerminalQueryTestPane(t)
+	defer cleanup()
+
+	filtered := pane.filterTerminalQueryOutput([]byte("\x1b[6n"))
+	if string(filtered) != "\x1b[6n" {
+		t.Fatalf("unexpected filtered output: %q", string(filtered))
+	}
+	if err := pane.writeGeneratedInput([]byte("\x1b[38;3R")); err != nil {
+		t.Fatalf("first generated cursor report returned error: %v", err)
+	}
+	if err := pane.writeGeneratedInput([]byte("\x1b[38;3R")); err != nil {
+		t.Fatalf("duplicate generated cursor report returned error: %v", err)
+	}
+	assertTerminalQueryOutput(t, pane, reader, "\x1b[38;3R")
+}
+
+func TestTerminalPaneDedupesPlainCursorReports(t *testing.T) {
+	pane, reader, cleanup := newTerminalQueryTestPane(t)
+	defer cleanup()
+
+	filtered := pane.filterTerminalQueryOutput([]byte("\x1b[6n"))
+	if string(filtered) != "\x1b[6n" {
+		t.Fatalf("unexpected filtered output: %q", string(filtered))
+	}
+	if err := pane.writeInput([]byte("\x1b[38;3R")); err != nil {
+		t.Fatalf("first plain cursor report returned error: %v", err)
+	}
+	if err := pane.writeInput([]byte("\x1b[24;1R")); err != nil {
+		t.Fatalf("duplicate plain cursor report returned error: %v", err)
+	}
+	assertTerminalQueryOutput(t, pane, reader, "\x1b[38;3R")
+}
+
+func TestTerminalPaneDropsPlainCursorReportTailsInQueryWindow(t *testing.T) {
+	pane, reader, cleanup := newTerminalQueryTestPane(t)
+	defer cleanup()
+
+	filtered := pane.filterTerminalQueryOutput([]byte("\x1b[6n"))
+	if string(filtered) != "\x1b[6n" {
+		t.Fatalf("unexpected filtered output: %q", string(filtered))
+	}
+	if err := pane.writeInput([]byte("38;3R")); err != nil {
+		t.Fatalf("tail cursor report returned error: %v", err)
+	}
+	if err := pane.writeInput([]byte("[24;1R")); err != nil {
+		t.Fatalf("bracketed tail cursor report returned error: %v", err)
+	}
+	if err := pane.writeInput([]byte(";3R38;3R")); err != nil {
+		t.Fatalf("combined tail cursor report returned error: %v", err)
+	}
+	if err := pane.writeGeneratedInput([]byte("\x1b[39;4R")); err != nil {
+		t.Fatalf("expected generated cursor report returned error: %v", err)
+	}
+	assertTerminalQueryOutput(t, pane, reader, "\x1b[39;4R")
+}
+
+func TestTerminalPaneAllowsCursorReportTextOutsideQueryWindow(t *testing.T) {
+	pane, reader, cleanup := newTerminalQueryTestPane(t)
+	defer cleanup()
+
+	if err := pane.writeInput([]byte("38;3R")); err != nil {
+		t.Fatalf("plain text cursor report tail returned error: %v", err)
+	}
+	assertTerminalQueryOutput(t, pane, reader, "38;3R")
+}
+
+func TestTerminalPaneDropsUnexpectedGeneratedCursorReport(t *testing.T) {
+	pane, reader, cleanup := newTerminalQueryTestPane(t)
+	defer cleanup()
+
+	if err := pane.writeGeneratedInput([]byte("\x1b[38;3R")); err != nil {
+		t.Fatalf("unexpected generated cursor report returned error: %v", err)
+	}
+	if pane.pendingCursorReports != 0 {
+		t.Fatalf("unexpected pending cursor report count: %d", pane.pendingCursorReports)
+	}
+	pane.expectGeneratedCursorReport(1)
+	if err := pane.writeGeneratedInput([]byte("\x1b[39;4R")); err != nil {
+		t.Fatalf("expected generated cursor report returned error: %v", err)
+	}
+	assertTerminalQueryResponse(t, reader, "\x1b[39;4R")
+}
+
 func TestTerminalPaneInputLockDropsWrites(t *testing.T) {
 	pane := &terminalPane{}
 	pane.setInputBlocked(true)
@@ -1715,6 +1799,21 @@ func assertTerminalQueryResponse(t *testing.T, reader io.Reader, expected string
 	}
 	if string(buf) != expected {
 		t.Fatalf("unexpected terminal query response: %q", string(buf))
+	}
+}
+
+func assertTerminalQueryOutput(t *testing.T, pane *terminalPane, reader io.Reader, expected string) {
+	t.Helper()
+	if pane.ptyFile != nil {
+		_ = pane.ptyFile.Close()
+		pane.ptyFile = nil
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("reading terminal query output returned error: %v", err)
+	}
+	if string(data) != expected {
+		t.Fatalf("unexpected terminal query output: %q", string(data))
 	}
 }
 

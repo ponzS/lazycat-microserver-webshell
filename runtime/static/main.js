@@ -6703,7 +6703,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   }
 
   const generatedTerminalResponsePattern =
-    /^(?:\x1b)?(?:\[\d{1,4};\d{1,4}R|\[0n|\[\?[\d;]{1,16}c|\[>[\d;]{1,16}c)/;
+    /^(?:\x1b)?(?:\[\d{1,4};\d{1,4}R|\[\d{1,4}R|\[0n|\[\?[\d;]{1,16}c|\[>[\d;]{1,16}c)/;
+  const generatedTerminalResponseTailPattern =
+    /^(?:\[\d{1,4};\d{1,4}R|\[\d{1,4}R|\d{1,4};\d{1,4}R|;\d{1,4}R|\d{1,4}R)+$/;
 
   const isGeneratedTerminalResponse = (data) => {
     if (typeof data !== "string" || data === "") {
@@ -6720,24 +6722,50 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     return true;
   };
 
-  const armReplayGeneratedInputSuppression = (session) => {
-    if (!session || session.allowGeneratedInputDuringReplay) {
+  const isGeneratedTerminalResponseTail = (data) => (
+    typeof data === "string"
+    && data !== ""
+    && generatedTerminalResponseTailPattern.test(data)
+  );
+
+  const armGeneratedInputSuppression = (session, durationMs = 1000) => {
+    if (!session) {
       return;
     }
     session.suppressGeneratedTerminalInputUntil = Math.max(
       Number(session.suppressGeneratedTerminalInputUntil || 0),
-      Date.now() + 1000,
+      Date.now() + durationMs,
     );
   };
 
+  const armReplayGeneratedInputSuppression = (session) => {
+    if (!session || session.allowGeneratedInputDuringReplay) {
+      return;
+    }
+    armGeneratedInputSuppression(session, 1000);
+  };
+
+  const armAllGeneratedInputSuppression = (durationMs = 1000) => {
+    for (const tab of tabs.values()) {
+      for (const pane of tab.panes.values()) {
+        armGeneratedInputSuppression(pane, durationMs);
+      }
+    }
+  };
+
   const shouldSuppressGeneratedTerminalInput = (session, data) => {
-    if (!session || !isGeneratedTerminalResponse(data)) {
+    if (!session) {
       return false;
     }
+    const generatedResponse = isGeneratedTerminalResponse(data);
+    const generatedResponseTail = isGeneratedTerminalResponseTail(data);
     if (session.replayOutputDepth > 0 && !session.allowGeneratedInputDuringReplay) {
-      return true;
+      return generatedResponse || generatedResponseTail;
     }
-    return Number(session.suppressGeneratedTerminalInputUntil || 0) > Date.now();
+    if (Number(session.suppressGeneratedTerminalInputUntil || 0) <= Date.now()) {
+      return false;
+    }
+    return generatedResponse || generatedResponseTail;
   };
 
   const isTerminalInputBlocked = () => deployRestartDialogOpen;
@@ -6806,9 +6834,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     session.processingGeneratedTerminalResponses = true;
     try {
-    for (let index = 0; index < 256 && wasmTerm.hasResponse(); index += 1) {
-      term.processTerminalResponses();
-    }
+      for (let index = 0; index < 256 && wasmTerm.hasResponse(); index += 1) {
+        term.processTerminalResponses();
+      }
     } finally {
       session.processingGeneratedTerminalResponses = false;
     }
@@ -6821,6 +6849,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     const restartTargetName = activeName;
     const restartTargetTabId = activeTabId;
     deployRestartDialogOpen = true;
+    armAllGeneratedInputSuppression(2000);
     setAllTerminalInputLocked(true);
     setServerRevisionInputLocked(true).catch(() => {});
     discardAllTerminalInputBuffers();
@@ -6839,9 +6868,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       if (restart === true) {
         shouldUnlock = false;
         rememberRestartTabForReload(restartTargetName, restartTargetTabId);
+        armAllGeneratedInputSuppression(2000);
         await setServerRevisionInputLocked(false).catch(() => {});
         setAllTerminalInputLocked(false);
-        deployRestartDialogOpen = false;
+        discardAllTerminalInputBuffers();
         suppressBeforeUnloadForNavigation();
         window.location.reload();
       }
@@ -7954,6 +7984,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (!data || session.socket?.readyState !== WebSocket.OPEN) {
       return;
     }
+    if (!generated && shouldSuppressGeneratedTerminalInput(session, data)) {
+      return;
+    }
     if (generated) {
       try {
         session.socket.send(JSON.stringify({ type: "input", data, generated: true }));
@@ -7998,6 +8031,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const sendOrQueueInput = (session, data, { userInput = true } = {}) => {
     if (isTerminalInputBlocked()) {
       discardSessionInputBuffers(session);
+      return;
+    }
+    if (shouldSuppressGeneratedTerminalInput(session, data)) {
       return;
     }
     if (data && userInput) {
@@ -8503,15 +8539,23 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     installDesktopMouseClipboard(session);
 
     term.onData((data) => {
+      const generatedResponse = isGeneratedTerminalResponse(data);
+      const generatedResponseTail = isGeneratedTerminalResponseTail(data);
       if (isTerminalInputBlocked()) {
+        if (generatedResponse || generatedResponseTail) {
+          armGeneratedInputSuppression(session, 1000);
+        }
         discardSessionInputBuffers(session);
         return;
       }
       if (shouldSuppressGeneratedTerminalInput(session, data)) {
         return;
       }
-      if (session.processingGeneratedTerminalResponses) {
+      if (session.processingGeneratedTerminalResponses || generatedResponse) {
         sendSessionInput(session, data, { immediate: true, generated: true });
+        return;
+      }
+      if (generatedResponseTail) {
         return;
       }
       if (session.replayOutputDepth > 0) {
