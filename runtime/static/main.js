@@ -5361,9 +5361,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     const visualViewport = window.visualViewport;
     const nextHeight = Math.max(0, Math.round(visualViewport?.height || window.innerHeight || 0));
-    const nextInset = visualViewport
+    const measuredInset = visualViewport
       ? Math.max(0, Math.round((window.innerHeight || 0) - visualViewport.height - visualViewport.offsetTop))
       : 0;
+    const nextInset = measuredInset > mobileKeyboardInsetThresholdPx ? measuredInset : 0;
     const heightChanged = nextHeight !== mobileViewportHeight;
     const insetChanged = nextInset !== mobileKeyboardInsetBottom;
     mobileViewportHeight = nextHeight;

@@ -364,6 +364,81 @@ func TestRuntimeTouchShortcutLayoutKeepsDesktopPCHidden(t *testing.T) {
 	}
 }
 
+func TestRuntimeMobileBottomSafeAreaBleedsBehindControls(t *testing.T) {
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	mainSource := string(mainData)
+	for _, want := range []string{
+		`const measuredInset = visualViewport`,
+		`const nextInset = measuredInset > mobileKeyboardInsetThresholdPx ? measuredInset : 0;`,
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime mobile keyboard inset guard missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		`const lzcNavigationBarSchemeStatusBarOnly = "statusBarOnly";`,
+		`const syncLzcIOSShellLayout = () => {`,
+		`callLzcBridge("SetFullScreen");`,
+		`callLzcBridge("SetCloseBtnShowStatus", false);`,
+	} {
+		if strings.Contains(mainSource, forbidden) {
+			t.Fatalf("runtime should not force Lazycat shell top layout, found %q", forbidden)
+		}
+	}
+
+	indexData, err := os.ReadFile("runtime/static/index.html")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
+	}
+	indexSource := string(indexData)
+	if !strings.Contains(indexSource, `viewport-fit=cover`) {
+		t.Fatal("runtime viewport must opt into safe-area cover rendering")
+	}
+	if !strings.Contains(indexSource, `name="lzcapp-navigation-bar-scheme" content="hidden"`) {
+		t.Fatal("runtime Lazycat shell navigation bar should stay hidden to avoid top safe-area gap")
+	}
+
+	styleData, err := os.ReadFile("runtime/static/style.css")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/style.css) error = %v", err)
+	}
+	styleSource := string(styleData)
+	wantSnippets := []string{
+		`--lzc-safe-area-inset-bottom: var(--lzc-safe-area-bottom, env(safe-area-inset-bottom, 0px));`,
+		`--mobile-shortcuts-total-height: var(--mobile-shortcuts-content-height);`,
+		`--mobile-shortcuts-bottom-padding: 8px;`,
+		`--mobile-bottom-dock-offset: 0px;`,
+		`--mobile-bottom-overlay-offset: calc(var(--mobile-shortcuts-total-height) + 12px + var(--mobile-bottom-dock-offset));`,
+		`body.mobile-keyboard-visible {`,
+		`  --mobile-bottom-dock-offset: var(--mobile-keyboard-inset-bottom);`,
+		`bottom: var(--mobile-bottom-dock-offset);`,
+		`padding: 8px max(5px, var(--lzc-safe-area-inset-right)) var(--mobile-shortcuts-bottom-padding) max(5px, var(--lzc-safe-area-inset-left));`,
+		`background: var(--terminal-bg);`,
+		`bottom: var(--mobile-bottom-overlay-offset);`,
+	}
+	for _, want := range wantSnippets {
+		if !strings.Contains(styleSource, want) {
+			t.Fatalf("runtime mobile bottom safe-area CSS guard missing %q", want)
+		}
+	}
+
+	forbiddenSnippets := []string{
+		`76px + var(--lzc-safe-area-inset-bottom)`,
+		`88px + var(--lzc-safe-area-inset-bottom)`,
+		`bottom: var(--mobile-keyboard-inset-bottom);`,
+		`--mobile-shortcuts-bottom-padding: calc(8px + var(--lzc-safe-area-inset-bottom))`,
+		`--mobile-shortcuts-bottom-padding: calc(8px + var(--mobile-bottom-safe-area))`,
+	}
+	for _, forbidden := range forbiddenSnippets {
+		if strings.Contains(styleSource, forbidden) {
+			t.Fatalf("runtime mobile bottom safe-area CSS should use semantic variables, found %q", forbidden)
+		}
+	}
+}
+
 func TestRuntimeWebSocketURLUsesWebSocketProtocols(t *testing.T) {
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {

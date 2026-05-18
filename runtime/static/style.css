@@ -41,6 +41,15 @@
   --lzc-safe-area-inset-right: var(--lzc-safe-area-right, env(safe-area-inset-right, 0px));
   --mobile-visual-viewport-height: 100dvh;
   --mobile-keyboard-inset-bottom: 0px;
+  --mobile-shortcuts-content-height: 76px;
+  --mobile-shortcuts-total-height: var(--mobile-shortcuts-content-height);
+  --mobile-shortcuts-bottom-padding: 8px;
+  --mobile-bottom-dock-offset: 0px;
+  --mobile-bottom-overlay-offset: calc(var(--mobile-shortcuts-total-height) + 12px + var(--mobile-bottom-dock-offset));
+}
+
+body.mobile-keyboard-visible {
+  --mobile-bottom-dock-offset: var(--mobile-keyboard-inset-bottom);
 }
 
 html,
@@ -3359,11 +3368,11 @@ body.is-mobile-shortcut-dragging {
   }
 
   .app-shell {
-    inset: 0 0 calc(76px + var(--lzc-safe-area-inset-bottom) + var(--mobile-keyboard-inset-bottom)) 0;
+    inset: 0 0 calc(var(--mobile-shortcuts-total-height) + var(--mobile-bottom-dock-offset)) 0;
   }
 
   body.mobile-shortcuts-empty .app-shell {
-    inset: 0 0 var(--mobile-keyboard-inset-bottom) 0;
+    inset: 0 0 var(--mobile-bottom-dock-offset) 0;
   }
 
   .search-panel {
@@ -3380,13 +3389,13 @@ body.is-mobile-shortcut-dragging {
   .mobile-shortcuts {
     position: fixed;
     right: 0;
-    bottom: var(--mobile-keyboard-inset-bottom);
+    bottom: var(--mobile-bottom-dock-offset);
     left: 0;
     z-index: 80;
     display: flex;
     flex-direction: column;
     gap: 4px;
-    padding: 8px max(5px, var(--lzc-safe-area-inset-right)) calc(8px + var(--lzc-safe-area-inset-bottom)) max(5px, var(--lzc-safe-area-inset-left));
+    padding: 8px max(5px, var(--lzc-safe-area-inset-right)) var(--mobile-shortcuts-bottom-padding) max(5px, var(--lzc-safe-area-inset-left));
     overflow: hidden;
     border-top: 1px solid var(--chrome-line);
     background: var(--terminal-bg);
@@ -3806,33 +3815,33 @@ body.is-mobile-shortcut-dragging {
 
   .selection-sheet,
   .network-banner {
-    bottom: calc(88px + var(--lzc-safe-area-inset-bottom) + var(--mobile-keyboard-inset-bottom));
+    bottom: var(--mobile-bottom-overlay-offset);
   }
 
   .toast {
-    bottom: calc(88px + var(--lzc-safe-area-inset-bottom) + var(--mobile-keyboard-inset-bottom));
+    bottom: var(--mobile-bottom-overlay-offset);
   }
 }
 
 @media (hover: none), (pointer: coarse) {
   .app-shell {
-    inset: 0 0 calc(76px + var(--lzc-safe-area-inset-bottom) + var(--mobile-keyboard-inset-bottom)) 0;
+    inset: 0 0 calc(var(--mobile-shortcuts-total-height) + var(--mobile-bottom-dock-offset)) 0;
   }
 
   body.mobile-shortcuts-empty .app-shell {
-    inset: 0 0 var(--mobile-keyboard-inset-bottom) 0;
+    inset: 0 0 var(--mobile-bottom-dock-offset) 0;
   }
 
   .mobile-shortcuts {
     position: fixed;
     right: 0;
-    bottom: var(--mobile-keyboard-inset-bottom);
+    bottom: var(--mobile-bottom-dock-offset);
     left: 0;
     z-index: 80;
     display: flex;
     flex-direction: column;
     gap: 4px;
-    padding: 8px max(5px, var(--lzc-safe-area-inset-right)) calc(8px + var(--lzc-safe-area-inset-bottom)) max(5px, var(--lzc-safe-area-inset-left));
+    padding: 8px max(5px, var(--lzc-safe-area-inset-right)) var(--mobile-shortcuts-bottom-padding) max(5px, var(--lzc-safe-area-inset-left));
     overflow: hidden;
     border-top: 1px solid var(--chrome-line);
     background: var(--terminal-bg);
@@ -4080,11 +4089,11 @@ body.is-mobile-shortcut-dragging {
 
   .selection-sheet,
   .network-banner {
-    bottom: calc(88px + var(--lzc-safe-area-inset-bottom) + var(--mobile-keyboard-inset-bottom));
+    bottom: var(--mobile-bottom-overlay-offset);
   }
 
   .toast {
-    bottom: calc(88px + var(--lzc-safe-area-inset-bottom) + var(--mobile-keyboard-inset-bottom));
+    bottom: var(--mobile-bottom-overlay-offset);
   }
 }
 
