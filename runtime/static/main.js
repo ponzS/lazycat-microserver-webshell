@@ -3420,6 +3420,328 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     };
   };
 
+  const terminalCellBleedPx = (renderer) => {
+    const dpr = Number(renderer?.devicePixelRatio) || Number(window.devicePixelRatio) || 1;
+    return Math.min(0.75, Math.max(0.35, 0.75 / dpr));
+  };
+  const terminalCanvasPixelPx = (renderer) => {
+    const dpr = Number(renderer?.devicePixelRatio) || Number(window.devicePixelRatio) || 1;
+    return 1 / dpr;
+  };
+  const terminalAlignToCanvasPixel = (renderer, value, mode = "round") => {
+    const pixel = terminalCanvasPixelPx(renderer);
+    const scaled = value / pixel;
+    if (mode === "floor") {
+      return Math.floor(scaled) * pixel;
+    }
+    if (mode === "ceil") {
+      return Math.ceil(scaled) * pixel;
+    }
+    return Math.round(scaled) * pixel;
+  };
+  const terminalCellFlagInverse = 16;
+  const terminalCellFlagInvisible = 32;
+  const terminalCellFlagFaint = 128;
+
+  const terminalPowerlineShape = (renderer, cell, column, row) => {
+    let text = "";
+    if (cell?.grapheme_len > 0 && renderer?.currentBuffer?.getGraphemeString) {
+      text = renderer.currentBuffer.getGraphemeString(row, column);
+    } else if (cell?.codepoint) {
+      text = String.fromCodePoint(cell.codepoint);
+    }
+    if (text === "\uE0B6") {
+      return "round-left";
+    }
+    if (text === "\uE0B4") {
+      return "round-right";
+    }
+    if (text === "\uE0B0") {
+      return "arrow-right";
+    }
+    return "";
+  };
+
+  const terminalCellForegroundCSS = (renderer, cell, column, row) => {
+    if (renderer.isInSelection?.(column, row)) {
+      return renderer.theme.selectionForeground;
+    }
+    let red = cell.fg_r;
+    let green = cell.fg_g;
+    let blue = cell.fg_b;
+    if (cell.flags & terminalCellFlagInverse) {
+      red = cell.bg_r;
+      green = cell.bg_g;
+      blue = cell.bg_b;
+    }
+    return renderer.rgbToCSS(red, green, blue);
+  };
+
+  const terminalCellBackgroundRGB = (cell) => {
+    let red = cell?.bg_r;
+    let green = cell?.bg_g;
+    let blue = cell?.bg_b;
+    if (cell?.flags & terminalCellFlagInverse) {
+      red = cell.fg_r;
+      green = cell.fg_g;
+      blue = cell.fg_b;
+    }
+    return {
+      red: Number(red) || 0,
+      green: Number(green) || 0,
+      blue: Number(blue) || 0,
+    };
+  };
+
+  const terminalSameRGB = (left, right) =>
+    left && right && left.red === right.red && left.green === right.green && left.blue === right.blue;
+
+  const terminalLineCellAt = (renderer, row, column) => {
+    if (column < 0) {
+      return null;
+    }
+    try {
+      const line = renderer?.currentBuffer?.getLine?.(row);
+      return line?.[column] || null;
+    } catch (error) {
+      return null;
+    }
+  };
+
+  const terminalCellBackgroundCSS = (renderer, cell, column, row) => {
+    if (renderer.isInSelection?.(column, row)) {
+      return renderer.theme.selectionBackground;
+    }
+    const { red, green, blue } = terminalCellBackgroundRGB(cell);
+    if (red === 0 && green === 0 && blue === 0) {
+      return "";
+    }
+    return renderer.rgbToCSS(red, green, blue);
+  };
+
+  const renderTerminalMergedLineBackgrounds = (renderer, line, row, columns, offsetY = 0) => {
+    const metrics = renderer.metrics || renderer.getMetrics?.();
+    const width = Number(metrics?.width) || 0;
+    const height = Number(metrics?.height) || 0;
+    if (!width || !height) {
+      return false;
+    }
+    const y = row * height + offsetY;
+    renderer.ctx.fillStyle = renderer.theme.background;
+    renderer.ctx.fillRect(0, y, columns * width, height);
+    let segmentColor = "";
+    let segmentStart = 0;
+    let segmentEnd = 0;
+    const flushSegment = () => {
+      if (!segmentColor || segmentEnd <= segmentStart) {
+        return;
+      }
+      renderer.ctx.fillStyle = segmentColor;
+      renderer.ctx.fillRect(segmentStart * width, y, (segmentEnd - segmentStart) * width, height);
+    };
+    for (let column = 0; column < line.length; column += 1) {
+      const cell = line[column];
+      if (!cell || cell.width === 0) {
+        continue;
+      }
+      const cellWidth = Math.max(1, Number(cell.width) || 1);
+      const color = terminalCellBackgroundCSS(renderer, cell, column, row);
+      if (color && color === segmentColor && column === segmentEnd) {
+        segmentEnd = column + cellWidth;
+        continue;
+      }
+      flushSegment();
+      segmentColor = color;
+      segmentStart = column;
+      segmentEnd = color ? column + cellWidth : column;
+    }
+    flushSegment();
+    return true;
+  };
+
+  const terminalPowerlineCellBox = (renderer, cell, column, row, offsetY = 0) => {
+    const metrics = renderer.metrics || renderer.getMetrics?.();
+    const cellWidth = Number(cell?.width) || 0;
+    const width = (Number(metrics?.width) || 0) * cellWidth;
+    const height = Number(metrics?.height) || 0;
+    if (!width || !height) {
+      return null;
+    }
+    const rawTop = row * height + offsetY;
+    const rawBottom = rawTop + height;
+    const y = terminalAlignToCanvasPixel(renderer, rawTop, "ceil");
+    const bottom = terminalAlignToCanvasPixel(renderer, rawBottom, "floor");
+    return {
+      width,
+      height: Math.max(terminalCanvasPixelPx(renderer), bottom - y),
+      x: column * Number(metrics.width),
+      y,
+    };
+  };
+
+  const drawTerminalPowerlineRoundCap = (renderer, direction, cell, column, row, offsetY = 0) => {
+    const box = terminalPowerlineCellBox(renderer, cell, column, row, offsetY);
+    if (!box) {
+      return false;
+    }
+    const bleed = terminalCellBleedPx(renderer);
+    const centerX = direction === "left" ? box.x + box.width + bleed : box.x - bleed;
+    const centerY = box.y + box.height / 2;
+    const previousAlpha = renderer.ctx.globalAlpha;
+    renderer.ctx.save();
+    renderer.ctx.beginPath();
+    renderer.ctx.rect(box.x - bleed, box.y, box.width + bleed * 2, box.height);
+    renderer.ctx.clip();
+    renderer.ctx.fillStyle = terminalCellForegroundCSS(renderer, cell, column, row);
+    if (cell.flags & terminalCellFlagFaint) {
+      renderer.ctx.globalAlpha = previousAlpha * 0.5;
+    }
+    renderer.ctx.beginPath();
+    renderer.ctx.moveTo(centerX, box.y);
+    renderer.ctx.ellipse(
+      centerX,
+      centerY,
+      box.width + bleed * 2,
+      box.height / 2,
+      0,
+      -Math.PI / 2,
+      Math.PI / 2,
+      direction === "left"
+    );
+    renderer.ctx.closePath();
+    renderer.ctx.fill();
+    renderer.ctx.restore();
+    renderer.ctx.globalAlpha = previousAlpha;
+    return true;
+  };
+
+  const drawTerminalPowerlineArrow = (renderer, direction, cell, column, row, offsetY = 0) => {
+    const box = terminalPowerlineCellBox(renderer, cell, column, row, offsetY);
+    if (!box) {
+      return false;
+    }
+    const bleed = terminalCellBleedPx(renderer);
+    const pixel = terminalCanvasPixelPx(renderer);
+    const baseBleed = Math.max(bleed, pixel);
+    const baseOuter = direction === "right" ? box.x - baseBleed : box.x + box.width + baseBleed;
+    const tip = direction === "right" ? box.x + box.width + bleed : box.x - bleed;
+    const clipLeft = Math.min(baseOuter, tip) - pixel;
+    const clipRight = Math.max(baseOuter, tip) + pixel;
+    const previousAlpha = renderer.ctx.globalAlpha;
+    renderer.ctx.save();
+    renderer.ctx.beginPath();
+    renderer.ctx.rect(clipLeft, box.y, clipRight - clipLeft, box.height);
+    renderer.ctx.clip();
+    renderer.ctx.fillStyle = terminalCellForegroundCSS(renderer, cell, column, row);
+    if (cell.flags & terminalCellFlagFaint) {
+      renderer.ctx.globalAlpha = previousAlpha * 0.5;
+    }
+    renderer.ctx.beginPath();
+    renderer.ctx.moveTo(baseOuter, box.y);
+    renderer.ctx.lineTo(tip, box.y + box.height / 2);
+    renderer.ctx.lineTo(baseOuter, box.y + box.height);
+    renderer.ctx.closePath();
+    renderer.ctx.fill();
+    renderer.ctx.restore();
+    renderer.ctx.globalAlpha = previousAlpha;
+    return true;
+  };
+
+  const drawTerminalPowerlineShape = (renderer, shape, cell, column, row, offsetY = 0) => {
+    if (shape === "round-left") {
+      return drawTerminalPowerlineRoundCap(renderer, "left", cell, column, row, offsetY);
+    }
+    if (shape === "round-right") {
+      return drawTerminalPowerlineRoundCap(renderer, "right", cell, column, row, offsetY);
+    }
+    if (shape === "arrow-right") {
+      return drawTerminalPowerlineArrow(renderer, "right", cell, column, row, offsetY);
+    }
+    return false;
+  };
+
+  const installRendererCellSeamPatch = (session) => {
+    const renderer = session?.term?.renderer;
+    if (!renderer || renderer.webshellCellSeamPatchInstalled || typeof renderer.renderCellBackground !== "function") {
+      return;
+    }
+    renderer.webshellCellSeamPatchInstalled = true;
+    renderer.webshellOriginalRenderCellBackground = renderer.renderCellBackground.bind(renderer);
+    renderer.renderCellBackground = (cell, column, row, offsetY = 0) => {
+      renderer.webshellOriginalRenderCellBackground(cell, column, row, offsetY);
+      const metrics = renderer.metrics || renderer.getMetrics?.();
+      const width = Number(metrics?.width) || 0;
+      const height = Number(metrics?.height) || 0;
+      const cellWidth = Number(cell?.width) || 0;
+      if (!width || !height || !cellWidth || renderer.isInSelection?.(column, row)) {
+        return;
+      }
+      const { red, green, blue } = terminalCellBackgroundRGB(cell);
+      if (red === 0 && green === 0 && blue === 0) {
+        return;
+      }
+      const bleed = terminalCellBleedPx(renderer);
+      const rgb = { red, green, blue };
+      const leftCell = terminalLineCellAt(renderer, row, column - 1);
+      const rightCell = terminalLineCellAt(renderer, row, column + cellWidth);
+      const bleedLeft = terminalSameRGB(rgb, terminalCellBackgroundRGB(leftCell)) ? bleed : 0;
+      const bleedRight = terminalSameRGB(rgb, terminalCellBackgroundRGB(rightCell)) ? bleed : 0;
+      if (!bleedLeft && !bleedRight) {
+        return;
+      }
+      const x = column * width - bleedLeft;
+      const y = row * height + offsetY;
+      renderer.ctx.fillStyle = renderer.rgbToCSS(red, green, blue);
+      renderer.ctx.fillRect(x, y, width * cellWidth + bleedLeft + bleedRight, height);
+    };
+    if (typeof renderer.renderCursor === "function") {
+      renderer.webshellOriginalRenderCursor = renderer.renderCursor.bind(renderer);
+      renderer.renderCursor = (column, row) => {
+        if (renderer.cursorStyle !== "block") {
+          renderer.webshellOriginalRenderCursor(column, row);
+          return;
+        }
+        const metrics = renderer.metrics || renderer.getMetrics?.();
+        const width = Number(metrics?.width) || 0;
+        const height = Number(metrics?.height) || 0;
+        if (!width || !height) {
+          renderer.webshellOriginalRenderCursor(column, row);
+          return;
+        }
+        const bleed = terminalCellBleedPx(renderer);
+        renderer.ctx.fillStyle = renderer.theme.cursor;
+        renderer.ctx.fillRect(column * width - bleed, row * height, width + bleed * 2, height);
+      };
+    }
+    if (typeof renderer.renderCellText === "function") {
+      renderer.webshellOriginalRenderCellText = renderer.renderCellText.bind(renderer);
+      renderer.renderCellText = (cell, column, row, offsetY = 0) => {
+        if (!(cell.flags & terminalCellFlagInvisible)) {
+          const shape = terminalPowerlineShape(renderer, cell, column, row);
+          if (shape && drawTerminalPowerlineShape(renderer, shape, cell, column, row, offsetY)) {
+            return;
+          }
+        }
+        renderer.webshellOriginalRenderCellText(cell, column, row, offsetY);
+      };
+    }
+    if (typeof renderer.renderLine === "function") {
+      renderer.webshellOriginalRenderLine = renderer.renderLine.bind(renderer);
+      renderer.renderLine = (line, row, columns, offsetY = 0) => {
+        if (!renderTerminalMergedLineBackgrounds(renderer, line, row, columns, offsetY)) {
+          renderer.webshellOriginalRenderLine(line, row, columns, offsetY);
+          return;
+        }
+        for (let column = 0; column < line.length; column += 1) {
+          const cell = line[column];
+          if (cell?.width !== 0) {
+            renderer.renderCellText(cell, column, row, offsetY);
+          }
+        }
+      };
+    }
+  };
+
   const themePreviewPromptText = "lazycat@terminal:~/Theme$ _";
   const themePreviewFont = "16px monospace";
 
@@ -3671,6 +3993,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     const nextTheme = cloneTheme(activeTheme);
     installRendererThemeMapper(session);
+    installRendererCellSeamPatch(session);
     if (!session.baseTheme) {
       session.baseTheme = activeTheme;
     }
@@ -7939,6 +8262,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     installTerminalKeyOverrides(session);
     installTerminalHostViewportGuard(session);
     installRendererThemeMapper(session);
+    installRendererCellSeamPatch(session);
     installMobileTouchSelection(session);
     installDesktopMouseClipboard(session);
 

@@ -123,6 +123,69 @@ func TestRuntimeMobileReturnShortcutRepeats(t *testing.T) {
 	}
 }
 
+func TestRuntimeTerminalRendererCellSeamPatch(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+
+	wantSnippets := []string{
+		`const installRendererCellSeamPatch = (session) => {`,
+		`renderer.webshellOriginalRenderCellBackground = renderer.renderCellBackground.bind(renderer);`,
+		`renderer.renderCellBackground = (cell, column, row, offsetY = 0) => {`,
+		`renderer.webshellOriginalRenderCellBackground(cell, column, row, offsetY);`,
+		`const bleed = terminalCellBleedPx(renderer);`,
+		`const terminalCanvasPixelPx = (renderer) => {`,
+		`const terminalAlignToCanvasPixel = (renderer, value, mode = "round") => {`,
+		`return Math.floor(scaled) * pixel;`,
+		`return Math.ceil(scaled) * pixel;`,
+		`const terminalCellFlagInverse = 16;`,
+		`const terminalCellFlagInvisible = 32;`,
+		`const terminalCellFlagFaint = 128;`,
+		`const terminalCellBackgroundRGB = (cell) => {`,
+		`const terminalSameRGB = (left, right) =>`,
+		`const terminalLineCellAt = (renderer, row, column) => {`,
+		`const renderTerminalMergedLineBackgrounds = (renderer, line, row, columns, offsetY = 0) => {`,
+		`renderer.ctx.fillRect(segmentStart * width, y, (segmentEnd - segmentStart) * width, height);`,
+		`const leftCell = terminalLineCellAt(renderer, row, column - 1);`,
+		`const bleedLeft = terminalSameRGB(rgb, terminalCellBackgroundRGB(leftCell)) ? bleed : 0;`,
+		`renderer.ctx.fillRect(x, y, width * cellWidth + bleedLeft + bleedRight, height);`,
+		`renderer.renderCursor = (column, row) => {`,
+		`if (renderer.cursorStyle !== "block") {`,
+		`renderer.ctx.fillRect(column * width - bleed, row * height, width + bleed * 2, height);`,
+		`const terminalPowerlineShape = (renderer, cell, column, row) => {`,
+		`if (text === "\uE0B6") {`,
+		`if (text === "\uE0B4") {`,
+		`if (text === "\uE0B0") {`,
+		`const rawTop = row * height + offsetY;`,
+		`const y = terminalAlignToCanvasPixel(renderer, rawTop, "ceil");`,
+		`height: Math.max(terminalCanvasPixelPx(renderer), bottom - y),`,
+		`const drawTerminalPowerlineRoundCap = (renderer, direction, cell, column, row, offsetY = 0) => {`,
+		`renderer.ctx.rect(box.x - bleed, box.y, box.width + bleed * 2, box.height);`,
+		`renderer.ctx.ellipse(`,
+		`const drawTerminalPowerlineArrow = (renderer, direction, cell, column, row, offsetY = 0) => {`,
+		`const pixel = terminalCanvasPixelPx(renderer);`,
+		`const baseBleed = Math.max(bleed, pixel);`,
+		`const baseOuter = direction === "right" ? box.x - baseBleed : box.x + box.width + baseBleed;`,
+		`const clipLeft = Math.min(baseOuter, tip) - pixel;`,
+		`renderer.ctx.clip();`,
+		`renderer.ctx.moveTo(baseOuter, box.y);`,
+		`renderer.ctx.lineTo(tip, box.y + box.height / 2);`,
+		`const drawTerminalPowerlineShape = (renderer, shape, cell, column, row, offsetY = 0) => {`,
+		`renderer.renderCellText = (cell, column, row, offsetY = 0) => {`,
+		`drawTerminalPowerlineShape(renderer, shape, cell, column, row, offsetY)`,
+		`renderer.renderLine = (line, row, columns, offsetY = 0) => {`,
+		`renderTerminalMergedLineBackgrounds(renderer, line, row, columns, offsetY)`,
+		`installRendererCellSeamPatch(session);`,
+	}
+	for _, want := range wantSnippets {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime terminal renderer cell seam patch missing %q", want)
+		}
+	}
+}
+
 func TestRuntimeMobileStickyModifiersApplyToTextInput(t *testing.T) {
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {
