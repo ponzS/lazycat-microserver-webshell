@@ -25,7 +25,7 @@ const (
 	DefaultTerminalScrollback = 5000
 	MinTerminalScrollback     = 100
 	MaxTerminalScrollback     = 100000
-	DefaultTerminalFontID     = "8a463de46a8fe098f88b5ae22239889eccce14767918d9d6a132d61e6635e3c2"
+	DefaultTerminalFontID     = "03e60d3c1a9f8bef4e1f78836f80aacb9ec005260a6b094f5bfc10043bb115ab"
 )
 
 var (
@@ -137,6 +137,7 @@ type bundledFont struct {
 	Family   string
 	Filename string
 	File     string
+	MIME     string
 	SHA256   string
 }
 
@@ -152,28 +153,40 @@ type symbolFont struct {
 
 var bundledFonts = []bundledFont{
 	{
-		ID:       "2d5d4248c42ce44927e41d57630a4d621235b31764b91350464fc32bd1cb1538",
-		Label:    "Source Code Pro",
-		Family:   "WebShellBuiltin_SourceCodePro",
-		Filename: "SourceCodePro-Regular.woff2",
-		File:     "SourceCodePro-Regular.woff2",
-		SHA256:   "714eee29b70d191f5bf4b3a06b68f2c50522b1303d31c7d44dcefdcc5f9defd0",
+		ID:       "03e60d3c1a9f8bef4e1f78836f80aacb9ec005260a6b094f5bfc10043bb115ab",
+		Label:    "Hack Nerd Font",
+		Family:   "WebShellBuiltin_HackNerdFont",
+		Filename: "HackNerdFontMono-Regular.ttf",
+		File:     "HackNerdFontMono-Regular.ttf",
+		MIME:     "font/ttf",
+		SHA256:   "03e60d3c1a9f8bef4e1f78836f80aacb9ec005260a6b094f5bfc10043bb115ab",
 	},
 	{
-		ID:       "69adbdf6a8befb71fa19adfa9137ecbee9237b157206100b9bfbc6ed65fc79c3",
-		Label:    "Fira Code",
-		Family:   "WebShellBuiltin_FiraCode",
-		Filename: "FiraCode-Regular.woff2",
-		File:     "FiraCode-Regular.woff2",
-		SHA256:   "a6ce59520b90e15d7062ffef214f94c8add5a4085c0bbb1683602ef227a4d1fe",
+		ID:       "f01031f40e48dc29e1112e6b0b0450a2c6cd097f3f35cfff05c55cb311f8034c",
+		Label:    "JetBrainsMono Nerd Font",
+		Family:   "WebShellBuiltin_JetBrainsMonoNerdFont",
+		Filename: "JetBrainsMonoNerdFontMono-Regular.ttf",
+		File:     "JetBrainsMonoNerdFontMono-Regular.ttf",
+		MIME:     "font/ttf",
+		SHA256:   "f01031f40e48dc29e1112e6b0b0450a2c6cd097f3f35cfff05c55cb311f8034c",
 	},
 	{
-		ID:       "8a463de46a8fe098f88b5ae22239889eccce14767918d9d6a132d61e6635e3c2",
-		Label:    "Hack",
-		Family:   "WebShellBuiltin_Hack",
-		Filename: "Hack-Regular.woff2",
-		File:     "Hack-Regular.woff2",
-		SHA256:   "0b0ef254dfc7afc172528e3166eace813989e1cf77f576ddae5f5e8fb2897c06",
+		ID:       "ad88c69cb6a497db9f2714e4b414817aabbee621484a1560bfdb3fd73abdd564",
+		Label:    "FiraCode Nerd Font",
+		Family:   "WebShellBuiltin_FiraCodeNerdFont",
+		Filename: "FiraCodeNerdFontMono-Regular.ttf",
+		File:     "FiraCodeNerdFontMono-Regular.ttf",
+		MIME:     "font/ttf",
+		SHA256:   "ad88c69cb6a497db9f2714e4b414817aabbee621484a1560bfdb3fd73abdd564",
+	},
+	{
+		ID:       "3cb52e923ca3981cecca9ea7307186e424e8521cbc5643fd0b5b5b1d7daa53d9",
+		Label:    "MesloLGS Nerd Font",
+		Family:   "WebShellBuiltin_MesloLGSNerdFont",
+		Filename: "MesloLGSNerdFontMono-Regular.ttf",
+		File:     "MesloLGSNerdFontMono-Regular.ttf",
+		MIME:     "font/ttf",
+		SHA256:   "3cb52e923ca3981cecca9ea7307186e424e8521cbc5643fd0b5b5b1d7daa53d9",
 	},
 }
 
@@ -500,7 +513,7 @@ func (s Store) File(id string) (File, error) {
 		if err := s.ensureBundledFontAvailable(id); err != nil {
 			return File{}, err
 		}
-		return File{Path: s.bundledPath(font), MIME: "font/woff2"}, nil
+		return File{Path: s.bundledPath(font), MIME: font.MIME}, nil
 	}
 	metadata, err := s.ReadMetadata(id)
 	if err != nil {
@@ -740,7 +753,7 @@ func (s Store) bundledDescriptor(font bundledFont) (Descriptor, bool) {
 		Label:      font.Label,
 		Family:     font.Family,
 		Filename:   font.Filename,
-		MIME:       "font/woff2",
+		MIME:       font.MIME,
 		Size:       info.Size(),
 		URL:        "/api/settings/fonts/" + font.ID + "/file?v=" + font.SHA256[:12],
 		SourceName: font.Label,

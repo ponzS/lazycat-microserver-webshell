@@ -856,9 +856,10 @@ func TestHandleSettingsServesBundledFonts(t *testing.T) {
 		name string
 		data string
 	}{
-		{name: "SourceCodePro-Regular.woff2", data: "source"},
-		{name: "FiraCode-Regular.woff2", data: "fira"},
-		{name: "Hack-Regular.woff2", data: "hack"},
+		{name: "HackNerdFontMono-Regular.ttf", data: "hack"},
+		{name: "JetBrainsMonoNerdFontMono-Regular.ttf", data: "jetbrains"},
+		{name: "FiraCodeNerdFontMono-Regular.ttf", data: "fira"},
+		{name: "MesloLGSNerdFontMono-Regular.ttf", data: "meslo"},
 		{name: "SymbolsNerdFontMono-Regular.ttf", data: "symbols"},
 	} {
 		if err := os.WriteFile(filepath.Join(bundledDir, item.name), []byte(item.data), 0o644); err != nil {
@@ -876,14 +877,14 @@ func TestHandleSettingsServesBundledFonts(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&state); err != nil {
 		t.Fatalf("decode settings response error = %v", err)
 	}
-	if len(state.Fonts) != 3 {
-		t.Fatalf("bundled font count = %d, want 3: %+v", len(state.Fonts), state.Fonts)
+	if len(state.Fonts) != 4 {
+		t.Fatalf("bundled font count = %d, want 4: %+v", len(state.Fonts), state.Fonts)
 	}
 	if state.TerminalFontID != fonts.DefaultTerminalFontID {
-		t.Fatalf("default TerminalFontID = %q, want Hack %q", state.TerminalFontID, fonts.DefaultTerminalFontID)
+		t.Fatalf("default TerminalFontID = %q, want Hack Nerd Font %q", state.TerminalFontID, fonts.DefaultTerminalFontID)
 	}
-	if state.Fonts[0].Label != "Source Code Pro" || !state.Fonts[0].Builtin {
-		t.Fatalf("first bundled font = %+v, want Source Code Pro builtin", state.Fonts[0])
+	if state.Fonts[0].Label != "Hack Nerd Font" || !state.Fonts[0].Builtin {
+		t.Fatalf("first bundled font = %+v, want Hack Nerd Font builtin", state.Fonts[0])
 	}
 	if state.TerminalSymbolFont == nil {
 		t.Fatal("TerminalSymbolFont = nil, want bundled Nerd Font symbol descriptor")
@@ -914,8 +915,8 @@ func TestHandleSettingsServesBundledFonts(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("handleSettingsFont(file) status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
-	if contentType := recorder.Header().Get("Content-Type"); contentType != "font/woff2" {
-		t.Fatalf("Content-Type = %q, want font/woff2", contentType)
+	if contentType := recorder.Header().Get("Content-Type"); contentType != "font/ttf" {
+		t.Fatalf("Content-Type = %q, want font/ttf", contentType)
 	}
 
 	recorder = httptest.NewRecorder()
@@ -945,8 +946,8 @@ func TestHandleSettingsServesBundledFonts(t *testing.T) {
 	if state.TerminalFontID != "" {
 		t.Fatalf("TerminalFontID after bundled delete = %q, want empty", state.TerminalFontID)
 	}
-	if len(state.Fonts) != 2 {
-		t.Fatalf("bundled font count after delete = %d, want 2: %+v", len(state.Fonts), state.Fonts)
+	if len(state.Fonts) != 3 {
+		t.Fatalf("bundled font count after delete = %d, want 3: %+v", len(state.Fonts), state.Fonts)
 	}
 	for _, font := range state.Fonts {
 		if font.ID == selectedID {

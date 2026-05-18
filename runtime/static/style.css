@@ -1083,6 +1083,18 @@ body.split-resize-active * {
   background-clip: padding-box;
 }
 
+.settings-tab-panel[data-settings-panel="terminal"] {
+  align-self: stretch;
+  width: auto;
+  margin-right: 3px;
+}
+
+.settings-tab-panel[data-settings-panel="terminal"] > .settings-section {
+  width: 80%;
+  align-self: center;
+  box-sizing: border-box;
+}
+
 .settings-section {
   display: flex;
   flex-direction: column;
@@ -3115,6 +3127,14 @@ body.is-mobile-shortcut-dragging {
 
   .settings-tab-panel {
     align-self: stretch;
+    width: 100%;
+  }
+
+  .settings-tab-panel[data-settings-panel="terminal"] {
+    width: auto;
+  }
+
+  .settings-tab-panel[data-settings-panel="terminal"] > .settings-section {
     width: 100%;
   }
 
