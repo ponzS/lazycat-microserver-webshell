@@ -276,7 +276,33 @@ func TestRuntimeMobileIMECompositionPreviewVisible(t *testing.T) {
 		`compositionPreview.className = "terminal-composition-preview";`,
 		`terminalHost.appendChild(compositionPreview);`,
 		`setTerminalTextareaCompositionText(session, event.data);`,
-		`const committedText = event.data || terminalTextareaCompositionText(session);`,
+		`const clearTerminalPostCompositionInput = (session) => {`,
+		`session.pendingCompositionInput = null;`,
+		`const armTerminalPostCompositionInput = (session, { preedit = "", committed = "", sent = false } = {}) => {`,
+		`preedit: stripTerminalInputSentinel(preedit),`,
+		`committed: stripTerminalInputSentinel(committed),`,
+		`sent: Boolean(sent),`,
+		`expiresAt: performance.now() + 350,`,
+		`const resolveTerminalPostCompositionInput = (session, value) => {`,
+		`const pending = session?.pendingCompositionInput;`,
+		"rawValue === committed || (preedit && rawValue === `${preedit}${committed}`)",
+		`data = rawValue.slice(preedit.length);`,
+		`if (!data) {`,
+		`const rememberTerminalPostCompositionSentInput = (session, pending, committed) => {`,
+		`const committedText = stripTerminalInputSentinel(committed);`,
+		`sent: true,`,
+		`const compositionValue = data ? resolveTerminalPostCompositionInput(session, data) : null;`,
+		`? resolveTerminalPostCompositionInput(session, value)`,
+		`rememberTerminalPostCompositionSentInput(session, pendingComposition, compositionValue);`,
+		`clearTerminalPostCompositionInput(session);`,
+		`const preeditText = terminalTextareaCompositionText(session);`,
+		`const committedText = typeof event.data === "string" ? stripTerminalInputSentinel(event.data) : "";`,
+		`armTerminalPostCompositionInput(session, {`,
+		`preedit: preeditText,`,
+		`committed: committedText,`,
+		`sent: Boolean(committedText),`,
+		`const fallbackValue = stripTerminalInputSentinel(textarea.value);`,
+		`const compositionValue = resolveTerminalPostCompositionInput(session, fallbackValue);`,
 		`if (committedText) {`,
 		`sendTerminalTextInput(session, committedText, { dedupe: true });`,
 	}
@@ -290,6 +316,9 @@ func TestRuntimeMobileIMECompositionPreviewVisible(t *testing.T) {
 	}
 	if strings.Contains(source, `host.addEventListener("compositionupdate", () => scheduleTerminalHostViewportReset(session`) {
 		t.Fatalf("runtime mobile IME preview should not keep host composition listeners active")
+	}
+	if strings.Contains(source, `const committedText = event.data || terminalTextareaCompositionText(session);`) {
+		t.Fatalf("runtime mobile IME compositionend must not send preedit text when event.data is empty")
 	}
 	compositionBeforeInputBranch := sourceBetween(t, source,
 		`if (type === "insertCompositionText" || type === "deleteCompositionText" || event.isComposing) {`,

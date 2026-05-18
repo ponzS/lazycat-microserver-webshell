@@ -5003,6 +5003,82 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   };
 
+  const clearTerminalPostCompositionInput = (session) => {
+    if (!session) {
+      return;
+    }
+    session.pendingCompositionInput = null;
+  };
+
+  const armTerminalPostCompositionInput = (session, { preedit = "", committed = "", sent = false } = {}) => {
+    if (!session) {
+      return null;
+    }
+    const pending = {
+      preedit: stripTerminalInputSentinel(preedit),
+      committed: stripTerminalInputSentinel(committed),
+      sent: Boolean(sent),
+      expiresAt: performance.now() + 350,
+    };
+    session.pendingCompositionInput = pending;
+    return pending;
+  };
+
+  const resolveTerminalPostCompositionInput = (session, value) => {
+    const pending = session?.pendingCompositionInput;
+    if (!pending) {
+      return null;
+    }
+    if (performance.now() > Number(pending.expiresAt || 0)) {
+      clearTerminalPostCompositionInput(session);
+      return null;
+    }
+    const rawValue = stripTerminalInputSentinel(value);
+    const preedit = pending.preedit || "";
+    const committed = pending.committed || "";
+    let data = rawValue;
+    let handled = false;
+    if (!rawValue || rawValue === preedit) {
+      data = "";
+      handled = true;
+    } else if (pending.sent && (rawValue === committed || (preedit && rawValue === `${preedit}${committed}`))) {
+      data = "";
+      handled = true;
+    } else if (!pending.sent && preedit && rawValue.startsWith(preedit)) {
+      data = rawValue.slice(preedit.length);
+      handled = true;
+    } else if (!pending.sent && committed && rawValue === committed) {
+      data = committed;
+      handled = true;
+    } else if (!pending.sent && !committed) {
+      data = rawValue;
+      handled = true;
+    }
+    if (handled) {
+      if (!data) {
+        return "";
+      }
+      clearTerminalPostCompositionInput(session);
+      return data;
+    }
+    if (pending.sent) {
+      clearTerminalPostCompositionInput(session);
+    }
+    return null;
+  };
+
+  const rememberTerminalPostCompositionSentInput = (session, pending, committed) => {
+    const committedText = stripTerminalInputSentinel(committed);
+    if (!session || !committedText) {
+      return;
+    }
+    armTerminalPostCompositionInput(session, {
+      preedit: pending?.preedit || "",
+      committed: committedText,
+      sent: true,
+    });
+  };
+
   const sendTerminalTextInput = (session, data, { dedupe = false, applySticky = false } = {}) => {
     const rawData = String(data || "");
     if (!session || !rawData) {
@@ -5064,6 +5140,24 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     } else if (event.data) {
       data = event.data;
     }
+    const pendingComposition = session?.pendingCompositionInput;
+    const compositionValue = data ? resolveTerminalPostCompositionInput(session, data) : null;
+    if (compositionValue !== null) {
+      event.preventDefault();
+      event.stopPropagation();
+      setTerminalInputComposing(session, false);
+      if (textarea) {
+        textarea.value = terminalInputSentinel;
+        moveTerminalTextareaCaretToEnd(textarea);
+      }
+      if (compositionValue) {
+        sendTerminalTextInput(session, compositionValue, { dedupe: true });
+        rememberTerminalPostCompositionSentInput(session, pendingComposition, compositionValue);
+      }
+      resetTerminalHostViewport(session, { clean: true });
+      positionTerminalInput(session);
+      return;
+    }
     if (!data) {
       if (type.startsWith("insert") || type.startsWith("delete")) {
         event.stopPropagation();
@@ -5094,6 +5188,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     const type = String(event.inputType || "");
     if (session.composingIME) {
+      clearTerminalPostCompositionInput(session);
       const value = stripTerminalInputSentinel(textarea.value);
       if (value) {
         setTerminalTextareaCompositionText(session, value);
@@ -5104,7 +5199,16 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     if (!session.composingIME) {
       const value = stripTerminalInputSentinel(textarea.value);
-      if (!value && isBackwardDeleteInputType(type)) {
+      const pendingComposition = session?.pendingCompositionInput;
+      const compositionValue = (value || (!isBackwardDeleteInputType(type) && !isForwardDeleteInputType(type)))
+        ? resolveTerminalPostCompositionInput(session, value)
+        : null;
+      if (compositionValue !== null) {
+        if (compositionValue) {
+          sendTerminalTextInput(session, compositionValue, { dedupe: true });
+          rememberTerminalPostCompositionSentInput(session, pendingComposition, compositionValue);
+        }
+      } else if (!value && isBackwardDeleteInputType(type)) {
         sendTerminalTextInput(session, "\x7f");
       } else if (!value && isForwardDeleteInputType(type)) {
         sendTerminalTextInput(session, "\x1b[3~");
@@ -5201,6 +5305,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       event.stopPropagation();
       scrollTerminalToBottomForUserInput(session);
       clearTerminalTextareaSentinel(session);
+      clearTerminalPostCompositionInput(session);
       setTerminalInputComposing(session, true);
       setTerminalTextareaCompositionText(session, "");
       positionTerminalInput(session);
@@ -5217,12 +5322,27 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }, { capture: true });
     textarea.addEventListener("compositionend", (event) => {
       event.stopPropagation();
-      const committedText = event.data || terminalTextareaCompositionText(session);
+      const preeditText = terminalTextareaCompositionText(session);
+      const committedText = typeof event.data === "string" ? stripTerminalInputSentinel(event.data) : "";
       setTerminalInputComposing(session, false);
+      armTerminalPostCompositionInput(session, {
+        preedit: preeditText,
+        committed: committedText,
+        sent: Boolean(committedText),
+      });
       if (committedText) {
         sendTerminalTextInput(session, committedText, { dedupe: true });
       }
       window.setTimeout(() => {
+        const fallbackValue = stripTerminalInputSentinel(textarea.value);
+        if (fallbackValue) {
+          const pendingComposition = session?.pendingCompositionInput;
+          const compositionValue = resolveTerminalPostCompositionInput(session, fallbackValue);
+          if (compositionValue) {
+            sendTerminalTextInput(session, compositionValue, { dedupe: true });
+            rememberTerminalPostCompositionSentInput(session, pendingComposition, compositionValue);
+          }
+        }
         resetTerminalTextareaValue(session);
         resetTerminalHostViewport(session, { clean: true });
       }, 0);
