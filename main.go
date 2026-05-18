@@ -247,7 +247,7 @@ func (s *pluginServer) handleInstances(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "account id is required", http.StatusUnauthorized)
 		return
 	}
-	items, err := s.listOwnedInstances(r.Context())
+	items, err := s.listVisibleInstances(r.Context())
 	if err != nil {
 		writeAuthorizationError(w, err)
 		return
@@ -592,6 +592,10 @@ func (s *pluginServer) listOwnedInstances(ctx context.Context) ([]instanceSummar
 	return items, nil
 }
 
+func (s *pluginServer) listVisibleInstances(ctx context.Context) ([]instanceSummary, error) {
+	return s.listInstances(ctx)
+}
+
 func (s *pluginServer) currentOwnerDeployIDs(ctx context.Context) []string {
 	var ids []string
 	seen := make(map[string]struct{})
@@ -632,6 +636,23 @@ func (s *pluginServer) authorizeInstanceSelector(ctx context.Context, selector s
 	if err := validateInstanceSelector(selector); err != nil {
 		return err
 	}
+	items, err := s.listVisibleInstances(ctx)
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		if instanceSelector(item) == selector {
+			return nil
+		}
+	}
+	return errInstanceForbidden
+}
+
+func (s *pluginServer) authorizeOwnedInstanceSelector(ctx context.Context, selector string) error {
+	selector = strings.TrimSpace(selector)
+	if err := validateInstanceSelector(selector); err != nil {
+		return err
+	}
 	items, err := s.listOwnedInstances(ctx)
 	if err != nil {
 		return err
@@ -668,7 +689,7 @@ func (s *pluginServer) authorizePublishProxyRequest(r *http.Request) error {
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return fmt.Errorf("%w: %v", errInvalidPublishCreatePayload, err)
 	}
-	return s.authorizeInstanceSelector(r.Context(), payload.InstanceName)
+	return s.authorizeOwnedInstanceSelector(r.Context(), payload.InstanceName)
 }
 
 func validateInstanceSelector(value string) error {
