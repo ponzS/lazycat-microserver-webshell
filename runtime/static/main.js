@@ -9151,7 +9151,10 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
       updateLocationName(activeName, { replace: true, tabId: "" });
     }
     const active = instances.find((item) => instanceSelector(item) === activeName);
-    if (!active || !isRunningInstance(active)) {
+    if (!active) {
+      throw new Error("Requested LightOS instance is unavailable.");
+    }
+    if (!isRunningInstance(active)) {
       const fallback = instances.find((item) => isRunningInstance(item));
       const fallbackName = instanceSelector(fallback);
       if (fallbackName) {

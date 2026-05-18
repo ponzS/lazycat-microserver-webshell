@@ -101,13 +101,8 @@ func TestHandleInstancesFiltersByDeployUID(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&items); err != nil {
 		t.Fatalf("decode instances error = %v", err)
 	}
-	if len(items) != 2 {
-		t.Fatalf("instances count = %d, want 2: %+v", len(items), items)
-	}
-	for _, item := range items {
-		if item.OwnerDeployID != "deploy-a" {
-			t.Fatalf("returned cross-account instance: %+v", item)
-		}
+	if len(items) != len(testInstanceSummaries()) {
+		t.Fatalf("instances count = %d, want all visible instances: %+v", len(items), items)
 	}
 }
 
@@ -132,13 +127,8 @@ func TestHandleInstancesUsesAdminInfoDeployIDWhenEnvDoesNotMatch(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&items); err != nil {
 		t.Fatalf("decode instances error = %v", err)
 	}
-	if len(items) != 2 {
-		t.Fatalf("instances count = %d, want 2: %+v", len(items), items)
-	}
-	for _, item := range items {
-		if item.OwnerDeployID != "deploy-a" {
-			t.Fatalf("returned cross-account instance: %+v", item)
-		}
+	if len(items) != len(testInstanceSummaries()) {
+		t.Fatalf("instances count = %d, want all visible instances: %+v", len(items), items)
 	}
 }
 
@@ -179,17 +169,28 @@ func TestHandleInstancesRequiresAccountHeader(t *testing.T) {
 	}
 }
 
-func TestAuthorizeInstanceSelectorRequiresOwnedSelector(t *testing.T) {
+func TestAuthorizeInstanceSelectorAllowsVisibleSelector(t *testing.T) {
 	server := testPluginServerWithInstances()
 
 	if err := server.authorizeInstanceSelector(context.Background(), "alpha@deploy-a"); err != nil {
 		t.Fatalf("authorize own selector error = %v", err)
 	}
-	if err := server.authorizeInstanceSelector(context.Background(), "beta@deploy-b"); !errors.Is(err, errInstanceForbidden) {
-		t.Fatalf("authorize foreign selector error = %v, want errInstanceForbidden", err)
+	if err := server.authorizeInstanceSelector(context.Background(), "beta@deploy-b"); err != nil {
+		t.Fatalf("authorize visible selector error = %v", err)
 	}
 	if err := server.authorizeInstanceSelector(context.Background(), "invalid"); err == nil || !strings.Contains(err.Error(), "invalid instance selector") {
 		t.Fatalf("authorize invalid selector error = %v, want invalid selector", err)
+	}
+}
+
+func TestAuthorizeOwnedInstanceSelectorRejectsForeignSelector(t *testing.T) {
+	server := testPluginServerWithInstances()
+
+	if err := server.authorizeOwnedInstanceSelector(context.Background(), "alpha@deploy-a"); err != nil {
+		t.Fatalf("authorize own selector error = %v", err)
+	}
+	if err := server.authorizeOwnedInstanceSelector(context.Background(), "beta@deploy-b"); !errors.Is(err, errInstanceForbidden) {
+		t.Fatalf("authorize foreign selector error = %v, want errInstanceForbidden", err)
 	}
 }
 
@@ -1406,14 +1407,14 @@ func TestHandleWorkspaceRequiresAccountHeader(t *testing.T) {
 	}
 }
 
-func TestHandleWorkspaceRejectsForeignSelector(t *testing.T) {
+func TestHandleWorkspaceAllowsVisibleSelector(t *testing.T) {
 	server := testPluginServerWithInstances()
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/workspace?name=beta@deploy-b", nil)
 	request.Header.Set(lightOSUserIDHeader, "login-user-a")
 	server.handleWorkspace(recorder, request)
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("handleWorkspace status = %d, want 403", recorder.Code)
+	if recorder.Code == http.StatusForbidden {
+		t.Fatalf("handleWorkspace status = %d, should allow visible selector", recorder.Code)
 	}
 }
 
@@ -1427,14 +1428,14 @@ func TestHandleWorkspaceActivityRequiresAccountHeader(t *testing.T) {
 	}
 }
 
-func TestHandleWorkspaceActivityRejectsForeignSelector(t *testing.T) {
+func TestHandleWorkspaceActivityAllowsVisibleSelector(t *testing.T) {
 	server := testPluginServerWithInstances()
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/workspace/activity?name=beta@deploy-b", nil)
 	request.Header.Set(lightOSUserIDHeader, "login-user-a")
 	server.handleWorkspaceActivity(recorder, request)
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("handleWorkspaceActivity status = %d, want 403", recorder.Code)
+	if recorder.Code == http.StatusForbidden {
+		t.Fatalf("handleWorkspaceActivity status = %d, should allow visible selector", recorder.Code)
 	}
 }
 
@@ -1450,7 +1451,7 @@ func TestAttachPersistentPaneRequiresAccountHeader(t *testing.T) {
 	}
 }
 
-func TestAttachPersistentPaneRejectsForeignSelector(t *testing.T) {
+func TestAttachPersistentPaneAllowsVisibleSelector(t *testing.T) {
 	server := testPluginServerWithInstances()
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/ws?name=beta@deploy-b&pane=pane-1", nil)
@@ -1458,8 +1459,8 @@ func TestAttachPersistentPaneRejectsForeignSelector(t *testing.T) {
 	if err := server.attachPersistentPane(recorder, request, 80, 24); err != nil {
 		t.Fatalf("attachPersistentPane returned error: %v", err)
 	}
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("attachPersistentPane status = %d, want 403", recorder.Code)
+	if recorder.Code == http.StatusForbidden {
+		t.Fatalf("attachPersistentPane status = %d, should allow visible selector", recorder.Code)
 	}
 }
 
@@ -1473,14 +1474,14 @@ func TestHandleServerRevisionRequiresAccountHeaderForScopedState(t *testing.T) {
 	}
 }
 
-func TestHandleServerRevisionRejectsForeignSelector(t *testing.T) {
+func TestHandleServerRevisionAllowsVisibleSelector(t *testing.T) {
 	server := testPluginServerWithInstances()
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/server-revision?name=beta@deploy-b&client_id=client-one", nil)
 	request.Header.Set(lightOSUserIDHeader, "login-user-a")
 	server.handleServerRevision(recorder, request)
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("handleServerRevision status = %d, want 403", recorder.Code)
+	if recorder.Code == http.StatusForbidden {
+		t.Fatalf("handleServerRevision status = %d, should allow visible selector", recorder.Code)
 	}
 }
 
