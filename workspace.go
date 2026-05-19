@@ -33,6 +33,7 @@ const (
 	clientQueueLimit           = 8 << 20
 	historyReplayChunk         = 256 << 10
 	websocketReadLimit         = 10 << 20
+	terminalPTYInputChunkBytes = 16 << 10
 )
 
 type workspaceManager struct {
@@ -1787,7 +1788,11 @@ func (p *terminalPane) writePTYInput(data []byte) error {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 	for len(data) > 0 {
-		n, err := ptyFile.Write(data)
+		chunk := data
+		if len(chunk) > terminalPTYInputChunkBytes {
+			chunk = chunk[:terminalPTYInputChunkBytes]
+		}
+		n, err := ptyFile.Write(chunk)
 		if n > 0 {
 			data = data[n:]
 		}

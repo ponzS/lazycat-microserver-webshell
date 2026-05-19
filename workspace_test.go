@@ -1442,6 +1442,18 @@ func TestTerminalControlInputLockTogglesPaneWrites(t *testing.T) {
 	}
 }
 
+func TestTerminalPTYInputChunkLimitIsBelowWebSocketReadLimit(t *testing.T) {
+	if terminalPTYInputChunkBytes <= 0 {
+		t.Fatal("terminalPTYInputChunkBytes must be positive")
+	}
+	if terminalPTYInputChunkBytes > 16<<10 {
+		t.Fatalf("terminalPTYInputChunkBytes = %d, want at most 16KiB", terminalPTYInputChunkBytes)
+	}
+	if terminalPTYInputChunkBytes >= websocketReadLimit {
+		t.Fatalf("terminalPTYInputChunkBytes = %d must stay below websocketReadLimit = %d", terminalPTYInputChunkBytes, websocketReadLimit)
+	}
+}
+
 func TestPluginServerTerminalInputLockOwnersAreIndependent(t *testing.T) {
 	server := &pluginServer{}
 	scope := normalizeAgentScope("demo@owner", "user-a")

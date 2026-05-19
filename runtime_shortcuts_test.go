@@ -592,6 +592,47 @@ func TestRuntimeTerminalInputAvoidsPerKeyResize(t *testing.T) {
 	}
 }
 
+func TestRuntimeTerminalInputChunksLargePaste(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+
+	wantSnippets := []string{
+		"const terminalInputChunkChars = 16 * 1024;",
+		"const terminalInputPumpChunkBudget = 4;",
+		"const terminalInputBackpressureBytes = 512 * 1024;",
+		"const maxBufferedInputBytes = 64 * 1024;",
+		"const maxQueuedInputBytes = 16 * 1024 * 1024;",
+		"const splitTerminalInputChunks = (data, chunkChars = terminalInputChunkChars) => {",
+		"const buildTerminalInputQueueItems = (data, { generated = false, maxBytes = Infinity } = {}) => {",
+		"const sendSessionInputChunk = (session, data, { generated = false } = {}) => {",
+		"const enqueueSessionInput = (session, data, { generated = false, front = false } = {}) => {",
+		"const pumpQueuedInput = (session) => {",
+		"Number(session.socket.bufferedAmount || 0)",
+		"sendSessionInputChunk(session, item.data, { generated: item.generated })",
+		"enqueueSessionInput(session, data);",
+		"if (session.inputBuffer) {",
+		"scheduleQueuedInputPump(session);",
+		"scheduleQueuedInputPump(session, terminalInputBackpressureDelayMs);",
+		"const data = bracketed ? `\\x1b[200~${value}\\x1b[201~` : value;",
+		"sendOrQueueInput(session, data);",
+		`textarea.addEventListener("paste", (event) => {`,
+		"event.stopImmediatePropagation();",
+		"inputQueue: [],",
+		"inputPumpTimer: 0,",
+	}
+	for _, want := range wantSnippets {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime terminal large paste guard missing %q", want)
+		}
+	}
+	if strings.Contains(source, "session.term.paste(value);") {
+		t.Fatal("runtime paste path should not send large clipboard content through terminal paste directly")
+	}
+}
+
 func TestRuntimeGeneratedTerminalResponsesAreMarked(t *testing.T) {
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {
@@ -613,7 +654,7 @@ func TestRuntimeGeneratedTerminalResponsesAreMarked(t *testing.T) {
 		"if (shouldSuppressGeneratedTerminalInput(session, data)) {",
 		"session.processingGeneratedTerminalResponses = true;",
 		"session.processingGeneratedTerminalResponses = false;",
-		"JSON.stringify({ type: \"input\", data, generated: true })",
+		"JSON.stringify(generated ? { type: \"input\", data, generated: true } : { type: \"input\", data })",
 		"const generatedResponse = isGeneratedTerminalResponse(data);",
 		"if (generatedResponse || generatedResponseTail) {",
 		"sendSessionInput(session, data, { immediate: true, generated: true });",

@@ -178,6 +178,14 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const mobileKeyboardInsetThresholdPx = 80;
   const desktopSelectionCopyMoveThresholdPx = 4;
   const terminalSizeReassertIntervalMs = 250;
+  const terminalInputChunkChars = 16 * 1024;
+  const terminalInputFlushDelayMs = 8;
+  const terminalInputPumpChunkBudget = 4;
+  const terminalInputBackpressureBytes = 512 * 1024;
+  const terminalInputBackpressureDelayMs = 16;
+  const maxBufferedInputBytes = 64 * 1024;
+  const maxPendingInputBytes = 8 * 1024 * 1024;
+  const maxQueuedInputBytes = 16 * 1024 * 1024;
   const terminalOutputFlushFallbackMs = 32;
   const maxQueuedTerminalOutputBytes = 4 * 1024 * 1024;
   const activityPollIntervalMs = 4000;
@@ -5428,6 +5436,16 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     textarea.addEventListener("input", (event) => {
       handleTerminalTextareaInput(session, event);
     }, { capture: true });
+    textarea.addEventListener("paste", (event) => {
+      const text = event.clipboardData?.getData("text/plain") || "";
+      if (!text) {
+        return;
+      }
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      reassertTerminalSize(session, { force: true });
+      pasteIntoSession(session, text).catch((error) => showToast(error.message));
+    }, { capture: true });
     host.addEventListener("pointerdown", (event) => {
       if (event.pointerType === "touch" || event.pointerType === "pen") {
         return;
@@ -5885,7 +5903,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     try {
       const value = text === null ? await readClipboardText() : text;
       if (value) {
-        session.term.paste(value);
+        const bracketed = session.term.wasmTerm?.hasBracketedPaste?.() === true;
+        const data = bracketed ? `\x1b[200~${value}\x1b[201~` : value;
+        sendOrQueueInput(session, data);
       }
     } catch (error) {
       showToast(error.message || "粘贴失败。");
@@ -6903,6 +6923,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     session.inputBuffer = "";
     session.inputBufferSize = 0;
+    session.inputQueue = [];
+    session.inputQueueSize = 0;
+    clearInputPumpTimer(session);
     session.pendingInput = [];
     session.pendingInputSize = 0;
   };
@@ -8067,6 +8090,63 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   };
 
+  const clearInputPumpTimer = (session) => {
+    if (session?.inputPumpTimer) {
+      window.clearTimeout(session.inputPumpTimer);
+      session.inputPumpTimer = 0;
+    }
+  };
+
+  const splitTerminalInputChunks = (data, chunkChars = terminalInputChunkChars) => {
+    const value = String(data || "");
+    const chunks = [];
+    for (let offset = 0; offset < value.length;) {
+      let end = Math.min(value.length, offset + chunkChars);
+      if (end < value.length) {
+        const code = value.charCodeAt(end - 1);
+        if (code >= 0xd800 && code <= 0xdbff) {
+          end -= 1;
+        }
+      }
+      if (end <= offset) {
+        end = Math.min(value.length, offset + 1);
+      }
+      chunks.push(value.slice(offset, end));
+      offset = end;
+    }
+    return chunks;
+  };
+
+  const buildTerminalInputQueueItems = (data, { generated = false, maxBytes = Infinity } = {}) => {
+    const items = [];
+    let byteLength = 0;
+    for (const chunk of splitTerminalInputChunks(data)) {
+      const chunkByteLength = textEncoder.encode(chunk).length;
+      byteLength += chunkByteLength;
+      if (byteLength > maxBytes) {
+        return { items: [], byteLength, exceeded: true };
+      }
+      items.push({
+        data: chunk,
+        generated: generated === true,
+        byteLength: chunkByteLength,
+      });
+    }
+    return { items, byteLength, exceeded: false };
+  };
+
+  const sendSessionInputChunk = (session, data, { generated = false } = {}) => {
+    if (!data || session?.socket?.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    try {
+      session.socket.send(JSON.stringify(generated ? { type: "input", data, generated: true } : { type: "input", data }));
+      return true;
+    } catch (error) {
+      return false;
+    }
+  };
+
   const flushInputBuffer = (session) => {
     if (!session) {
       return;
@@ -8082,9 +8162,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     const data = session.inputBuffer;
     session.inputBuffer = "";
     session.inputBufferSize = 0;
-    try {
-      session.socket.send(JSON.stringify({ type: "input", data }));
-    } catch (error) {
+    if (!sendSessionInputChunk(session, data)) {
       session.inputBuffer = data + session.inputBuffer;
       session.inputBufferSize += textEncoder.encode(data).length;
     }
@@ -8094,7 +8172,88 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (session.inputFlushTimer) {
       return;
     }
-    session.inputFlushTimer = window.setTimeout(() => flushInputBuffer(session), 8);
+    session.inputFlushTimer = window.setTimeout(() => flushInputBuffer(session), terminalInputFlushDelayMs);
+  };
+
+  const scheduleQueuedInputPump = (session, delay = 0) => {
+    if (!session || session.inputPumpTimer) {
+      return;
+    }
+    session.inputPumpTimer = window.setTimeout(() => {
+      session.inputPumpTimer = 0;
+      pumpQueuedInput(session);
+    }, delay);
+  };
+
+  const enqueueSessionInput = (session, data, { generated = false, front = false } = {}) => {
+    if (!session || !data) {
+      return false;
+    }
+    const availableBytes = generated ? Infinity : Math.max(0, maxQueuedInputBytes - session.inputQueueSize);
+    const { items, byteLength, exceeded } = buildTerminalInputQueueItems(data, { generated, maxBytes: availableBytes });
+    if (exceeded) {
+      if (!generated) {
+        showToast("粘贴内容过大，已丢弃部分输入。");
+      }
+      return false;
+    }
+    if (items.length === 0) {
+      return true;
+    }
+    if (front) {
+      session.inputQueue.unshift(...items);
+    } else {
+      session.inputQueue.push(...items);
+    }
+    session.inputQueueSize += byteLength;
+    scheduleQueuedInputPump(session);
+    return true;
+  };
+
+  const pumpQueuedInput = (session) => {
+    if (!session || session.inputPumpActive) {
+      return;
+    }
+    if (isTerminalInputBlocked()) {
+      discardSessionInputBuffers(session);
+      return;
+    }
+    session.inputPumpActive = true;
+    try {
+      if (session.inputBuffer) {
+        flushInputBuffer(session);
+        if (session.inputBuffer) {
+          scheduleQueuedInputPump(session, terminalInputBackpressureDelayMs);
+          return;
+        }
+      }
+      let sent = 0;
+      while (session.inputQueue.length > 0 && session.socket?.readyState === WebSocket.OPEN) {
+        const bufferedAmount = Number(session.socket.bufferedAmount || 0);
+        if (bufferedAmount > terminalInputBackpressureBytes) {
+          scheduleQueuedInputPump(session, terminalInputBackpressureDelayMs);
+          return;
+        }
+        const item = session.inputQueue.shift();
+        session.inputQueueSize = Math.max(0, session.inputQueueSize - item.byteLength);
+        if (!sendSessionInputChunk(session, item.data, { generated: item.generated })) {
+          session.inputQueue.unshift(item);
+          session.inputQueueSize += item.byteLength;
+          scheduleQueuedInputPump(session, terminalInputBackpressureDelayMs);
+          return;
+        }
+        sent += 1;
+        if (sent >= terminalInputPumpChunkBudget) {
+          scheduleQueuedInputPump(session, 0);
+          return;
+        }
+      }
+    } finally {
+      session.inputPumpActive = false;
+    }
+    if (session.inputQueue.length > 0 && session.socket?.readyState === WebSocket.OPEN) {
+      scheduleQueuedInputPump(session, terminalInputBackpressureDelayMs);
+    }
   };
 
   const sendSessionInput = (session, data, { immediate = false, generated = false } = {}) => {
@@ -8109,22 +8268,19 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return;
     }
     if (generated) {
-      try {
-        session.socket.send(JSON.stringify({ type: "input", data, generated: true }));
-      } catch (error) {
-      }
+      sendSessionInputChunk(session, data, { generated: true });
+      return;
+    }
+    if (String(data).length > terminalInputChunkChars || session.inputQueue.length > 0) {
+      enqueueSessionInput(session, data);
       return;
     }
     const byteLength = textEncoder.encode(data).length;
-    const maxBufferedInput = 8 * 1024 * 1024;
-    if (session.inputBufferSize + byteLength > maxBufferedInput) {
+    if (session.inputBufferSize + byteLength > maxBufferedInputBytes) {
       flushInputBuffer(session);
     }
-    if (byteLength > maxBufferedInput) {
-      try {
-        session.socket.send(JSON.stringify({ type: "input", data }));
-      } catch (error) {
-      }
+    if (byteLength > maxBufferedInputBytes) {
+      enqueueSessionInput(session, data);
       return;
     }
     session.inputBuffer += data;
@@ -8147,6 +8303,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.pendingInput = [];
     session.pendingInputSize = 0;
     flushInputBuffer(session);
+    scheduleQueuedInputPump(session);
   };
 
   const sendOrQueueInput = (session, data, { userInput = true } = {}) => {
@@ -8161,8 +8318,6 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       markSessionUserInput(session);
       scrollTerminalToBottomForUserInput(session);
     }
-    const byteLength = textEncoder.encode(data).length;
-    const maxPendingInput = 8 * 1024 * 1024;
     if (session.closed || session.exitExpected) {
       return;
     }
@@ -8173,7 +8328,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       if (session.socket?.readyState === WebSocket.OPEN) {
         sendSessionInput(session, data, { immediate: /[\r\n\x03\x04]/.test(data) });
       } else {
-        if (session.pendingInputSize + byteLength > maxPendingInput) {
+        const availablePendingBytes = Math.max(0, maxPendingInputBytes - session.pendingInputSize);
+        const { byteLength, exceeded } = buildTerminalInputQueueItems(data, { maxBytes: availablePendingBytes });
+        if (exceeded) {
+          return;
+        }
+        if (session.pendingInputSize + byteLength > maxPendingInputBytes) {
           return;
         }
         session.pendingInput.push(data);
@@ -8181,7 +8341,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       }
       return;
     }
-    if (session.pendingInputSize + byteLength > maxPendingInput) {
+    const availablePendingBytes = Math.max(0, maxPendingInputBytes - session.pendingInputSize);
+    const { byteLength, exceeded } = buildTerminalInputQueueItems(data, { maxBytes: availablePendingBytes });
+    if (exceeded) {
+      return;
+    }
+    if (session.pendingInputSize + byteLength > maxPendingInputBytes) {
       return;
     }
     session.pendingInput.push(data);
@@ -8624,6 +8789,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       inputBuffer: "",
       inputBufferSize: 0,
       inputFlushTimer: 0,
+      inputQueue: [],
+      inputQueueSize: 0,
+      inputPumpTimer: 0,
+      inputPumpActive: false,
       outputQueue: [],
       outputQueueSize: 0,
       outputFlushFrame: 0,
@@ -9304,6 +9473,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     pane.inputBuffer = "";
     pane.inputBufferSize = 0;
     clearInputFlushTimer(pane);
+    pane.inputQueue = [];
+    pane.inputQueueSize = 0;
+    clearInputPumpTimer(pane);
+    pane.inputPumpActive = false;
     clearReconnectTimer(pane);
     discardSessionOutputBuffers(pane);
     runSessionCleanups(pane);
