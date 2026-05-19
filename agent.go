@@ -120,6 +120,9 @@ func runAgentCommand(args []string) error {
 }
 
 func runAgentDaemon(socketPath, selector, accountID, username string) error {
+	if err := resetAgentDaemonSignalDisposition(); err != nil {
+		return err
+	}
 	socketPath = strings.TrimSpace(socketPath)
 	if socketPath == "" {
 		return errors.New("socket path is required")
