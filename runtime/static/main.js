@@ -4281,6 +4281,17 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   };
 
+  const resetTerminalAfterInitialFit = (session) => {
+    const term = session?.term;
+    if (!term || session.initialFitResetDone) {
+      return;
+    }
+    session.initialFitResetDone = true;
+    if (typeof term.reset === "function") {
+      term.reset();
+    }
+  };
+
   const syncTabMobilePixelScroll = (tab) => {
     if (!tab) {
       return;
@@ -5610,6 +5621,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     resetTerminalHostViewport(pane, { clean: true });
     positionTerminalInput(pane);
+    if (!pane.initialFitResetDone && !pane.replayComplete) {
+      resetTerminalAfterInitialFit(pane);
+    }
     sendTerminalSize(pane);
   };
 
