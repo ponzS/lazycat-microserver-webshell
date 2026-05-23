@@ -7753,9 +7753,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     const left = Math.max(minLeft, Math.min(maxLeft, preferredX - rect.width / 2));
     const minTop = viewportTop + margin;
     const maxTop = viewportTop + viewportHeight - rect.height - margin;
-    let top = selectedTop - rect.height - 10;
-    if (top < minTop) {
-      top = selectedBottom + 10;
+    const verticalGap = 10;
+    let top = selectedBottom + verticalGap;
+    if (top > maxTop) {
+      top = selectedTop - rect.height - verticalGap;
     }
     top = Math.max(minTop, Math.min(maxTop, top));
     selectionSheet.style.left = `${Math.round(left)}px`;
