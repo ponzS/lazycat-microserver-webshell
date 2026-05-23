@@ -354,7 +354,7 @@ func (s Store) ReadSettings() (Settings, error) {
 		return Settings{
 			TerminalScrollback:           DefaultTerminalScrollback,
 			DesktopMouseClipboardEnabled: boolPtr(true),
-			MobilePixelScrollEnabled:     boolPtr(false),
+			MobilePixelScrollEnabled:     boolPtr(true),
 			MobileShortcuts:              nil,
 			DesktopShortcuts:             nil,
 		}, nil
@@ -369,6 +369,7 @@ func (s Store) ReadSettings() (Settings, error) {
 	settings.TerminalFontID = strings.TrimSpace(settings.TerminalFontID)
 	settings.TerminalScrollback = normalizeTerminalScrollback(settings.TerminalScrollback)
 	settings.DesktopMouseClipboardEnabled = normalizeDesktopMouseClipboardEnabled(settings.DesktopMouseClipboardEnabled)
+	settings.MobilePixelScrollEnabled = normalizeMobilePixelScrollEnabled(settings.MobilePixelScrollEnabled)
 	if settings.MobileShortcuts != nil {
 		normalized, err := normalizeMobileShortcuts(*settings.MobileShortcuts)
 		if err != nil {
@@ -675,6 +676,7 @@ func (s Store) SaveSettings(settings Settings) error {
 func (s Store) MergeSettings(settings Settings, pruneMissingSelection bool) (Settings, error) {
 	settings.TerminalFontID = strings.TrimSpace(settings.TerminalFontID)
 	settings.DesktopMouseClipboardEnabled = normalizeDesktopMouseClipboardEnabled(settings.DesktopMouseClipboardEnabled)
+	settings.MobilePixelScrollEnabled = normalizeMobilePixelScrollEnabled(settings.MobilePixelScrollEnabled)
 	if settings.MobileShortcuts != nil {
 		normalized, err := normalizeMobileShortcuts(*settings.MobileShortcuts)
 		if err != nil {
@@ -876,7 +878,7 @@ func normalizeDesktopMouseClipboardEnabled(value *bool) *bool {
 
 func normalizeMobilePixelScrollEnabled(value *bool) *bool {
 	if value == nil {
-		return boolPtr(false)
+		return boolPtr(true)
 	}
 	enabled := *value
 	return &enabled
@@ -1155,7 +1157,7 @@ func desktopMouseClipboardEnabled(settings Settings) bool {
 
 func mobilePixelScrollEnabled(settings Settings) bool {
 	if settings.MobilePixelScrollEnabled == nil {
-		return false
+		return true
 	}
 	return *settings.MobilePixelScrollEnabled
 }

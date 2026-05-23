@@ -93,6 +93,9 @@ func TestStoreDefaultsInvalidAndPersistsScrollback(t *testing.T) {
 	if !state.DesktopMouseClipboardEnabled {
 		t.Fatalf("default DesktopMouseClipboardEnabled = false, want true")
 	}
+	if !state.MobilePixelScrollEnabled {
+		t.Fatalf("default MobilePixelScrollEnabled = false, want true")
+	}
 
 	writeSettingsJSON(t, store, map[string]any{
 		"terminal_font_id":    "",
@@ -107,6 +110,9 @@ func TestStoreDefaultsInvalidAndPersistsScrollback(t *testing.T) {
 	}
 	if !state.DesktopMouseClipboardEnabled {
 		t.Fatalf("missing DesktopMouseClipboardEnabled = false, want true")
+	}
+	if !state.MobilePixelScrollEnabled {
+		t.Fatalf("missing MobilePixelScrollEnabled = false, want true")
 	}
 
 	if err := store.SaveScrollback(12000); err != nil {

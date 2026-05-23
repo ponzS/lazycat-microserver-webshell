@@ -551,7 +551,7 @@ func TestHandleSettingsPatchScrollbackPreservesFont(t *testing.T) {
 	}
 }
 
-func TestHandleSettingsDefaultsDesktopMouseClipboardEnabled(t *testing.T) {
+func TestHandleSettingsDefaultsDesktopMouseClipboardAndMobilePixelScrollEnabled(t *testing.T) {
 	server := &pluginServer{fontDir: t.TempDir()}
 
 	recorder := httptest.NewRecorder()
@@ -567,12 +567,12 @@ func TestHandleSettingsDefaultsDesktopMouseClipboardEnabled(t *testing.T) {
 	if !state.DesktopMouseClipboardEnabled {
 		t.Fatalf("DesktopMouseClipboardEnabled = false, want default true")
 	}
-	if state.MobilePixelScrollEnabled {
-		t.Fatalf("MobilePixelScrollEnabled = true, want default false")
+	if !state.MobilePixelScrollEnabled {
+		t.Fatalf("MobilePixelScrollEnabled = false, want default true")
 	}
 }
 
-func TestHandleSettingsPatchDesktopMouseClipboardAndMobilePixelScrollPreserveFontAndScrollback(t *testing.T) {
+func TestHandleSettingsPatchDesktopMouseClipboardAndMobilePixelScrollPreservesFontAndScrollback(t *testing.T) {
 	server := &pluginServer{fontDir: t.TempDir()}
 	store := server.fontStore()
 	font, err := store.StoreUpload("Mono.woff2", "font/woff2", strings.NewReader("font-data"))
@@ -587,7 +587,7 @@ func TestHandleSettingsPatchDesktopMouseClipboardAndMobilePixelScrollPreserveFon
 	}
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"desktop_mouse_clipboard_enabled":false,"mobile_pixel_scroll_enabled":true}`))
+	request := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"desktop_mouse_clipboard_enabled":false,"mobile_pixel_scroll_enabled":false}`))
 	request.Header.Set("Content-Type", "application/json")
 	server.handleSettings(recorder, request)
 
@@ -598,8 +598,8 @@ func TestHandleSettingsPatchDesktopMouseClipboardAndMobilePixelScrollPreserveFon
 	if err := json.NewDecoder(recorder.Body).Decode(&state); err != nil {
 		t.Fatalf("decode response error = %v", err)
 	}
-	if state.TerminalFontID != font.ID || state.TerminalScrollback != 44000 || state.DesktopMouseClipboardEnabled || !state.MobilePixelScrollEnabled {
-		t.Fatalf("State = %+v, want selected font, scrollback 44000, disabled mouse clipboard, and enabled mobile pixel scroll", state)
+	if state.TerminalFontID != font.ID || state.TerminalScrollback != 44000 || state.DesktopMouseClipboardEnabled || state.MobilePixelScrollEnabled {
+		t.Fatalf("State = %+v, want selected font, scrollback 44000, disabled mouse clipboard, and disabled mobile pixel scroll", state)
 	}
 }
 
