@@ -898,6 +898,42 @@ func TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs(t *testing.T) {
 	}
 }
 
+func TestRuntimeMobileOrientationReplaysVisibleTerminalAfterViewportSettle(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+
+	wantSnippets := []string{
+		"const mobileOrientationViewportRecoveryDelays = [0, 80, 180, 360, 720];",
+		"const mobileOrientationHistoryReplayDelayMs = 900;",
+		"const currentMobileViewportOrientation = () => {",
+		"const rememberMobileViewportOrientationChange = () => {",
+		"const scheduleMobileOrientationViewportRecovery = () => {",
+		"if (rememberMobileViewportOrientationChange() || mobileOrientationRecoveryTimer) {",
+		"const shouldRecoverOrientation = orientationChanged || (detectOrientation && mobileOrientationRecoveryTimer);",
+		"syncMobileVisualViewport({ detectOrientation: false });",
+		"replayActiveTabFromServerAfterViewportChange();",
+		"const resetTerminalForHistoryReplay = (session) => {",
+		"session.term.reset();",
+		"session.term.selectionManager.wasmTerm = session.term.wasmTerm;",
+		"const requestSessionHistoryReplay = (session) => {",
+		"session.resetOnNextReplay = true;",
+		"socket.close(4000, \"viewport changed\");",
+		"const replayActiveTabFromServerAfterViewportChange = () => {",
+		"if (session.resetOnNextReplay) {",
+		"resetTerminalForHistoryReplay(session);",
+		"window.addEventListener(\"orientationchange\", handleMobileOrientationChange);",
+		"window.screen?.orientation?.addEventListener?.(\"change\", handleMobileOrientationChange);",
+	}
+	for _, want := range wantSnippets {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime mobile orientation replay guard missing %q", want)
+		}
+	}
+}
+
 func TestRuntimeTabOverviewRerendersAndFallsBackToWorkspaceTabs(t *testing.T) {
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {

@@ -192,6 +192,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const mobileKeyboardFocusAllowWindowMs = 600;
   const mobileKeyboardFocusPrompt = "双击屏幕开启键盘输入";
   const mobileKeyboardInsetThresholdPx = 80;
+  const mobileOrientationViewportRecoveryDelays = [0, 80, 180, 360, 720];
+  const mobileOrientationHistoryReplayDelayMs = 900;
   const desktopSelectionCopyMoveThresholdPx = 4;
   const terminalSizeReassertIntervalMs = 250;
   const terminalInputChunkChars = 16 * 1024;
@@ -432,6 +434,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   let mobileCloseConfirmResolve = null;
   let mobileCustomSelectState = null;
   let mobileViewportResizeFrame = 0;
+  let mobileOrientationRecoverySeq = 0;
+  let mobileOrientationRecoveryTimer = 0;
+  let lastMobileViewportOrientation = "";
   let mobileViewportHeight = Math.max(0, Math.round(window.visualViewport?.height || window.innerHeight || 0));
   let mobileKeyboardInsetBottom = 0;
   let themePickerEdgeSwipe = null;
@@ -6507,6 +6512,91 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
 
   const resizeActiveTabForCurrentDevice = () => resizeTabForCurrentDevice(currentTab());
 
+  const currentMobileViewportOrientation = () => {
+    const type = String(window.screen?.orientation?.type || "").toLowerCase();
+    if (type.startsWith("landscape")) {
+      return "landscape";
+    }
+    if (type.startsWith("portrait")) {
+      return "portrait";
+    }
+    const rawAngle = window.screen?.orientation?.angle ?? window.orientation;
+    const angle = Number(rawAngle);
+    if (Number.isFinite(angle)) {
+      const normalized = ((Math.round(angle) % 360) + 360) % 360;
+      if (normalized === 90 || normalized === 270) {
+        return "landscape";
+      }
+      if (normalized === 0 || normalized === 180) {
+        return "portrait";
+      }
+    }
+    const screenWidth = Number(window.screen?.width) || 0;
+    const screenHeight = Number(window.screen?.height) || 0;
+    if (screenWidth > 0 && screenHeight > 0 && screenWidth !== screenHeight) {
+      return screenWidth > screenHeight ? "landscape" : "portrait";
+    }
+    const visualViewport = window.visualViewport;
+    const viewportWidth = Number(visualViewport?.width || window.innerWidth || document.documentElement.clientWidth || 0);
+    const viewportHeight = Number(visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 0);
+    if (viewportWidth > 0 && viewportHeight > 0 && viewportWidth !== viewportHeight) {
+      return viewportWidth > viewportHeight ? "landscape" : "portrait";
+    }
+    return "";
+  };
+
+  const rememberMobileViewportOrientationChange = () => {
+    if (!isTouchShortcutLayout()) {
+      return false;
+    }
+    const orientation = currentMobileViewportOrientation();
+    if (!orientation) {
+      return false;
+    }
+    if (!lastMobileViewportOrientation) {
+      lastMobileViewportOrientation = orientation;
+      return false;
+    }
+    if (lastMobileViewportOrientation === orientation) {
+      return false;
+    }
+    lastMobileViewportOrientation = orientation;
+    return true;
+  };
+
+  const runMobileOrientationViewportRecoveryPass = (seq) => {
+    if (seq !== mobileOrientationRecoverySeq) {
+      return;
+    }
+    syncMobileVisualViewport({ detectOrientation: false });
+    resizeActiveTabForCurrentDevice();
+    updateMobileActiveTabTitle();
+    updateSelectionSheet();
+  };
+
+  const scheduleMobileOrientationViewportRecovery = () => {
+    if (!isTouchShortcutLayout() || !currentTab()?.panes.size) {
+      return;
+    }
+    mobileOrientationRecoverySeq += 1;
+    const seq = mobileOrientationRecoverySeq;
+    if (mobileOrientationRecoveryTimer) {
+      window.clearTimeout(mobileOrientationRecoveryTimer);
+      mobileOrientationRecoveryTimer = 0;
+    }
+    for (const delay of mobileOrientationViewportRecoveryDelays) {
+      window.setTimeout(() => runMobileOrientationViewportRecoveryPass(seq), delay);
+    }
+    mobileOrientationRecoveryTimer = window.setTimeout(() => {
+      if (seq !== mobileOrientationRecoverySeq) {
+        return;
+      }
+      mobileOrientationRecoveryTimer = 0;
+      runMobileOrientationViewportRecoveryPass(seq);
+      replayActiveTabFromServerAfterViewportChange();
+    }, mobileOrientationHistoryReplayDelayMs);
+  };
+
   const handleMobileViewportResize = () => {
     mobileViewportResizeFrame = 0;
     resizeActiveTabForCurrentDevice();
@@ -6518,6 +6608,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       renderMobileActionSheet();
     }
     scheduleTabOverviewRender();
+    if (rememberMobileViewportOrientationChange() || mobileOrientationRecoveryTimer) {
+      scheduleMobileOrientationViewportRecovery();
+    }
   };
 
   const scheduleMobileViewportResize = () => {
@@ -6527,13 +6620,15 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     mobileViewportResizeFrame = window.requestAnimationFrame(handleMobileViewportResize);
   };
 
-  const syncMobileVisualViewport = () => {
+  const syncMobileVisualViewport = ({ detectOrientation = true } = {}) => {
     const useKeyboardInset = isIOSPlatform();
     const visualViewport = window.visualViewport;
     const nextHeight = Math.max(0, Math.round(visualViewport?.height || window.innerHeight || 0));
     if (nextHeight > 0) {
       document.documentElement.style.setProperty("--mobile-visual-viewport-height", `${nextHeight}px`);
     }
+    const orientationChanged = detectOrientation && rememberMobileViewportOrientationChange();
+    const shouldRecoverOrientation = orientationChanged || (detectOrientation && mobileOrientationRecoveryTimer);
     if (!useKeyboardInset) {
       const insetChanged = mobileKeyboardInsetBottom !== 0;
       const heightChanged = nextHeight !== mobileViewportHeight;
@@ -6543,6 +6638,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       document.body.classList.remove("mobile-keyboard-visible");
       if (heightChanged || insetChanged) {
         scheduleMobileViewportResize();
+      }
+      if (shouldRecoverOrientation) {
+        scheduleMobileOrientationViewportRecovery();
       }
       return;
     }
@@ -6559,6 +6657,15 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (heightChanged || insetChanged) {
       scheduleMobileViewportResize();
     }
+    if (shouldRecoverOrientation) {
+      scheduleMobileOrientationViewportRecovery();
+    }
+  };
+
+  const handleMobileOrientationChange = () => {
+    syncMobileVisualViewport();
+    rememberMobileViewportOrientationChange();
+    scheduleMobileOrientationViewportRecovery();
   };
 
   const activeSession = () => {
@@ -9767,6 +9874,67 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     return true;
   };
 
+  const resetTerminalForHistoryReplay = (session) => {
+    if (!session?.term || session.closed || session.name !== activeName) {
+      return false;
+    }
+    discardSessionOutputBuffers(session);
+    session.selectAllBufferActive = false;
+    session.term.clearSelection?.();
+    session.term.viewportY = 0;
+    session.term.targetViewportY = 0;
+    try {
+      session.term.reset();
+      if (session.term.selectionManager && session.term.wasmTerm) {
+        session.term.selectionManager.wasmTerm = session.term.wasmTerm;
+      }
+      session.term.linkDetector?.invalidateCache?.();
+    } catch (error) {
+      return false;
+    }
+    installRendererBaselinePatch(session);
+    installRendererThemeMapper(session);
+    installRendererCellSeamPatch(session);
+    resizePane(session);
+    resetTerminalHostViewport(session, { clean: true });
+    positionTerminalInput(session);
+    return true;
+  };
+
+  const requestSessionHistoryReplay = (session) => {
+    if (!session?.term || session.closed || session.name !== activeName) {
+      return;
+    }
+    session.resetOnNextReplay = true;
+    discardSessionOutputBuffers(session);
+    const socket = session.socket;
+    if (socket) {
+      detachSessionSocket(session, socket, { connection: "connecting" });
+      try {
+        socket.close(4000, "viewport changed");
+      } catch (error) {
+      }
+    } else {
+      session.replayComplete = false;
+      session.replayVerified = false;
+      session.shellEl.dataset.connection = "connecting";
+    }
+    session.reconnectAttempts = 0;
+    connectSession(session).catch((error) => {
+      showSessionStartupError(session, error.message || "WebSocket reconnect failed.");
+    });
+  };
+
+  const replayActiveTabFromServerAfterViewportChange = () => {
+    const tab = currentTab();
+    if (!tab) {
+      return;
+    }
+    for (const pane of tab.panes.values()) {
+      requestSessionHistoryReplay(pane);
+    }
+  };
+
   const markSessionSocketHealth = (session, currentSocket) => {
     if (session?.socket === currentSocket) {
       session.lastSocketHealthAt = Date.now();
@@ -9980,6 +10148,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                   rejectMismatchedReplay(message);
                   return;
                 }
+                if (session.resetOnNextReplay) {
+                  session.resetOnNextReplay = false;
+                  resetTerminalForHistoryReplay(session);
+                }
                 session.replayComplete = false;
                 session.replayVerified = replayMessageHasIdentity(message) ? "identified" : "legacy";
                 session.allowGeneratedInputDuringReplay = message.allow_generated_input === true || message.allowGeneratedInput === true;
@@ -10153,6 +10325,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       outputFlushTimer: 0,
       replayOutputDepth: 0,
       allowGeneratedInputDuringReplay: false,
+      resetOnNextReplay: false,
       suppressGeneratedTerminalInputUntil: 0,
       inputLocked: false,
       composingIME: false,
@@ -12951,8 +13124,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   if (isIOSPlatform()) {
     window.visualViewport?.addEventListener("resize", syncMobileVisualViewport);
     window.visualViewport?.addEventListener("scroll", syncMobileVisualViewport);
-    window.addEventListener("orientationchange", syncMobileVisualViewport);
   }
+  window.addEventListener("orientationchange", handleMobileOrientationChange);
+  window.screen?.orientation?.addEventListener?.("change", handleMobileOrientationChange);
   window.visualViewport?.addEventListener("resize", syncMobileCustomSelectPosition);
   window.visualViewport?.addEventListener("scroll", syncMobileCustomSelectPosition);
   syncMobileVisualViewport();
