@@ -206,6 +206,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const maxQueuedInputBytes = 16 * 1024 * 1024;
   const terminalWebSocketPingIntervalMs = 10 * 1000;
   const terminalWebSocketHealthTimeoutMs = 25 * 1000;
+  const terminalResumeProbeTimeoutMs = 1500;
+  const terminalUserRecoveryThrottleMs = 1500;
   const terminalAttachReadyTimeoutMs = 8 * 1000;
   const terminalReconnectBaseDelayMs = 500;
   const terminalReconnectMaxDelayMs = 10 * 1000;
@@ -484,6 +486,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   let touchShortcutFeedbackEnabled = loadTouchShortcutFeedbackEnabled();
   const textEncoder = new TextEncoder();
   const serverRevisionClientID = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  let terminalUserRecoveryLastAt = 0;
   const themePickerSwipeEdgeWidth = 24;
   const themePickerSwipeAxisThreshold = 12;
   const themePickerSwipeCloseDistance = 56;
@@ -7889,16 +7892,28 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     networkBanner.hidden = !visible;
   };
 
-  const reconnectVisibleSessions = () => {
+  const reconnectVisibleSessions = ({ allowHidden = false, probe = false } = {}) => {
     if (disposed || navigator.onLine === false) {
       return;
     }
     const tab = currentTab();
     for (const pane of tab?.panes.values() || []) {
       if (pane.name === activeName) {
-        checkSessionConnectionHealth(pane, { connect: true, force: true });
+        const ready = checkSessionConnectionHealth(pane, { connect: true, force: true, allowHidden });
+        if (probe && ready) {
+          probeOpenSessionSocket(pane, { allowHidden });
+        }
       }
     }
+  };
+
+  const recoverVisibleSessionsFromUserGesture = () => {
+    const now = Date.now();
+    if (now - terminalUserRecoveryLastAt < terminalUserRecoveryThrottleMs) {
+      return;
+    }
+    terminalUserRecoveryLastAt = now;
+    reconnectVisibleSessions({ allowHidden: true, probe: true });
   };
 
   const hasActiveTerminalSelection = (session = activeSession()) => Boolean(session?.term?.hasSelection?.() || session?.selectAllBufferActive);
@@ -9348,9 +9363,17 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   };
 
+  const clearSocketResumeProbeTimer = (session) => {
+    if (session?.resumeProbeTimer) {
+      window.clearTimeout(session.resumeProbeTimer);
+      session.resumeProbeTimer = 0;
+    }
+  };
+
   const clearSessionConnectionTimers = (session) => {
     clearSocketHealthTimer(session);
     clearAttachReadyTimer(session);
+    clearSocketResumeProbeTimer(session);
   };
 
   const clearInputFlushTimer = (session) => {
@@ -9616,7 +9639,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (/[\r\n]/.test(data)) {
       scheduleActivityRefresh(450);
     }
-    if (isSessionInputReady(session) && checkSessionConnectionHealth(session, { connect: true })) {
+    if (isSessionInputReady(session) && checkSessionConnectionHealth(session, { connect: true, force: userInput, allowHidden: userInput })) {
       sendSessionInput(session, data, { immediate: /[\r\n\x03\x04]/.test(data) });
       return;
     }
@@ -9938,14 +9961,16 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const markSessionSocketHealth = (session, currentSocket) => {
     if (session?.socket === currentSocket) {
       session.lastSocketHealthAt = Date.now();
+      clearSocketResumeProbeTimer(session);
+      flushPendingInput(session);
     }
   };
 
-  const scheduleReconnect = (session, { immediate = false } = {}) => {
+  const scheduleReconnect = (session, { immediate = false, allowHidden = false } = {}) => {
     if (disposed || !session || session.closed || session.reconnectPending || session.reconnectTimer || session.name !== activeName) {
       return;
     }
-    if (document.hidden) {
+    if (document.hidden && !allowHidden) {
       return;
     }
     if (navigator.onLine === false) {
@@ -9964,7 +9989,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.reconnectTimer = window.setTimeout(() => {
       session.reconnectTimer = 0;
       session.reconnectPending = false;
-      if (disposed || session.closed || session.name !== activeName || document.hidden) {
+      if (disposed || session.closed || session.name !== activeName || (document.hidden && !allowHidden)) {
         return;
       }
       if (navigator.onLine === false) {
@@ -9972,13 +9997,13 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         return;
       }
       session.reconnectAttempts = Math.min(20, Number(session.reconnectAttempts || 0) + 1);
-      connectSession(session).catch((error) => {
+      connectSession(session, { allowHidden }).catch((error) => {
         showSessionStartupError(session, error.message || "WebSocket reconnect failed.");
       });
     }, delay);
   };
 
-  const closeSessionSocketForReconnect = (session, currentSocket, reason) => {
+  const closeSessionSocketForReconnect = (session, currentSocket, reason, { allowHidden = false } = {}) => {
     if (!detachSessionSocket(session, currentSocket, { connection: "closed" })) {
       return;
     }
@@ -9987,7 +10012,33 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       currentSocket.close();
     } catch (error) {
     }
-    scheduleReconnect(session, { immediate: true });
+    scheduleReconnect(session, { immediate: true, allowHidden });
+  };
+
+  const probeOpenSessionSocket = (session, { allowHidden = false } = {}) => {
+    const socket = session?.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN || session.closed || session.name !== activeName) {
+      return false;
+    }
+    const probeStartedAt = Date.now();
+    clearSocketResumeProbeTimer(session);
+    try {
+      socket.send(JSON.stringify({ type: "ping" }));
+    } catch (error) {
+      closeSessionSocketForReconnect(session, socket, `Terminal WebSocket resume probe failed: ${session.name}/${session.id}`, { allowHidden });
+      return false;
+    }
+    session.resumeProbeTimer = window.setTimeout(() => {
+      session.resumeProbeTimer = 0;
+      if (session.socket !== socket || socket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      const lastHealth = Number(session.lastSocketHealthAt || 0);
+      if (lastHealth < probeStartedAt) {
+        closeSessionSocketForReconnect(session, socket, `Terminal WebSocket resume probe timed out: ${session.name}/${session.id}`, { allowHidden });
+      }
+    }, terminalResumeProbeTimeoutMs);
+    return true;
   };
 
   const startSocketHealthMonitor = (session, currentSocket) => {
@@ -10026,7 +10077,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }, terminalAttachReadyTimeoutMs);
   };
 
-  const checkSessionConnectionHealth = (session, { connect = true, force = false } = {}) => {
+  const checkSessionConnectionHealth = (session, { connect = true, force = false, allowHidden = false } = {}) => {
     if (disposed || !session || session.closed || session.name !== activeName) {
       return false;
     }
@@ -10039,12 +10090,15 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       const now = Date.now();
       const lastHealth = Number(session.lastSocketHealthAt || 0);
       if (lastHealth > 0 && now - lastHealth > terminalWebSocketHealthTimeoutMs) {
-        closeSessionSocketForReconnect(session, socket, `Terminal WebSocket health check failed: ${session.name}/${session.id}`);
+        closeSessionSocketForReconnect(session, socket, `Terminal WebSocket health check failed: ${session.name}/${session.id}`, { allowHidden: allowHidden || force });
         return false;
       }
       const attachStartedAt = Number(session.attachStartedAt || 0);
       if (!session.replayComplete && attachStartedAt > 0 && now - attachStartedAt > terminalAttachReadyTimeoutMs) {
-        closeSessionSocketForReconnect(session, socket, `Terminal attach readiness check failed: ${session.name}/${session.id}`);
+        closeSessionSocketForReconnect(session, socket, `Terminal attach readiness check failed: ${session.name}/${session.id}`, { allowHidden: allowHidden || force });
+        return false;
+      }
+      if (session.resumeProbeTimer && force) {
         return false;
       }
       return isSessionInputReady(session);
@@ -10053,17 +10107,17 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return false;
     }
     if (connect) {
-      scheduleReconnect(session, { immediate: force });
+      scheduleReconnect(session, { immediate: force, allowHidden: allowHidden || force });
     }
     return false;
   };
 
-  const connectSession = async (session) => {
+  const connectSession = async (session, { allowHidden = false } = {}) => {
     if (
       !session ||
       session.closed ||
       session.name !== activeName ||
-      document.hidden ||
+      (document.hidden && !allowHidden) ||
       navigator.onLine === false ||
       session.socket?.readyState === WebSocket.OPEN ||
       session.socket?.readyState === WebSocket.CONNECTING
@@ -10306,6 +10360,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       reconnectAttempts: 0,
       socketHealthTimer: 0,
       attachReadyTimer: 0,
+      resumeProbeTimer: 0,
       attachStartedAt: 0,
       lastSocketHealthAt: 0,
       replayComplete: false,
@@ -13063,6 +13118,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     runContextAction(item.dataset.action);
   });
 
+  document.addEventListener("pointerdown", recoverVisibleSessionsFromUserGesture, { capture: true, passive: true });
+  document.addEventListener("touchstart", recoverVisibleSessionsFromUserGesture, { capture: true, passive: true });
   document.addEventListener("pointerdown", (event) => {
     if (typeof PointerEvent === "undefined" || !(event instanceof PointerEvent) || !event.pointerType || event.pointerType === "mouse") {
       reassertTerminalSize(activeSession());
@@ -13082,6 +13139,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   });
 
   document.addEventListener("keydown", (event) => {
+    recoverVisibleSessionsFromUserGesture();
     if (event.key === "Escape") {
       closeContextMenu();
       closeMobileActionSheet();
@@ -13162,7 +13220,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     setNetworkBanner(false);
     showToast("网络已恢复，正在重连。");
     refreshServerRevision().catch(() => {});
-    reconnectVisibleSessions();
+    reconnectVisibleSessions({ allowHidden: true, probe: true });
     refreshActivity({ silent: true }).catch(() => {});
   });
   window.addEventListener("offline", () => {
@@ -13173,7 +13231,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (!document.hidden) {
       resizeActiveTab();
       refreshServerRevision().catch(() => {});
-      reconnectVisibleSessions();
+      reconnectVisibleSessions({ allowHidden: true, probe: true });
       refreshActivity({ silent: true }).catch(() => {});
       updateSelectionSheet();
     }
@@ -13181,13 +13239,13 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   window.addEventListener("focus", () => {
     resizeActiveTab();
     refreshServerRevision().catch(() => {});
-    reconnectVisibleSessions();
+    reconnectVisibleSessions({ allowHidden: true, probe: true });
     refreshActivity({ silent: true }).catch(() => {});
   });
   window.addEventListener("pageshow", () => {
     resizeActiveTab();
     refreshServerRevision().catch(() => {});
-    reconnectVisibleSessions();
+    reconnectVisibleSessions({ allowHidden: true, probe: true });
     refreshActivity({ silent: true }).catch(() => {});
   });
   window.addEventListener("beforeunload", (event) => {
