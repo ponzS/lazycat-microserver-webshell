@@ -448,7 +448,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   let mobileOrientationRecoveryTimer = 0;
   let lastMobileViewportOrientation = "";
   let mobileViewportHeight = Math.max(0, Math.round(window.visualViewport?.height || window.innerHeight || 0));
+  let mobileViewportReferenceHeight = mobileViewportHeight;
   let mobileKeyboardInsetBottom = 0;
+  let mobileClientBottomSafeOffset = 0;
   let themePickerEdgeSwipe = null;
   let mobileOverviewEdgeSwipe = null;
   let resolvedThemeCardWidth = themeCardWidth;
@@ -2937,6 +2939,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     return /\bMac/i.test(platform) && Number(navigator.maxTouchPoints || 0) > 1;
   };
+  const isAndroidPlatform = () => {
+    const platform = String(navigator.userAgentData?.platform || navigator.platform || "");
+    const userAgent = String(navigator.userAgent || "");
+    return /\bAndroid\b/i.test(platform) || /\bAndroid\b/i.test(userAgent);
+  };
+  const usesMobileViewportInsets = () => isIOSPlatform() || isAndroidPlatform();
   const macShortcut = (mac, fallback) => isMacPlatform() ? mac : fallback;
   const shortcutDefinitions = {
     fullscreen: "F11",
@@ -4636,6 +4644,17 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const isTouchShortcutLayout = () => Boolean(touchShortcutLayoutQuery?.matches);
 
   const isMobileCustomSelectLayout = () => isMobileLayout() || isTouchShortcutLayout();
+  const shouldPreventMobileViewportZoom = () => isMobileLayout() || isTouchShortcutLayout() || usesMobileViewportInsets();
+
+  const preventMobileViewportZoom = (event) => {
+    if (!shouldPreventMobileViewportZoom()) {
+      return;
+    }
+    const touchCount = Number(event.touches?.length || 0);
+    if (String(event.type || "").startsWith("gesture") || touchCount > 1) {
+      event.preventDefault();
+    }
+  };
 
   const mobileCustomSelectLabel = (select) =>
     String(
@@ -6934,6 +6953,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const syncMobileVisualViewport = ({ detectOrientation = true } = {}) => {
+    const supportsViewportInsets = usesMobileViewportInsets();
     const useKeyboardInset = isIOSPlatform();
     const visualViewport = window.visualViewport;
     const nextHeight = Math.max(0, Math.round(visualViewport?.height || window.innerHeight || 0));
@@ -6942,14 +6962,21 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     const orientationChanged = detectOrientation && rememberMobileViewportOrientationChange();
     const shouldRecoverOrientation = orientationChanged || (detectOrientation && mobileOrientationRecoveryTimer);
-    if (!useKeyboardInset) {
+    if (orientationChanged && nextHeight > 0) {
+      mobileViewportReferenceHeight = nextHeight;
+    }
+    if (!supportsViewportInsets) {
       const insetChanged = mobileKeyboardInsetBottom !== 0;
+      const safeOffsetChanged = mobileClientBottomSafeOffset !== 0;
       const heightChanged = nextHeight !== mobileViewportHeight;
       mobileViewportHeight = nextHeight;
+      mobileViewportReferenceHeight = nextHeight;
       mobileKeyboardInsetBottom = 0;
+      mobileClientBottomSafeOffset = 0;
       document.documentElement.style.setProperty("--mobile-keyboard-inset-bottom", "0px");
+      document.documentElement.style.setProperty("--mobile-client-bottom-safe-offset", "0px");
       document.body.classList.remove("mobile-keyboard-visible");
-      if (heightChanged || insetChanged) {
+      if (heightChanged || insetChanged || safeOffsetChanged) {
         scheduleMobileViewportResize();
       }
       if (shouldRecoverOrientation) {
@@ -6957,17 +6984,31 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       }
       return;
     }
-    const measuredInset = visualViewport
-      ? Math.max(0, Math.round((window.innerHeight || 0) - visualViewport.height - visualViewport.offsetTop))
+    const viewportOffsetTop = Math.max(0, Math.round(visualViewport?.offsetTop || 0));
+    const measuredBottomInset = visualViewport
+      ? Math.max(0, Math.round((window.innerHeight || document.documentElement.clientHeight || 0) - visualViewport.height - viewportOffsetTop))
       : 0;
-    const nextInset = measuredInset > mobileKeyboardInsetThresholdPx ? measuredInset : 0;
+    const measuredReferenceInset = visualViewport
+      ? Math.max(0, Math.round((mobileViewportReferenceHeight || nextHeight) - visualViewport.height - viewportOffsetTop))
+      : 0;
+    const measuredInset = Math.max(measuredBottomInset, measuredReferenceInset);
+    const nextInset = useKeyboardInset && measuredInset > mobileKeyboardInsetThresholdPx ? measuredInset : 0;
+    const nextSafeOffset = nextInset === 0 && measuredBottomInset > 0 && measuredBottomInset <= mobileKeyboardInsetThresholdPx
+      ? measuredBottomInset
+      : 0;
     const heightChanged = nextHeight !== mobileViewportHeight;
     const insetChanged = nextInset !== mobileKeyboardInsetBottom;
+    const safeOffsetChanged = nextSafeOffset !== mobileClientBottomSafeOffset;
+    if (nextInset === 0 && nextHeight > 0 && (orientationChanged || nextHeight > mobileViewportReferenceHeight)) {
+      mobileViewportReferenceHeight = nextHeight;
+    }
     mobileViewportHeight = nextHeight;
     mobileKeyboardInsetBottom = nextInset;
+    mobileClientBottomSafeOffset = nextSafeOffset;
     document.documentElement.style.setProperty("--mobile-keyboard-inset-bottom", `${nextInset}px`);
+    document.documentElement.style.setProperty("--mobile-client-bottom-safe-offset", `${nextSafeOffset}px`);
     document.body.classList.toggle("mobile-keyboard-visible", nextInset > mobileKeyboardInsetThresholdPx);
-    if (heightChanged || insetChanged) {
+    if (heightChanged || insetChanged || safeOffsetChanged) {
       scheduleMobileViewportResize();
     }
     if (shouldRecoverOrientation) {
@@ -13521,6 +13562,16 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   });
 
   document.addEventListener("pointerdown", recoverVisibleSessionsFromUserGesture, { capture: true, passive: true });
+  window.addEventListener("touchstart", preventMobileViewportZoom, { capture: true, passive: false });
+  window.addEventListener("touchmove", preventMobileViewportZoom, { capture: true, passive: false });
+  window.addEventListener("gesturestart", preventMobileViewportZoom, { capture: true, passive: false });
+  window.addEventListener("gesturechange", preventMobileViewportZoom, { capture: true, passive: false });
+  window.addEventListener("gestureend", preventMobileViewportZoom, { capture: true, passive: false });
+  document.addEventListener("touchstart", preventMobileViewportZoom, { capture: true, passive: false });
+  document.addEventListener("touchmove", preventMobileViewportZoom, { capture: true, passive: false });
+  document.addEventListener("gesturestart", preventMobileViewportZoom, { capture: true, passive: false });
+  document.addEventListener("gesturechange", preventMobileViewportZoom, { capture: true, passive: false });
+  document.addEventListener("gestureend", preventMobileViewportZoom, { capture: true, passive: false });
   document.addEventListener("touchstart", recoverVisibleSessionsFromUserGesture, { capture: true, passive: true });
   document.addEventListener("pointerdown", (event) => {
     if (typeof PointerEvent === "undefined" || !(event instanceof PointerEvent) || !event.pointerType || event.pointerType === "mouse") {
@@ -13581,7 +13632,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     ensureMobileOverviewHistoryGuard();
     scheduleTabOverviewRender();
   });
-  if (isIOSPlatform()) {
+  if (usesMobileViewportInsets()) {
     window.visualViewport?.addEventListener("resize", syncMobileVisualViewport);
     window.visualViewport?.addEventListener("scroll", syncMobileVisualViewport);
   }
