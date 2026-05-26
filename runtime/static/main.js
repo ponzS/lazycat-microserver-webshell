@@ -188,6 +188,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const defaultTerminalLineHeightPercent = 100;
   const minTerminalLineHeightPercent = 100;
   const maxTerminalLineHeightPercent = 160;
+  const terminalViewportBottomEpsilon = 1;
   const defaultTerminalFontFamily = '"DejaVu Sans Mono", "Liberation Mono", monospace';
   const touchShortcutMoveThresholdPx = 8;
   const touchShortcutRepeatInitialDelayMs = 320;
@@ -204,6 +205,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const terminalSizeReassertIntervalMs = 250;
   const terminalInputChunkChars = 16 * 1024;
   const terminalInputFlushDelayMs = 8;
+  const terminalInteractiveInputImmediateMaxBytes = 256;
   const terminalInputPumpChunkBudget = 4;
   const terminalInputBackpressureBytes = 512 * 1024;
   const terminalInputBackpressureDelayMs = 16;
@@ -3866,6 +3868,67 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       const mapped = renderer.webshellColorMap?.get(`${red},${green},${blue}`);
       return mapped || renderer.webshellOriginalRGBToCSS(red, green, blue);
     };
+  };
+
+  const terminalViewportValue = (value) => {
+    const number = Number(value || 0);
+    return Number.isFinite(number) ? number : 0;
+  };
+
+  const isTerminalViewportAtBottom = (term) => (
+    terminalViewportValue(term?.viewportY) <= terminalViewportBottomEpsilon &&
+    terminalViewportValue(term?.targetViewportY) <= terminalViewportBottomEpsilon
+  );
+
+  const normalizeTerminalBottomViewport = (term) => {
+    if (!term || !isTerminalViewportAtBottom(term)) {
+      return false;
+    }
+    term.viewportY = 0;
+    term.targetViewportY = 0;
+    return true;
+  };
+
+  const installTerminalBottomScrollbarPatch = (session) => {
+    const term = session?.term;
+    if (!term || term.webshellBottomScrollbarPatchInstalled) {
+      return;
+    }
+    term.webshellBottomScrollbarPatchInstalled = true;
+
+    if (typeof term.showScrollbar === "function") {
+      term.webshellOriginalShowScrollbar = term.showScrollbar.bind(term);
+      term.showScrollbar = (...args) => {
+        if (term.webshellSuppressBottomScrollbar && normalizeTerminalBottomViewport(term)) {
+          return;
+        }
+        return term.webshellOriginalShowScrollbar(...args);
+      };
+    }
+
+    if (typeof term.scrollToBottom === "function") {
+      term.webshellOriginalScrollToBottom = term.scrollToBottom.bind(term);
+      term.scrollToBottom = (...args) => {
+        if (normalizeTerminalBottomViewport(term)) {
+          return;
+        }
+        return term.webshellOriginalScrollToBottom(...args);
+      };
+    }
+
+    if (typeof term.write === "function") {
+      term.webshellOriginalWrite = term.write.bind(term);
+      term.write = (...args) => {
+        const previous = term.webshellSuppressBottomScrollbar === true;
+        term.webshellSuppressBottomScrollbar = true;
+        try {
+          return term.webshellOriginalWrite(...args);
+        } finally {
+          term.webshellSuppressBottomScrollbar = previous;
+          normalizeTerminalBottomViewport(term);
+        }
+      };
+    }
   };
 
   const terminalCellBleedPx = (renderer) => {
@@ -8182,6 +8245,19 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return;
     }
     try {
+      const atBottom = isTerminalViewportAtBottom(term);
+      if (atBottom) {
+        term.stopTouchInertia?.();
+        if (term.scrollAnimationFrame) {
+          window.cancelAnimationFrame(term.scrollAnimationFrame);
+          term.scrollAnimationFrame = void 0;
+        }
+        term.scrollAnimationStartTime = void 0;
+        term.scrollAnimationStartY = void 0;
+        term.scrollAnimationLastFrameTime = void 0;
+        normalizeTerminalBottomViewport(term);
+        return;
+      }
       term.stopTouchInertia?.();
       if (term.scrollAnimationFrame) {
         window.cancelAnimationFrame(term.scrollAnimationFrame);
@@ -8191,9 +8267,6 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       term.scrollAnimationStartY = void 0;
       term.scrollAnimationLastFrameTime = void 0;
       term.scrollToBottom();
-      if (term.renderer && term.wasmTerm && typeof term.renderer.render === "function") {
-        term.renderer.render(term.wasmTerm, true, term.viewportY || 0, term);
-      }
     } catch (error) {
     }
   };
@@ -9926,7 +9999,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     session.inputBuffer += data;
     session.inputBufferSize += byteLength;
-    if (immediate || session.inputBufferSize >= 4096) {
+    if (immediate || byteLength <= terminalInteractiveInputImmediateMaxBytes || session.inputBufferSize >= 4096) {
       flushInputBuffer(session);
     } else {
       scheduleInputFlush(session);
@@ -10764,6 +10837,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     installTerminalInputFocus(session);
     installTerminalKeyOverrides(session);
     installTerminalHostViewportGuard(session);
+    installTerminalBottomScrollbarPatch(session);
     installRendererBaselinePatch(session);
     installRendererThemeMapper(session);
     installRendererCellSeamPatch(session);
