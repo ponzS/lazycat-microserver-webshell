@@ -42,6 +42,40 @@ func TestRuntimeFontURLsStayRelativeToProviderEntry(t *testing.T) {
 	}
 }
 
+func TestRuntimeHomeNavigationUsesCurrentOrigin(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+
+	wantSnippets := []string{
+		"const buildCurrentOriginHomeURL = () => {",
+		`const targetURL = new URL("/", window.location.origin);`,
+		`targetURL.searchParams.set("view", "home");`,
+		"lightOSHomeURL = buildCurrentOriginHomeURL();",
+		"const targetURL = await loadLightOSHomeURL();",
+	}
+	for _, want := range wantSnippets {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime home navigation guard missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		`fetch("./api/lightos-admin-info"`,
+		"buildExplicitHomeURL",
+		"resolveReferrerHomeURL",
+		"loadLightOSAdminBaseURL",
+		"loadLightOSAdminInfo",
+		"lightOSAdminInfo",
+		"lightOSAdminBaseURL",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("runtime home navigation must not use %q", forbidden)
+		}
+	}
+}
+
 func TestRuntimeShortcutDefaultsGuardMacAndAltMappings(t *testing.T) {
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {

@@ -445,11 +445,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   let tabOverviewRenderFrame = 0;
   let tabOverviewDragState = null;
   let tabOverviewSuppressClickUntil = 0;
-  let lightOSAdminInfo = null;
-  let lightOSAdminInfoPromise = null;
-  let lightOSAdminBaseURL = "";
   let lightOSHomeURL = "";
-  let lightOSHomeURLPromise = null;
   let mobileActionSheetIgnoreClicksUntil = 0;
   let mobileCloseConfirmResolve = null;
   let mobileCustomSelectState = null;
@@ -3354,93 +3350,18 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     return targetName;
   };
 
-  const buildExplicitHomeURL = (value) => {
-    const targetURL = new URL(String(value || "").trim(), window.location.href);
+  const buildCurrentOriginHomeURL = () => {
+    const targetURL = new URL("/", window.location.origin);
     targetURL.searchParams.set("view", "home");
     return targetURL.toString();
   };
 
-  const resolveReferrerHomeURL = () => {
-    try {
-      const referrerURL = new URL(document.referrer);
-      if (referrerURL.origin === window.location.origin) {
-        return "";
-      }
-      referrerURL.pathname = "/";
-      referrerURL.search = "";
-      referrerURL.hash = "";
-      return buildExplicitHomeURL(referrerURL.toString());
-    } catch (error) {
-      return "";
-    }
-  };
-
-  const loadLightOSAdminInfo = async () => {
-    if (lightOSAdminInfo?.base_url) {
-      return lightOSAdminInfo;
-    }
-    if (!lightOSAdminInfoPromise) {
-      lightOSAdminInfoPromise = fetch("./api/lightos-admin-info", { cache: "no-store" })
-        .then(async (response) => {
-          if (!response.ok) {
-            throw new Error(await response.text() || `无法获取 LightOS 管理地址 (${response.status})`);
-          }
-          const info = await response.json();
-          const baseURL = String(info?.base_url || "").trim();
-          if (!baseURL) {
-            throw new Error("LightOS 管理地址不可用。");
-          }
-          lightOSAdminInfo = {
-            ...info,
-            deploy_id: String(info?.deploy_id || "").trim(),
-            domain: String(info?.domain || "").trim(),
-            base_url: baseURL,
-          };
-          return lightOSAdminInfo;
-        })
-        .finally(() => {
-          lightOSAdminInfoPromise = null;
-        });
-    }
-    return lightOSAdminInfoPromise;
-  };
-
-  const loadLightOSAdminBaseURL = async () => {
-    if (lightOSAdminBaseURL) {
-      return lightOSAdminBaseURL;
-    }
-    const info = await loadLightOSAdminInfo();
-    const parsed = new URL(String(info?.base_url || "").trim(), window.location.href);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      throw new Error("LightOS 管理地址协议无效。");
-    }
-    lightOSAdminBaseURL = parsed.toString();
-    return lightOSAdminBaseURL;
-  };
-
-  const loadLightOSHomeURL = async () => {
+  const loadLightOSHomeURL = () => {
     if (lightOSHomeURL) {
       return lightOSHomeURL;
     }
-    if (!lightOSHomeURLPromise) {
-      lightOSHomeURLPromise = loadLightOSAdminInfo()
-        .then((info) => buildExplicitHomeURL(info.base_url))
-        .catch((error) => {
-          const fallback = resolveReferrerHomeURL();
-          if (fallback) {
-            return fallback;
-          }
-          throw error;
-        })
-        .then((url) => {
-          lightOSHomeURL = url;
-          return url;
-        })
-        .finally(() => {
-          lightOSHomeURLPromise = null;
-        });
-    }
-    return lightOSHomeURLPromise;
+    lightOSHomeURL = buildCurrentOriginHomeURL();
+    return lightOSHomeURL;
   };
 
   const terminalEstimatedSizeForElement = (element) => {

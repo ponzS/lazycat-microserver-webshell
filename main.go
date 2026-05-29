@@ -74,7 +74,14 @@ type apiErrorResponse struct {
 }
 
 const lightOSUserIDHeader = "X-HC-USER-ID"
+const lightOSRequireCookieAuthEnv = "LIGHTOS_REQUIRE_COOKIE_AUTH"
 const lazyCatAppDeployUIDEnv = "LAZYCAT_APP_DEPLOY_UID"
+const lazyCatDeployUIDEnv = "LAZYCAT_DEPLOY_UID"
+const lazyCatUserIDEnv = "LAZYCAT_USER_ID"
+const lazyCatUserUIDEnv = "LAZYCAT_USER_UID"
+const lazyCatAppDeployIDEnv = "LAZYCAT_APP_DEPLOY_ID"
+const lazyCatDeployIDEnv = "LAZYCAT_DEPLOY_ID"
+const lazyCatAppIDEnv = "LAZYCAT_APP_ID"
 const serverRevisionInputLockTTL = 60 * time.Second
 
 var errInstanceForbidden = errors.New("instance is not accessible by current account")
@@ -389,7 +396,95 @@ func currentRequestAccountID(r *http.Request) string {
 	if r == nil {
 		return ""
 	}
-	return strings.TrimSpace(r.Header.Get(lightOSUserIDHeader))
+	if accountID := strings.TrimSpace(r.Header.Get(lightOSUserIDHeader)); accountID != "" {
+		return accountID
+	}
+	if lightOSCookieAuthRequired() {
+		return ""
+	}
+	return currentDeployUIDFromEnv()
+}
+
+func lightOSCookieAuthRequired() bool {
+	switch strings.ToLower(lightOSConfigValue(lightOSRequireCookieAuthEnv)) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+func currentDeployUIDFromEnv() string {
+	for _, name := range []string{
+		lazyCatAppDeployUIDEnv,
+		lazyCatDeployUIDEnv,
+		lazyCatUserIDEnv,
+		lazyCatUserUIDEnv,
+		lazyCatAppDeployIDEnv,
+		lazyCatDeployIDEnv,
+		lazyCatAppIDEnv,
+	} {
+		if uid := strings.TrimSpace(os.Getenv(name)); uid != "" {
+			return uid
+		}
+	}
+	return ""
+}
+
+func lightOSConfigValue(name string) string {
+	if value, ok := os.LookupEnv(name); ok {
+		return strings.TrimSpace(value)
+	}
+	for _, filename := range lightOSConfigEnvFiles() {
+		if value, ok := readLightOSConfigFileValue(filename, name); ok {
+			return value
+		}
+	}
+	return ""
+}
+
+func lightOSConfigEnvFiles() []string {
+	files := []string{"/lzcapp/pkg/content/.env", "/lzcapp/run/.env"}
+	if exe, err := os.Executable(); err == nil {
+		files = append(files, filepath.Join(filepath.Dir(exe), ".env"))
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		files = append(files, filepath.Join(cwd, ".env"))
+	}
+	return files
+}
+
+func readLightOSConfigFileValue(filename, name string) (string, bool) {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return "", false
+	}
+	prefix := name + "="
+	exportPrefix := "export " + prefix
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, prefix):
+			return unquoteLightOSConfigValue(strings.TrimSpace(strings.TrimPrefix(line, prefix))), true
+		case strings.HasPrefix(line, exportPrefix):
+			return unquoteLightOSConfigValue(strings.TrimSpace(strings.TrimPrefix(line, exportPrefix))), true
+		}
+	}
+	return "", false
+}
+
+func unquoteLightOSConfigValue(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 {
+		quote := value[0]
+		if (quote == '"' || quote == '\'') && value[len(value)-1] == quote {
+			return strings.TrimSpace(value[1 : len(value)-1])
+		}
+	}
+	return value
 }
 
 func writeAuthorizationError(w http.ResponseWriter, err error) {
@@ -607,7 +702,7 @@ func (s *pluginServer) currentDeployUID() string {
 	if s != nil && s.deployUIDResolver != nil {
 		return strings.TrimSpace(s.deployUIDResolver())
 	}
-	return strings.TrimSpace(os.Getenv(lazyCatAppDeployUIDEnv))
+	return currentDeployUIDFromEnv()
 }
 
 func (s *pluginServer) listOwnedInstances(ctx context.Context) ([]instanceSummary, error) {
