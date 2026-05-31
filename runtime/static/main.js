@@ -3282,6 +3282,47 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     return event.ctrlKey && !event.metaKey;
   };
 
+  const terminalFontSizeShortcutAction = (event) => {
+    if (!(event instanceof KeyboardEvent) || event.altKey) {
+      return "";
+    }
+    const usesControl = event.ctrlKey && !event.metaKey;
+    const usesCommand = isMacPlatform() && event.metaKey && !event.ctrlKey;
+    if (!usesControl && !usesCommand) {
+      return "";
+    }
+    const key = String(event.key || "");
+    const code = String(event.code || "");
+    if (key === "+" || key === "=" || code === "Equal" || code === "NumpadAdd") {
+      return "increase";
+    }
+    if (key === "-" || key === "_" || code === "Minus" || code === "NumpadSubtract") {
+      return "decrease";
+    }
+    if (key === "0" || (!event.shiftKey && code === "Digit0") || code === "Numpad0") {
+      return "reset";
+    }
+    return "";
+  };
+
+  const runTerminalFontSizeShortcut = (event) => {
+    const action = terminalFontSizeShortcutAction(event);
+    if (!action) {
+      return false;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation?.();
+    if (action === "increase") {
+      adjustTerminalFontSize(1);
+    } else if (action === "decrease") {
+      adjustTerminalFontSize(-1);
+    } else {
+      resetTerminalFontSize();
+    }
+    return true;
+  };
+
   const rebuildShortcutActionMap = () => {
     shortcutActionMap.clear();
     for (const item of desktopShortcutsConfig) {
@@ -10819,6 +10860,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return;
     }
     term.attachCustomKeyEventHandler((event) => {
+      if (runTerminalFontSizeShortcut(event)) {
+        return true;
+      }
       if (
         hasMobileStickyModifiers()
         && !event.ctrlKey
@@ -12264,22 +12308,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       event.stopImmediatePropagation?.();
       return;
     }
-    if (event.ctrlKey && !event.altKey && !event.metaKey) {
-      if (event.key === "+" || event.key === "=") {
-        event.preventDefault();
-        adjustTerminalFontSize(1);
-        return;
-      }
-      if (event.key === "-" || event.key === "_") {
-        event.preventDefault();
-        adjustTerminalFontSize(-1);
-        return;
-      }
-      if (event.key === "0") {
-        event.preventDefault();
-        resetTerminalFontSize();
-        return;
-      }
+    if (runTerminalFontSizeShortcut(event)) {
+      closeContextMenu();
+      return;
     }
     if (!event.ctrlKey && !event.altKey && !event.metaKey && (event.key === "PageUp" || event.key === "PageDown")) {
       const session = activeSession();
