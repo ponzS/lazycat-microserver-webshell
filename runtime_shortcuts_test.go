@@ -1088,7 +1088,10 @@ func TestRuntimeWebSocketReconnectHealthGuard(t *testing.T) {
 		"const terminalResumeProbeTimeoutMs = 1500;",
 		"const terminalUserRecoveryThrottleMs = 1500;",
 		"const terminalAttachReadyTimeoutMs = 8 * 1000;",
+		"const terminalAgentPrepareTimeoutMs = 45 * 1000;",
 		"const terminalReconnectBaseDelayMs = 500;",
+		"const healthTimeout = session.agentPreparing ? terminalAgentPrepareTimeoutMs : terminalWebSocketHealthTimeoutMs;",
+		"const attachReadyTimeout = Number(session.attachReadyTimeoutMs || 0) || terminalAttachReadyTimeoutMs;",
 		"const isSessionInputReady = (session) => (",
 		"const checkSessionConnectionHealth = (session, { connect = true, force = false, allowHidden = false } = {}) => {",
 		"const probeOpenSessionSocket = (session, { allowHidden = false } = {}) => {",
@@ -1100,6 +1103,9 @@ func TestRuntimeWebSocketReconnectHealthGuard(t *testing.T) {
 		"if (session.resumeProbeTimer && force) {",
 		"startSocketHealthMonitor(session, currentSocket);",
 		"startAttachReadyTimer(session, currentSocket);",
+		"case \"agent-preparing\":",
+		"session.agentPreparing = true;",
+		"startAttachReadyTimer(session, currentSocket, terminalAgentPrepareTimeoutMs);",
 		"clearAttachReadyTimer(session);",
 		"clearSocketResumeProbeTimer(session);",
 		"session.shellEl.dataset.connection = \"open\";",
@@ -1374,6 +1380,11 @@ func TestRuntimeMobileDeployRestartUsesBottomSheet(t *testing.T) {
 		`? await confirmMobileSheet({ ...restartDialogOptions, actionsLayout: "vertical-ok-first" })`,
 		`: await openDialog(restartDialogOptions);`,
 		`discardAllTerminalInputBuffers();`,
+		`const clearStartupServerRevisionInputLock = async () => {`,
+		`await clearStartupServerRevisionInputLock().catch(() => {});`,
+		`const ensureInitialInteractiveTab = ({ focus = true } = {}) => {`,
+		`paneId: "pane-1",`,
+		`ensureInitialInteractiveTab({ focus: true });`,
 	}
 	for _, want := range wantMainSnippets {
 		if !strings.Contains(mainSource, want) {

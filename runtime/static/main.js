@@ -223,12 +223,13 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const maxPendingInputBytes = 8 * 1024 * 1024;
   const maxQueuedInputBytes = 16 * 1024 * 1024;
   const terminalWebSocketPingIntervalMs = 10 * 1000;
-  const deviceHeartbeatIntervalMs = 500;
+  const deviceHeartbeatIntervalMs = 1500;
   const deviceListRefreshIntervalMs = 500;
   const terminalWebSocketHealthTimeoutMs = 25 * 1000;
   const terminalResumeProbeTimeoutMs = 1500;
   const terminalUserRecoveryThrottleMs = 1500;
   const terminalAttachReadyTimeoutMs = 8 * 1000;
+  const terminalAgentPrepareTimeoutMs = 45 * 1000;
   const terminalReconnectBaseDelayMs = 500;
   const terminalReconnectMaxDelayMs = 10 * 1000;
   const terminalReconnectJitterRatio = 0.2;
@@ -8939,6 +8940,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   };
 
+  const clearStartupServerRevisionInputLock = async () => {
+    await setServerRevisionInputLocked(false);
+    setAllTerminalInputLocked(false);
+  };
+
   const drainGeneratedTerminalResponses = (session) => {
     const term = session?.term;
     const wasmTerm = term?.wasmTerm;
@@ -10647,7 +10653,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.replayComplete = false;
     session.replayVerified = false;
     session.allowGeneratedInputDuringReplay = false;
+    session.agentPreparing = false;
     session.attachStartedAt = 0;
+    session.attachReadyTimeoutMs = 0;
     session.lastSocketHealthAt = 0;
     clearSessionConnectionTimers(session);
     if (connection) {
@@ -10812,7 +10820,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         return;
       }
       const lastHealth = Number(session.lastSocketHealthAt || 0);
-      if (lastHealth > 0 && Date.now() - lastHealth > terminalWebSocketHealthTimeoutMs) {
+      const healthTimeout = session.agentPreparing ? terminalAgentPrepareTimeoutMs : terminalWebSocketHealthTimeoutMs;
+      if (lastHealth > 0 && Date.now() - lastHealth > healthTimeout) {
         closeSessionSocketForReconnect(session, currentSocket, `Terminal WebSocket health timeout: ${session.name}/${session.id}`);
         return;
       }
@@ -10824,16 +10833,17 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }, terminalWebSocketPingIntervalMs);
   };
 
-  const startAttachReadyTimer = (session, currentSocket) => {
+  const startAttachReadyTimer = (session, currentSocket, timeoutMs = terminalAttachReadyTimeoutMs) => {
     clearAttachReadyTimer(session);
     session.attachStartedAt = Date.now();
+    session.attachReadyTimeoutMs = timeoutMs;
     session.attachReadyTimer = window.setTimeout(() => {
       session.attachReadyTimer = 0;
       if (session.socket !== currentSocket || session.replayComplete) {
         return;
       }
       closeSessionSocketForReconnect(session, currentSocket, `Terminal attach timed out before replay complete: ${session.name}/${session.id}`);
-    }, terminalAttachReadyTimeoutMs);
+    }, timeoutMs);
   };
 
   const checkSessionConnectionHealth = (session, { connect = true, force = false, allowHidden = false } = {}) => {
@@ -10852,12 +10862,14 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (socket?.readyState === WebSocket.OPEN) {
       const now = Date.now();
       const lastHealth = Number(session.lastSocketHealthAt || 0);
-      if (lastHealth > 0 && now - lastHealth > terminalWebSocketHealthTimeoutMs) {
+      const healthTimeout = session.agentPreparing ? terminalAgentPrepareTimeoutMs : terminalWebSocketHealthTimeoutMs;
+      if (lastHealth > 0 && now - lastHealth > healthTimeout) {
         closeSessionSocketForReconnect(session, socket, `Terminal WebSocket health check failed: ${session.name}/${session.id}`, { allowHidden: allowHidden || force });
         return false;
       }
       const attachStartedAt = Number(session.attachStartedAt || 0);
-      if (!session.replayComplete && attachStartedAt > 0 && now - attachStartedAt > terminalAttachReadyTimeoutMs) {
+      const attachReadyTimeout = Number(session.attachReadyTimeoutMs || 0) || terminalAttachReadyTimeoutMs;
+      if (!session.replayComplete && attachStartedAt > 0 && now - attachStartedAt > attachReadyTimeout) {
         closeSessionSocketForReconnect(session, socket, `Terminal attach readiness check failed: ${session.name}/${session.id}`, { allowHidden: allowHidden || force });
         return false;
       }
@@ -10966,6 +10978,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                   rejectMismatchedReplay(message);
                   return;
                 }
+                session.agentPreparing = false;
                 if (session.resetOnNextReplay) {
                   session.resetOnNextReplay = false;
                   resetTerminalForHistoryReplay(session);
@@ -10984,11 +10997,17 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                 flushSessionOutput(session);
                 session.replayComplete = true;
                 session.replayVerified = false;
+                session.agentPreparing = false;
                 session.allowGeneratedInputDuringReplay = false;
                 clearAttachReadyTimer(session);
                 session.reconnectAttempts = 0;
                 session.shellEl.dataset.connection = "open";
                 flushPendingInput(session);
+                return;
+              case "agent-preparing":
+                session.agentPreparing = true;
+                startAttachReadyTimer(session, currentSocket, terminalAgentPrepareTimeoutMs);
+                session.shellEl.dataset.connection = "connecting";
                 return;
               case "pong":
                 return;
@@ -11140,9 +11159,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       attachReadyTimer: 0,
       resumeProbeTimer: 0,
       attachStartedAt: 0,
+      attachReadyTimeoutMs: 0,
       lastSocketHealthAt: 0,
       replayComplete: false,
       replayVerified: false,
+      agentPreparing: false,
       pendingInput: [],
       pendingInputSize: 0,
       inputBuffer: "",
@@ -11517,7 +11538,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     tabsEl.appendChild(button);
   };
 
-  const createTab = ({ id = "", label, pane, focus = true, connect = true, customLabel = false, empty = false, activate = true } = {}) => {
+  const createTab = ({ id = "", label, pane, paneId = "", focus = true, connect = true, customLabel = false, empty = false, activate = true } = {}) => {
     const normalizedID = String(id || `tab-${nextTabSeq}`).trim();
     const numeric = Number(normalizedID.replace(/^tab-/, ""));
     if (Number.isFinite(numeric) && numeric >= nextTabSeq) {
@@ -11550,7 +11571,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       tab.activePaneId = pane.id;
       tab.layout = { type: "leaf", paneId: pane.id };
     } else if (!empty) {
-      const session = createPaneSession(tab, activeName, { connect });
+      const session = createPaneSession(tab, activeName, { id: paneId, connect });
       tab.activePaneId = session.id;
       tab.layout = { type: "leaf", paneId: session.id };
     }
@@ -11560,6 +11581,27 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     updateEmptyState();
     return tab;
+  };
+
+  const ensureInitialInteractiveTab = ({ focus = true } = {}) => {
+    if (!activeName || tabs.size > 0) {
+      return null;
+    }
+    const wasApplyingWorkspaceState = applyingWorkspaceState;
+    applyingWorkspaceState = true;
+    try {
+      return createTab({
+        id: "tab-1",
+        label: "Shell 1",
+        focus,
+        connect: true,
+        empty: false,
+        activate: true,
+        paneId: "pane-1",
+      });
+    } finally {
+      applyingWorkspaceState = wasApplyingWorkspaceState;
+    }
   };
 
   const setActiveTab = (tabId, { focus = true, remember = true, rememberRecent = true } = {}) => {
@@ -13369,6 +13411,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     renderSettingsThemeList();
     await loadSettings().catch((error) => showToast(error.message || "设置加载失败。"));
     await refreshInstances();
+    await clearStartupServerRevisionInputLock().catch(() => {});
+    ensureInitialInteractiveTab({ focus: true });
     await refreshWorkspace({ focus: true });
     await refreshServerRevision().catch(() => {});
     startServerRevisionRefresh();

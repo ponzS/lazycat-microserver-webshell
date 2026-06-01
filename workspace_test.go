@@ -1974,6 +1974,32 @@ func TestHandleServerRevisionAllowsVisibleSelector(t *testing.T) {
 	}
 }
 
+func TestHandleServerRevisionInputLockOnlyRequestDoesNotProbeRevision(t *testing.T) {
+	server := testPluginServerWithInstances()
+	scope := normalizeAgentScope("beta@deploy-b", "login-user-a")
+	clientID := "client-one"
+	server.setTerminalInputBlocked(scope, serverRevisionInputLockOwner(clientID), true)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/server-revision?name=beta@deploy-b&client_id=client-one&terminal_input_blocked=false", nil)
+	request.Header.Set(lightOSUserIDHeader, "login-user-a")
+	server.handleServerRevision(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("handleServerRevision status = %d, want 200; body=%q", recorder.Code, recorder.Body.String())
+	}
+	if server.terminalInputBlocked(scope, clientID) {
+		t.Fatal("expected explicit startup unlock to clear matching client input lock")
+	}
+	var info serverRevisionInfo
+	if err := json.Unmarshal(recorder.Body.Bytes(), &info); err != nil {
+		t.Fatalf("unmarshal server revision response: %v", err)
+	}
+	if info.ReloadRequired {
+		t.Fatal("input lock only request should not run revision observation or request reload")
+	}
+}
+
 func TestAgentHistoryReplayFramesIncludeSelectorAndPane(t *testing.T) {
 	var out bytes.Buffer
 	history := paneHistorySnapshot{chunks: [][]byte{[]byte("hello")}}

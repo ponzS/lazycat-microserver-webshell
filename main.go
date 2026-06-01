@@ -379,6 +379,9 @@ func (s *pluginServer) handleServerRevision(w http.ResponseWriter, r *http.Reque
 		scope := normalizeAgentScope(selector, accountID)
 		if blockedText := strings.TrimSpace(r.URL.Query().Get("terminal_input_blocked")); blockedText != "" {
 			s.setTerminalInputBlocked(scope, serverRevisionInputLockOwner(clientID), parseBoolQuery(blockedText))
+			w.Header().Set("Cache-Control", "no-store")
+			writeJSON(w, info)
+			return
 		}
 		changed, err := observeServerRevisionState(r.Context(), scope, clientID, s.serverRevision)
 		if err != nil {
