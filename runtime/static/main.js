@@ -28,6 +28,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const instanceSwitcherList = document.getElementById("instanceSwitcherList");
   const instanceSwitcherFeedback = document.getElementById("instanceSwitcherFeedback");
   const homeMenuButton = document.getElementById("homeMenuButton");
+  const deviceMenuButton = document.getElementById("deviceMenuButton");
   const settingsMenuButton = document.getElementById("settingsMenuButton");
   const themePickerBackdrop = document.getElementById("themePickerBackdrop");
   const themePickerClose = document.getElementById("themePickerClose");
@@ -120,6 +121,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const settingsFeedback = document.getElementById("settingsFeedback");
   const settingsTabs = Array.from(document.querySelectorAll("[data-settings-tab]"));
   const settingsTabPanels = Array.from(document.querySelectorAll("[data-settings-panel]"));
+  const deviceBackdrop = document.getElementById("deviceBackdrop");
+  const deviceBack = document.getElementById("deviceBack");
+  const deviceClose = document.getElementById("deviceClose");
+  const deviceList = document.getElementById("deviceList");
+  const deviceFeedback = document.getElementById("deviceFeedback");
   const searchPanel = document.getElementById("searchPanel");
   const searchInput = document.getElementById("searchInput");
   const searchCount = document.getElementById("searchCount");
@@ -217,6 +223,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const maxPendingInputBytes = 8 * 1024 * 1024;
   const maxQueuedInputBytes = 16 * 1024 * 1024;
   const terminalWebSocketPingIntervalMs = 10 * 1000;
+  const deviceHeartbeatIntervalMs = 3000;
+  const deviceListRefreshIntervalMs = 3000;
   const terminalWebSocketHealthTimeoutMs = 25 * 1000;
   const terminalResumeProbeTimeoutMs = 1500;
   const terminalUserRecoveryThrottleMs = 1500;
@@ -440,6 +448,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   let currentServerRevision = "";
   let serverRevisionReloadPrompted = false;
   let serverRevisionRefreshTimer = 0;
+  let deviceHeartbeatTimer = 0;
+  let deviceListRefreshTimer = 0;
+  let deviceListRequestSeq = 0;
+  let deviceListLoading = false;
+  let deviceListLoaded = false;
+  let deviceListSignature = "";
   let suppressLocationUpdate = false;
   let suppressBeforeUnloadOnce = false;
   let suppressBeforeUnloadResetTimer = 0;
@@ -505,7 +519,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const mobileSticky = { ctrl: false, alt: false, shift: false };
   let touchShortcutFeedbackEnabled = loadTouchShortcutFeedbackEnabled();
   const textEncoder = new TextEncoder();
-  const serverRevisionClientID = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  const serverRevisionClientID = loadStableClientID();
   let terminalUserRecoveryLastAt = 0;
   const themePickerSwipeEdgeWidth = 24;
   const themePickerSwipeAxisThreshold = 12;
@@ -716,6 +730,21 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     const text = await response.text().catch(() => "");
     return text.trim() || fallback;
   };
+
+  function loadStableClientID() {
+    const key = `${storagePrefix}.clientID`;
+    try {
+      const stored = String(window.localStorage.getItem(key) || "").trim();
+      if (stored) {
+        return stored;
+      }
+      const next = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+      window.localStorage.setItem(key, next);
+      return next;
+    } catch (error) {
+      return globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    }
+  }
 
   function cloneMobileShortcutRows(rows) {
     return [0, 1].map((rowIndex) => Array.isArray(rows?.[rowIndex])
@@ -2923,6 +2952,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const openSettings = (tabID = "terminal") => {
     closeContextMenu();
     closeThemePicker();
+    closeDevicePanel();
     closeInstanceSwitcher();
     renderSettingsMobileNav();
     settingsMobileView = isMobileLayout() ? "index" : "detail";
@@ -3369,6 +3399,246 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     instanceSwitcherFeedback.hidden = !message;
   };
 
+  const setDeviceFeedback = (message, tone = "info") => {
+    if (!deviceFeedback) {
+      return;
+    }
+    const text = String(message || "").trim();
+    deviceFeedback.hidden = !text;
+    deviceFeedback.textContent = text;
+    deviceFeedback.dataset.tone = tone;
+  };
+
+  const normalizeDevicePlatform = () => {
+    const platform = String(navigator.userAgentData?.platform || navigator.platform || "");
+    const userAgent = String(navigator.userAgent || "");
+    if (/\bAndroid\b/i.test(platform) || /\bAndroid\b/i.test(userAgent)) {
+      return "Android";
+    }
+    if (/\b(iPhone|iPad|iPod)\b/i.test(platform) || /\b(iPhone|iPad|iPod)\b/i.test(userAgent)) {
+      return "iOS";
+    }
+    if (/\bMac/i.test(platform)) {
+      return Number(navigator.maxTouchPoints || 0) > 1 ? "iOS" : "macOS";
+    }
+    if (/\bWin/i.test(platform)) {
+      return "Windows";
+    }
+    if (/\bLinux/i.test(platform) || /\bX11\b/i.test(platform)) {
+      return "Linux";
+    }
+    return "Unknown";
+  };
+
+  const normalizeDeviceBrowser = () => {
+    const userAgent = String(navigator.userAgent || "");
+    const brands = navigator.userAgentData?.brands || [];
+    const brandNames = brands.map((brand) => String(brand?.brand || "")).filter(Boolean);
+    const hasBrand = (pattern) => brandNames.some((brand) => pattern.test(brand));
+    if (hasBrand(/Firefox/i) || /\bFirefox\//i.test(userAgent)) {
+      return "Firefox";
+    }
+    if (hasBrand(/Edg/i) || /\bEdg\//i.test(userAgent)) {
+      return "Edge";
+    }
+    if (hasBrand(/Chrome|Chromium/i) || /\bChrome\//i.test(userAgent) || /\bCriOS\//i.test(userAgent)) {
+      return "Chrome";
+    }
+    if (/\bSafari\//i.test(userAgent) && !/\bChrome\/|\bCriOS\/|\bChromium\/|\bEdg\//i.test(userAgent)) {
+      return "Safari";
+    }
+    return "Browser";
+  };
+
+  const currentDeviceInfo = () => {
+    const platform = normalizeDevicePlatform();
+    const devicePlatform = platform === "macOS" ? "Mac" : platform;
+    return {
+      client_id: serverRevisionClientID,
+      device_name: `${devicePlatform === "Unknown" ? "Unknown" : devicePlatform} ${normalizeDeviceBrowser()}`,
+      platform,
+    };
+  };
+
+  const devicesAPIURL = () => new URL("./api/devices", window.location.href).toString();
+  const deviceHeartbeatAPIURL = () => new URL("./api/devices/heartbeat", window.location.href).toString();
+
+  const postDeviceHeartbeat = async () => {
+    if (disposed || navigator.onLine === false) {
+      return;
+    }
+    const response = await fetch(deviceHeartbeatAPIURL(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(currentDeviceInfo()),
+    });
+    if (!response.ok) {
+      throw new Error(await readResponseText(response, `设备心跳失败 (${response.status})`));
+    }
+  };
+
+  const sendDeviceHeartbeatBeacon = () => {
+    if (navigator.onLine === false || !navigator.sendBeacon) {
+      return false;
+    }
+    try {
+      return navigator.sendBeacon(
+        deviceHeartbeatAPIURL(),
+        new Blob([JSON.stringify(currentDeviceInfo())], { type: "application/json" }),
+      );
+    } catch (error) {
+      return false;
+    }
+  };
+
+  const startDeviceHeartbeat = () => {
+    window.clearInterval(deviceHeartbeatTimer);
+    postDeviceHeartbeat().catch(() => {});
+    deviceHeartbeatTimer = window.setInterval(() => {
+      postDeviceHeartbeat().catch(() => {});
+    }, deviceHeartbeatIntervalMs);
+  };
+
+  const renderDeviceList = (devices) => {
+    if (!deviceList) {
+      return;
+    }
+    deviceList.textContent = "";
+    if (!deviceListLoaded && deviceListLoading) {
+      const empty = document.createElement("div");
+      empty.className = "device-empty";
+      empty.textContent = "正在加载设备...";
+      deviceList.appendChild(empty);
+      return;
+    }
+    if (!Array.isArray(devices) || devices.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "device-empty";
+      empty.textContent = "暂无正在连接的设备";
+      deviceList.appendChild(empty);
+      return;
+    }
+    for (const device of devices) {
+      const item = document.createElement("div");
+      item.className = "device-item";
+      item.setAttribute("role", "listitem");
+
+      const title = document.createElement("div");
+      title.className = "device-item-title";
+      const name = String(device?.device_name || "Unknown Browser").trim();
+      const platform = String(device?.platform || "Unknown").trim();
+      const accountID = String(device?.account_id || "").trim();
+      title.textContent = [name, platform, accountID].filter(Boolean).join(" - ");
+
+      const meta = document.createElement("div");
+      meta.className = "device-item-meta";
+      meta.textContent = "当前在线";
+
+      item.append(title, meta);
+      deviceList.appendChild(item);
+    }
+  };
+
+  const deviceListContentSignature = (devices) => JSON.stringify((devices || []).map((device) => ({
+    client_id: String(device?.client_id || "").trim(),
+    device_name: String(device?.device_name || "").trim(),
+    platform: String(device?.platform || "").trim(),
+    account_id: String(device?.account_id || "").trim(),
+  })));
+
+  const refreshDeviceList = async () => {
+    if (!deviceList || !deviceBackdrop || deviceBackdrop.hidden) {
+      return [];
+    }
+    const requestSeq = ++deviceListRequestSeq;
+    if (!deviceListLoaded) {
+      deviceListLoading = true;
+      renderDeviceList([]);
+    }
+    try {
+      const response = await fetch(devicesAPIURL(), { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(await readResponseText(response, `设备列表加载失败 (${response.status})`));
+      }
+      const devices = await response.json();
+      if (!Array.isArray(devices)) {
+        throw new Error("设备列表响应无效");
+      }
+      if (requestSeq !== deviceListRequestSeq) {
+        return devices;
+      }
+      deviceListLoaded = true;
+      deviceListLoading = false;
+      setDeviceFeedback("");
+      const nextSignature = deviceListContentSignature(devices);
+      if (nextSignature === deviceListSignature) {
+        return devices;
+      }
+      deviceListSignature = nextSignature;
+      renderDeviceList(devices);
+      return devices;
+    } catch (error) {
+      if (requestSeq === deviceListRequestSeq) {
+        deviceListLoading = false;
+        deviceListLoaded = true;
+        if (!deviceListSignature) {
+          renderDeviceList([]);
+        }
+        setDeviceFeedback(error.message || "设备列表加载失败。", "error");
+      }
+      throw error;
+    }
+  };
+
+  const startDeviceListRefresh = () => {
+    window.clearInterval(deviceListRefreshTimer);
+    refreshDeviceList().catch(() => {});
+    deviceListRefreshTimer = window.setInterval(() => {
+      refreshDeviceList().catch(() => {});
+    }, deviceListRefreshIntervalMs);
+  };
+
+  const stopDeviceListRefresh = () => {
+    window.clearInterval(deviceListRefreshTimer);
+    deviceListRefreshTimer = 0;
+  };
+
+  const openDevicePanel = () => {
+    closeContextMenu();
+    closeThemePicker();
+    closeSettings();
+    closeInstanceSwitcher();
+    deviceListLoaded = false;
+    deviceListLoading = true;
+    deviceListSignature = "";
+    setDeviceFeedback("");
+    deviceList?.setAttribute("role", "list");
+    renderDeviceList([]);
+    if (deviceBackdrop) {
+      deviceBackdrop.hidden = false;
+    }
+    postDeviceHeartbeat().catch(() => {});
+    startDeviceListRefresh();
+    window.setTimeout(() => {
+      if (isMobileLayout()) {
+        deviceBack?.focus();
+        return;
+      }
+      deviceClose?.focus();
+    }, 0);
+  };
+
+  const closeDevicePanel = () => {
+    const wasOpen = deviceBackdrop && !deviceBackdrop.hidden;
+    if (deviceBackdrop) {
+      deviceBackdrop.hidden = true;
+    }
+    stopDeviceListRefresh();
+    if (wasOpen) {
+      window.setTimeout(() => activeSession()?.term?.focus(), 0);
+    }
+  };
+
   const loadInstances = async () => {
     const response = await fetch("./api/instances", { cache: "no-store" });
     if (!response.ok) {
@@ -3750,6 +4020,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const navigateHome = async () => {
+    closeDevicePanel();
     closeInstanceSwitcher();
     rememberActiveTab();
     if (homeMenuButton) {
@@ -4702,6 +4973,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
 
   const openThemePicker = () => {
     closeContextMenu();
+    closeDevicePanel();
     renderThemePicker();
     if (themePickerBackdrop) {
       themePickerBackdrop.hidden = false;
@@ -5880,6 +6152,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     closeContextMenu();
     closeThemePicker();
+    closeDevicePanel();
     closeInstanceSwitcher();
     tabOverview.hidden = false;
     tabOverviewToggle?.setAttribute("aria-expanded", "true");
@@ -5936,6 +6209,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     isTabOverviewOpen() ||
     isThemePickerOpen() ||
     (settingsBackdrop && !settingsBackdrop.hidden) ||
+    (deviceBackdrop && !deviceBackdrop.hidden) ||
     (instanceSwitcherPanel && !instanceSwitcherPanel.hidden) ||
     (mobileActionSheet && !mobileActionSheet.hidden) ||
     (mobileCloseConfirmSheet && !mobileCloseConfirmSheet.hidden) ||
@@ -9535,6 +9809,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     closeContextMenu();
     closeInstanceSwitcher();
     closeThemePicker();
+    closeDevicePanel();
     renderMobileActionSheet(buildMobileContextTarget());
     mobileActionSheet.hidden = false;
     document.body.classList.add("mobile-action-sheet-open");
@@ -12215,6 +12490,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (
       (themePickerBackdrop && !themePickerBackdrop.hidden) ||
       (settingsBackdrop && !settingsBackdrop.hidden) ||
+      (deviceBackdrop && !deviceBackdrop.hidden) ||
       (instanceSwitcherPanel && !instanceSwitcherPanel.hidden) ||
       (attachmentBackdrop && !attachmentBackdrop.hidden) ||
       isTabOverviewOpen()
@@ -12300,6 +12576,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return;
     }
     closeContextMenu();
+    closeDevicePanel();
     instanceSwitcher.classList.add("is-open");
     instanceSwitcherPanel.hidden = false;
     instanceSwitcherButton.setAttribute("aria-expanded", "true");
@@ -12329,6 +12606,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     closeContextMenu();
     closeInstanceSwitcher();
+    closeDevicePanel();
     attachmentDialogOpen = true;
     attachmentBackdrop.hidden = false;
     window.setTimeout(() => attachmentClipboard?.focus(), 0);
@@ -12565,6 +12843,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     closeAttachmentDialog({ focusTerminal: false });
     closeContextMenu();
     closeInstanceSwitcher();
+    closeDevicePanel();
     const startPath = String(activeSession()?.cwd || "").trim() || "/";
     attachmentBrowserOpen = true;
     attachmentBrowserCurrentPath = startPath;
@@ -13081,6 +13360,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
 
   const bootstrap = async () => {
     startPerformanceMeter();
+    startDeviceHeartbeat();
     await loadThemeCatalog();
     applyThemeDocumentState();
     renderThemePicker();
@@ -13137,6 +13417,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   homeMenuButton?.addEventListener("click", () => {
     navigateHome().catch((error) => showToast(error.message || "无法返回首页"));
   });
+  deviceMenuButton?.addEventListener("click", openDevicePanel);
   settingsMenuButton?.addEventListener("click", () => openSettings());
   themePickerClose?.addEventListener("click", closeThemePicker);
   themePickerBackdrop?.addEventListener("click", (event) => {
@@ -13213,6 +13494,13 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   settingsBackdrop?.addEventListener("click", (event) => {
     if (event.target === settingsBackdrop) {
       closeSettings();
+    }
+  });
+  deviceClose?.addEventListener("click", closeDevicePanel);
+  deviceBack?.addEventListener("click", closeDevicePanel);
+  deviceBackdrop?.addEventListener("click", (event) => {
+    if (event.target === deviceBackdrop) {
+      closeDevicePanel();
     }
   });
   settingsMobileNav?.addEventListener("click", (event) => {
@@ -13736,6 +14024,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   });
   document.addEventListener("keydown", (event) => {
+    if (deviceBackdrop && !deviceBackdrop.hidden && event.key === "Escape") {
+      event.preventDefault();
+      closeDevicePanel();
+      return;
+    }
     if (mobileCustomSelectState && event.key === "Escape") {
       event.preventDefault();
       closeMobileCustomSelect({ focus: true });
@@ -13915,6 +14208,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       closeAttachmentBrowser({ focusTerminal: false });
       closeThemePicker();
       closeSettings();
+      closeDevicePanel();
       closeTabOverview();
     }
     handleGlobalShortcutKeydown(event);
@@ -13941,6 +14235,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     updateSelectionSheet();
     if (settingsBackdrop && !settingsBackdrop.hidden) {
       syncSettingsMobileNavigation();
+    }
+    if (deviceBackdrop && !deviceBackdrop.hidden) {
+      refreshDeviceList().catch(() => {});
     }
     ensureMobileOverviewHistoryGuard();
     scheduleTabOverviewRender();
@@ -13995,10 +14292,14 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   });
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
+      postDeviceHeartbeat().catch(() => {});
       resizeActiveTab();
       refreshServerRevision().catch(() => {});
       reconnectVisibleSessions({ allowHidden: true, probe: true });
       refreshActivity({ silent: true }).catch(() => {});
+      if (deviceBackdrop && !deviceBackdrop.hidden) {
+        refreshDeviceList().catch(() => {});
+      }
       updateSelectionSheet();
     }
   });
@@ -14009,10 +14310,14 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     refreshActivity({ silent: true }).catch(() => {});
   });
   window.addEventListener("pageshow", () => {
+    postDeviceHeartbeat().catch(() => {});
     resizeActiveTab();
     refreshServerRevision().catch(() => {});
     reconnectVisibleSessions({ allowHidden: true, probe: true });
     refreshActivity({ silent: true }).catch(() => {});
+  });
+  window.addEventListener("pagehide", () => {
+    sendDeviceHeartbeatBeacon();
   });
   window.addEventListener("beforeunload", (event) => {
     if (!suppressBeforeUnloadOnce && hasCachedBusyPane()) {
@@ -14021,6 +14326,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return "";
     }
     disposed = true;
+    sendDeviceHeartbeatBeacon();
+    window.clearInterval(deviceHeartbeatTimer);
+    stopDeviceListRefresh();
     window.clearInterval(serverRevisionRefreshTimer);
     for (const tab of tabs.values()) {
       for (const pane of tab.panes.values()) {

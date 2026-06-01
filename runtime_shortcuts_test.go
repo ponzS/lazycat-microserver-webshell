@@ -76,6 +76,84 @@ func TestRuntimeHomeNavigationUsesCurrentOrigin(t *testing.T) {
 	}
 }
 
+func TestRuntimeDeviceManagementStaticGuards(t *testing.T) {
+	indexData, err := os.ReadFile("runtime/static/index.html")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
+	}
+	index := string(indexData)
+	for _, want := range []string{
+		`id="deviceMenuButton"`,
+		"在线设备",
+		"当前正在连接的设备",
+		`id="deviceBackdrop"`,
+		`id="deviceBack"`,
+		`class="settings-back"`,
+		`id="deviceList"`,
+	} {
+		if !strings.Contains(index, want) {
+			t.Fatalf("runtime device management index guard missing %q", want)
+		}
+	}
+
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(mainData)
+	for _, want := range []string{
+		"const deviceHeartbeatIntervalMs = 3000;",
+		"const deviceListRefreshIntervalMs = 3000;",
+		"function loadStableClientID() {",
+		"const serverRevisionClientID = loadStableClientID();",
+		"const currentDeviceInfo = () => {",
+		"client_id: serverRevisionClientID,",
+		`new URL("./api/devices/heartbeat", window.location.href).toString();`,
+		"const startDeviceHeartbeat = () => {",
+		"const refreshDeviceList = async () => {",
+		"const stopDeviceListRefresh = () => {",
+		"const closeDevicePanel = () => {",
+		"stopDeviceListRefresh();",
+		`deviceBack?.addEventListener("click", closeDevicePanel);`,
+		"const deviceListContentSignature = (devices) => JSON.stringify",
+		"if (nextSignature === deviceListSignature) {",
+		"暂无正在连接的设备",
+		`deviceMenuButton?.addEventListener("click", openDevicePanel);`,
+		`document.addEventListener("visibilitychange", () => {`,
+		`window.addEventListener("pageshow", () => {`,
+		`window.addEventListener("pagehide", () => {`,
+		"sendDeviceHeartbeatBeacon();",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime device management main guard missing %q", want)
+		}
+	}
+
+	styleData, err := os.ReadFile("runtime/static/style.css")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/style.css) error = %v", err)
+	}
+	style := string(styleData)
+	for _, want := range []string{
+		".device-panel",
+		".device-list",
+		"border: 1px dashed var(--panel-border);",
+		"background: var(--panel-subtle-bg);",
+		".device-item",
+		"background: var(--panel-bg);",
+	} {
+		if !strings.Contains(style, want) {
+			t.Fatalf("runtime device management style guard missing %q", want)
+		}
+	}
+	deviceStyle := sourceBetween(t, style, ".device-panel", ".settings-section-head")
+	for _, forbidden := range []string{"gradient", "animation:"} {
+		if strings.Contains(deviceStyle, forbidden) {
+			t.Fatalf("runtime device management style must not contain %q", forbidden)
+		}
+	}
+}
+
 func TestRuntimeShortcutDefaultsGuardMacAndAltMappings(t *testing.T) {
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {
@@ -148,7 +226,7 @@ func TestRuntimePasteShortcutUsesNativePasteEvent(t *testing.T) {
 
 	earlyNativePasteBranch := sourceBetween(t, source,
 		`if (isNativePasteShortcutEvent(event)) {`,
-		`    if (event.ctrlKey && !event.altKey && !event.metaKey) {`,
+		`    if (runTerminalFontSizeShortcut(event)) {`,
 	)
 	for _, want := range []string{
 		`focusTerminalForNativePasteShortcut();`,

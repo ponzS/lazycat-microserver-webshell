@@ -45,6 +45,9 @@ type pluginServer struct {
 	settingsMu   sync.Mutex
 	inputLocksMu sync.Mutex
 	inputLocks   map[string]map[string]time.Time
+	devicesMu    sync.Mutex
+	devices      map[string]webshellDeviceRecord
+	deviceNow    func() time.Time
 }
 
 type instanceSummary struct {
@@ -86,6 +89,7 @@ const lightOSAdminInternalBaseURLEnv = "LIGHTOS_ADMIN_INTERNAL_BASE_URL"
 const lightOSAdminAppID = "cloud.lazycat.lightos.entry"
 const defaultLightOSAdminInternalBaseURL = "http://127.0.0.1:18081"
 const serverRevisionInputLockTTL = 60 * time.Second
+const webshellDeviceTTL = 10 * time.Second
 
 var errInstanceForbidden = errors.New("instance is not accessible by current account")
 var errInvalidPublishCreatePayload = errors.New("invalid publish create payload")
@@ -193,6 +197,8 @@ func (s *pluginServer) run(ctx context.Context) error {
 	mux.HandleFunc("/api/lightos-admin-info", s.handleLightOSAdminInfo)
 	mux.HandleFunc("/api/publish/", s.handlePublishProxy)
 	mux.HandleFunc("/api/server-revision", s.handleServerRevision)
+	mux.HandleFunc("/api/devices", s.handleDevices)
+	mux.HandleFunc("/api/devices/heartbeat", s.handleDeviceHeartbeat)
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/settings/fonts", s.handleSettingsFonts)
 	mux.HandleFunc("/api/settings/fonts/", s.handleSettingsFont)
