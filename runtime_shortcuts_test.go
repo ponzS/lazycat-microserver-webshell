@@ -1054,11 +1054,16 @@ func TestRuntimeTerminalOutputBatchingGuard(t *testing.T) {
 
 	wantSnippets := []string{
 		"const terminalOutputFlushFallbackMs = 32;",
+		"const terminalOutputFlushBudgetBytes = 128 * 1024;",
 		"const maxQueuedTerminalOutputBytes = 4 * 1024 * 1024;",
 		"const clearSessionOutputFlushSchedule = (session) => {",
+		"const terminalOutputByteChunkEnd = (data, start, maxBytes) => {",
+		"const finishSessionHistoryReplayIfReady = (session) => {",
 		"const flushSessionOutput = (session, { force = false } = {}) => {",
 		"window.requestAnimationFrame(flush);",
-		"session.outputQueue.push(entry);",
+		"session.outputQueue.push({",
+		"outputData.byteLength > terminalOutputFlushBudgetBytes",
+		"finishSessionHistoryReplayIfReady(session) || flushSessionOutput(session);",
 		"flushSessionOutput(session, { force: true });",
 		"const genericWebSocketStartupFallbacks = new Set([",
 		"const isGenericWebSocketStartupFallback = (message) =>",
@@ -1072,6 +1077,66 @@ func TestRuntimeTerminalOutputBatchingGuard(t *testing.T) {
 	}
 	if strings.Contains(source, "writeSessionWebShellError(session, message || fallback);") {
 		t.Fatal("generic websocket startup fallbacks should not be written as terminal errors")
+	}
+}
+
+func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	styleData, err := os.ReadFile("runtime/static/style.css")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/style.css) error = %v", err)
+	}
+	rendererData, err := os.ReadFile("runtime/static/ghostty-web.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/ghostty-web.js) error = %v", err)
+	}
+	mainSource := string(mainData)
+	styleSource := string(styleData)
+	rendererSource := string(rendererData)
+
+	mainSnippets := []string{
+		"const setPaneRenderReady = (session, ready) => {",
+		"session.shellEl.dataset.renderReady = session.renderReady ? \"true\" : \"false\";",
+		"const markPaneRenderPending = (session) => {",
+		"session.term?.renderer?.clear?.();",
+		"const markPaneRenderedIfMeasurable = (session) => {",
+		"session.replayCompletionPending",
+		"setPaneRenderReady(session, true);",
+		"shellEl.dataset.renderReady = \"false\";",
+		"term.onRender(() => markPaneRenderedIfMeasurable(session))",
+		"markPaneRenderPending(session);",
+		"requestPaneFullRender(session);",
+	}
+	for _, want := range mainSnippets {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime terminal canvas residue guard missing main snippet %q", want)
+		}
+	}
+
+	styleSnippets := []string{
+		`.pane-shell[data-render-ready="false"] .terminal-host canvas {`,
+		"visibility: hidden;",
+	}
+	for _, want := range styleSnippets {
+		if !strings.Contains(styleSource, want) {
+			t.Fatalf("runtime terminal canvas residue guard missing style snippet %q", want)
+		}
+	}
+
+	rendererSnippets := []string{
+		"this.ctx.fillRect(0, 0, this.canvas.width / this.devicePixelRatio, this.canvas.height / this.devicePixelRatio)",
+		"this.ctx.fillRect(0, C, this.canvas.width / this.devicePixelRatio, this.metrics.height)",
+		"i.text = D.grapheme_len > 0 && typeof A.getGraphemeString == \"function\" ? A.getGraphemeString(Math.floor(I / B.cols), I % B.cols) : String.fromCodePoint(D.codepoint || 32)",
+		"text: I[w + 14] > 0 && typeof this.getScrollbackGraphemeString == \"function\" ? this.getScrollbackGraphemeString(A, i) : String.fromCodePoint(D.getUint32(w, !0) || 32)",
+		"typeof A.text == \"string\" ? N = A.text",
+	}
+	for _, want := range rendererSnippets {
+		if !strings.Contains(rendererSource, want) {
+			t.Fatalf("runtime terminal canvas residue guard missing renderer snippet %q", want)
+		}
 	}
 }
 

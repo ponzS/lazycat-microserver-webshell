@@ -234,6 +234,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const terminalReconnectMaxDelayMs = 10 * 1000;
   const terminalReconnectJitterRatio = 0.2;
   const terminalOutputFlushFallbackMs = 32;
+  const terminalOutputFlushBudgetBytes = 128 * 1024;
   const performanceMeterSampleMs = 500;
   const performanceMeterWarmupFrames = 12;
   const terminalPixelScrollOffsetEpsilon = 0.001;
@@ -498,6 +499,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   let mobileShortcutsPersistChain = Promise.resolve();
   let mobileShortcutEditorState = null;
   let mobileShortcutDragState = null;
+  let performanceMeterFrame = 0;
   let desktopShortcutsSaveRequestSeq = 0;
   let desktopShortcutsSaveVersion = 0;
   let desktopShortcutsPersistChain = Promise.resolve();
@@ -654,16 +656,18 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (!performanceMeterFps || !performanceMeterRefresh) {
       return;
     }
-    applyPerformanceMeterVisibility();
+    if (!performanceMeterEnabled || performanceMeterFrame) {
+      return;
+    }
     let frameCount = 0;
     let sampleFrames = 0;
     let sampleStart = 0;
     let lastTime = 0;
-    let rafID = 0;
     const frameIntervals = [];
     const maxIntervals = 90;
     const update = (time) => {
-      if (disposed) {
+      if (disposed || !performanceMeterEnabled) {
+        performanceMeterFrame = 0;
         return;
       }
       frameCount += 1;
@@ -680,7 +684,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       if (frameCount <= performanceMeterWarmupFrames) {
         sampleStart = time;
         sampleFrames = 0;
-        rafID = window.requestAnimationFrame(update);
+        performanceMeterFrame = window.requestAnimationFrame(update);
         return;
       }
       if (!sampleStart) {
@@ -698,10 +702,22 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         sampleStart = time;
         sampleFrames = 0;
       }
-      rafID = window.requestAnimationFrame(update);
+      performanceMeterFrame = window.requestAnimationFrame(update);
     };
-    rafID = window.requestAnimationFrame(update);
-    window.addEventListener("beforeunload", () => window.cancelAnimationFrame(rafID), { once: true });
+    performanceMeterFrame = window.requestAnimationFrame(update);
+    window.addEventListener("beforeunload", () => {
+      if (performanceMeterFrame) {
+        window.cancelAnimationFrame(performanceMeterFrame);
+        performanceMeterFrame = 0;
+      }
+    }, { once: true });
+  };
+
+  const stopPerformanceMeter = () => {
+    if (performanceMeterFrame) {
+      window.cancelAnimationFrame(performanceMeterFrame);
+      performanceMeterFrame = 0;
+    }
   };
 
   const selectStoredTheme = () => {
@@ -1014,6 +1030,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     const meter = performanceMeterFps?.closest?.(".performance-meter");
     if (meter) {
       meter.hidden = !performanceMeterEnabled;
+    }
+    if (performanceMeterEnabled) {
+      startPerformanceMeter();
+    } else {
+      stopPerformanceMeter();
     }
   };
 
@@ -4419,6 +4440,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (column < 0) {
       return null;
     }
+    const snapshot = renderer?.currentViewportSnapshot;
+    const cols = Number(renderer?.currentViewportSnapshotCols || 0);
+    const rows = Number(renderer?.currentViewportSnapshotRows || 0);
+    if (snapshot && cols > 0 && rows > 0 && row >= 0 && row < rows && column < cols) {
+      return snapshot[row * cols + column] || null;
+    }
     try {
       const line = renderer?.currentBuffer?.getLine?.(row);
       return line?.[column] || null;
@@ -4949,9 +4976,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     if (session.term.renderer && typeof session.term.renderer.setTheme === "function") {
       session.term.renderer.setTheme(nextTheme);
-      if (session.term.wasmTerm && typeof session.term.renderer.render === "function") {
-        session.term.renderer.render(session.term.wasmTerm, true, session.term.viewportY || 0, session.term);
-      }
+      session.term.requestRender?.({ full: true });
     }
     refreshTerminalMetrics(session);
   };
@@ -5256,6 +5281,36 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (typeof term.reset === "function") {
       term.reset();
     }
+  };
+
+  const setPaneRenderReady = (session, ready) => {
+    if (!session?.shellEl) {
+      return;
+    }
+    session.renderReady = ready === true;
+    session.shellEl.dataset.renderReady = session.renderReady ? "true" : "false";
+  };
+
+  const markPaneRenderPending = (session) => {
+    if (!session || session.closed) {
+      return;
+    }
+    setPaneRenderReady(session, false);
+    session.term?.renderer?.clear?.();
+  };
+
+  const markPaneRenderedIfMeasurable = (session) => {
+    if (!session || session.closed || session.renderReady || session.replayCompletionPending || (!session.replayComplete && session.shellEl?.dataset.connection === "connecting") || !isPaneMeasurable(session)) {
+      return;
+    }
+    setPaneRenderReady(session, true);
+  };
+
+  const requestPaneFullRender = (session) => {
+    if (!session?.term || session.closed) {
+      return;
+    }
+    session.term.requestRender?.({ full: true });
   };
 
   const syncTabMobilePixelScroll = (tab) => {
@@ -6351,6 +6406,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     refreshTabAutoLabel(tab);
     syncCursorBlinkState();
     updateMobileSelectionHandles(activePane);
+    requestPaneFullRender(activePane);
     if (activePane?.pendingConnect) {
       connectPendingSession(activePane);
     } else {
@@ -6359,6 +6415,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (focus) {
       window.requestAnimationFrame(() => {
         resizePane(activePane);
+        requestPaneFullRender(activePane);
         connectPendingSession(activePane);
         activePane?.term?.focus();
       });
@@ -7153,6 +7210,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (!pane.initialFitResetDone && !pane.replayComplete) {
       resetTerminalAfterInitialFit(pane);
     }
+    requestPaneFullRender(pane);
     sendTerminalSize(pane);
     updateMobileSelectionHandles(pane);
     return true;
@@ -7443,9 +7501,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       if (session.term.renderer && typeof session.term.renderer.measureFont === "function") {
         session.term.renderer.metrics = session.term.renderer.measureFont();
       }
-      if (session.term.renderer && session.term.wasmTerm && typeof session.term.renderer.render === "function") {
-        session.term.renderer.render(session.term.wasmTerm, true, session.term.viewportY || 0, session.term);
-      }
+      session.term.requestRender?.({ full: true });
       resizePane(session);
       if (deferFitRetry) {
         window.setTimeout(() => resizePane(session), 60);
@@ -8539,7 +8595,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return;
     }
     try {
-      term.renderer.render(term.wasmTerm, true, term.viewportY || 0, term);
+      term.requestRender?.({ full: true });
     } catch (error) {
     }
   };
@@ -10742,6 +10798,41 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     return 0;
   };
 
+  const terminalOutputByteChunkEnd = (data, start, maxBytes) => {
+    const hardEnd = Math.min(data.byteLength, start + maxBytes);
+    if (hardEnd >= data.byteLength) {
+      return hardEnd;
+    }
+    let end = hardEnd;
+    while (end > start && (data[end] & 0xc0) === 0x80) {
+      end -= 1;
+    }
+    return end > start ? end : hardEnd;
+  };
+
+  const splitTerminalOutputText = (data, maxBytes) => {
+    const chunks = [];
+    let chunk = "";
+    let chunkBytes = 0;
+    for (let index = 0; index < data.length;) {
+      const codepoint = data.codePointAt(index);
+      const text = String.fromCodePoint(codepoint);
+      const byteLength = textEncoder.encode(text).length;
+      if (chunk && chunkBytes + byteLength > maxBytes) {
+        chunks.push(chunk);
+        chunk = "";
+        chunkBytes = 0;
+      }
+      chunk += text;
+      chunkBytes += byteLength;
+      index += text.length;
+    }
+    if (chunk) {
+      chunks.push(chunk);
+    }
+    return chunks;
+  };
+
   const coalesceTerminalOutputBatch = (chunks, kind, byteLength) => {
     if (chunks.length === 1) {
       return chunks[0];
@@ -10781,6 +10872,30 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   };
 
+  const finishSessionHistoryReplayIfReady = (session) => {
+    if (
+      !session ||
+      !session.replayCompletionPending ||
+      session.outputQueueSize > 0 ||
+      !session.replayVerified ||
+      session.closed ||
+      session.name !== activeName
+    ) {
+      return false;
+    }
+    session.replayCompletionPending = false;
+    session.replayComplete = true;
+    session.replayVerified = false;
+    session.agentPreparing = false;
+    session.allowGeneratedInputDuringReplay = false;
+    clearAttachReadyTimer(session);
+    session.reconnectAttempts = 0;
+    session.shellEl.dataset.connection = "open";
+    requestPaneFullRender(session);
+    flushPendingInput(session);
+    return true;
+  };
+
   const discardSessionOutputBuffers = (session) => {
     if (!session) {
       return;
@@ -10788,6 +10903,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     clearSessionOutputFlushSchedule(session);
     session.outputQueue = [];
     session.outputQueueSize = 0;
+    session.replayCompletionPending = false;
   };
 
   const flushSessionOutput = (session, { force = false } = {}) => {
@@ -10799,11 +10915,31 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (queue.length === 0) {
       return;
     }
-    session.outputQueue = [];
-    session.outputQueueSize = 0;
     if (!session.term || (!force && (session.closed || session.name !== activeName))) {
+      session.outputQueue = [];
+      session.outputQueueSize = 0;
+      session.replayCompletionPending = false;
       return;
     }
+    const flushQueue = [];
+    const restQueue = [];
+    let flushBytes = 0;
+    let restBytes = 0;
+    if (force) {
+      flushQueue.push(...queue);
+    } else {
+      for (const entry of queue) {
+        if (restQueue.length > 0 || (flushQueue.length > 0 && flushBytes + entry.byteLength > terminalOutputFlushBudgetBytes)) {
+          restQueue.push(entry);
+          restBytes += entry.byteLength;
+        } else {
+          flushQueue.push(entry);
+          flushBytes += entry.byteLength;
+        }
+      }
+    }
+    session.outputQueue = restQueue;
+    session.outputQueueSize = restBytes;
 
     let wrote = false;
     let batch = null;
@@ -10818,7 +10954,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       batch = null;
     };
 
-    for (const entry of queue) {
+    for (const entry of flushQueue) {
       if (
         !batch ||
         batch.kind !== entry.kind ||
@@ -10843,6 +10979,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       resetTerminalHostViewport(session, { clean: true });
       positionTerminalInput(session);
     }
+    if (session.outputQueueSize > 0) {
+      scheduleSessionOutputFlush(session);
+    } else {
+      finishSessionHistoryReplayIfReady(session);
+    }
   };
 
   const scheduleSessionOutputFlush = (session) => {
@@ -10865,15 +11006,34 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     // Output chunks carry replay state because the replay-complete control frame can arrive before the next paint.
     const replayOutput = !session.replayComplete;
-    const entry = {
-      data: outputData,
-      kind,
-      byteLength: terminalOutputByteLength(outputData),
-      replayOutput,
-      allowGeneratedInput: replayOutput && session.allowGeneratedInputDuringReplay === true,
+    const allowGeneratedInput = replayOutput && session.allowGeneratedInputDuringReplay === true;
+    const enqueueEntry = (entryData) => {
+      const byteLength = terminalOutputByteLength(entryData);
+      if (byteLength <= 0) {
+        return;
+      }
+      session.outputQueue.push({
+        data: entryData,
+        kind,
+        byteLength,
+        replayOutput,
+        allowGeneratedInput,
+      });
+      session.outputQueueSize += byteLength;
     };
-    session.outputQueue.push(entry);
-    session.outputQueueSize += entry.byteLength;
+    if (kind === "bytes" && outputData.byteLength > terminalOutputFlushBudgetBytes) {
+      for (let offset = 0; offset < outputData.byteLength;) {
+        const end = terminalOutputByteChunkEnd(outputData, offset, terminalOutputFlushBudgetBytes);
+        enqueueEntry(outputData.subarray(offset, end));
+        offset = end;
+      }
+    } else if (kind === "text" && terminalOutputByteLength(outputData) > terminalOutputFlushBudgetBytes) {
+      for (const chunk of splitTerminalOutputText(outputData, terminalOutputFlushBudgetBytes)) {
+        enqueueEntry(chunk);
+      }
+    } else {
+      enqueueEntry(outputData);
+    }
     if (session.outputQueueSize >= maxQueuedTerminalOutputBytes) {
       flushSessionOutput(session);
     } else {
@@ -10948,6 +11108,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.socket = null;
     session.replayComplete = false;
     session.replayVerified = false;
+    session.replayCompletionPending = false;
     session.allowGeneratedInputDuringReplay = false;
     session.agentPreparing = false;
     session.attachStartedAt = 0;
@@ -10965,6 +11126,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return false;
     }
     discardSessionOutputBuffers(session);
+    markPaneRenderPending(session);
     session.selectAllBufferActive = false;
     session.term.clearSelection?.();
     session.term.viewportY = 0;
@@ -11207,6 +11369,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.socket = currentSocket;
     session.replayComplete = false;
     session.replayVerified = false;
+    session.replayCompletionPending = false;
     session.allowGeneratedInputDuringReplay = false;
     session.startupErrorShown = false;
     session.shellEl.dataset.connection = "connecting";
@@ -11275,11 +11438,13 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                   return;
                 }
                 session.agentPreparing = false;
+                markPaneRenderPending(session);
                 if (session.resetOnNextReplay) {
                   session.resetOnNextReplay = false;
                   resetTerminalForHistoryReplay(session);
                 }
                 session.replayComplete = false;
+                session.replayCompletionPending = false;
                 session.replayVerified = replayMessageHasIdentity(message) ? "identified" : "legacy";
                 session.allowGeneratedInputDuringReplay = message.allow_generated_input === true || message.allowGeneratedInput === true;
                 session.suppressGeneratedTerminalInputUntil = 0;
@@ -11290,15 +11455,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                   rejectMismatchedReplay(message);
                   return;
                 }
-                flushSessionOutput(session);
-                session.replayComplete = true;
-                session.replayVerified = false;
-                session.agentPreparing = false;
-                session.allowGeneratedInputDuringReplay = false;
-                clearAttachReadyTimer(session);
-                session.reconnectAttempts = 0;
-                session.shellEl.dataset.connection = "open";
-                flushPendingInput(session);
+                session.replayCompletionPending = true;
+                finishSessionHistoryReplayIfReady(session) || flushSessionOutput(session);
                 return;
               case "agent-preparing":
                 session.agentPreparing = true;
@@ -11414,6 +11572,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     shellEl.className = "pane-shell";
     shellEl.dataset.paneId = normalizedID;
     shellEl.dataset.connection = connect ? "connecting" : "idle";
+    shellEl.dataset.renderReady = "false";
     shellEl.setAttribute("tabindex", "-1");
 
     const terminalHost = document.createElement("div");
@@ -11459,6 +11618,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       lastSocketHealthAt: 0,
       replayComplete: false,
       replayVerified: false,
+      replayCompletionPending: false,
       agentPreparing: false,
       pendingInput: [],
       pendingInputSize: 0,
@@ -11481,6 +11641,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       composingIME: false,
       exitExpected: false,
       closed: false,
+      renderReady: false,
       baseTheme: activeTheme,
       selectAllBufferActive: false,
       title: "",
@@ -11507,6 +11668,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     installMobileTouchSelection(session);
     installTerminalMouseTracking(session);
     installDesktopMouseClipboard(session);
+    const renderDisposable = typeof term.onRender === "function" ? term.onRender(() => markPaneRenderedIfMeasurable(session)) : null;
+    if (renderDisposable && typeof renderDisposable.dispose === "function") {
+      session.cleanupCallbacks.push(() => renderDisposable.dispose());
+    }
 
     term.onData((data) => {
       const generatedResponse = isGeneratedTerminalResponse(data);
@@ -11920,7 +12085,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       item.button?.setAttribute("tabindex", isActive ? "0" : "-1");
     }
     setActivePane(tab, tab.activePaneId, { focus });
-    resetSessionUserInput(tab.panes.get(tab.activePaneId));
+    const activePane = tab.panes.get(tab.activePaneId);
+    resetSessionUserInput(activePane);
+    requestPaneFullRender(activePane);
     syncCursorBlinkState();
     clearTabNotification(tab);
     if (remember) {
@@ -13700,7 +13867,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const bootstrap = async () => {
-    startPerformanceMeter();
+    applyPerformanceMeterVisibility();
     startDeviceHeartbeat();
     await loadThemeCatalog();
     applyThemeDocumentState();
