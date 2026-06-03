@@ -3461,12 +3461,15 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     });
   };
 
+  const isShiftInsertPasteShortcutEvent = (event) => {
+    const key = normalizeShortcutKeyToken(shortcutKeyFromEventCode(event) || event.key);
+    const keyCode = Number(event.keyCode || event.which || 0);
+    return (key === "insert" || keyCode === 45) && event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey;
+  };
+
   const isNativePasteShortcutEvent = (event) => {
     const key = normalizeShortcutKeyToken(shortcutKeyFromEventCode(event) || event.key);
     const keyCode = Number(event.keyCode || event.which || 0);
-    if ((key === "insert" || keyCode === 45) && event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
-      return true;
-    }
     if ((key !== "v" && keyCode !== 86) || event.altKey) {
       return false;
     }
@@ -13208,6 +13211,15 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (isInteractiveShortcutTarget(event.target)) {
       return;
     }
+    if (isShiftInsertPasteShortcutEvent(event)) {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation?.();
+      focusTerminalForNativePasteShortcut();
+      closeContextMenu();
+      pasteIntoSession().catch((error) => showToast(error.message));
+      return;
+    }
     if (isNativePasteShortcutEvent(event)) {
       focusTerminalForNativePasteShortcut();
       closeContextMenu();
@@ -14839,6 +14851,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     const cardButton = target instanceof Element ? target.closest(".tab-overview-card-main") : null;
     if (cardButton) {
       selectTabFromOverview(cardButton.dataset.tabId);
+      return;
+    }
+    const card = target instanceof Element ? target.closest(".tab-overview-card") : null;
+    if (card) {
+      selectTabFromOverview(card.dataset.tabId);
       return;
     }
     if (target instanceof Element && !target.closest(".tab-overview-header")) {
