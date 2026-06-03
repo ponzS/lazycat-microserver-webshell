@@ -14853,6 +14853,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       selectTabFromOverview(cardButton.dataset.tabId);
       return;
     }
+    const card = target instanceof Element ? target.closest(".tab-overview-card") : null;
+    if (card) {
+      selectTabFromOverview(card.dataset.tabId);
+      return;
+    }
     if (target instanceof Element && !target.closest(".tab-overview-header")) {
       closeTabOverview();
     }

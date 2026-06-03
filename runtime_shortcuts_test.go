@@ -1522,6 +1522,21 @@ func TestRuntimeTabOverviewRerendersAndFallsBackToWorkspaceTabs(t *testing.T) {
 	if renderIndex < 0 || scheduleIndex < 0 || renderIndex > scheduleIndex {
 		t.Fatalf("openTabOverview should schedule a follow-up overview render after the initial render")
 	}
+
+	clickBranch := sourceBetween(t, source,
+		`tabOverview?.addEventListener("click", (event) => {`,
+		`  });`,
+	)
+	for _, want := range []string{
+		`const cardButton = target instanceof Element ? target.closest(".tab-overview-card-main") : null;`,
+		`selectTabFromOverview(cardButton.dataset.tabId);`,
+		`const card = target instanceof Element ? target.closest(".tab-overview-card") : null;`,
+		`selectTabFromOverview(card.dataset.tabId);`,
+	} {
+		if !strings.Contains(clickBranch, want) {
+			t.Fatalf("runtime tab overview click guard missing %q", want)
+		}
+	}
 }
 
 func TestRuntimeMobileDeployRestartUsesBottomSheet(t *testing.T) {
