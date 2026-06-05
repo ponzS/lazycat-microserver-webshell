@@ -3191,6 +3191,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
   const isCurrentInstanceRequest = (name, generation) =>
     String(name || "").trim() === activeName && generation === activeInstanceGeneration;
+  const isCurrentInstanceSession = (session) => {
+    const name = String(session?.name || "").trim();
+    return Boolean(name) && name === activeName;
+  };
   const responseSelector = (state) => String(state?.selector || "").trim();
   const ensureResponseSelector = (state, expectedName, label = "Workspace") => {
     const selector = responseSelector(state);
@@ -7408,7 +7412,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const connectPendingSession = (session, { allowHidden = false } = {}) => {
-    if (!session || !session.pendingConnect || session.closed || session.name !== activeName) {
+    if (!session || !session.pendingConnect || session.closed || !isCurrentInstanceSession(session)) {
       return;
     }
     const socketReadyState = session.socket?.readyState;
@@ -11249,7 +11253,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const readAgentStartupError = async (name) => {
-    const response = await fetch(agentStartupErrorURL(name), { cache: "no-store" });
+    const requestName = String(name || "").trim();
+    if (!requestName) {
+      return "";
+    }
+    const response = await fetch(agentStartupErrorURL(requestName), { cache: "no-store" });
     if (!response.ok) {
       return "";
     }
@@ -11259,7 +11267,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
 
   const writeSessionWebShellError = (session, message) => {
     const text = String(message || "").trim();
-    if (!text || !session || session.closed || session.name !== activeName) {
+    if (!text || !session || session.closed || !isCurrentInstanceSession(session)) {
       return;
     }
     showStartupErrorPanel(text);
@@ -11276,7 +11284,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     genericWebSocketStartupFallbacks.has(String(message || "").trim());
 
   const showSessionStartupError = async (session, fallback = "") => {
-    if (!session || session.closed || session.name !== activeName) {
+    if (!session || session.closed || !isCurrentInstanceSession(session)) {
       return;
     }
     let message = "";
@@ -11387,7 +11395,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const scheduleReconnect = (session, { immediate = false, allowHidden = false } = {}) => {
-    if (disposed || !session || session.closed || session.reconnectPending || session.reconnectTimer || session.name !== activeName) {
+    if (disposed || !session || session.closed || session.reconnectPending || session.reconnectTimer || !isCurrentInstanceSession(session)) {
       return;
     }
     if (document.hidden && !allowHidden) {
@@ -11500,7 +11508,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const checkSessionConnectionHealth = (session, { connect = true, force = false, allowHidden = false } = {}) => {
-    if (disposed || !session || session.closed || session.name !== activeName) {
+    if (disposed || !session || session.closed || !isCurrentInstanceSession(session)) {
       return false;
     }
     if (navigator.onLine === false) {
@@ -11544,7 +11552,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (
       !session ||
       session.closed ||
-      session.name !== activeName ||
+      !isCurrentInstanceSession(session) ||
       (document.hidden && !allowHidden) ||
       navigator.onLine === false ||
       session.socket?.readyState === WebSocket.OPEN ||
@@ -11555,7 +11563,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.pendingConnect = false;
     clearReconnectTimer(session);
     const socketUrl = webSocketURL("./ws");
-    socketUrl.searchParams.set("name", session.name);
+    socketUrl.searchParams.set("name", String(session.name || "").trim());
     socketUrl.searchParams.set("pane", session.id);
     socketUrl.searchParams.set("client_id", serverRevisionClientID);
     socketUrl.searchParams.set("cols", String(session.term.cols || 120));
