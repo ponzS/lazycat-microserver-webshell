@@ -31,7 +31,6 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const instanceSwitcherList = document.getElementById("instanceSwitcherList");
   const instanceSwitcherFeedback = document.getElementById("instanceSwitcherFeedback");
   const homeMenuButton = document.getElementById("homeMenuButton");
-  const deviceMenuButton = document.getElementById("deviceMenuButton");
   const settingsMenuButton = document.getElementById("settingsMenuButton");
   const themePickerBackdrop = document.getElementById("themePickerBackdrop");
   const themePickerClose = document.getElementById("themePickerClose");
@@ -55,6 +54,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const settingsLineHeightResetButton = document.getElementById("settingsLineHeightResetButton");
   const settingsScrollbackInput = document.getElementById("settingsScrollbackInput");
   const settingsScrollbackResetButton = document.getElementById("settingsScrollbackResetButton");
+  const settingsDebugModeToggle = document.getElementById("settingsDebugModeToggle");
+  const settingsDebugOptions = document.getElementById("settingsDebugOptions");
+  const settingsOnlineDevicesButton = document.getElementById("settingsOnlineDevicesButton");
   const settingsPerformanceMeterToggle = document.getElementById("settingsPerformanceMeterToggle");
   const settingsPerformanceTasksToggle = document.getElementById("settingsPerformanceTasksToggle");
   const settingsDesktopMouseClipboardToggle = document.getElementById("settingsDesktopMouseClipboardToggle");
@@ -192,6 +194,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const recentTabsStorageKey = (name) => `${storagePrefix}.recentTabs.${name || "default"}`;
   const restartTabStorageKey = `${storagePrefix}.restartTab`;
   const touchShortcutFeedbackStorageKey = `${storagePrefix}.touchShortcutFeedback`;
+  const debugModeStorageKey = `${storagePrefix}.debugMode`;
   const performanceMeterStorageKey = `${storagePrefix}.performanceMeter`;
   const performanceTasksStorageKey = `${storagePrefix}.performanceTasks`;
   const defaultFontSize = 16;
@@ -462,6 +465,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   let desktopMouseClipboardEnabled = true;
   let mobilePixelScrollEnabled = true;
   let mobileDoubleTapReminderEnabled = true;
+  let debugModeEnabled = window.localStorage.getItem(debugModeStorageKey) === "true";
   let performanceMeterEnabled = window.localStorage.getItem(performanceMeterStorageKey) === "true";
   let performanceTasksEnabled = window.localStorage.getItem(performanceTasksStorageKey) === "true";
   let fontEditMode = false;
@@ -1172,6 +1176,15 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   };
 
+  const syncSettingsDebugModeControls = () => {
+    if (settingsDebugModeToggle) {
+      settingsDebugModeToggle.checked = debugModeEnabled;
+    }
+    if (settingsDebugOptions) {
+      settingsDebugOptions.hidden = !debugModeEnabled;
+    }
+  };
+
   const syncSettingsPerformanceMeterToggle = () => {
     if (settingsPerformanceMeterToggle) {
       settingsPerformanceMeterToggle.checked = performanceMeterEnabled;
@@ -1182,6 +1195,16 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (settingsPerformanceTasksToggle) {
       settingsPerformanceTasksToggle.checked = performanceTasksEnabled;
     }
+  };
+
+  const syncSettingsDebugOptions = () => {
+    syncSettingsDebugModeControls();
+    syncSettingsPerformanceMeterToggle();
+    syncSettingsPerformanceTasksToggle();
+  };
+
+  const syncDebugModeState = () => {
+    syncSettingsDebugOptions();
   };
 
   const syncSettingsDesktopMouseClipboardToggle = () => {
@@ -2299,8 +2322,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     syncSettingsDesktopMouseClipboardToggle();
     syncSettingsMobilePixelScrollToggle();
     syncSettingsMobileDoubleTapReminderToggle();
-    syncSettingsPerformanceMeterToggle();
-    syncSettingsPerformanceTasksToggle();
+    syncSettingsDebugOptions();
     resizeActiveTabForCurrentDevice();
     updateMobileActiveTabTitle();
     await registerTerminalSymbolFont(terminalSymbolFont);
@@ -3127,7 +3149,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     renderServiceForwardSettings();
     syncSettingsScrollbackInput();
     syncSettingsLineHeightInput();
-    syncSettingsPerformanceMeterToggle();
+    syncSettingsDebugOptions();
     syncSettingsDesktopMouseClipboardToggle();
     syncSettingsMobilePixelScrollToggle();
     syncSettingsMobileDoubleTapReminderToggle();
@@ -14099,6 +14121,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const bootstrap = async () => {
+    syncDebugModeState();
     applyPerformanceMeterVisibility();
     applyPerformanceTaskMeterVisibility();
     startDeviceHeartbeat();
@@ -14160,7 +14183,6 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   homeMenuButton?.addEventListener("click", () => {
     navigateHome().catch((error) => showToast(error.message || "无法返回首页"));
   });
-  deviceMenuButton?.addEventListener("click", openDevicePanel);
   settingsMenuButton?.addEventListener("click", () => openSettings());
   themePickerClose?.addEventListener("click", closeThemePicker);
   themePickerBackdrop?.addEventListener("click", (event) => {
@@ -14435,6 +14457,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         }
       });
   });
+  settingsDebugModeToggle?.addEventListener("change", () => {
+    debugModeEnabled = settingsDebugModeToggle.checked;
+    window.localStorage.setItem(debugModeStorageKey, debugModeEnabled ? "true" : "false");
+    syncDebugModeState();
+  });
+  settingsOnlineDevicesButton?.addEventListener("click", openDevicePanel);
   settingsPerformanceMeterToggle?.addEventListener("change", () => {
     performanceMeterEnabled = settingsPerformanceMeterToggle.checked;
     window.localStorage.setItem(performanceMeterStorageKey, performanceMeterEnabled ? "true" : "false");

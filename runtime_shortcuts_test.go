@@ -83,9 +83,12 @@ func TestRuntimeDeviceManagementStaticGuards(t *testing.T) {
 	}
 	index := string(indexData)
 	for _, want := range []string{
-		`id="deviceMenuButton"`,
+		`id="settingsDebugModeToggle"`,
+		`id="settingsDebugOptions" hidden`,
+		`id="settingsOnlineDevicesButton"`,
+		`class="settings-debug-action"`,
 		"在线设备",
-		"当前正在连接的设备",
+		"查看当前正在连接的设备",
 		`id="deviceBackdrop"`,
 		`id="deviceBack"`,
 		`class="settings-back"`,
@@ -94,6 +97,12 @@ func TestRuntimeDeviceManagementStaticGuards(t *testing.T) {
 		if !strings.Contains(index, want) {
 			t.Fatalf("runtime device management index guard missing %q", want)
 		}
+	}
+	if strings.Contains(index, `id="deviceMenuButton"`) {
+		t.Fatalf("runtime device management must not expose online devices in the top-right menu")
+	}
+	if strings.Contains(index, `id="settingsOnlineDevicesToggle"`) {
+		t.Fatalf("runtime device management must not render online devices as a checkbox toggle")
 	}
 
 	mainData, err := os.ReadFile("runtime/static/main.js")
@@ -115,12 +124,13 @@ func TestRuntimeDeviceManagementStaticGuards(t *testing.T) {
 		"const stopDeviceListRefresh = () => {",
 		"const closeDevicePanel = () => {",
 		"stopDeviceListRefresh();",
+		`const settingsOnlineDevicesButton = document.getElementById("settingsOnlineDevicesButton");`,
 		`deviceBack?.addEventListener("click", closeDevicePanel);`,
 		"const deviceListContentSignature = (devices) => JSON.stringify",
 		"joined_at: String(device?.joined_at || \"\").trim(),",
 		"if (nextSignature === deviceListSignature) {",
 		"暂无正在连接的设备",
-		`deviceMenuButton?.addEventListener("click", openDevicePanel);`,
+		`settingsOnlineDevicesButton?.addEventListener("click", openDevicePanel);`,
 		`document.addEventListener("visibilitychange", () => {`,
 		`window.addEventListener("pageshow", () => {`,
 		`window.addEventListener("pagehide", () => {`,
@@ -128,6 +138,18 @@ func TestRuntimeDeviceManagementStaticGuards(t *testing.T) {
 	} {
 		if !strings.Contains(source, want) {
 			t.Fatalf("runtime device management main guard missing %q", want)
+		}
+	}
+	if strings.Contains(source, "deviceMenuButton") {
+		t.Fatalf("runtime device management must not keep deviceMenuButton wiring")
+	}
+	for _, forbidden := range []string{
+		"settingsOnlineDevicesToggle",
+		"onlineDevicesDebugEnabled",
+		"syncSettingsOnlineDevicesToggle",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("runtime device management must not keep online devices checkbox state %q", forbidden)
 		}
 	}
 
@@ -143,6 +165,8 @@ func TestRuntimeDeviceManagementStaticGuards(t *testing.T) {
 		"background: var(--panel-subtle-bg);",
 		".device-item",
 		"background: var(--panel-bg);",
+		".settings-debug-options",
+		".settings-debug-action",
 	} {
 		if !strings.Contains(style, want) {
 			t.Fatalf("runtime device management style guard missing %q", want)
@@ -152,6 +176,63 @@ func TestRuntimeDeviceManagementStaticGuards(t *testing.T) {
 	for _, forbidden := range []string{"gradient", "animation:"} {
 		if strings.Contains(deviceStyle, forbidden) {
 			t.Fatalf("runtime device management style must not contain %q", forbidden)
+		}
+	}
+}
+
+func TestRuntimeInstanceSwitcherListScrollsWhenManyInstances(t *testing.T) {
+	styleData, err := os.ReadFile("runtime/static/style.css")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/style.css) error = %v", err)
+	}
+	style := string(styleData)
+	listStyle := sourceBetween(t, style, ".instance-switcher-list {", ".instance-switcher-list::-webkit-scrollbar")
+	for _, want := range []string{
+		"max-height: clamp(160px, calc(100dvh - 220px), 340px);",
+		"overflow-y: auto;",
+		"overscroll-behavior: contain;",
+		"scrollbar-width: thin;",
+		"-webkit-overflow-scrolling: touch;",
+	} {
+		if !strings.Contains(listStyle, want) {
+			t.Fatalf("runtime instance switcher list scroll guard missing %q", want)
+		}
+	}
+}
+
+func TestRuntimeDebugModeOnlyTogglesOptionsList(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+	for _, want := range []string{
+		"const debugModeStorageKey = `${storagePrefix}.debugMode`;",
+		`const settingsDebugOptions = document.getElementById("settingsDebugOptions");`,
+		"settingsDebugOptions.hidden = !debugModeEnabled;",
+		`let performanceMeterEnabled = window.localStorage.getItem(performanceMeterStorageKey) === "true";`,
+		`let performanceTasksEnabled = window.localStorage.getItem(performanceTasksStorageKey) === "true";`,
+		"meter.hidden = !performanceMeterEnabled;",
+		"performanceTaskMonitor.setEnabled(performanceTasksEnabled);",
+		"performanceMeterEnabled = settingsPerformanceMeterToggle.checked;",
+		"performanceTasksEnabled = settingsPerformanceTasksToggle.checked;",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime debug mode guard missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"debugModeEnabled && window.localStorage.getItem(performanceMeterStorageKey)",
+		"debugModeEnabled && window.localStorage.getItem(performanceTasksStorageKey)",
+		"debugModeEnabled && performanceMeterEnabled",
+		"debugModeEnabled && performanceTasksEnabled",
+		"debugModeEnabled && settingsPerformanceMeterToggle.checked",
+		"debugModeEnabled && settingsPerformanceTasksToggle.checked",
+		"performanceMeterEnabled = false;",
+		"performanceTasksEnabled = false;",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("runtime debug mode must not gate feature state with %q", forbidden)
 		}
 	}
 }
