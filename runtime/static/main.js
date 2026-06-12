@@ -447,7 +447,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     },
   ];
 
-  let activeName = (params.get("name") || "").trim();
+  const readTargetNameParam = (sourceParams) => (sourceParams.get("target") || sourceParams.get("name") || "").trim();
+  let activeName = readTargetNameParam(params);
   let activeTabId = null;
   let inlineTabRenameState = null;
   let recentTabIds = [];
@@ -3192,6 +3193,14 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const instanceSelector = (item) => {
+    const explicitSelector = String(item?.selector || item?.target || "").trim();
+    if (explicitSelector) {
+      return explicitSelector;
+    }
+    const clientInstanceID = String(item?.client_instance_id || "").trim();
+    if (clientInstanceID) {
+      return `client:${clientInstanceID}`;
+    }
     const name = String(item?.name || "").trim();
     const ownerDeployID = String(item?.owner_deploy_id || "").trim();
     if (!name || !ownerDeployID) {
@@ -15046,7 +15055,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return;
     }
     const nextParams = new URLSearchParams(window.location.search);
-    const nextName = (nextParams.get("name") || "").trim();
+    const nextName = readTargetNameParam(nextParams);
     const nextTab = (nextParams.get("tab") || "").trim();
     if (!nextName) {
       return;

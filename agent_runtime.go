@@ -669,6 +669,14 @@ func (s *pluginServer) handleAgentStartupError(w http.ResponseWriter, r *http.Re
 		http.Error(w, "account id is required", http.StatusUnauthorized)
 		return
 	}
+	if isClientTarget(selector) {
+		if err := s.authorizeClientTarget(r.Context(), r.Header, accountID, selector); err != nil {
+			writeAuthorizationError(w, err)
+			return
+		}
+		writeAuthorizationError(w, errClientTerminalProxyUnavailable)
+		return
+	}
 	if err := s.authorizeInstanceSelector(r.Context(), selector); err != nil {
 		writeAuthorizationError(w, err)
 		return

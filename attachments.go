@@ -88,6 +88,14 @@ func (s *pluginServer) handleAttachments(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "account id is required", http.StatusUnauthorized)
 		return
 	}
+	if isClientTarget(selector) {
+		if err := s.authorizeClientTarget(r.Context(), r.Header, accountID, selector); err != nil {
+			writeAuthorizationError(w, err)
+			return
+		}
+		writeAuthorizationError(w, errClientTerminalProxyUnavailable)
+		return
+	}
 	if err := s.authorizeInstanceSelector(r.Context(), selector); err != nil {
 		writeAuthorizationError(w, err)
 		return
@@ -209,6 +217,14 @@ func (s *pluginServer) resolveAttachmentRequestScope(w http.ResponseWriter, r *h
 	accountID := currentRequestAccountID(r)
 	if accountID == "" {
 		http.Error(w, "account id is required", http.StatusUnauthorized)
+		return agentScope{}, "", false
+	}
+	if isClientTarget(selector) {
+		if err := s.authorizeClientTarget(r.Context(), r.Header, accountID, selector); err != nil {
+			writeAuthorizationError(w, err)
+			return agentScope{}, "", false
+		}
+		writeAuthorizationError(w, errClientTerminalProxyUnavailable)
 		return agentScope{}, "", false
 	}
 	if err := s.authorizeInstanceSelector(r.Context(), selector); err != nil {
