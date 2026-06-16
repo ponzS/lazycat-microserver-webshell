@@ -11663,6 +11663,24 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     socketUrl.searchParams.set("client_id", serverRevisionClientID);
     socketUrl.searchParams.set("cols", String(session.term.cols || 120));
     socketUrl.searchParams.set("rows", String(session.term.rows || 32));
+    const logSocketUrl = new URL(socketUrl.toString());
+    logSocketUrl.searchParams.delete("client_id");
+    const socketDebug = {
+      textMessages: 0,
+      binaryMessages: 0,
+      binaryBytes: 0,
+      openedAt: 0,
+    };
+    console.info("[client-terminal] websocket connecting", {
+      name: session.name,
+      pane: session.id,
+      cols: session.term.cols || 120,
+      rows: session.term.rows || 32,
+      url: logSocketUrl.toString(),
+      allowHidden,
+      documentHidden: document.hidden,
+      reconnectAttempts: session.reconnectAttempts || 0,
+    });
     const currentSocket = new WebSocket(socketUrl.toString());
     session.socket = currentSocket;
     session.replayComplete = false;
@@ -11692,6 +11710,13 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       const selector = String(message?.selector || "").trim() || "unknown";
       const paneID = String(message?.pane_id || message?.paneId || "").trim() || "unknown";
       detachSessionSocket(session, currentSocket, { connection: "error" });
+      console.warn("[client-terminal] rejected terminal replay", {
+        selector,
+        pane: paneID,
+        expectedName: session.name,
+        expectedPane: session.id,
+        messageType: message?.type,
+      });
       console.warn(`Rejected terminal replay for ${selector}/${paneID}; expected ${session.name}/${session.id}.`);
       currentSocket.close();
     };
@@ -11700,6 +11725,14 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       if (session.socket !== currentSocket) {
         return;
       }
+      socketDebug.openedAt = Date.now();
+      console.info("[client-terminal] websocket open", {
+        name: session.name,
+        pane: session.id,
+        cols: session.term.cols || 120,
+        rows: session.term.rows || 32,
+        reconnectAttempts: session.reconnectAttempts || 0,
+      });
       session.reconnectPending = false;
       session.shellEl.dataset.connection = "connecting";
       startSocketHealthMonitor(session, currentSocket);
@@ -11726,9 +11759,28 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         return;
       }
       if (typeof event.data === "string") {
+        socketDebug.textMessages += 1;
         try {
           const message = JSON.parse(event.data);
           if (message && typeof message.type === "string") {
+            if (
+              socketDebug.textMessages <= 8
+              || message.type === "history-replay-start"
+              || message.type === "history-replay-complete"
+              || message.type === "process-exit"
+              || message.type === "agent-preparing"
+            ) {
+              console.info("[client-terminal] websocket control message", {
+                name: session.name,
+                pane: session.id,
+                type: message.type,
+                selector: message.selector || "",
+                paneID: message.pane_id || message.paneId || "",
+                replayVerified: session.replayVerified || false,
+                replayComplete: session.replayComplete,
+                textMessages: socketDebug.textMessages,
+              });
+            }
             switch (message.type) {
               case "history-replay-start":
                 if (!validateReplayMessage(message)) {
@@ -11763,6 +11815,13 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
               case "pong":
                 return;
               case "process-exit":
+                console.warn("[client-terminal] process exit message", {
+                  name: session.name,
+                  pane: session.id,
+                  retryable: message.retryable === true,
+                  exitCode: message.exit_code,
+                  message: message.message || "",
+                });
                 if (message.retryable === true && !/pane not found/i.test(String(message.message || ""))) {
                   detachSessionSocket(session, currentSocket, { connection: "closed" });
                   currentSocket.close();
@@ -11778,22 +11837,67 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
             }
           }
         } catch (error) {
+          if (socketDebug.textMessages <= 8) {
+            console.warn("[client-terminal] websocket text message parse failed", {
+              name: session.name,
+              pane: session.id,
+              bytes: event.data.length,
+              textMessages: socketDebug.textMessages,
+              error: error?.message || String(error),
+            });
+          }
         }
         writeSessionOutput(session, event.data);
         return;
       }
       if (event.data instanceof ArrayBuffer) {
+        socketDebug.binaryMessages += 1;
+        socketDebug.binaryBytes += event.data.byteLength;
+        if (socketDebug.binaryMessages <= 8) {
+          console.info("[client-terminal] websocket binary message", {
+            name: session.name,
+            pane: session.id,
+            bytes: event.data.byteLength,
+            binaryMessages: socketDebug.binaryMessages,
+            binaryBytes: socketDebug.binaryBytes,
+            replayVerified: session.replayVerified || false,
+            replayComplete: session.replayComplete,
+          });
+        }
         if (!session.replayVerified && !session.replayComplete) {
+          if (socketDebug.binaryMessages <= 8) {
+            console.warn("[client-terminal] dropped binary before replay verification", {
+              name: session.name,
+              pane: session.id,
+              bytes: event.data.byteLength,
+              binaryMessages: socketDebug.binaryMessages,
+            });
+          }
           return;
         }
         writeSessionOutput(session, new Uint8Array(event.data));
       }
     });
 
-    currentSocket.addEventListener("close", () => {
+    currentSocket.addEventListener("close", (event) => {
       if (session.socket !== currentSocket) {
         return;
       }
+      console.warn("[client-terminal] websocket close", {
+        name: session.name,
+        pane: session.id,
+        code: event.code,
+        reason: event.reason || "",
+        wasClean: event.wasClean,
+        openDurationMs: socketDebug.openedAt ? Date.now() - socketDebug.openedAt : 0,
+        textMessages: socketDebug.textMessages,
+        binaryMessages: socketDebug.binaryMessages,
+        binaryBytes: socketDebug.binaryBytes,
+        replayVerified: session.replayVerified || false,
+        replayComplete: session.replayComplete,
+        startupErrorShown: session.startupErrorShown,
+        exitExpected: session.exitExpected === true,
+      });
       detachSessionSocket(session, currentSocket, { connection: "closed" });
       flushSessionOutput(session);
       if (session.exitExpected) {
@@ -11806,10 +11910,22 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       scheduleReconnect(session);
     });
 
-    currentSocket.addEventListener("error", () => {
+    currentSocket.addEventListener("error", (event) => {
       if (session.socket !== currentSocket) {
         return;
       }
+      console.warn("[client-terminal] websocket error", {
+        name: session.name,
+        pane: session.id,
+        readyState: currentSocket.readyState,
+        openDurationMs: socketDebug.openedAt ? Date.now() - socketDebug.openedAt : 0,
+        textMessages: socketDebug.textMessages,
+        binaryMessages: socketDebug.binaryMessages,
+        binaryBytes: socketDebug.binaryBytes,
+        replayVerified: session.replayVerified || false,
+        replayComplete: session.replayComplete,
+        eventType: event.type,
+      });
       detachSessionSocket(session, currentSocket, { connection: "error" });
       flushSessionOutput(session);
       if (!session.startupErrorShown) {
