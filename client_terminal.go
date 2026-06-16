@@ -141,7 +141,14 @@ func (s *pluginServer) attachClientPane(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		failure := readWebSocketDialFailure(err, dialResponse)
 		log.Printf("client terminal websocket target dial failed: selector=%s pane=%s target=%s status=%d location=%s content_type=%s body=%q err=%v", selector, paneID, sanitizeClientTerminalURL(targetURL.String()), failure.status, failure.location, failure.contentType, failure.body, err)
-		_ = writeWebSocketJSON(source, map[string]any{"type": "process-exit", "exit_code": -1, "message": failure.message, "retryable": true})
+		_ = writeWebSocketJSON(source, map[string]any{
+			"type":              "process-exit",
+			"exit_code":         -1,
+			"message":           failure.userMessage,
+			"technical_message": failure.message,
+			"error_code":        failure.code,
+			"retryable":         true,
+		})
 		return nil
 	}
 	defer target.Close()
@@ -362,10 +369,16 @@ type websocketDialFailure struct {
 	contentType string
 	body        string
 	message     string
+	userMessage string
+	code        string
 }
 
 func readWebSocketDialFailure(err error, response *http.Response) websocketDialFailure {
-	failure := websocketDialFailure{message: err.Error()}
+	failure := websocketDialFailure{
+		message:     err.Error(),
+		userMessage: err.Error(),
+		code:        "client_terminal_websocket_dial_failed",
+	}
 	if response == nil {
 		return failure
 	}
@@ -379,6 +392,10 @@ func readWebSocketDialFailure(err error, response *http.Response) websocketDialF
 		failure.message = fmt.Sprintf("%s; target_status=%d", err.Error(), failure.status)
 		if failure.body != "" {
 			failure.message += "; target_body=" + failure.body
+		}
+		failure.userMessage = fmt.Sprintf("Client terminal connection failed. Please restart the desktop client or turn LightOS access off and on again. (target_status=%d)", failure.status)
+		if failure.status == http.StatusBadGateway {
+			failure.code = "client_terminal_service_unavailable"
 		}
 	}
 	return failure
