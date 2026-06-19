@@ -6925,9 +6925,48 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return "";
     }
     const normalized = stripTerminalInputSentinel(text);
+    const previous = typeof session.compositionText === "string" ? session.compositionText : "";
+    if (normalized && normalized !== previous) {
+      session.compositionPreviousText = previous;
+      const history = Array.isArray(session.compositionTextHistory) ? session.compositionTextHistory.slice() : [];
+      if (!history.includes(normalized)) {
+        history.push(normalized);
+      }
+      session.compositionTextHistory = history.slice(-8);
+    }
     session.compositionText = normalized;
     return normalized;
   };
+
+  const normalizeTerminalCompositionTextCandidates = (...values) => {
+    const seen = new Set();
+    const candidates = [];
+    const add = (value) => {
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          add(item);
+        }
+        return;
+      }
+      const normalized = stripTerminalInputSentinel(value);
+      if (!normalized || seen.has(normalized)) {
+        return;
+      }
+      seen.add(normalized);
+      candidates.push(normalized);
+    };
+    for (const value of values) {
+      add(value);
+    }
+    return candidates.sort((left, right) => right.length - left.length);
+  };
+
+  const terminalCompositionPreeditCandidates = (session, ...extraValues) => normalizeTerminalCompositionTextCandidates(
+    session?.compositionTextHistory,
+    session?.compositionPreviousText,
+    session?.compositionText,
+    extraValues,
+  );
 
   const setTerminalCompositionPreviewVisible = (session, visible) => {
     const preview = session?.compositionPreview;
@@ -7101,8 +7140,13 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const setTerminalInputComposing = (session, composing) => {
+    const wasComposing = Boolean(session.composingIME);
     session.composingIME = composing;
     if (composing) {
+      if (!wasComposing) {
+        session.compositionPreviousText = "";
+        session.compositionTextHistory = [];
+      }
       if (typeof session.compositionText !== "string") {
         session.compositionText = "";
       }
@@ -7124,12 +7168,27 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.pendingCompositionInput = null;
   };
 
-  const armTerminalPostCompositionInput = (session, { preedit = "", committed = "", sent = false } = {}) => {
+  const isTerminalPostCompositionInputAlreadySent = (session, committed) => {
+    const pending = session?.pendingCompositionInput;
+    const committedText = stripTerminalInputSentinel(committed);
+    if (!pending?.sent || !committedText) {
+      return false;
+    }
+    if (performance.now() > Number(pending.expiresAt || 0)) {
+      clearTerminalPostCompositionInput(session);
+      return false;
+    }
+    return pending.committed === committedText;
+  };
+
+  const armTerminalPostCompositionInput = (session, { preedit = "", preedits = [], committed = "", sent = false } = {}) => {
     if (!session) {
       return null;
     }
+    const preeditCandidates = normalizeTerminalCompositionTextCandidates(preedits, preedit);
     const pending = {
-      preedit: stripTerminalInputSentinel(preedit),
+      preedit: preeditCandidates[0] || "",
+      preedits: preeditCandidates,
       committed: stripTerminalInputSentinel(committed),
       sent: Boolean(sent),
       expiresAt: performance.now() + 350,
@@ -7148,28 +7207,43 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return null;
     }
     const rawValue = stripTerminalInputSentinel(value);
-    const preedit = pending.preedit || "";
+    const preedits = normalizeTerminalCompositionTextCandidates(pending.preedits, pending.preedit);
     const committed = pending.committed || "";
     let data = rawValue;
     let handled = false;
     if (!rawValue) {
       data = "";
       handled = true;
-    } else if (pending.sent && (rawValue === committed || (preedit && rawValue === `${preedit}${committed}`))) {
-      data = "";
-      handled = true;
-    } else if (!pending.sent && preedit && rawValue === preedit) {
-      data = rawValue;
-      handled = true;
-    } else if (!pending.sent && preedit && rawValue.startsWith(preedit)) {
-      data = rawValue.slice(preedit.length);
-      handled = true;
-    } else if (!pending.sent && committed && rawValue === committed) {
+    } else if (pending.sent) {
+      if (
+        (committed && rawValue === committed)
+        || preedits.includes(rawValue)
+        || (committed && preedits.some((preedit) => rawValue === `${preedit}${committed}`))
+      ) {
+        data = "";
+        handled = true;
+      }
+    } else if (committed && rawValue === committed) {
       data = committed;
       handled = true;
-    } else if (!pending.sent && !committed) {
-      data = rawValue;
+    } else if (committed && preedits.some((preedit) => rawValue === `${preedit}${committed}`)) {
+      data = committed;
       handled = true;
+    } else {
+      const preeditPrefix = preedits.find((preedit) => rawValue.startsWith(preedit) && rawValue.length > preedit.length);
+      if (preedits.includes(rawValue)) {
+        data = rawValue;
+        handled = true;
+      } else if (preeditPrefix && preedits.includes(rawValue.slice(preeditPrefix.length))) {
+        data = rawValue.slice(preeditPrefix.length);
+        handled = true;
+      } else if (preeditPrefix && preedits.length === 1) {
+        data = rawValue.slice(preeditPrefix.length);
+        handled = true;
+      } else if (!committed) {
+        data = rawValue;
+        handled = true;
+      }
     }
     if (handled) {
       if (!data) {
@@ -7190,7 +7264,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return;
     }
     armTerminalPostCompositionInput(session, {
-      preedit: pending?.preedit || "",
+      preedits: pending?.preedits || pending?.preedit || "",
       committed: committedText,
       sent: true,
     });
@@ -7274,6 +7348,26 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return;
     } else if (event.data) {
       data = event.data;
+    }
+    if (data && session?.composingIME && (type === "insertText" || type === "insertReplacementText")) {
+      const textareaPreeditText = textarea ? stripTerminalInputSentinel(textarea.value) : "";
+      const preeditCandidates = terminalCompositionPreeditCandidates(session, textareaPreeditText);
+      event.preventDefault();
+      event.stopPropagation();
+      setTerminalInputComposing(session, false);
+      armTerminalPostCompositionInput(session, {
+        preedits: preeditCandidates,
+        committed: data,
+        sent: true,
+      });
+      if (textarea) {
+        textarea.value = terminalInputSentinel;
+        moveTerminalTextareaCaretToEnd(textarea);
+      }
+      sendTerminalTextInput(session, data, { dedupe: true });
+      resetTerminalHostViewport(session, { clean: true });
+      positionTerminalInput(session);
+      return;
     }
     const pendingComposition = session?.pendingCompositionInput;
     const compositionValue = data ? resolveTerminalPostCompositionInput(session, data) : null;
@@ -7442,6 +7536,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       clearTerminalTextareaSentinel(session);
       clearTerminalPostCompositionInput(session);
       setTerminalInputComposing(session, true);
+      session.compositionTextHistory = [];
+      session.compositionPreviousText = "";
       setTerminalTextareaCompositionText(session, "");
       positionTerminalInput(session);
       scheduleTerminalHostViewportReset(session, { clean: true });
@@ -7458,14 +7554,19 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     textarea.addEventListener("compositionend", (event) => {
       event.stopPropagation();
       const preeditText = terminalTextareaCompositionText(session);
+      const textareaPreeditText = stripTerminalInputSentinel(textarea.value);
+      const preeditCandidates = terminalCompositionPreeditCandidates(session, preeditText, textareaPreeditText);
       const committedText = typeof event.data === "string" ? stripTerminalInputSentinel(event.data) : "";
+      const committedAlreadySent = isTerminalPostCompositionInputAlreadySent(session, committedText);
       setTerminalInputComposing(session, false);
       armTerminalPostCompositionInput(session, {
-        preedit: preeditText,
+        preedits: preeditCandidates,
         committed: committedText,
         sent: Boolean(committedText),
       });
-      if (committedText) {
+      textarea.value = terminalInputSentinel;
+      moveTerminalTextareaCaretToEnd(textarea);
+      if (committedText && !committedAlreadySent) {
         sendTerminalTextInput(session, committedText, { dedupe: true });
       }
       window.setTimeout(() => {
