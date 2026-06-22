@@ -223,7 +223,7 @@ func (s *pluginServer) handleAttachments(w http.ResponseWriter, r *http.Request)
 	}
 	if isClientTarget(selector) {
 		if err := s.authorizeClientTarget(r.Context(), r.Header, accountID, selector); err != nil {
-			writeAuthorizationError(w, err)
+			writeClientTerminalError(w, err)
 			return
 		}
 		s.handleAttachmentUploadWithBackend(w, r, normalizeAgentScope(selector, accountID), "", clientAttachmentUploadBackend{server: s, header: r.Header})
@@ -271,7 +271,11 @@ func (s *pluginServer) handleAttachmentUploadWithBackend(w http.ResponseWriter, 
 		result, err := backend.UploadAttachment(r.Context(), scope, username, part.FileName(), limited)
 		closeErr := part.Close()
 		if err != nil {
-			writeAttachmentUploadError(w, err)
+			if isClientTarget(scope.Selector) {
+				writeClientTerminalError(w, err)
+			} else {
+				writeAttachmentUploadError(w, err)
+			}
 			return
 		}
 		if limited.TooLarge() {
@@ -302,7 +306,11 @@ func (s *pluginServer) handleAttachmentFiles(w http.ResponseWriter, r *http.Requ
 	}
 	state, err := s.attachmentFileBackendForRequest(r, scope).ListAttachmentFiles(r.Context(), scope, username, r.URL.Query().Get("path"))
 	if err != nil {
-		writeAttachmentFileError(w, err)
+		if isClientTarget(scope.Selector) {
+			writeClientTerminalError(w, err)
+		} else {
+			writeAttachmentFileError(w, err)
+		}
 		return
 	}
 	writeJSON(w, state)
@@ -329,7 +337,11 @@ func (s *pluginServer) handleAttachmentDownload(w http.ResponseWriter, r *http.R
 	backend := s.attachmentFileBackendForRequest(r, scope)
 	entries, err := backend.StatAttachmentFiles(r.Context(), scope, username, paths)
 	if err != nil {
-		writeAttachmentFileError(w, err)
+		if isClientTarget(scope.Selector) {
+			writeClientTerminalError(w, err)
+		} else {
+			writeAttachmentFileError(w, err)
+		}
 		return
 	}
 	if len(entries) != len(paths) {
@@ -356,7 +368,7 @@ func (s *pluginServer) resolveAttachmentRequestScope(w http.ResponseWriter, r *h
 	}
 	if isClientTarget(selector) {
 		if err := s.authorizeClientTarget(r.Context(), r.Header, accountID, selector); err != nil {
-			writeAuthorizationError(w, err)
+			writeClientTerminalError(w, err)
 			return agentScope{}, "", false
 		}
 		return normalizeAgentScope(selector, accountID), "", true

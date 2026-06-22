@@ -36,11 +36,25 @@ var newClientTerminalHTTPClient = func() *http.Client {
 
 var resolveClientDeviceAPIAuthToken = clientDeviceAPIAuthToken
 
+type clientTerminalStatusError struct {
+	label  string
+	status int
+	body   string
+}
+
+func (e clientTerminalStatusError) Error() string {
+	label := strings.TrimSpace(e.label)
+	if label == "" {
+		label = "client terminal"
+	}
+	return fmt.Sprintf("%s returned %d: %s", label, e.status, e.body)
+}
+
 func (s *pluginServer) handleClientWorkspace(w http.ResponseWriter, r *http.Request, accountID, selector string, cols, rows int) {
 	log.Printf("client terminal workspace request: method=%s selector=%s account_present=%t cols=%d rows=%d", r.Method, selector, accountID != "", cols, rows)
 	if err := s.authorizeClientTarget(r.Context(), r.Header, accountID, selector); err != nil {
 		log.Printf("client terminal workspace auth failed: method=%s selector=%s account_present=%t err=%v", r.Method, selector, accountID != "", err)
-		writeAuthorizationError(w, err)
+		writeClientTerminalError(w, err)
 		return
 	}
 	switch r.Method {
@@ -48,7 +62,7 @@ func (s *pluginServer) handleClientWorkspace(w http.ResponseWriter, r *http.Requ
 		state, err := s.clientWorkspaceState(r.Context(), r.Header, selector, cols, rows)
 		if err != nil {
 			log.Printf("client terminal workspace state failed: selector=%s err=%v", selector, err)
-			writeAuthorizationError(w, err)
+			writeClientTerminalError(w, err)
 			return
 		}
 		state.ServerRevision = s.serverRevision
@@ -65,7 +79,7 @@ func (s *pluginServer) handleClientWorkspace(w http.ResponseWriter, r *http.Requ
 		state, err := s.clientWorkspaceAction(r.Context(), r.Header, selector, cols, rows, request)
 		if err != nil {
 			log.Printf("client terminal workspace action failed: selector=%s action=%s err=%v", selector, request.Action, err)
-			writeAuthorizationError(w, err)
+			writeClientTerminalError(w, err)
 			return
 		}
 		state.ServerRevision = s.serverRevision
@@ -81,13 +95,13 @@ func (s *pluginServer) handleClientWorkspaceActivity(w http.ResponseWriter, r *h
 	log.Printf("client terminal activity request: method=%s selector=%s account_present=%t cols=%d rows=%d", r.Method, selector, accountID != "", cols, rows)
 	if err := s.authorizeClientTarget(r.Context(), r.Header, accountID, selector); err != nil {
 		log.Printf("client terminal activity auth failed: selector=%s account_present=%t err=%v", selector, accountID != "", err)
-		writeAuthorizationError(w, err)
+		writeClientTerminalError(w, err)
 		return
 	}
 	state, err := s.clientWorkspaceActivity(r.Context(), r.Header, selector, cols, rows)
 	if err != nil {
 		log.Printf("client terminal activity failed: selector=%s err=%v", selector, err)
-		writeAuthorizationError(w, err)
+		writeClientTerminalError(w, err)
 		return
 	}
 	state.ServerRevision = s.serverRevision
@@ -99,20 +113,20 @@ func (s *pluginServer) attachClientPane(w http.ResponseWriter, r *http.Request, 
 	log.Printf("client terminal websocket attach request: selector=%s pane=%s account_present=%t cols=%d rows=%d", selector, paneID, accountID != "", cols, rows)
 	if err := s.authorizeClientTarget(r.Context(), r.Header, accountID, selector); err != nil {
 		log.Printf("client terminal websocket auth failed: selector=%s pane=%s account_present=%t err=%v", selector, paneID, accountID != "", err)
-		writeAuthorizationError(w, err)
+		writeClientTerminalError(w, err)
 		return nil
 	}
 	ticket, authToken, err := s.clientTerminalDialInfo(r.Context(), r.Header, selector)
 	if err != nil {
 		log.Printf("client terminal websocket dial info failed: selector=%s pane=%s err=%v", selector, paneID, err)
-		writeAuthorizationError(w, err)
+		writeClientTerminalError(w, err)
 		return nil
 	}
 	log.Printf("client terminal websocket dial info ready: selector=%s pane=%s client_instance=%s service=%s device_api=%s auth_token_present=%t expires_at=%s", selector, paneID, ticket.ClientInstanceID, ticket.TerminalServiceName, safeURLOrigin(ticket.DeviceAPIURL), authToken != "", ticket.ExpiresAt)
 	targetURL, err := clientTerminalURL(ticket, "/ws")
 	if err != nil {
 		log.Printf("client terminal websocket target url failed: selector=%s pane=%s err=%v", selector, paneID, err)
-		writeAuthorizationError(w, err)
+		writeClientTerminalError(w, err)
 		return nil
 	}
 	query := targetURL.Query()
@@ -263,7 +277,32 @@ func clientTerminalResponseError(resp *http.Response, label string) error {
 		return fmt.Errorf("%s returned no response", label)
 	}
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	return fmt.Errorf("%s returned %d: %s", label, resp.StatusCode, strings.TrimSpace(string(data)))
+	return clientTerminalStatusError{label: label, status: resp.StatusCode, body: strings.TrimSpace(string(data))}
+}
+
+func writeClientTerminalError(w http.ResponseWriter, err error) {
+	if err == nil {
+		return
+	}
+	var statusErr clientTerminalStatusError
+	if errors.As(err, &statusErr) {
+		if statusErr.status == http.StatusUnauthorized || statusErr.status == http.StatusForbidden {
+			http.Error(w, errInstanceForbidden.Error(), statusErr.status)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	switch {
+	case errors.Is(err, errInstanceForbidden):
+		http.Error(w, err.Error(), http.StatusForbidden)
+	case strings.Contains(err.Error(), "account id is required"):
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+	case strings.Contains(err.Error(), "invalid client target"):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	default:
+		http.Error(w, err.Error(), http.StatusBadGateway)
+	}
 }
 
 func (s *pluginServer) clientTerminalDialInfo(ctx context.Context, header http.Header, selector string) (clientTerminalTicket, string, error) {
@@ -297,8 +336,9 @@ func (s *pluginServer) clientTerminalDialInfo(ctx context.Context, header http.H
 	log.Printf("client terminal dial info ticket response: client_id=%s status=%d", clientID, resp.StatusCode)
 	if resp.StatusCode != http.StatusOK {
 		payload, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		log.Printf("client terminal dial info ticket non-200: client_id=%s status=%d body=%s", clientID, resp.StatusCode, strings.TrimSpace(string(payload)))
-		return clientTerminalTicket{}, "", fmt.Errorf("client terminal ticket failed: %d %s", resp.StatusCode, strings.TrimSpace(string(payload)))
+		body := strings.TrimSpace(string(payload))
+		log.Printf("client terminal dial info ticket non-200: client_id=%s status=%d body=%s", clientID, resp.StatusCode, body)
+		return clientTerminalTicket{}, "", clientTerminalStatusError{label: "client terminal ticket", status: resp.StatusCode, body: body}
 	}
 	var ticket clientTerminalTicket
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&ticket); err != nil {
@@ -421,7 +461,14 @@ func readWebSocketDialFailure(err error, response *http.Response) websocketDialF
 		if failure.body != "" {
 			failure.message += "; target_body=" + failure.body
 		}
-		failure.userMessage = fmt.Sprintf("Client terminal connection failed. Please restart the desktop client or turn LightOS access off and on again. (target_status=%d)", failure.status)
+		if failure.status == http.StatusUnauthorized || failure.status == http.StatusForbidden {
+			failure.userMessage = errInstanceForbidden.Error()
+			failure.code = "client_terminal_forbidden"
+		} else if failure.body != "" {
+			failure.userMessage = fmt.Sprintf("Client terminal connection failed (target_status=%d): %s", failure.status, failure.body)
+		} else {
+			failure.userMessage = fmt.Sprintf("Client terminal connection failed. Please restart the desktop client or turn LightOS access off and on again. (target_status=%d)", failure.status)
+		}
 		if failure.status == http.StatusBadGateway {
 			failure.code = "client_terminal_service_unavailable"
 		}

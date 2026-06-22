@@ -690,10 +690,15 @@ func (s *pluginServer) handleAgentStartupError(w http.ResponseWriter, r *http.Re
 	}
 	if isClientTarget(selector) {
 		if err := s.authorizeClientTarget(r.Context(), r.Header, accountID, selector); err != nil {
-			writeAuthorizationError(w, err)
+			writeClientTerminalError(w, err)
 			return
 		}
-		writeAuthorizationError(w, errClientTerminalProxyUnavailable)
+		cols, rows := parseTerminalSize(r.URL.Query().Get("cols"), r.URL.Query().Get("rows"))
+		if _, err := s.clientWorkspaceActivity(r.Context(), r.Header, selector, cols, rows); err != nil {
+			writeJSON(w, agentStartupErrorResponse{Error: err.Error()})
+			return
+		}
+		writeJSON(w, agentStartupErrorResponse{})
 		return
 	}
 	if err := s.authorizeInstanceSelector(r.Context(), selector); err != nil {

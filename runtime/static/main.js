@@ -12256,6 +12256,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                   message: message.message || "",
                 });
                 if (message.retryable === true && !/pane not found/i.test(String(message.message || ""))) {
+                  showSessionStartupError(session, message.message || "Client terminal connection failed.");
                   detachSessionSocket(session, currentSocket, { connection: "closed" });
                   currentSocket.close();
                   scheduleReconnect(session, { immediate: true });
@@ -12338,7 +12339,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       }
       if (!session.startupErrorShown) {
         session.startupErrorShown = true;
-        showSessionStartupError(session, "WebSocket closed before terminal attached.");
+        showSessionStartupError(session, event.reason || "WebSocket closed before terminal attached.");
       }
       scheduleReconnect(session);
     });
