@@ -562,7 +562,7 @@ func TestRuntimeMobileDoubleTapReminderSetting(t *testing.T) {
 			`let mobileDoubleTapReminderEnabled = true;`,
 			`mobileDoubleTapReminderEnabled = state?.mobile_double_tap_reminder_enabled !== false;`,
 			`body: JSON.stringify({ mobile_double_tap_reminder_enabled: enabled }),`,
-			`if (!mobileDoubleTapReminderEnabled || !mobileLayoutQuery?.matches) {`,
+			`if (!mobileDoubleTapReminderEnabled || !requiresTouchKeyboardDoubleTap()) {`,
 			`const activePaneDirectoryLabel = () => {`,
 			`: activePaneDirectoryLabel() || String(currentTab()?.label || "终端").trim() || "终端";`,
 			`settingsMobileDoubleTapReminderToggle?.addEventListener("change", () => {`,
@@ -591,9 +591,10 @@ func TestRuntimeTouchKeyboardRequiresDoubleTapOnWideTouchScreens(t *testing.T) {
 	source := string(data)
 
 	wantSnippets := []string{
-		`const requiresTouchKeyboardDoubleTap = () => isMobileLayout() || isTouchShortcutLayout();`,
+		`const requiresTouchKeyboardDoubleTap = () => isTouchShortcutLayout();`,
 		`if (requiresTouchKeyboardDoubleTap() && performance.now() > Number(session?.allowMobileKeyboardFocusUntil || 0)) {`,
 		`if (requiresTouchKeyboardDoubleTap()) {`,
+		`session.allowMobileKeyboardFocusUntil = performance.now() + mobileKeyboardFocusAllowWindowMs;`,
 		`if (!requiresTouchKeyboardDoubleTap() || event.touches.length !== 1) {`,
 		`if (!requiresTouchKeyboardDoubleTap() || !mobileTapTouchState) {`,
 	}
@@ -1045,6 +1046,36 @@ func TestRuntimeTouchShortcutLayoutKeepsDesktopPCHidden(t *testing.T) {
 	for _, want := range styleWantSnippets {
 		if !strings.Contains(styleSource, want) {
 			t.Fatalf("runtime touch shortcut CSS guard missing %q", want)
+		}
+	}
+}
+
+func TestRuntimeSmallDesktopWindowKeepsTabBar(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/style.css")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/style.css) error = %v", err)
+	}
+	source := string(data)
+	want := `@media (max-width: 640px) and (hover: none) and (pointer: coarse) {`
+	if !strings.Contains(source, want) {
+		t.Fatalf("runtime small-window tab bar guard missing %q", want)
+	}
+	guardedHeaderCSS := sourceBetween(t, source, want, `@media (max-width: 640px) {`)
+	for _, want := range []string{
+		`.tabs {` + "\n" + `    display: none;`,
+		`.mobile-active-tab-title {` + "\n" + `    display: block;`,
+	} {
+		if !strings.Contains(guardedHeaderCSS, want) {
+			t.Fatalf("runtime small-window tab bar guard block missing %q", want)
+		}
+	}
+	narrowCSS := sourceBetween(t, source, `@media (max-width: 640px) {`, `@media (hover: none), (pointer: coarse) {`)
+	for _, forbidden := range []string{
+		`.tabs {` + "\n" + `    display: none;`,
+		`.mobile-active-tab-title {` + "\n" + `    display: block;`,
+	} {
+		if strings.Contains(narrowCSS, forbidden) {
+			t.Fatalf("runtime desktop small-window CSS must not force mobile tab header with %q", forbidden)
 		}
 	}
 }

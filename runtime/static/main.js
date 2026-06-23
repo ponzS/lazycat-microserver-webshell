@@ -5281,7 +5281,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const shouldShowMobileKeyboardFocusPrompt = () => {
-    if (!mobileDoubleTapReminderEnabled || !mobileLayoutQuery?.matches) {
+    if (!mobileDoubleTapReminderEnabled || !requiresTouchKeyboardDoubleTap()) {
       return false;
     }
     const tab = currentTab();
@@ -5303,7 +5303,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
 
   const isMobileLayout = () => Boolean(mobileLayoutQuery?.matches);
   const isTouchShortcutLayout = () => Boolean(touchShortcutLayoutQuery?.matches);
-  const requiresTouchKeyboardDoubleTap = () => isMobileLayout() || isTouchShortcutLayout();
+  const requiresTouchKeyboardDoubleTap = () => isTouchShortcutLayout();
 
   const isMobileCustomSelectLayout = () => isMobileLayout() || isTouchShortcutLayout();
   const shouldPreventMobileViewportZoom = () => isMobileLayout() || isTouchShortcutLayout() || usesMobileViewportInsets();
@@ -7601,6 +7601,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     host.addEventListener("pointerdown", (event) => {
       if (event.pointerType === "touch" || event.pointerType === "pen") {
         return;
+      }
+      if (requiresTouchKeyboardDoubleTap()) {
+        session.allowMobileKeyboardFocusUntil = performance.now() + mobileKeyboardFocusAllowWindowMs;
       }
       window.requestAnimationFrame(() => focusTerminalInput(session));
     });
