@@ -4244,7 +4244,7 @@ body.is-tab-overview-dragging {
   display: none;
 }
 
-@media (max-width: 640px) {
+@media (max-width: 640px) and (hover: none) and (pointer: coarse) {
   .tabs-bar {
     gap: 6px;
     height: calc(42px + var(--lzc-safe-area-inset-top));
@@ -4299,7 +4299,9 @@ body.is-tab-overview-dragging {
   .attachment-toggle {
     color: var(--chrome-text);
   }
+}
 
+@media (max-width: 640px) {
   .attachment-upload-panel {
     top: 10px;
     right: max(10px, var(--lzc-safe-area-inset-right));
