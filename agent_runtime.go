@@ -907,7 +907,7 @@ func handleAgentAttachControlMessage(conn *websocket.Conn, writeMu *sync.Mutex, 
 	}
 	switch message.Type {
 	case "input":
-		if message.Data != "" && !inputBlocked {
+		if message.Data != "" && (!inputBlocked || message.Generated) {
 			frameType := agentFrameInput
 			if message.Generated {
 				frameType = agentFrameGeneratedInput
