@@ -1380,6 +1380,9 @@ const (
 	maxPendingTerminalQuery           = 64
 	primaryDeviceAttributesResponse   = "\x1b[?1;2c"
 	secondaryDeviceAttributesResponse = "\x1b[>0;0;0c"
+	terminalForegroundColorResponse   = "\x1b]10;rgb:0000/cdcd/0000\a"
+	terminalBackgroundColorResponse   = "\x1b]11;rgb:0000/0000/0000\a"
+	terminalCursorColorResponse       = "\x1b]12;rgb:0000/cdcd/0000\a"
 	generatedCursorReportWindow       = 2 * time.Second
 )
 
@@ -1677,6 +1680,27 @@ func (p *terminalPane) filterTerminalQueryOutput(data []byte) []byte {
 			}
 			output = append(output, sequence...)
 			buffer = buffer[final+1:]
+		case ']':
+			end, ok := findOSCTerminator(buffer)
+			if !ok {
+				if len(buffer) <= maxPendingTerminalQuery {
+					p.setTerminalQueryPending(buffer)
+					return output
+				}
+				output = append(output, buffer[0])
+				buffer = buffer[1:]
+				continue
+			}
+			sequence := buffer[:end]
+			if response, ok := terminalOSCQueryResponse(sequence); ok {
+				responseData := []byte(response)
+				p.expectGeneratedInput(responseData, 1)
+				_ = p.writeGeneratedInput(responseData)
+				buffer = buffer[end:]
+				continue
+			}
+			output = append(output, sequence...)
+			buffer = buffer[end:]
 		case 'Z':
 			responseData := []byte(primaryDeviceAttributesResponse)
 			p.expectGeneratedInput(responseData, 1)
@@ -1696,6 +1720,23 @@ func (p *terminalPane) setTerminalQueryPending(data []byte) {
 	p.mu.Unlock()
 }
 
+func findOSCTerminator(sequence []byte) (int, bool) {
+	if len(sequence) < 2 || sequence[0] != '\x1b' || sequence[1] != ']' {
+		return -1, false
+	}
+	for index := 2; index < len(sequence); index++ {
+		switch sequence[index] {
+		case '\a':
+			return index + 1, true
+		case '\x1b':
+			if index+1 < len(sequence) && sequence[index+1] == '\\' {
+				return index + 2, true
+			}
+		}
+	}
+	return -1, false
+}
+
 func terminalQueryResponse(sequence []byte) (string, bool) {
 	if len(sequence) < 3 || sequence[0] != '\x1b' || sequence[1] != '[' || sequence[len(sequence)-1] != 'c' {
 		return "", false
@@ -1706,6 +1747,31 @@ func terminalQueryResponse(sequence []byte) (string, bool) {
 		return primaryDeviceAttributesResponse, true
 	case ">", ">0":
 		return secondaryDeviceAttributesResponse, true
+	default:
+		return "", false
+	}
+}
+
+func terminalOSCQueryResponse(sequence []byte) (string, bool) {
+	if len(sequence) < len("\x1b]10;?\a") || sequence[0] != '\x1b' || sequence[1] != ']' {
+		return "", false
+	}
+	terminator := 0
+	switch {
+	case sequence[len(sequence)-1] == '\a':
+		terminator = len(sequence) - 1
+	case len(sequence) >= 2 && sequence[len(sequence)-2] == '\x1b' && sequence[len(sequence)-1] == '\\':
+		terminator = len(sequence) - 2
+	default:
+		return "", false
+	}
+	switch string(sequence[2:terminator]) {
+	case "10;?":
+		return terminalForegroundColorResponse, true
+	case "11;?":
+		return terminalBackgroundColorResponse, true
+	case "12;?":
+		return terminalCursorColorResponse, true
 	default:
 		return "", false
 	}
@@ -1871,6 +1937,14 @@ func (p *terminalPane) writeInput(data []byte) error {
 }
 
 func (p *terminalPane) writePTYInput(data []byte) error {
+	return p.writePTYInputWithOptions(data, false)
+}
+
+func (p *terminalPane) writeGeneratedPTYInput(data []byte) error {
+	return p.writePTYInputWithOptions(data, true)
+}
+
+func (p *terminalPane) writePTYInputWithOptions(data []byte, ignoreInputBlockers bool) error {
 	if len(data) == 0 {
 		return nil
 	}
@@ -1879,7 +1953,7 @@ func (p *terminalPane) writePTYInput(data []byte) error {
 	inputBlocked := len(p.inputBlockers) > 0
 	exited := p.exited
 	p.mu.Unlock()
-	if inputBlocked {
+	if inputBlocked && !ignoreInputBlockers {
 		return nil
 	}
 	if exited || ptyFile == nil {
@@ -1914,7 +1988,7 @@ func (p *terminalPane) writeGeneratedInput(data []byte) error {
 		return nil
 	}
 	p.addGeneratedEchoFilter(data)
-	return p.writePTYInput(data)
+	return p.writeGeneratedPTYInput(data)
 }
 
 func (p *terminalPane) setInputBlocked(blocked bool) {
