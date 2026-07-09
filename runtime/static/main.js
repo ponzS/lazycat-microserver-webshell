@@ -217,6 +217,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const touchShortcutRepeatIntervalMs = 80;
   const touchSelectionMoveThresholdPx = 7;
   const touchSelectionLongPressDelayMs = 450;
+  const mobileSelectionAutoScrollEdgePx = 34;
+  const mobileSelectionAutoScrollIntervalMs = 50;
+  const mobileSelectionAutoScrollMaxLines = 4;
   const mobileKeyboardDoubleTapDelayMs = 320;
   const mobileKeyboardFocusAllowWindowMs = 600;
   const mobileKeyboardFocusPrompt = "双击屏幕开启键盘输入";
@@ -11139,6 +11142,100 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   };
 
+  const mobileSelectionAutoScrollIntent = (session, clientY) => {
+    if (session?.closed || !isMobileLayout()) {
+      return null;
+    }
+    const term = session?.term;
+    const canvas = term?.canvas || term?.element?.querySelector?.("canvas");
+    const metrics = term?.renderer?.getMetrics?.();
+    const y = Number(clientY);
+    if (!term || !canvas || !metrics?.height || !Number.isFinite(y)) {
+      return null;
+    }
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+    const edge = Math.max(
+      1,
+      Math.min(rect.height / 3, Math.max(mobileSelectionAutoScrollEdgePx, metrics.height * 1.5)),
+    );
+    let direction = 0;
+    let distance = 0;
+    if (y < rect.top + edge) {
+      direction = -1;
+      distance = rect.top + edge - y;
+    } else if (y > rect.bottom - edge) {
+      direction = 1;
+      distance = y - (rect.bottom - edge);
+    }
+    if (!direction) {
+      return null;
+    }
+    const lines = Math.max(
+      1,
+      Math.min(mobileSelectionAutoScrollMaxLines, Math.ceil(distance / Math.max(1, metrics.height))),
+    );
+    return { direction, lines };
+  };
+
+  const stopMobileSelectionAutoScroll = (state) => {
+    if (!state) {
+      return;
+    }
+    if (state.autoScrollTimer) {
+      window.clearInterval(state.autoScrollTimer);
+      state.autoScrollTimer = 0;
+    }
+    state.autoScrollDirection = 0;
+    state.autoScrollApplyPoint = null;
+  };
+
+  const terminalViewportLine = (term) => {
+    const value = Math.floor(Number(term?.getViewportY?.() ?? term?.viewportY ?? 0));
+    return Number.isFinite(value) ? value : 0;
+  };
+
+  const updateMobileSelectionAutoScroll = (session, state, applyPoint) => {
+    if (!state || typeof applyPoint !== "function") {
+      return;
+    }
+    state.autoScrollApplyPoint = applyPoint;
+    const intent = mobileSelectionAutoScrollIntent(session, state.lastY);
+    if (!intent) {
+      stopMobileSelectionAutoScroll(state);
+      return;
+    }
+    state.autoScrollDirection = intent.direction;
+    if (state.autoScrollTimer) {
+      return;
+    }
+    state.autoScrollTimer = window.setInterval(() => {
+      const nextIntent = mobileSelectionAutoScrollIntent(session, state.lastY);
+      if (!nextIntent || typeof state.autoScrollApplyPoint !== "function") {
+        stopMobileSelectionAutoScroll(state);
+        return;
+      }
+      const term = session?.term;
+      const before = terminalViewportLine(term);
+      suppressTerminalTouchScroll(session);
+      try {
+        term?.scrollLines?.(nextIntent.direction * nextIntent.lines);
+      } catch (error) {
+      }
+      const applied = state.autoScrollApplyPoint({ clientX: state.lastX, clientY: state.lastY });
+      updateMobileSelectionHandles(session);
+      if (applied === false) {
+        stopMobileSelectionAutoScroll(state);
+        return;
+      }
+      if (terminalViewportLine(term) === before) {
+        stopMobileSelectionAutoScroll(state);
+      }
+    }, mobileSelectionAutoScrollIntervalMs);
+  };
+
   const currentSelectionCells = (session) => {
     const manager = session?.term?.selectionManager;
     if (!manager?.selectionStart || !manager?.selectionEnd) {
@@ -11203,54 +11300,72 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     const selection = currentSelectionCells(session);
     const point = terminalCellFromPoint(session, touch.clientX, touch.clientY);
     if (!selection || !point) {
-      return;
+      return false;
     }
     if (role === "start") {
       const nextStart = compareSelectionCells(point, selection.end) >= 0
         ? previousSelectionCell(session, selection.end)
         : point;
       applyTerminalSelection(session, nextStart, selection.end);
-      return;
+      return true;
     }
     const nextEnd = compareSelectionCells(point, selection.start) <= 0
       ? nextSelectionCell(session, selection.start)
       : point;
     applyTerminalSelection(session, selection.start, nextEnd);
+    return true;
   };
 
   const bindMobileSelectionHandle = (session, handle, role) => {
-    let dragging = false;
+    let dragState = null;
     handle.addEventListener("touchstart", (event) => {
       if (!isMobileLayout() || event.touches.length !== 1) {
         return;
       }
-      dragging = true;
+      stopMobileSelectionAutoScroll(dragState);
+      const touch = event.touches[0];
+      dragState = {
+        lastX: touch.clientX,
+        lastY: touch.clientY,
+        autoScrollTimer: 0,
+        autoScrollDirection: 0,
+        autoScrollApplyPoint: null,
+      };
       suppressTerminalTouchScroll(session);
       stopMobileSelectionEvent(event);
     }, { passive: false });
     handle.addEventListener("touchmove", (event) => {
-      if (!dragging) {
+      if (!dragState) {
         return;
       }
       const touch = primaryTouch(event);
       if (!touch) {
         return;
       }
+      dragState.lastX = touch.clientX;
+      dragState.lastY = touch.clientY;
       suppressTerminalTouchScroll(session);
       stopMobileSelectionEvent(event);
-      updateSelectionFromHandleTouch(session, role, touch);
+      if (updateSelectionFromHandleTouch(session, role, touch)) {
+        updateMobileSelectionAutoScroll(session, dragState, (point) => updateSelectionFromHandleTouch(session, role, point));
+      }
     }, { passive: false });
     const finish = (event) => {
-      if (!dragging) {
+      if (!dragState) {
         return;
       }
-      dragging = false;
+      stopMobileSelectionAutoScroll(dragState);
+      dragState = null;
       suppressTerminalTouchScroll(session);
       stopMobileSelectionEvent(event);
       updateMobileSelectionHandles(session);
     };
     handle.addEventListener("touchend", finish, { passive: false });
     handle.addEventListener("touchcancel", finish, { passive: false });
+    addSessionCleanup(session, () => {
+      stopMobileSelectionAutoScroll(dragState);
+      dragState = null;
+    });
   };
 
   const installMobileTouchSelection = (session) => {
@@ -11276,9 +11391,24 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     };
     const resetTouchSelectionState = (state = touchState) => {
       clearTouchSelectionTimer(state);
+      stopMobileSelectionAutoScroll(state);
       if (!state || touchState === state) {
         touchState = null;
       }
+    };
+    const updateTouchSelectionFromPoint = (state, point) => {
+      if (!state || !point) {
+        return false;
+      }
+      const current = terminalCellFromPoint(session, point.clientX, point.clientY);
+      if (!current) {
+        return false;
+      }
+      const currentTabForSession = tabs.get(session.tabId);
+      setActivePane(currentTabForSession, session.id, { focus: false });
+      session.selectAllBufferActive = false;
+      applyTerminalSelection(session, state.startCell, current);
+      return true;
     };
     const beginTouchSelection = (state, touch = null) => {
       if (!state || touchState !== state || state.selecting || !isMobileLayout() || session.closed) {
@@ -11328,6 +11458,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         lastY: touch.clientY,
         selecting: false,
         longPressTimer: 0,
+        autoScrollTimer: 0,
+        autoScrollDirection: 0,
+        autoScrollApplyPoint: null,
       };
       const state = touchState;
       state.longPressTimer = window.setTimeout(() => {
@@ -11357,14 +11490,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       }
       suppressTerminalTouchScroll(session);
       stopMobileSelectionEvent(event);
-      const current = terminalCellFromPoint(session, touch.clientX, touch.clientY);
-      if (!current) {
-        return;
+      if (updateTouchSelectionFromPoint(state, touch)) {
+        updateMobileSelectionAutoScroll(session, state, (point) => updateTouchSelectionFromPoint(state, point));
       }
-      const currentTabForSession = tabs.get(session.tabId);
-      setActivePane(currentTabForSession, session.id, { focus: false });
-      session.selectAllBufferActive = false;
-      applyTerminalSelection(session, state.startCell, current);
     }, { capture: true, passive: false });
 
     const finishTouchSelection = (event) => {
