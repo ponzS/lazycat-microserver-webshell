@@ -217,6 +217,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const touchShortcutRepeatIntervalMs = 80;
   const touchSelectionMoveThresholdPx = 7;
   const touchSelectionLongPressDelayMs = 450;
+  const touchContextMenuSuppressWindowMs = 1400;
+  const touchContextMenuSuppressDistancePx = 32;
   const mobileSelectionAutoScrollEdgePx = 34;
   const mobileSelectionAutoScrollIntervalMs = 50;
   const mobileSelectionAutoScrollMaxLines = 4;
@@ -468,6 +470,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   let nextTabSeq = 1;
   let nextPaneSeq = 1;
   let contextTarget = null;
+  let lastTerminalTouchContextMenuCandidate = null;
   let toastTimer = 0;
   let activeTheme = themes.find((theme) => theme.id === window.localStorage.getItem(themeStorageKey)) || themes[0];
   let uploadedFonts = [];
@@ -5346,10 +5349,44 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
 
   const isMobileLayout = () => Boolean(mobileLayoutQuery?.matches);
   const isTouchShortcutLayout = () => Boolean(touchShortcutLayoutQuery?.matches);
+  const isTouchSelectionLayout = () => isMobileLayout() || isTouchShortcutLayout();
   const requiresTouchKeyboardDoubleTap = () => isTouchShortcutLayout();
 
   const isMobileCustomSelectLayout = () => isMobileLayout() || isTouchShortcutLayout();
   const shouldPreventMobileViewportZoom = () => isMobileLayout() || isTouchShortcutLayout() || usesMobileViewportInsets();
+
+  const markTerminalTouchContextMenuCandidate = (touch) => {
+    if (!touch) {
+      return;
+    }
+    lastTerminalTouchContextMenuCandidate = {
+      x: touch.clientX,
+      y: touch.clientY,
+      at: performance.now(),
+    };
+  };
+
+  const isRecentTerminalTouchContextMenu = (event) => {
+    const pointerType = String(event?.pointerType || "");
+    if (pointerType && pointerType !== "mouse") {
+      return true;
+    }
+    if (event?.sourceCapabilities?.firesTouchEvents) {
+      return true;
+    }
+    const candidate = lastTerminalTouchContextMenuCandidate;
+    if (!candidate) {
+      return false;
+    }
+    const elapsed = performance.now() - candidate.at;
+    if (elapsed < 0 || elapsed > touchContextMenuSuppressWindowMs) {
+      return false;
+    }
+    return Math.hypot(event.clientX - candidate.x, event.clientY - candidate.y) <= touchContextMenuSuppressDistancePx;
+  };
+
+  const shouldSuppressTerminalContextMenu = (event) =>
+    isMobileLayout() || (isTouchSelectionLayout() && isRecentTerminalTouchContextMenu(event));
 
   const preventMobileViewportZoom = (event) => {
     if (!shouldPreventMobileViewportZoom()) {
@@ -9937,7 +9974,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     syncMobileMenuSelectionState();
     updateMobileSelectionHandles(session);
     if (
-      !isMobileLayout() ||
+      !isTouchSelectionLayout() ||
       !hasActiveTerminalSelection(session) ||
       isTabOverviewOpen() ||
       (mobileActionSheet && !mobileActionSheet.hidden)
@@ -9970,7 +10007,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     const position = term?.getSelectionPosition?.();
     const canvas = term?.canvas || term?.element?.querySelector?.("canvas");
     const metrics = term?.renderer?.getMetrics?.();
-    if (!overlay || !term?.hasSelection?.() || !position || !canvas || !metrics?.width || !metrics?.height || !isMobileLayout()) {
+    if (!overlay || !term?.hasSelection?.() || !position || !canvas || !metrics?.width || !metrics?.height || !isTouchSelectionLayout()) {
       setMobileSelectionOverlayVisible(session, false);
       return;
     }
@@ -11143,7 +11180,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const mobileSelectionAutoScrollIntent = (session, clientY) => {
-    if (session?.closed || !isMobileLayout()) {
+    if (session?.closed || !isTouchSelectionLayout()) {
       return null;
     }
     const term = session?.term;
@@ -11319,7 +11356,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const bindMobileSelectionHandle = (session, handle, role) => {
     let dragState = null;
     handle.addEventListener("touchstart", (event) => {
-      if (!isMobileLayout() || event.touches.length !== 1) {
+      if (!isTouchSelectionLayout() || event.touches.length !== 1) {
         return;
       }
       stopMobileSelectionAutoScroll(dragState);
@@ -11411,7 +11448,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return true;
     };
     const beginTouchSelection = (state, touch = null) => {
-      if (!state || touchState !== state || state.selecting || !isMobileLayout() || session.closed) {
+      if (!state || touchState !== state || state.selecting || !isTouchSelectionLayout() || session.closed) {
         return false;
       }
       const current = touch
@@ -11434,7 +11471,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.shellEl.addEventListener("touchstart", (event) => {
       resetTouchSelectionState();
       if (
-        !isMobileLayout()
+        !isTouchSelectionLayout()
         || event.touches.length !== 1
         || terminalMouseTrackingState(session)
         || (mobileActionSheet && !mobileActionSheet.hidden)
@@ -11446,6 +11483,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         return;
       }
       const touch = event.touches[0];
+      markTerminalTouchContextMenuCandidate(touch);
       const startCell = terminalCellFromPoint(session, touch.clientX, touch.clientY);
       if (!startCell) {
         return;
@@ -12978,7 +13016,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       setActivePane(current, session.id, { focus: false });
     });
     shellEl.addEventListener("contextmenu", (event) => {
-      if (!isMobileLayout()) {
+      if (!shouldSuppressTerminalContextMenu(event)) {
         return;
       }
       event.preventDefault();
@@ -12991,7 +13029,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       event.preventDefault();
       const current = tabs.get(session.tabId);
       setActivePane(current, session.id, { focus: false });
-      if (isMobileLayout()) {
+      if (shouldSuppressTerminalContextMenu(event)) {
         closeContextMenu();
         return;
       }

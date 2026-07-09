@@ -5888,6 +5888,71 @@ body.attachment-browser-open .mobile-shortcuts {
     -webkit-line-clamp: 2;
   }
 
+  .terminal-host,
+  .terminal-host canvas {
+    -webkit-touch-callout: none;
+  }
+
+  .mobile-selection-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 7;
+    display: block;
+    pointer-events: none;
+  }
+
+  .mobile-selection-overlay[hidden] {
+    display: none;
+  }
+
+  .mobile-selection-handle {
+    position: absolute;
+    width: 32px;
+    min-width: 32px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--accent);
+    cursor: grab;
+    pointer-events: auto;
+    touch-action: none;
+    transform: translateX(-16px);
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .mobile-selection-handle.start {
+    transform: translateX(-16px);
+  }
+
+  .mobile-selection-handle.end {
+    transform: translateX(-16px);
+  }
+
+  .mobile-selection-handle-bar {
+    position: absolute;
+    top: 0;
+    bottom: 10px;
+    left: 50%;
+    width: 2px;
+    border-radius: 999px;
+    background: currentColor;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.32);
+    transform: translateX(-50%);
+  }
+
+  .mobile-selection-handle-knob {
+    position: absolute;
+    bottom: 0;
+    left: 50%;
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--terminal-bg);
+    border-radius: 999px;
+    background: currentColor;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.36);
+    transform: translateX(-50%);
+  }
+
   .selection-sheet,
   .network-banner {
     bottom: var(--mobile-bottom-overlay-offset);
@@ -5900,7 +5965,15 @@ body.attachment-browser-open .mobile-shortcuts {
 
 @media (hover: none) and (min-width: 641px), (pointer: coarse) and (min-width: 641px) {
   .mobile-shortcut-row {
-    justify-content: center;
+    justify-content: flex-start;
+    justify-content: safe center;
+    padding-inline: 8px;
+    box-sizing: border-box;
+    scroll-padding-inline: 8px;
+  }
+
+  .mobile-shortcut-row[data-mobile-shortcut-row="bottom"] button[data-kind="menu"] {
+    margin-left: 8px;
   }
 }
 

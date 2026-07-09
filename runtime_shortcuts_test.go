@@ -1101,7 +1101,11 @@ func TestRuntimeTouchShortcutLayoutKeepsDesktopPCHidden(t *testing.T) {
 		`    display: flex;`,
 		`@media (hover: none) and (min-width: 641px), (pointer: coarse) and (min-width: 641px) {`,
 		`  .mobile-shortcut-row {`,
-		`    justify-content: center;`,
+		`    justify-content: flex-start;`,
+		`    justify-content: safe center;`,
+		`    scroll-padding-inline: 8px;`,
+		`.mobile-shortcut-row[data-mobile-shortcut-row="bottom"] button[data-kind="menu"] {`,
+		`    margin-left: 8px;`,
 		`@media (hover: hover) and (pointer: fine) {`,
 		`  .mobile-shortcuts {`,
 		`    display: none;`,
@@ -1109,6 +1113,60 @@ func TestRuntimeTouchShortcutLayoutKeepsDesktopPCHidden(t *testing.T) {
 	for _, want := range styleWantSnippets {
 		if !strings.Contains(styleSource, want) {
 			t.Fatalf("runtime touch shortcut CSS guard missing %q", want)
+		}
+	}
+}
+
+func TestRuntimeTouchSelectionUsesTouchLayout(t *testing.T) {
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	mainSource := string(mainData)
+	for _, want := range []string{
+		`let lastTerminalTouchContextMenuCandidate = null;`,
+		`const isTouchSelectionLayout = () => isMobileLayout() || isTouchShortcutLayout();`,
+		`const markTerminalTouchContextMenuCandidate = (touch) => {`,
+		`const isRecentTerminalTouchContextMenu = (event) => {`,
+		`const shouldSuppressTerminalContextMenu = (event) =>`,
+		`isMobileLayout() || (isTouchSelectionLayout() && isRecentTerminalTouchContextMenu(event));`,
+		`markTerminalTouchContextMenuCandidate(touch);`,
+		`if (!shouldSuppressTerminalContextMenu(event)) {`,
+		`if (shouldSuppressTerminalContextMenu(event)) {`,
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime touch selection guard missing %q", want)
+		}
+	}
+
+	selectionBody := sourceBetween(t, mainSource, `  const mobileSelectionAutoScrollIntent = (session, clientY) => {`, `  const clearReconnectTimer = (session) => {`)
+	for _, want := range []string{
+		`if (session?.closed || !isTouchSelectionLayout()) {`,
+		`if (!isTouchSelectionLayout() || event.touches.length !== 1) {`,
+		`if (!state || touchState !== state || state.selecting || !isTouchSelectionLayout() || session.closed) {`,
+		`!isTouchSelectionLayout()`,
+	} {
+		if !strings.Contains(selectionBody, want) {
+			t.Fatalf("runtime touch selection body missing %q", want)
+		}
+	}
+	if strings.Contains(selectionBody, `!isMobileLayout()`) {
+		t.Fatal("runtime touch selection body must not restrict long-press selection to narrow mobile layout")
+	}
+
+	styleData, err := os.ReadFile("runtime/static/style.css")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/style.css) error = %v", err)
+	}
+	styleSource := string(styleData)
+	touchStyle := sourceBetween(t, styleSource, "@media (hover: none), (pointer: coarse) {\n  .attachment-browser-backdrop {", `@media (hover: none) and (min-width: 641px), (pointer: coarse) and (min-width: 641px) {`)
+	for _, want := range []string{
+		`.mobile-selection-overlay {` + "\n" + `    position: absolute;`,
+		`.mobile-selection-handle {` + "\n" + `    position: absolute;`,
+		`.mobile-selection-handle-knob {`,
+	} {
+		if !strings.Contains(touchStyle, want) {
+			t.Fatalf("runtime touch CSS must expose mobile selection handles on tablets, missing %q", want)
 		}
 	}
 }
