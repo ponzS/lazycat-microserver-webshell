@@ -10762,6 +10762,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     let touchStartX = 0;
     let touchStartY = 0;
     let touchMoved = false;
+    let touchScrollRow = null;
+    let touchScrollStartLeft = 0;
+    let touchHorizontalScroll = false;
     let shortcutSession = null;
     let suppressNextClick = false;
     let repeatDelayTimer = 0;
@@ -10812,18 +10815,36 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       touchStartX = 0;
       touchStartY = 0;
       touchMoved = false;
+      touchScrollRow = null;
+      touchScrollStartLeft = 0;
+      touchHorizontalScroll = false;
     };
 
     const updateTouchMoved = (clientX, clientY) => {
-      if (touchMoved || !Number.isFinite(clientX) || !Number.isFinite(clientY)) {
+      if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) {
         return;
       }
+      const dx = clientX - touchStartX;
+      const dy = clientY - touchStartY;
+      const absX = Math.abs(dx);
+      const absY = Math.abs(dy);
       if (
-        Math.abs(clientX - touchStartX) >= touchShortcutMoveThresholdPx ||
-        Math.abs(clientY - touchStartY) >= touchShortcutMoveThresholdPx
+        !touchMoved &&
+        (absX >= touchShortcutMoveThresholdPx || absY >= touchShortcutMoveThresholdPx)
       ) {
         touchMoved = true;
         stopRepeat();
+      }
+      if (
+        touchScrollRow &&
+        !touchHorizontalScroll &&
+        absX >= touchShortcutMoveThresholdPx &&
+        absX > absY
+      ) {
+        touchHorizontalScroll = true;
+      }
+      if (touchHorizontalScroll && touchScrollRow) {
+        touchScrollRow.scrollLeft = touchScrollStartLeft - dx;
       }
     };
 
@@ -10867,6 +10888,15 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       touchMoved = false;
       repeatTriggered = false;
       rememberShortcutSession();
+      if (isMobileTerminalKeyboardActive(shortcutSession)) {
+        const row = button.closest(".mobile-shortcut-row");
+        touchScrollRow = row instanceof HTMLElement ? row : null;
+        touchScrollStartLeft = touchScrollRow?.scrollLeft || 0;
+      } else {
+        touchScrollRow = null;
+        touchScrollStartLeft = 0;
+      }
+      touchHorizontalScroll = false;
       startRepeat();
     }, { passive: false });
 
