@@ -1655,6 +1655,83 @@ func TestRuntimeTerminalMouseTrackingSequences(t *testing.T) {
 	}
 }
 
+func TestRuntimeGrokMouseTrackingPreservesMobileDoubleTapKeyboard(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+
+	detectionStart := strings.Index(source, "const grokExecutableNamePattern =")
+	detectionEnd := strings.Index(source, "const terminalMouseModeEnabled =")
+	if detectionStart < 0 || detectionEnd <= detectionStart {
+		t.Fatal("runtime Grok terminal detection guard is missing")
+	}
+	detection := source[detectionStart:detectionEnd]
+	for _, want := range []string{
+		`const grokExecutableNamePattern = /^grok(?:-\d+(?:\.\d+){1,3})?$/i;`,
+		`const isGrokTerminalSession = (session) => {`,
+		`isGrokExecutableToken(session?.command)`,
+		`isOfficialGrokEntrypoint(commandTokens[0])`,
+		`["node", "nodejs", "bun", "deno"].includes(launcher)`,
+		`String(session?.title || "").trim().toLowerCase() === "grok"`,
+	} {
+		if !strings.Contains(detection, want) {
+			t.Fatalf("runtime Grok terminal detection missing %q", want)
+		}
+	}
+	if strings.Contains(detection, `.includes("grok")`) {
+		t.Fatal("runtime Grok terminal detection must not use a broad substring match")
+	}
+
+	focusStart := strings.Index(source, "const finishGrokTouchKeyboardTap =")
+	if focusStart < 0 {
+		t.Fatal("runtime Grok touch keyboard focus guard is missing")
+	}
+	focusEnd := strings.Index(source[focusStart:], "const handleMouseDown =")
+	if focusEnd < 0 {
+		t.Fatal("runtime Grok touch keyboard focus guard has no bounded end")
+	}
+	focusBranch := source[focusStart : focusStart+focusEnd]
+	for _, want := range []string{
+		`event.type === "touchend"`,
+		`Math.abs(touch.clientX - grokTouchKeyboardState.startX) < touchShortcutMoveThresholdPx`,
+		`Math.abs(touch.clientY - grokTouchKeyboardState.startY) < touchShortcutMoveThresholdPx`,
+		`now - grokTouchKeyboardState.startedAt <= mobileKeyboardDoubleTapDelayMs`,
+		`now - previousTapAt <= mobileKeyboardDoubleTapDelayMs`,
+		`Math.hypot(dx, dy) < touchShortcutMoveThresholdPx * 2`,
+		`isGrokTerminalSession(session)`,
+		`terminalMouseTrackingState(session)`,
+		`sendMouseSequence(mouseEvent, "press", 0);`,
+		`sendMouseSequence(mouseEvent, "release", 0);`,
+		`resetGrokTouchKeyboardState(true);`,
+		`session.allowMobileKeyboardFocusUntil = now + mobileKeyboardFocusAllowWindowMs;`,
+		`focusTerminalInput(session);`,
+	} {
+		if !strings.Contains(focusBranch, want) {
+			t.Fatalf("runtime Grok touch keyboard focus missing %q", want)
+		}
+	}
+	if strings.Contains(focusBranch, "requestAnimationFrame") {
+		t.Fatal("runtime Grok touch keyboard focus must stay synchronous with touchend")
+	}
+	for _, want := range []string{
+		`touchMouseState.deferredClick = requiresTouchKeyboardDoubleTap() && isGrokTerminalSession(session);`,
+		`if (touchMouseState.deferredClick) {`,
+		`session.allowMobileKeyboardFocusUntil = 0;`,
+		`blurTerminalInput(session);`,
+		`const flushGrokTouchWheel = (event, touch) => {`,
+		`grokTouchKeyboardState.wheelRemainderY += previousY - touch.clientY;`,
+		`sendMouseSequence(wheelEvent, "wheel");`,
+		`flushGrokTouchWheel(event, touch);`,
+		`finishGrokTouchKeyboardTap(event, touch);`,
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime Grok mouse tracking compatibility missing %q", want)
+		}
+	}
+}
+
 func TestRuntimeTerminalInputChunksLargePaste(t *testing.T) {
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {
