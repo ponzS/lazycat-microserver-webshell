@@ -9047,6 +9047,50 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     return { col, row, absoluteRow: scrollback + row - viewportY };
   };
 
+  const stripTerminalCommandTokenQuotes = (value) => {
+    const token = String(value || "").trim();
+    if (token.length < 2) {
+      return token;
+    }
+    const quote = token[0];
+    return (quote === "\"" || quote === "'") && token[token.length - 1] === quote
+      ? token.slice(1, -1)
+      : token;
+  };
+
+  const terminalCommandLineTokens = (value) => (
+    String(value || "").match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || []
+  ).map(stripTerminalCommandTokenQuotes);
+
+  const terminalExecutableName = (value) => {
+    const normalized = stripTerminalCommandTokenQuotes(value).replace(/\\/g, "/");
+    return normalized.slice(normalized.lastIndexOf("/") + 1);
+  };
+
+  const grokExecutableNamePattern = /^grok(?:-\d+(?:\.\d+){1,3})?$/i;
+
+  const isGrokExecutableToken = (value) => grokExecutableNamePattern.test(terminalExecutableName(value));
+
+  const isOfficialGrokEntrypoint = (value) => {
+    const normalized = stripTerminalCommandTokenQuotes(value).replace(/\\/g, "/");
+    return isGrokExecutableToken(normalized) || /(?:^|\/)@xai-official\/grok(?:\/|$)/i.test(normalized);
+  };
+
+  const isGrokTerminalSession = (session) => {
+    if (isGrokExecutableToken(session?.command)) {
+      return true;
+    }
+    const commandTokens = terminalCommandLineTokens(session?.processCommandLine);
+    if (isOfficialGrokEntrypoint(commandTokens[0])) {
+      return true;
+    }
+    const launcher = terminalExecutableName(commandTokens[0]).toLowerCase();
+    if (["node", "nodejs", "bun", "deno"].includes(launcher) && isOfficialGrokEntrypoint(commandTokens[1])) {
+      return true;
+    }
+    return String(session?.title || "").trim().toLowerCase() === "grok";
+  };
+
   const terminalMouseModeEnabled = (term, mode) => {
     try {
       return typeof term?.getMode === "function" && term.getMode(mode, false) === true;
@@ -9228,8 +9272,20 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     const touchMouseState = {
       identifier: -1,
       active: false,
+      deferredClick: false,
       lastX: 0,
       lastY: 0,
+    };
+    const grokTouchKeyboardState = {
+      active: false,
+      startedAt: 0,
+      startX: 0,
+      startY: 0,
+      moved: false,
+      wheelRemainderY: 0,
+      lastTapAt: 0,
+      lastTapX: 0,
+      lastTapY: 0,
     };
 
     const sendMouseSequence = (event, action, button = -1) => {
@@ -9258,6 +9314,33 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       ctrlKey: Boolean(event?.ctrlKey),
     });
 
+    const flushGrokTouchWheel = (event, touch) => {
+      if (!grokTouchKeyboardState.moved || !grokTouchKeyboardState.wheelRemainderY) {
+        return;
+      }
+      const renderer = session.term?.renderer;
+      const rowHeight = Math.max(
+        touchShortcutMoveThresholdPx,
+        Number(renderer?.getMetrics?.().height) || Number(renderer?.charHeight) || 18,
+      );
+      const rawSteps = grokTouchKeyboardState.wheelRemainderY / rowHeight;
+      const wholeSteps = rawSteps > 0 ? Math.floor(rawSteps) : Math.ceil(rawSteps);
+      if (!wholeSteps) {
+        return;
+      }
+      const stepCount = Math.min(Math.abs(wholeSteps), 10);
+      const direction = wholeSteps > 0 ? 1 : -1;
+      const wheelEvent = {
+        ...terminalMouseEventFromTouch(event, touch),
+        deltaX: 0,
+        deltaY: direction,
+      };
+      for (let index = 0; index < stepCount; index += 1) {
+        sendMouseSequence(wheelEvent, "wheel");
+      }
+      grokTouchKeyboardState.wheelRemainderY -= direction * stepCount * rowHeight;
+    };
+
     const changedTouchForActiveMouse = (event) => {
       const touches = Array.from(event?.changedTouches || []);
       return touches.find((touch) => touch.identifier === touchMouseState.identifier) || null;
@@ -9266,8 +9349,68 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     const resetTouchMouseState = () => {
       touchMouseState.identifier = -1;
       touchMouseState.active = false;
+      touchMouseState.deferredClick = false;
       touchMouseState.lastX = 0;
       touchMouseState.lastY = 0;
+    };
+
+    const resetGrokTouchKeyboardState = (clearTapHistory = false) => {
+      grokTouchKeyboardState.active = false;
+      grokTouchKeyboardState.startedAt = 0;
+      grokTouchKeyboardState.startX = 0;
+      grokTouchKeyboardState.startY = 0;
+      grokTouchKeyboardState.moved = false;
+      grokTouchKeyboardState.wheelRemainderY = 0;
+      if (clearTapHistory) {
+        grokTouchKeyboardState.lastTapAt = 0;
+        grokTouchKeyboardState.lastTapX = 0;
+        grokTouchKeyboardState.lastTapY = 0;
+      }
+    };
+
+    const finishGrokTouchKeyboardTap = (event, touch) => {
+      const now = performance.now();
+      const previousTapAt = grokTouchKeyboardState.lastTapAt;
+      const previousTapX = grokTouchKeyboardState.lastTapX;
+      const previousTapY = grokTouchKeyboardState.lastTapY;
+      const isTap = (
+        event.type === "touchend"
+        && grokTouchKeyboardState.active
+        && touch
+        && !grokTouchKeyboardState.moved
+        && Math.abs(touch.clientX - grokTouchKeyboardState.startX) < touchShortcutMoveThresholdPx
+        && Math.abs(touch.clientY - grokTouchKeyboardState.startY) < touchShortcutMoveThresholdPx
+        && now - grokTouchKeyboardState.startedAt <= mobileKeyboardDoubleTapDelayMs
+        && requiresTouchKeyboardDoubleTap()
+        && isGrokTerminalSession(session)
+        && terminalMouseTrackingState(session)
+      );
+      if (isTap) {
+        const mouseEvent = terminalMouseEventFromTouch(event, touch);
+        sendMouseSequence(mouseEvent, "press", 0);
+        sendMouseSequence(mouseEvent, "release", 0);
+      }
+      resetGrokTouchKeyboardState(false);
+      if (!isTap) {
+        resetGrokTouchKeyboardState(true);
+        return;
+      }
+      const dx = touch.clientX - previousTapX;
+      const dy = touch.clientY - previousTapY;
+      const isDoubleTap = (
+        previousTapAt > 0
+        && now - previousTapAt <= mobileKeyboardDoubleTapDelayMs
+        && Math.hypot(dx, dy) < touchShortcutMoveThresholdPx * 2
+      );
+      grokTouchKeyboardState.lastTapAt = now;
+      grokTouchKeyboardState.lastTapX = touch.clientX;
+      grokTouchKeyboardState.lastTapY = touch.clientY;
+      if (!isDoubleTap) {
+        return;
+      }
+      resetGrokTouchKeyboardState(true);
+      session.allowMobileKeyboardFocusUntil = now + mobileKeyboardFocusAllowWindowMs;
+      focusTerminalInput(session);
     };
 
     const handleMouseDown = (event) => {
@@ -9347,13 +9490,15 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     };
 
     const handleTouchStart = (event) => {
+      const trackingState = terminalMouseTrackingState(session);
       if (
         !isTouchShortcutLayout()
         || event.touches.length !== 1
         || !isTerminalMouseTarget(event.target)
-        || !terminalMouseTrackingState(session)
+        || !trackingState
       ) {
         resetTouchMouseState();
+        resetGrokTouchKeyboardState(true);
         return;
       }
       const touch = event.touches[0];
@@ -9365,7 +9510,20 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       touchMouseState.active = true;
       touchMouseState.lastX = touch.clientX;
       touchMouseState.lastY = touch.clientY;
-      sendMouseSequence(terminalMouseEventFromTouch(event, touch), "press", 0);
+      touchMouseState.deferredClick = requiresTouchKeyboardDoubleTap() && isGrokTerminalSession(session);
+      if (touchMouseState.deferredClick) {
+        session.allowMobileKeyboardFocusUntil = 0;
+        blurTerminalInput(session);
+        grokTouchKeyboardState.active = true;
+        grokTouchKeyboardState.startedAt = performance.now();
+        grokTouchKeyboardState.startX = touch.clientX;
+        grokTouchKeyboardState.startY = touch.clientY;
+        grokTouchKeyboardState.moved = false;
+        grokTouchKeyboardState.wheelRemainderY = 0;
+      } else {
+        resetGrokTouchKeyboardState(true);
+        sendMouseSequence(terminalMouseEventFromTouch(event, touch), "press", 0);
+      }
     };
 
     const handleTouchMove = (event) => {
@@ -9376,9 +9534,21 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       if (!touch) {
         return;
       }
+      const previousY = touchMouseState.lastY;
       stopTerminalMouseEvent(event);
       touchMouseState.lastX = touch.clientX;
       touchMouseState.lastY = touch.clientY;
+      if (touchMouseState.deferredClick) {
+        grokTouchKeyboardState.wheelRemainderY += previousY - touch.clientY;
+        if (
+          Math.abs(touch.clientX - grokTouchKeyboardState.startX) >= touchShortcutMoveThresholdPx
+          || Math.abs(touch.clientY - grokTouchKeyboardState.startY) >= touchShortcutMoveThresholdPx
+        ) {
+          grokTouchKeyboardState.moved = true;
+        }
+        flushGrokTouchWheel(event, touch);
+        return;
+      }
       sendMouseSequence(terminalMouseEventFromTouch(event, touch), "move", 0);
     };
 
@@ -9392,7 +9562,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         touchMouseState.lastX = touch.clientX;
         touchMouseState.lastY = touch.clientY;
       }
-      sendMouseSequence(terminalMouseEventFromTouch(event, touch), "release", 0);
+      if (touchMouseState.deferredClick) {
+        finishGrokTouchKeyboardTap(event, touch);
+      } else {
+        sendMouseSequence(terminalMouseEventFromTouch(event, touch), "release", 0);
+      }
       resetTouchMouseState();
     };
 
