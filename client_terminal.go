@@ -50,8 +50,8 @@ func (e clientTerminalStatusError) Error() string {
 	return fmt.Sprintf("%s returned %d: %s", label, e.status, e.body)
 }
 
-func (s *pluginServer) handleClientWorkspace(w http.ResponseWriter, r *http.Request, accountID, selector string, cols, rows int) {
-	log.Printf("client terminal workspace request: method=%s selector=%s account_present=%t cols=%d rows=%d", r.Method, selector, accountID != "", cols, rows)
+func (s *pluginServer) handleClientWorkspace(w http.ResponseWriter, r *http.Request, accountID, selector string, cols, rows, terminalScrollback int) {
+	log.Printf("client terminal workspace request: method=%s selector=%s account_present=%t cols=%d rows=%d terminal_scrollback=%d", r.Method, selector, accountID != "", cols, rows, terminalScrollback)
 	if err := s.authorizeClientTarget(r.Context(), r.Header, accountID, selector); err != nil {
 		log.Printf("client terminal workspace auth failed: method=%s selector=%s account_present=%t err=%v", r.Method, selector, accountID != "", err)
 		writeClientTerminalError(w, err)
@@ -59,7 +59,7 @@ func (s *pluginServer) handleClientWorkspace(w http.ResponseWriter, r *http.Requ
 	}
 	switch r.Method {
 	case http.MethodGet:
-		state, err := s.clientWorkspaceState(r.Context(), r.Header, selector, cols, rows)
+		state, err := s.clientWorkspaceState(r.Context(), r.Header, selector, cols, rows, terminalScrollback)
 		if err != nil {
 			log.Printf("client terminal workspace state failed: selector=%s err=%v", selector, err)
 			writeClientTerminalError(w, err)
@@ -75,8 +75,8 @@ func (s *pluginServer) handleClientWorkspace(w http.ResponseWriter, r *http.Requ
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		log.Printf("client terminal workspace action request: selector=%s action=%s tab=%s pane=%s cols=%d rows=%d", selector, request.Action, request.TabID, request.PaneID, cols, rows)
-		state, err := s.clientWorkspaceAction(r.Context(), r.Header, selector, cols, rows, request)
+		log.Printf("client terminal workspace action request: selector=%s action=%s tab=%s pane=%s cols=%d rows=%d terminal_scrollback=%d", selector, request.Action, request.TabID, request.PaneID, cols, rows, terminalScrollback)
+		state, err := s.clientWorkspaceAction(r.Context(), r.Header, selector, cols, rows, terminalScrollback, request)
 		if err != nil {
 			log.Printf("client terminal workspace action failed: selector=%s action=%s err=%v", selector, request.Action, err)
 			writeClientTerminalError(w, err)
@@ -91,14 +91,14 @@ func (s *pluginServer) handleClientWorkspace(w http.ResponseWriter, r *http.Requ
 	}
 }
 
-func (s *pluginServer) handleClientWorkspaceActivity(w http.ResponseWriter, r *http.Request, accountID, selector string, cols, rows int) {
-	log.Printf("client terminal activity request: method=%s selector=%s account_present=%t cols=%d rows=%d", r.Method, selector, accountID != "", cols, rows)
+func (s *pluginServer) handleClientWorkspaceActivity(w http.ResponseWriter, r *http.Request, accountID, selector string, cols, rows, terminalScrollback int) {
+	log.Printf("client terminal activity request: method=%s selector=%s account_present=%t cols=%d rows=%d terminal_scrollback=%d", r.Method, selector, accountID != "", cols, rows, terminalScrollback)
 	if err := s.authorizeClientTarget(r.Context(), r.Header, accountID, selector); err != nil {
 		log.Printf("client terminal activity auth failed: selector=%s account_present=%t err=%v", selector, accountID != "", err)
 		writeClientTerminalError(w, err)
 		return
 	}
-	state, err := s.clientWorkspaceActivity(r.Context(), r.Header, selector, cols, rows)
+	state, err := s.clientWorkspaceActivity(r.Context(), r.Header, selector, cols, rows, terminalScrollback)
 	if err != nil {
 		log.Printf("client terminal activity failed: selector=%s err=%v", selector, err)
 		writeClientTerminalError(w, err)
@@ -109,8 +109,8 @@ func (s *pluginServer) handleClientWorkspaceActivity(w http.ResponseWriter, r *h
 	writeJSON(w, state)
 }
 
-func (s *pluginServer) attachClientPane(w http.ResponseWriter, r *http.Request, accountID, selector, paneID string, cols, rows int) error {
-	log.Printf("client terminal websocket attach request: selector=%s pane=%s account_present=%t cols=%d rows=%d", selector, paneID, accountID != "", cols, rows)
+func (s *pluginServer) attachClientPane(w http.ResponseWriter, r *http.Request, accountID, selector, paneID string, cols, rows, terminalScrollback int) error {
+	log.Printf("client terminal websocket attach request: selector=%s pane=%s account_present=%t cols=%d rows=%d terminal_scrollback=%d", selector, paneID, accountID != "", cols, rows, terminalScrollback)
 	if err := s.authorizeClientTarget(r.Context(), r.Header, accountID, selector); err != nil {
 		log.Printf("client terminal websocket auth failed: selector=%s pane=%s account_present=%t err=%v", selector, paneID, accountID != "", err)
 		writeClientTerminalError(w, err)
@@ -123,33 +123,12 @@ func (s *pluginServer) attachClientPane(w http.ResponseWriter, r *http.Request, 
 		return nil
 	}
 	log.Printf("client terminal websocket dial info ready: selector=%s pane=%s client_instance=%s service=%s device_api=%s auth_token_present=%t expires_at=%s", selector, paneID, ticket.ClientInstanceID, ticket.TerminalServiceName, safeURLOrigin(ticket.DeviceAPIURL), authToken != "", ticket.ExpiresAt)
-	targetURL, err := clientTerminalURL(ticket, "/ws")
+	targetURL, err := clientTerminalAttachURL(ticket, r, paneID, cols, rows, terminalScrollback)
 	if err != nil {
 		log.Printf("client terminal websocket target url failed: selector=%s pane=%s err=%v", selector, paneID, err)
 		writeClientTerminalError(w, err)
 		return nil
 	}
-	query := targetURL.Query()
-	query.Set("pane", paneID)
-	if cols > 0 {
-		query.Set("cols", fmt.Sprintf("%d", cols))
-	}
-	if rows > 0 {
-		query.Set("rows", fmt.Sprintf("%d", rows))
-	}
-	if foreground, background, cursor := terminalThemeFromRequest(r); foreground != "" || background != "" || cursor != "" {
-		if foreground != "" {
-			query.Set("fg", foreground)
-		}
-		if background != "" {
-			query.Set("bg", background)
-		}
-		if cursor != "" {
-			query.Set("cursor", cursor)
-		}
-	}
-	query.Set("ticket", ticket.Ticket)
-	targetURL.RawQuery = query.Encode()
 
 	source, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -187,21 +166,35 @@ func (s *pluginServer) attachClientPane(w http.ResponseWriter, r *http.Request, 
 	return nil
 }
 
-func (s *pluginServer) clientWorkspaceState(ctx context.Context, header http.Header, selector string, cols, rows int) (workspaceState, error) {
+func clientTerminalSessionQuery(cols, rows, terminalScrollback int) map[string]string {
+	query := make(map[string]string, 3)
+	if cols > 0 {
+		query["cols"] = fmt.Sprintf("%d", cols)
+	}
+	if rows > 0 {
+		query["rows"] = fmt.Sprintf("%d", rows)
+	}
+	if terminalScrollback > 0 {
+		query["terminal_scrollback"] = fmt.Sprintf("%d", terminalScrollback)
+	}
+	return query
+}
+
+func (s *pluginServer) clientWorkspaceState(ctx context.Context, header http.Header, selector string, cols, rows, terminalScrollback int) (workspaceState, error) {
 	var state workspaceState
-	err := s.clientTerminalJSON(ctx, header, selector, http.MethodGet, "/workspace", map[string]string{"cols": fmt.Sprintf("%d", cols), "rows": fmt.Sprintf("%d", rows)}, nil, &state)
+	err := s.clientTerminalJSON(ctx, header, selector, http.MethodGet, "/workspace", clientTerminalSessionQuery(cols, rows, terminalScrollback), nil, &state)
 	return state, err
 }
 
-func (s *pluginServer) clientWorkspaceActivity(ctx context.Context, header http.Header, selector string, cols, rows int) (workspaceActivityState, error) {
+func (s *pluginServer) clientWorkspaceActivity(ctx context.Context, header http.Header, selector string, cols, rows, terminalScrollback int) (workspaceActivityState, error) {
 	var state workspaceActivityState
-	err := s.clientTerminalJSON(ctx, header, selector, http.MethodGet, "/activity", map[string]string{"cols": fmt.Sprintf("%d", cols), "rows": fmt.Sprintf("%d", rows)}, nil, &state)
+	err := s.clientTerminalJSON(ctx, header, selector, http.MethodGet, "/activity", clientTerminalSessionQuery(cols, rows, terminalScrollback), nil, &state)
 	return state, err
 }
 
-func (s *pluginServer) clientWorkspaceAction(ctx context.Context, header http.Header, selector string, cols, rows int, request workspaceActionRequest) (workspaceState, error) {
+func (s *pluginServer) clientWorkspaceAction(ctx context.Context, header http.Header, selector string, cols, rows, terminalScrollback int, request workspaceActionRequest) (workspaceState, error) {
 	var state workspaceState
-	err := s.clientTerminalJSON(ctx, header, selector, http.MethodPost, "/workspace", map[string]string{"cols": fmt.Sprintf("%d", cols), "rows": fmt.Sprintf("%d", rows)}, request, &state)
+	err := s.clientTerminalJSON(ctx, header, selector, http.MethodPost, "/workspace", clientTerminalSessionQuery(cols, rows, terminalScrollback), request, &state)
 	return state, err
 }
 
@@ -409,6 +402,32 @@ func clientTerminalURL(ticket clientTerminalTicket, path string) (*url.URL, erro
 	}
 	base.Path = strings.TrimRight(base.Path, "/") + "/s/" + strings.Trim(ticket.TerminalServiceName, "/") + path
 	return base, nil
+}
+
+func clientTerminalAttachURL(ticket clientTerminalTicket, r *http.Request, paneID string, cols, rows, terminalScrollback int) (*url.URL, error) {
+	targetURL, err := clientTerminalURL(ticket, "/ws")
+	if err != nil {
+		return nil, err
+	}
+	query := targetURL.Query()
+	query.Set("pane", paneID)
+	for key, value := range clientTerminalSessionQuery(cols, rows, terminalScrollback) {
+		query.Set(key, value)
+	}
+	if foreground, background, cursor := terminalThemeFromRequest(r); foreground != "" || background != "" || cursor != "" {
+		if foreground != "" {
+			query.Set("fg", foreground)
+		}
+		if background != "" {
+			query.Set("bg", background)
+		}
+		if cursor != "" {
+			query.Set("cursor", cursor)
+		}
+	}
+	query.Set("ticket", ticket.Ticket)
+	targetURL.RawQuery = query.Encode()
+	return targetURL, nil
 }
 
 func websocketHTTPToWS(value string) string {

@@ -694,7 +694,7 @@ func (s *pluginServer) handleAgentStartupError(w http.ResponseWriter, r *http.Re
 			return
 		}
 		cols, rows := parseTerminalSize(r.URL.Query().Get("cols"), r.URL.Query().Get("rows"))
-		if _, err := s.clientWorkspaceActivity(r.Context(), r.Header, selector, cols, rows); err != nil {
+		if _, err := s.clientWorkspaceActivity(r.Context(), r.Header, selector, cols, rows, s.currentTerminalScrollback()); err != nil {
 			writeJSON(w, agentStartupErrorResponse{Error: err.Error()})
 			return
 		}

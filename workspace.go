@@ -284,7 +284,7 @@ func (s *pluginServer) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	if isClientTarget(selector) {
 		cols, rows := parseTerminalSize(r.URL.Query().Get("cols"), r.URL.Query().Get("rows"))
-		s.handleClientWorkspace(w, r, accountID, selector, cols, rows)
+		s.handleClientWorkspace(w, r, accountID, selector, cols, rows, s.currentTerminalScrollback())
 		return
 	}
 	if err := s.authorizeInstanceSelector(r.Context(), selector); err != nil {
@@ -340,7 +340,7 @@ func (s *pluginServer) handleWorkspaceActivity(w http.ResponseWriter, r *http.Re
 	}
 	if isClientTarget(selector) {
 		cols, rows := parseTerminalSize(r.URL.Query().Get("cols"), r.URL.Query().Get("rows"))
-		s.handleClientWorkspaceActivity(w, r, accountID, selector, cols, rows)
+		s.handleClientWorkspaceActivity(w, r, accountID, selector, cols, rows, s.currentTerminalScrollback())
 		return
 	}
 	if err := s.authorizeInstanceSelector(r.Context(), selector); err != nil {
@@ -375,7 +375,7 @@ func (s *pluginServer) attachPersistentPane(w http.ResponseWriter, r *http.Reque
 		return nil
 	}
 	if isClientTarget(selector) {
-		return s.attachClientPane(w, r, accountID, selector, paneID, cols, rows)
+		return s.attachClientPane(w, r, accountID, selector, paneID, cols, rows, s.currentTerminalScrollback())
 	}
 	if err := s.authorizeInstanceSelector(r.Context(), selector); err != nil {
 		writeAuthorizationError(w, err)
