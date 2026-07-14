@@ -1185,6 +1185,16 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   };
 
+  const applyTerminalScrollback = () => {
+    for (const tab of tabs.values()) {
+      for (const pane of tab.panes.values()) {
+        if (pane.term?.options) {
+          pane.term.options.scrollback = terminalOptionsBase.scrollback;
+        }
+      }
+    }
+  };
+
   const applyPerformanceMeterVisibility = () => {
     const meter = performanceMeterFps?.closest?.(".fps-meter");
     if (meter) {
@@ -2338,6 +2348,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     activeTerminalFontID = uploadedFonts.some((font) => font.id === nextFontID) ? nextFontID : "";
     terminalLineHeightPercent = normalizeTerminalLineHeightPercent(state?.terminal_line_height_percent);
     terminalOptionsBase.scrollback = normalizeTerminalScrollback(state?.terminal_scrollback);
+    applyTerminalScrollback();
     desktopMouseClipboardEnabled = state?.desktop_mouse_clipboard_enabled !== false;
     mobilePixelScrollEnabled = state?.mobile_pixel_scroll_enabled !== false;
     mobileDoubleTapReminderEnabled = state?.mobile_double_tap_reminder_enabled !== false;
@@ -2382,11 +2393,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     await applySettingsState(await response.json());
   });
 
-  const saveTerminalScrollback = async (scrollback, { syncScrollbackInput = false } = {}) => measurePerformanceTask("settings save", async () => {
+  const saveTerminalScrollback = async (scrollback, { syncScrollbackInput = false, keepalive = false } = {}) => measurePerformanceTask("settings save", async () => {
     const response = await fetch("./api/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ terminal_scrollback: scrollback }),
+      keepalive,
     });
     if (!response.ok) {
       throw new Error(await readResponseText(response, `滚动历史设置保存失败 (${response.status})`));
@@ -3084,22 +3096,44 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     settingsLineHeightSaveTimer = window.setTimeout(saveTerminalLineHeightFromInput, 360);
   };
 
-  const saveTerminalScrollbackFromInput = () => {
+  const saveTerminalScrollbackFromInput = ({ keepalive = false, showFeedback = true } = {}) => {
+    window.clearTimeout(settingsScrollbackSaveTimer);
+    settingsScrollbackSaveTimer = 0;
     let scrollback = defaultTerminalScrollback;
     try {
       scrollback = readSettingsScrollbackInput();
     } catch (error) {
-      return;
+      if (showFeedback) {
+        syncSettingsScrollbackInput();
+        setSettingsFeedback(error.message || "滚动历史设置无效。", "error");
+      }
+      return Promise.resolve(false);
     }
     if (scrollback === terminalOptionsBase.scrollback) {
-      return;
+      return Promise.resolve(false);
     }
     const requestSeq = ++settingsScrollbackSaveRequestSeq;
-    setSettingsScrollbackSaving(true);
-    saveTerminalScrollback(scrollback)
-      .catch(() => {})
-      .finally(() => {
+    if (!keepalive) {
+      setSettingsScrollbackSaving(true);
+    }
+    return saveTerminalScrollback(scrollback, { keepalive })
+      .then(() => {
+        if (showFeedback && requestSeq === settingsScrollbackSaveRequestSeq) {
+          setSettingsFeedback("滚动历史设置已保存，刷新或新建终端后生效。", "success");
+        }
+        return true;
+      })
+      .catch((error) => {
         if (requestSeq === settingsScrollbackSaveRequestSeq) {
+          if (showFeedback) {
+            syncSettingsScrollbackInput();
+            setSettingsFeedback(error.message || "滚动历史设置保存失败。", "error");
+          }
+        }
+        return false;
+      })
+      .finally(() => {
+        if (!keepalive && requestSeq === settingsScrollbackSaveRequestSeq) {
           setSettingsScrollbackSaving(false);
         }
       });
@@ -3112,7 +3146,29 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     } catch (error) {
       return;
     }
-    settingsScrollbackSaveTimer = window.setTimeout(saveTerminalScrollbackFromInput, 360);
+    settingsScrollbackSaveTimer = window.setTimeout(() => {
+      settingsScrollbackSaveTimer = 0;
+      saveTerminalScrollbackFromInput();
+    }, 360);
+  };
+
+  let terminalScrollbackKeepaliveValue = 0;
+  const flushPendingTerminalScrollbackSave = () => {
+    let scrollback = defaultTerminalScrollback;
+    try {
+      scrollback = readSettingsScrollbackInput();
+    } catch (error) {
+      return;
+    }
+    if (scrollback === terminalOptionsBase.scrollback || scrollback === terminalScrollbackKeepaliveValue) {
+      return;
+    }
+    terminalScrollbackKeepaliveValue = scrollback;
+    saveTerminalScrollbackFromInput({ keepalive: true, showFeedback: false }).finally(() => {
+      if (terminalScrollbackKeepaliveValue === scrollback) {
+        terminalScrollbackKeepaliveValue = 0;
+      }
+    });
   };
 
   const uploadTerminalFonts = async (files) => {
@@ -15782,22 +15838,36 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   settingsScrollbackInput?.addEventListener("input", scheduleTerminalScrollbackSave);
   settingsScrollbackInput?.addEventListener("change", () => {
     window.clearTimeout(settingsScrollbackSaveTimer);
+    settingsScrollbackSaveTimer = 0;
     try {
       readSettingsScrollbackInput();
     } catch (error) {
+      syncSettingsScrollbackInput();
+      setSettingsFeedback(error.message || "滚动历史设置无效。", "error");
       return;
     }
     saveTerminalScrollbackFromInput();
   });
   settingsScrollbackResetButton?.addEventListener("click", () => {
     window.clearTimeout(settingsScrollbackSaveTimer);
+    settingsScrollbackSaveTimer = 0;
     if (settingsScrollbackInput) {
       settingsScrollbackInput.value = String(defaultTerminalScrollback);
     }
     const requestSeq = ++settingsScrollbackSaveRequestSeq;
     setSettingsScrollbackSaving(true);
     saveTerminalScrollback(defaultTerminalScrollback, { syncScrollbackInput: true })
-      .catch(() => {})
+      .then(() => {
+        if (requestSeq === settingsScrollbackSaveRequestSeq) {
+          setSettingsFeedback("滚动历史已恢复默认，刷新或新建终端后生效。", "success");
+        }
+      })
+      .catch((error) => {
+        if (requestSeq === settingsScrollbackSaveRequestSeq) {
+          syncSettingsScrollbackInput();
+          setSettingsFeedback(error.message || "滚动历史恢复默认失败。", "error");
+        }
+      })
       .finally(() => {
         if (requestSeq === settingsScrollbackSaveRequestSeq) {
           setSettingsScrollbackSaving(false);
@@ -16474,9 +16544,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     refreshActivity({ silent: true }).catch(() => {});
   });
   window.addEventListener("pagehide", () => {
+    flushPendingTerminalScrollbackSave();
     sendDeviceOfflineBeacon();
   });
   window.addEventListener("beforeunload", (event) => {
+    flushPendingTerminalScrollbackSave();
     if (!suppressBeforeUnloadOnce && hasCachedBusyPane()) {
       event.preventDefault();
       event.returnValue = "";

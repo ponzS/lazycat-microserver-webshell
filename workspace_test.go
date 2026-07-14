@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -282,6 +283,7 @@ func TestAuthorizeInstanceSelectorAllowsVisibleSelector(t *testing.T) {
 
 func TestHandleWorkspaceClientTargetProxiesRemoteWorkspaceAfterVisibilityCheck(t *testing.T) {
 	var requestedPaths []string
+	var remoteWorkspaceQuery url.Values
 	oldHTTPClient := newClientTerminalHTTPClient
 	oldAuthToken := resolveClientDeviceAPIAuthToken
 	defer func() {
@@ -294,6 +296,7 @@ func TestHandleWorkspaceClientTargetProxiesRemoteWorkspaceAfterVisibilityCheck(t
 	newClientTerminalHTTPClient = func() *http.Client {
 		return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 			requestedPaths = append(requestedPaths, request.URL.Path)
+			remoteWorkspaceQuery = request.URL.Query()
 			if request.Header.Get("lzc_dapi_auth_token") != "device-auth-token" {
 				t.Fatalf("device api auth token header = %q", request.Header.Get("lzc_dapi_auth_token"))
 			}
@@ -310,6 +313,7 @@ func TestHandleWorkspaceClientTargetProxiesRemoteWorkspaceAfterVisibilityCheck(t
 		})}
 	}
 	server := &pluginServer{
+		fontDir: t.TempDir(),
 		adminInfoResolver: func(context.Context) (adminInfo, error) {
 			return adminInfo{BaseURL: "http://lightos-admin.local"}, nil
 		},
@@ -327,6 +331,9 @@ func TestHandleWorkspaceClientTargetProxiesRemoteWorkspaceAfterVisibilityCheck(t
 			}, nil
 		})},
 	}
+	if err := server.fontStore().SaveScrollback(22000); err != nil {
+		t.Fatalf("SaveScrollback() error = %v", err)
+	}
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/workspace?name=client:client-a", nil)
@@ -340,6 +347,9 @@ func TestHandleWorkspaceClientTargetProxiesRemoteWorkspaceAfterVisibilityCheck(t
 		if !slices.Contains(requestedPaths, want) {
 			t.Fatalf("requested paths = %v, missing %q", requestedPaths, want)
 		}
+	}
+	if got := remoteWorkspaceQuery.Get("terminal_scrollback"); got != "22000" {
+		t.Fatalf("remote workspace terminal_scrollback = %q, want 22000; query=%v", got, remoteWorkspaceQuery)
 	}
 }
 

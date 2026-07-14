@@ -887,6 +887,55 @@ func TestRuntimeTerminalLineHeightSetting(t *testing.T) {
 	}
 }
 
+func TestRuntimeTerminalScrollbackSettingPersistence(t *testing.T) {
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	indexData, err := os.ReadFile("runtime/static/index.html")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
+	}
+	mainSource := string(mainData)
+	indexSource := string(indexData)
+
+	for _, want := range []string{
+		`id="settingsScrollbackInput"`,
+		`id="settingsScrollbackResetButton"`,
+		`id="settingsFeedback" aria-live="polite"`,
+	} {
+		if !strings.Contains(indexSource, want) {
+			t.Fatalf("runtime scrollback setting index guard missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		`const applyTerminalScrollback = () => {`,
+		`pane.term.options.scrollback = terminalOptionsBase.scrollback;`,
+		`applyTerminalScrollback();`,
+		`keepalive,`,
+		`setSettingsFeedback(error.message || "滚动历史设置无效。", "error");`,
+		`setSettingsFeedback("滚动历史设置已保存，刷新或新建终端后生效。", "success");`,
+		`setSettingsFeedback(error.message || "滚动历史设置保存失败。", "error");`,
+		`setSettingsFeedback("滚动历史已恢复默认，刷新或新建终端后生效。", "success");`,
+		`setSettingsFeedback(error.message || "滚动历史恢复默认失败。", "error");`,
+		`const flushPendingTerminalScrollbackSave = () => {`,
+		`saveTerminalScrollbackFromInput({ keepalive: true, showFeedback: false })`,
+		`window.addEventListener("pagehide", () => {`,
+		`window.addEventListener("beforeunload", (event) => {`,
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime scrollback setting persistence guard missing %q", want)
+		}
+	}
+	beforeUnload := sourceBetween(t, mainSource, `window.addEventListener("beforeunload", (event) => {`, `disposed = true;`)
+	if !strings.Contains(beforeUnload, `flushPendingTerminalScrollbackSave();`) {
+		t.Fatal("beforeunload must flush pending scrollback before any early return")
+	}
+	if strings.Index(beforeUnload, `flushPendingTerminalScrollbackSave();`) > strings.Index(beforeUnload, `hasCachedBusyPane()`) {
+		t.Fatal("beforeunload scrollback flush must run before the busy-pane confirmation branch")
+	}
+}
+
 func TestRuntimeMobileStickyModifiersApplyToTextInput(t *testing.T) {
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {

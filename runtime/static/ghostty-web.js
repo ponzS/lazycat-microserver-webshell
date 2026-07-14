@@ -111,22 +111,20 @@ class V {
 const z = class K {
   constructor(A, B, g = 80, E = 24, C) {
     var I;
-    if (this.viewportBufferPtr = 0, this.viewportBufferSize = 0, this.cellPool = [], this.graphemeBuffer = null, this.graphemeBufferPtr = 0, this.exports = A, this.memory = B, this._cols = g, this._rows = E, C) {
-      const D = this.exports.ghostty_wasm_alloc_u8_array(d);
-      if (D === 0)
-        throw new Error("Failed to allocate config (out of memory)");
-      try {
-        const i = new DataView(this.memory.buffer);
-        let w = D;
-        i.setUint32(w, C.scrollbackLimit ?? 1e4, !0), w += 4, i.setUint32(w, C.fgColor ?? 0, !0), w += 4, i.setUint32(w, C.bgColor ?? 0, !0), w += 4, i.setUint32(w, C.cursorColor ?? 0, !0), w += 4;
-        for (let s = 0; s < 16; s++)
-          i.setUint32(w, ((I = C.palette) == null ? void 0 : I[s]) ?? 0, !0), w += 4;
-        this.handle = this.exports.ghostty_terminal_new_with_config(g, E, D);
-      } finally {
-        this.exports.ghostty_wasm_free_u8_array(D, d);
-      }
-    } else
-      this.handle = this.exports.ghostty_terminal_new(g, E);
+    this.viewportBufferPtr = 0, this.viewportBufferSize = 0, this.cellPool = [], this.graphemeBuffer = null, this.graphemeBufferPtr = 0, this.exports = A, this.memory = B, this._cols = g, this._rows = E, this.logicalScrollbackLimit = K.normalizeScrollbackLimit(C == null ? void 0 : C.scrollbackLimit);
+    const D = this.exports.ghostty_wasm_alloc_u8_array(d);
+    if (D === 0)
+      throw new Error("Failed to allocate config (out of memory)");
+    try {
+      const i = new DataView(this.memory.buffer);
+      let w = D;
+      i.setUint32(w, this.estimateScrollbackBytes(), !0), w += 4, i.setUint32(w, (C == null ? void 0 : C.fgColor) ?? 0, !0), w += 4, i.setUint32(w, (C == null ? void 0 : C.bgColor) ?? 0, !0), w += 4, i.setUint32(w, (C == null ? void 0 : C.cursorColor) ?? 0, !0), w += 4;
+      for (let s = 0; s < 16; s++)
+        i.setUint32(w, ((I = C == null ? void 0 : C.palette) == null ? void 0 : I[s]) ?? 0, !0), w += 4;
+      this.handle = this.exports.ghostty_terminal_new_with_config(g, E, D);
+    } finally {
+      this.exports.ghostty_wasm_free_u8_array(D, d);
+    }
     if (!this.handle)
       throw new Error("Failed to create terminal");
     this.initCellPool();
@@ -136,6 +134,23 @@ const z = class K {
   }
   get rows() {
     return this._rows;
+  }
+  static normalizeScrollbackLimit(A) {
+    return A === void 0 || !Number.isFinite(A) ? 1e4 : Math.max(0, Math.floor(A));
+  }
+  estimateScrollbackBytes() {
+    const A = (this.logicalScrollbackLimit + Math.max(1, this._rows)) * (Math.max(1, this._cols) + 64) * K.CELL_SIZE, B = Number.isFinite(A) ? A + K.SCROLLBACK_PAGE_SIZE : K.MAX_SCROLLBACK_BYTES;
+    return Math.min(
+      K.MAX_SCROLLBACK_BYTES,
+      Math.max(2 * K.SCROLLBACK_PAGE_SIZE, Math.ceil(B))
+    );
+  }
+  getRawScrollbackLength() {
+    return this.exports.ghostty_terminal_get_scrollback_length(this.handle);
+  }
+  getRawScrollbackOffset(A) {
+    const B = this.getRawScrollbackLength(), g = Math.min(B, this.logicalScrollbackLimit);
+    return !Number.isInteger(A) || A < 0 || A >= g ? null : B - g + A;
   }
   // ==========================================================================
   // Lifecycle
@@ -284,7 +299,7 @@ const z = class K {
   }
   /** Get number of scrollback lines (history, not including active screen) */
   getScrollbackLength() {
-    return this.exports.ghostty_terminal_get_scrollback_length(this.handle);
+    return Math.min(this.getRawScrollbackLength(), this.logicalScrollbackLimit);
   }
   /**
    * Get a line from the scrollback buffer.
@@ -292,11 +307,14 @@ const z = class K {
    * @param offset 0 = oldest line, (length-1) = most recent scrollback line
    */
   getScrollbackLine(A) {
+    const N = this.getRawScrollbackOffset(A);
+    if (N === null)
+      return null;
     const B = this._cols * K.CELL_SIZE;
-    (!this.viewportBufferPtr || this.viewportBufferSize < B) && (this.viewportBufferPtr && this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize), this.viewportBufferPtr = this.exports.ghostty_wasm_alloc_u8_array(B), this.viewportBufferSize = B), this.update();
+    (!this.viewportBufferPtr || this.viewportBufferSize < B) && (this.viewportBufferPtr && this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize), this.viewportBufferPtr = this.exports.ghostty_wasm_alloc_u8_array(B), this.viewportBufferSize = B), this.update(), new Uint8Array(this.memory.buffer, this.viewportBufferPtr, B).fill(0);
     const g = this.exports.ghostty_terminal_get_scrollback_line(
       this.handle,
-      A,
+      N,
       this.viewportBufferPtr,
       this._cols
     );
@@ -430,18 +448,21 @@ const z = class K {
    * @returns Array of codepoints, or null on error
    */
   getScrollbackGrapheme(A, B) {
+    const g = this.getRawScrollbackOffset(A);
+    if (g === null)
+      return null;
     this.graphemeBuffer || (this.graphemeBufferPtr = this.exports.ghostty_wasm_alloc_u8_array(16 * 4), this.graphemeBuffer = new Uint32Array(this.memory.buffer, this.graphemeBufferPtr, 16));
-    const g = this.exports.ghostty_terminal_get_scrollback_grapheme(
+    const E = this.exports.ghostty_terminal_get_scrollback_grapheme(
       this.handle,
-      A,
+      g,
       B,
       this.graphemeBufferPtr,
       16
     );
-    if (g < 0)
+    if (E < 0)
       return null;
-    const E = new Uint32Array(this.memory.buffer, this.graphemeBufferPtr, g);
-    return Array.from(E);
+    const C = new Uint32Array(this.memory.buffer, this.graphemeBufferPtr, E);
+    return Array.from(C);
   }
   /**
    * Get a string representation of a grapheme in the scrollback buffer.
@@ -455,6 +476,8 @@ const z = class K {
   }
 };
 z.CELL_SIZE = 16;
+z.SCROLLBACK_PAGE_SIZE = 512 * 1024;
+z.MAX_SCROLLBACK_BYTES = 2147483647;
 let W = z;
 class J {
   constructor() {
