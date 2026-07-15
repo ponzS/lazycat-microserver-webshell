@@ -2,6 +2,83 @@ import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
 import { createPerformanceTaskMonitor } from "./performance_tasks.js";
 
 const params = new URLSearchParams(window.location.search);
+const workspaceRestoreStorageKey = "webshell.workspaceRestore";
+const workspaceRestoreTTL = 30 * 1000;
+
+const readWorkspaceRestoreState = () => {
+  try {
+    const raw = window.localStorage.getItem(workspaceRestoreStorageKey);
+    const state = raw ? JSON.parse(raw) : null;
+    const name = String(state?.name || "").trim();
+    const tabId = String(state?.tabId || "").trim();
+    const expiresAt = Number(state?.expiresAt || 0);
+    if (!name || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      window.localStorage.removeItem(workspaceRestoreStorageKey);
+      return null;
+    }
+    return { name, tabId, expiresAt };
+  } catch (error) {
+    return null;
+  }
+};
+
+const persistWorkspaceRestoreState = (name, tabId) => {
+  const targetName = String(name || "").trim();
+  if (!targetName) {
+    return;
+  }
+  try {
+    const targetURL = new URL(window.location.href);
+    targetURL.searchParams.delete("view");
+    targetURL.searchParams.set("name", targetName);
+    const targetTabId = String(tabId || "").trim();
+    if (targetTabId) {
+      targetURL.searchParams.set("tab", targetTabId);
+    } else {
+      targetURL.searchParams.delete("tab");
+    }
+    window.localStorage.setItem(workspaceRestoreStorageKey, JSON.stringify({
+      name: targetName,
+      tabId: targetTabId,
+      url: `${targetURL.pathname}${targetURL.search}${targetURL.hash}`,
+      expiresAt: Date.now() + workspaceRestoreTTL,
+    }));
+  } catch (error) {
+  }
+};
+
+const clearWorkspaceRestoreState = () => {
+  try {
+    window.localStorage.removeItem(workspaceRestoreStorageKey);
+  } catch (error) {
+  }
+};
+
+const restoreInitialWorkspaceLocation = () => {
+  const state = readWorkspaceRestoreState();
+  if (!state) {
+    return;
+  }
+  const requestedName = (params.get("target") || params.get("name") || "").trim();
+  let changed = false;
+  if (!requestedName) {
+    params.set("name", state.name);
+    changed = true;
+  }
+  if (!params.get("tab") && (!requestedName || requestedName === state.name) && state.tabId) {
+    params.set("tab", state.tabId);
+    changed = true;
+  }
+  if (!changed) {
+    return;
+  }
+  params.delete("view");
+  const nextURL = new URL(window.location.href);
+  nextURL.search = params.toString();
+  window.history.replaceState(window.history.state, "", nextURL);
+};
+
+restoreInitialWorkspaceLocation();
 const isEmbedMode = params.has("embed");
 document.body?.classList.toggle("is-embed-mode", isEmbedMode);
 
@@ -502,6 +579,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   let suppressLocationUpdate = false;
   let suppressBeforeUnloadOnce = false;
   let suppressBeforeUnloadResetTimer = 0;
+  let suppressWorkspaceRestoreOnce = false;
+  let workspaceRestoreHeartbeatTimer = 0;
   let tabOverviewRenderFrame = 0;
   let tabOverviewDragState = null;
   let tabOverviewSuppressClickUntil = 0;
@@ -4292,7 +4371,14 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     return true;
   };
 
+  const rememberWorkspaceRestoreState = () => {
+    if (!suppressWorkspaceRestoreOnce) {
+      persistWorkspaceRestoreState(activeName, activeTabId);
+    }
+  };
+
   const rememberActiveTab = () => {
+    rememberWorkspaceRestoreState();
     if (!activeName || !activeTabId) {
       return;
     }
@@ -4364,9 +4450,13 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     try {
       const targetURL = await loadLightOSHomeURL();
+      suppressWorkspaceRestoreOnce = true;
+      clearWorkspaceRestoreState();
       suppressBeforeUnloadForNavigation();
       window.location.assign(targetURL);
     } catch (error) {
+      suppressWorkspaceRestoreOnce = false;
+      rememberWorkspaceRestoreState();
       if (homeMenuButton) {
         homeMenuButton.disabled = false;
       }
@@ -16519,6 +16609,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   });
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
+      rememberWorkspaceRestoreState();
       postDeviceHeartbeat().catch(() => {});
       resizeActiveTab();
       refreshServerRevision().catch(() => {});
@@ -16537,6 +16628,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     refreshActivity({ silent: true }).catch(() => {});
   });
   window.addEventListener("pageshow", () => {
+    rememberWorkspaceRestoreState();
     postDeviceHeartbeat().catch(() => {});
     resizeActiveTab();
     refreshServerRevision().catch(() => {});
@@ -16544,10 +16636,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     refreshActivity({ silent: true }).catch(() => {});
   });
   window.addEventListener("pagehide", () => {
+    rememberWorkspaceRestoreState();
     flushPendingTerminalScrollbackSave();
     sendDeviceOfflineBeacon();
   });
   window.addEventListener("beforeunload", (event) => {
+    rememberWorkspaceRestoreState();
     flushPendingTerminalScrollbackSave();
     if (!suppressBeforeUnloadOnce && hasCachedBusyPane()) {
       event.preventDefault();
@@ -16556,6 +16650,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     disposed = true;
     sendDeviceOfflineBeacon();
+    window.clearInterval(workspaceRestoreHeartbeatTimer);
     window.clearInterval(deviceHeartbeatTimer);
     stopDeviceListRefresh();
     window.clearInterval(serverRevisionRefreshTimer);
@@ -16568,6 +16663,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       }
     }
   });
+  workspaceRestoreHeartbeatTimer = window.setInterval(rememberWorkspaceRestoreState, 5 * 1000);
 
   bootstrap().catch((error) => {
     const message = error.message || "WebShell startup failed.";

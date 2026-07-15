@@ -1410,6 +1410,30 @@ func TestRuntimeMobileBottomSafeAreaKeepsShortcutsAboveControls(t *testing.T) {
 	}
 }
 
+func TestRuntimePersistsWorkspaceForLightOSHomeReload(t *testing.T) {
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	mainSource := string(mainData)
+	for _, want := range []string{
+		`const workspaceRestoreStorageKey = "webshell.workspaceRestore";`,
+		`const workspaceRestoreTTL = 30 * 1000;`,
+		`restoreInitialWorkspaceLocation();`,
+		`params.delete("view");`,
+		`const rememberWorkspaceRestoreState = () => {`,
+		`persistWorkspaceRestoreState(activeName, activeTabId);`,
+		"url: `${targetURL.pathname}${targetURL.search}${targetURL.hash}`",
+		`suppressWorkspaceRestoreOnce = true;`,
+		`clearWorkspaceRestoreState();`,
+		`workspaceRestoreHeartbeatTimer = window.setInterval(rememberWorkspaceRestoreState, 5 * 1000);`,
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime Lazycat shell reload guard missing %q", want)
+		}
+	}
+}
+
 func TestRuntimeMobileShortcutsPreserveKeyboardExceptMenu(t *testing.T) {
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {
