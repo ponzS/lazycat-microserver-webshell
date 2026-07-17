@@ -159,8 +159,8 @@ func TestClientTerminalWorkspaceRequestsForwardScrollback(t *testing.T) {
 	}
 }
 
-func TestClientTerminalAttachURLForwardsScrollback(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "/ws?fg=%23ffffff&bg=%23000000&cursor=%23ff5000", nil)
+func TestClientTerminalAttachURLForwardsScrollbackAndHistoryRange(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/ws?fg=%23ffffff&bg=%23000000&cursor=%23ff5000&history_generation=generation-one&local_base_cursor=4&local_end_cursor=9&history_replay_mode=snapshot", nil)
 	ticket := clientTerminalTicket{
 		DeviceAPIURL:        "https://device.example.com/root/",
 		TerminalServiceName: "cloud.lazycat.lightos.client-terminal.client-a",
@@ -183,6 +183,10 @@ func TestClientTerminalAttachURLForwardsScrollback(t *testing.T) {
 		"fg":                  "#ffffff",
 		"bg":                  "#000000",
 		"cursor":              "#ff5000",
+		"history_generation":  "generation-one",
+		"local_base_cursor":   "4",
+		"local_end_cursor":    "9",
+		"history_replay_mode": "snapshot",
 	} {
 		if got := target.Query().Get(key); got != value {
 			t.Fatalf("query %s = %q, want %q; query=%v", key, got, value, target.Query())

@@ -12261,7 +12261,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const prepareSessionHistoryCache = async (session) => {
-    if (!session || session.historyCacheLoaded || isClientInstanceName(session.name)) {
+    if (!session || session.historyCacheLoaded) {
       if (session) {
         session.historyCacheLoaded = true;
       }
@@ -12332,7 +12332,6 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (
       !session ||
       session.historyCacheDisabled ||
-      isClientInstanceName(session.name) ||
       !session.historyGeneration ||
       !(data instanceof Uint8Array) ||
       endCursor <= startCursor
@@ -12350,7 +12349,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const resetSessionHistoryCache = (session, generation, cursor) => {
-    if (!session || isClientInstanceName(session.name)) {
+    if (!session) {
       return;
     }
     clearSessionHistoryCacheWriteSchedule(session);
@@ -12381,7 +12380,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   });
 
   const destroySessionHistoryCache = async (session) => {
-    if (!session || isClientInstanceName(session.name)) {
+    if (!session) {
       return;
     }
     if (session.historyCacheDestroyPromise) {
@@ -12414,7 +12413,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const touchAllSessionHistoryCaches = () => {
     for (const tab of tabs.values()) {
       for (const pane of tab.panes.values()) {
-        if (!pane.historyCacheDisabled && pane.historyGeneration && !isClientInstanceName(pane.name)) {
+        if (!pane.historyCacheDisabled && pane.historyGeneration) {
           terminalHistoryCache.touch(pane.name, pane.id).catch(() => {});
         }
       }
@@ -12697,7 +12696,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     // Output chunks carry replay state because the replay-complete control frame can arrive before the next paint.
     const replayOutput = !session.replayComplete;
     const allowGeneratedInput = replayOutput && session.allowGeneratedInputDuringReplay === true;
-    const trackHistory = kind === "bytes" && session.historyProtocolActive && !isClientInstanceName(session.name);
+    const trackHistory = kind === "bytes" && session.historyProtocolActive;
     let nextHistoryCursor = trackHistory
       ? (startCursor === null ? session.receivedHistoryCursor : startCursor)
       : null;
@@ -13096,13 +13095,13 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     socketUrl.searchParams.set("fg", themePayload.foreground);
     socketUrl.searchParams.set("bg", themePayload.background);
     socketUrl.searchParams.set("cursor", themePayload.cursor);
-    const historyConnectRange = isClientInstanceName(session.name) ? null : sessionHistoryRangeForConnect(session);
+    const historyConnectRange = sessionHistoryRangeForConnect(session);
     if (historyConnectRange) {
       socketUrl.searchParams.set("history_generation", historyConnectRange.generation);
       socketUrl.searchParams.set("local_base_cursor", historyConnectRange.baseCursor.toString());
       socketUrl.searchParams.set("local_end_cursor", historyConnectRange.endCursor.toString());
     }
-    if (!isClientInstanceName(session.name) && session.resetOnNextReplay) {
+    if (session.resetOnNextReplay) {
       socketUrl.searchParams.set("history_replay_mode", "snapshot");
     }
     const logSocketUrl = new URL(socketUrl.toString());
@@ -13264,9 +13263,19 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                 const serverEndCursor = parseHistoryCursor(message.server_end_cursor);
                 const deltaFromCursor = parseHistoryCursor(message.delta_from_cursor);
                 const deltaToCursor = parseHistoryCursor(message.delta_to_cursor);
-                const modernHistoryProtocol = !isClientInstanceName(session.name) && Boolean(historyGeneration && syncMode);
+                const modernHistoryProtocol = Boolean(historyGeneration && syncMode);
                 if (!modernHistoryProtocol) {
                   session.historyProtocolActive = false;
+                  session.historyStateReady = false;
+                  session.historyGeneration = "";
+                  session.historyCacheSnapshot = null;
+                  session.localBaseCursor = 0n;
+                  session.receivedHistoryCursor = 0n;
+                  session.appliedHistoryCursor = 0n;
+                  session.persistedHistoryCursor = 0n;
+                  session.historyReplayTargetCursor = 0n;
+                  session.serverBaseCursor = 0n;
+                  disableSessionHistoryCache(session);
                   if (!resetTerminalForHistoryReplay(session)) {
                     detachSessionSocket(session, currentSocket, { connection: "error" });
                     currentSocket.close();
