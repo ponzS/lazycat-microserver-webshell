@@ -1426,7 +1426,8 @@ func TestRuntimePersistsWorkspaceForLightOSHomeReload(t *testing.T) {
 		"url: `${targetURL.pathname}${targetURL.search}${targetURL.hash}`",
 		`suppressWorkspaceRestoreOnce = true;`,
 		`clearWorkspaceRestoreState();`,
-		`workspaceRestoreHeartbeatTimer = window.setInterval(rememberWorkspaceRestoreState, 5 * 1000);`,
+		`workspaceRestoreHeartbeatTimer = window.setInterval(() => {`,
+		`touchAllSessionHistoryCaches();`,
 	} {
 		if !strings.Contains(mainSource, want) {
 			t.Fatalf("runtime Lazycat shell reload guard missing %q", want)
@@ -1534,6 +1535,63 @@ func TestRuntimeTerminalOutputBatchingGuard(t *testing.T) {
 	}
 }
 
+func TestRuntimeTerminalHistoryRangeSyncAndCache(t *testing.T) {
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	cacheData, err := os.ReadFile("runtime/static/terminal_history_cache.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/terminal_history_cache.js) error = %v", err)
+	}
+	mainSource := string(mainData)
+	cacheSource := string(cacheData)
+
+	mainSnippets := []string{
+		`import { createTerminalHistoryCache } from "./terminal_history_cache.js";`,
+		`const terminalHistoryCacheFlushBytes = 256 * 1024;`,
+		`const terminalHistoryCacheFlushDelayMs = 50;`,
+		`historyGeneration: "",`,
+		`localBaseCursor: 0n,`,
+		`receivedHistoryCursor: 0n,`,
+		`appliedHistoryCursor: 0n,`,
+		`persistedHistoryCursor: 0n,`,
+		`socketUrl.searchParams.set("history_generation", historyConnectRange.generation);`,
+		`socketUrl.searchParams.set("local_base_cursor", historyConnectRange.baseCursor.toString());`,
+		`socketUrl.searchParams.set("local_end_cursor", historyConnectRange.endCursor.toString());`,
+		`const modernHistoryProtocol = !isClientInstanceName(session.name)`,
+		`["snapshot", "delta", "current"].includes(syncMode)`,
+		`historyConnectRange.source === "memory"`,
+		`historyConnectRange.source === "cache"`,
+		`queueSessionHistoryCacheWrite(session, data, batch.historyStartCursor, batch.historyEndCursor);`,
+		`postWorkspaceAction("close_pane"`,
+		`.then(() => destroySessionHistoryCache(pane))`,
+		`flushAllSessionHistoryCaches();`,
+	}
+	for _, want := range mainSnippets {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime terminal history sync guard missing %q", want)
+		}
+	}
+
+	cacheSnippets := []string{
+		`database.createObjectStore("streams", { keyPath: "scopeKey" });`,
+		`database.createObjectStore("chunks", { keyPath: "id" });`,
+		`const scopeKeyFor = (selector, paneId) => JSON.stringify([`,
+		`if (output[index - 1].endCursor !== output[index].startCursor)`,
+		`const transaction = db.transaction(["streams", "chunks"], "readwrite");`,
+		`stream.endCursor = chunk.endCursor.toString();`,
+		`streamStore.put(stream);`,
+		`const reset = async (selector, paneId, generation, cursor) => {`,
+		`const cleanupExpired = async ({ now = Date.now() } = {}) => {`,
+	}
+	for _, want := range cacheSnippets {
+		if !strings.Contains(cacheSource, want) {
+			t.Fatalf("runtime terminal history cache guard missing %q", want)
+		}
+	}
+}
+
 func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	mainData, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {
@@ -1600,15 +1658,15 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 			t.Fatalf("runtime terminal canvas residue guard missing main snippet %q", want)
 		}
 	}
-	replayStartSnippet := `case "history-replay-start":
-                if (!validateReplayMessage(message)) {
-                  rejectMismatchedReplay(message);
-                  return;
-                }
-                session.agentPreparing = false;
-                if (!resetTerminalForHistoryReplay(session)) {`
-	if !strings.Contains(mainSource, replayStartSnippet) {
-		t.Fatal("runtime terminal replay start must reset Ghostty state before accepting replay output")
+	for _, want := range []string{
+		`if (syncMode === "snapshot") {`,
+		`if (!resetTerminalForHistoryReplay(session)) {`,
+		`if (historyConnectRange.source === "memory") {`,
+		`if (!session.historyStateReady || session.appliedHistoryCursor !== deltaFromCursor) {`,
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime terminal replay mode guard missing %q", want)
+		}
 	}
 
 	styleSnippets := []string{

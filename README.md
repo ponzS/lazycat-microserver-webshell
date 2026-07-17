@@ -22,6 +22,7 @@ LightOS WebShell 的目标是为懒猫微服提供一个开箱即用的网页终
 - 使用实例内的持久 agent 管理终端工作区，刷新页面、重新打开页面或短暂断网后可重新连接到已有 tab 和 pane。
 - 服务升级后优先复用兼容的旧 agent，尽量保留正在运行的终端会话；协议不兼容时会明确提示。
 - 支持终端输出历史回放，减少重连后的上下文丢失。
+- LightOS 实例端使用 PTY 原始字节范围游标同步历史；网络重连只获取本地终端缺失的增量，页面刷新优先从按 pane 隔离的本地缓存恢复后再接续服务端输出。
 - 支持终端活动检测、自动标签命名、忙闲状态和当前工作目录显示。
 
 ### 标签、分屏和搜索
@@ -94,6 +95,7 @@ lzc-cli project deploy
 
 - 后端使用 Go 实现，Web UI 通过 `/=exec://8080` 由 LPK 启动。
 - 终端会话通过实例内 persistent agent 管理，并通过 WebSocket 转发到浏览器。
+- 实例端终端历史由 persistent agent 作为可信数据源维护，浏览器使用 IndexedDB 按 selector、pane 和 history generation 隔离缓存；`client:` PC target 继续使用完整历史回放协议。
 - 终端渲染使用项目内随包分发的 Ghostty Web 运行时资源。
 - 本项目不使用 `tmux`，也不使用 `xterm.js`。
 

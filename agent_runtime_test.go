@@ -186,3 +186,25 @@ func TestPersistentAgentNoticeIsConsumedOnce(t *testing.T) {
 		t.Fatalf("second consumePersistentAgentNotice() = %q, want empty", got)
 	}
 }
+
+func TestPersistentAgentAttachCommandArgsIncludeHistoryRange(t *testing.T) {
+	scope := normalizeAgentScope("demo@owner", "account-a")
+	args := persistentAgentAttachCommandArgs(scope, "pane-2", 132, 43, 22000, historySyncRequest{
+		generation:    "generation-one",
+		localBase:     12,
+		localEnd:      34,
+		hasRange:      true,
+		forceSnapshot: true,
+	})
+	joined := strings.Join(args, "\x00")
+	for _, want := range []string{
+		"--history-generation\x00generation-one",
+		"--local-base-cursor\x0012",
+		"--local-end-cursor\x0034",
+		"--history-replay-mode\x00snapshot",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("attach command args missing %q: %v", want, args)
+		}
+	}
+}

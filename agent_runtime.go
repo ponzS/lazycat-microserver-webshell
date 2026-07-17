@@ -710,7 +710,7 @@ func (s *pluginServer) handleAgentStartupError(w http.ResponseWriter, r *http.Re
 	})
 }
 
-func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, scope agentScope, paneID string, cols, rows, terminalScrollback int) error {
+func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, scope agentScope, paneID string, cols, rows, terminalScrollback int, syncRequest historySyncRequest) error {
 	scope = normalizeAgentScope(scope.Selector, scope.AccountID)
 	if !websocket.IsWebSocketUpgrade(r) {
 		http.Error(w, "websocket upgrade is required", http.StatusBadRequest)
@@ -747,30 +747,7 @@ func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, s
 
 	attachCtx, cancelAttach := context.WithCancel(context.Background())
 	defer cancelAttach()
-	command := exec.CommandContext(
-		attachCtx,
-		lightosctlPath,
-		"exec",
-		"-i",
-		scope.Selector,
-		agentInstallPath,
-		"agent",
-		"attach",
-		"--socket",
-		scopedAgentSocketPath(scope),
-		"--selector",
-		scope.Selector,
-		"--account",
-		scope.AccountID,
-		"--pane",
-		paneID,
-		"--cols",
-		strconv.Itoa(normalizeCols(cols)),
-		"--rows",
-		strconv.Itoa(normalizeRows(rows)),
-		"--terminal-scrollback",
-		strconv.Itoa(terminalScrollback),
-	)
+	command := exec.CommandContext(attachCtx, lightosctlPath, persistentAgentAttachCommandArgs(scope, paneID, cols, rows, terminalScrollback, syncRequest)...)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		_ = writeWebSocketJSONLocked(conn, &writeMu, map[string]any{"type": "process-exit", "message": err.Error(), "exit_code": -1})
@@ -874,6 +851,44 @@ func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, s
 			}
 		}
 	}
+}
+
+func persistentAgentAttachCommandArgs(scope agentScope, paneID string, cols, rows, terminalScrollback int, syncRequest historySyncRequest) []string {
+	commandArgs := []string{
+		"exec",
+		"-i",
+		scope.Selector,
+		agentInstallPath,
+		"agent",
+		"attach",
+		"--socket",
+		scopedAgentSocketPath(scope),
+		"--selector",
+		scope.Selector,
+		"--account",
+		scope.AccountID,
+		"--pane",
+		paneID,
+		"--cols",
+		strconv.Itoa(normalizeCols(cols)),
+		"--rows",
+		strconv.Itoa(normalizeRows(rows)),
+		"--terminal-scrollback",
+		strconv.Itoa(terminalScrollback),
+	}
+	if syncRequest.generation != "" {
+		commandArgs = append(commandArgs, "--history-generation", syncRequest.generation)
+	}
+	if syncRequest.hasRange {
+		commandArgs = append(commandArgs,
+			"--local-base-cursor", strconv.FormatUint(syncRequest.localBase, 10),
+			"--local-end-cursor", strconv.FormatUint(syncRequest.localEnd, 10),
+		)
+	}
+	if syncRequest.forceSnapshot {
+		commandArgs = append(commandArgs, "--history-replay-mode", "snapshot")
+	}
+	return commandArgs
 }
 
 func isPaneNotFoundAttachError(message string) bool {

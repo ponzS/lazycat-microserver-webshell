@@ -1,5 +1,6 @@
 import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
 import { createPerformanceTaskMonitor } from "./performance_tasks.js";
+import { createTerminalHistoryCache } from "./terminal_history_cache.js";
 
 const params = new URLSearchParams(window.location.search);
 const workspaceRestoreStorageKey = "webshell.workspaceRestore";
@@ -333,6 +334,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const terminalReconnectJitterRatio = 0.2;
   const terminalOutputFlushFallbackMs = 32;
   const terminalOutputFlushBudgetBytes = 128 * 1024;
+  const terminalHistoryCacheFlushBytes = 256 * 1024;
+  const terminalHistoryCacheFlushDelayMs = 50;
+  const terminalHistoryCacheOrphanTTL = 30 * 1000;
+  const averageTerminalHistoryBytesPerLine = 350;
   const performanceMeterSampleMs = 500;
   const performanceMeterWarmupFrames = 12;
   const performanceTaskPanelLimit = 10;
@@ -354,6 +359,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const terminalPixelScrollOffsetEpsilon = 0.001;
   const terminalMouseLegacyCoordinateLimit = 95;
   const maxQueuedTerminalOutputBytes = 4 * 1024 * 1024;
+  const terminalHistoryCache = createTerminalHistoryCache({ orphanTTL: terminalHistoryCacheOrphanTTL });
   const activityPollIntervalMs = 4000;
   const maxAttachmentUploadBytes = 2 * 1024 * 1024 * 1024;
   const maxAttachmentUploadCount = 32;
@@ -12209,6 +12215,239 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   };
 
+  const parseHistoryCursor = (value) => {
+    const text = String(value ?? "").trim();
+    if (!/^\d+$/.test(text)) {
+      return null;
+    }
+    try {
+      return BigInt(text);
+    } catch (error) {
+      return null;
+    }
+  };
+
+  const clearSessionHistoryCacheWriteSchedule = (session) => {
+    if (!session) {
+      return;
+    }
+    if (session.historyCacheWriteFrame) {
+      window.cancelAnimationFrame(session.historyCacheWriteFrame);
+      session.historyCacheWriteFrame = 0;
+    }
+    if (session.historyCacheWriteTimer) {
+      window.clearTimeout(session.historyCacheWriteTimer);
+      session.historyCacheWriteTimer = 0;
+    }
+  };
+
+  const disableSessionHistoryCache = (session, error = null) => {
+    if (!session) {
+      return;
+    }
+    clearSessionHistoryCacheWriteSchedule(session);
+    session.historyCacheDisabled = true;
+    session.historyCacheWriteQueue = [];
+    session.historyCacheWriteBytes = 0;
+    session.historyCacheSnapshot = null;
+    if (error) {
+      console.warn("[terminal-history] local cache disabled", {
+        name: session.name,
+        pane: session.id,
+        error: error?.message || String(error),
+      });
+    }
+    terminalHistoryCache.deletePane(session.name, session.id).catch(() => {});
+  };
+
+  const prepareSessionHistoryCache = async (session) => {
+    if (!session || session.historyCacheLoaded || isClientInstanceName(session.name)) {
+      if (session) {
+        session.historyCacheLoaded = true;
+      }
+      return session?.historyCacheSnapshot || null;
+    }
+    if (session.historyCacheLoadPromise) {
+      return session.historyCacheLoadPromise;
+    }
+    session.historyCacheLoadPromise = terminalHistoryCache.load(session.name, session.id)
+      .then((snapshot) => {
+        if (session.closed) {
+          return null;
+        }
+        session.historyCacheSnapshot = snapshot;
+        if (snapshot) {
+          session.historyGeneration = snapshot.generation;
+          session.localBaseCursor = snapshot.baseCursor;
+          session.persistedHistoryCursor = snapshot.endCursor;
+        }
+        return snapshot;
+      })
+      .catch((error) => {
+        disableSessionHistoryCache(session, error);
+        return null;
+      })
+      .finally(() => {
+        session.historyCacheLoaded = true;
+        session.historyCacheLoadPromise = null;
+      });
+    return session.historyCacheLoadPromise;
+  };
+
+  const flushSessionHistoryCacheWrites = (session) => {
+    if (!session || session.historyCacheDisabled || session.historyCacheWriteQueue.length === 0) {
+      return session?.historyCacheWritePromise || Promise.resolve();
+    }
+    clearSessionHistoryCacheWriteSchedule(session);
+    const chunks = session.historyCacheWriteQueue;
+    session.historyCacheWriteQueue = [];
+    session.historyCacheWriteBytes = 0;
+    const generation = session.historyGeneration;
+    session.historyCacheWritePromise = session.historyCacheWritePromise
+      .then(() => session.historyCacheResetPromise)
+      .then(() => terminalHistoryCache.append(session.name, session.id, generation, chunks, {
+        limitBytes: Math.max(1, Number(terminalOptionsBase.scrollback || 0) * averageTerminalHistoryBytesPerLine),
+      }))
+      .then((result) => {
+        if (!result || session.closed || session.historyGeneration !== generation) {
+          return;
+        }
+        session.localBaseCursor = result.baseCursor;
+        session.persistedHistoryCursor = result.endCursor;
+      })
+      .catch((error) => disableSessionHistoryCache(session, error));
+    return session.historyCacheWritePromise;
+  };
+
+  const scheduleSessionHistoryCacheWrite = (session) => {
+    if (!session || session.historyCacheDisabled || session.historyCacheWriteFrame || session.historyCacheWriteTimer) {
+      return;
+    }
+    const flush = () => flushSessionHistoryCacheWrites(session);
+    session.historyCacheWriteFrame = window.requestAnimationFrame(flush);
+    session.historyCacheWriteTimer = window.setTimeout(flush, terminalHistoryCacheFlushDelayMs);
+  };
+
+  const queueSessionHistoryCacheWrite = (session, data, startCursor, endCursor) => {
+    if (
+      !session ||
+      session.historyCacheDisabled ||
+      isClientInstanceName(session.name) ||
+      !session.historyGeneration ||
+      !(data instanceof Uint8Array) ||
+      endCursor <= startCursor
+    ) {
+      return;
+    }
+    const copy = new Uint8Array(data);
+    session.historyCacheWriteQueue.push({ startCursor, endCursor, data: copy });
+    session.historyCacheWriteBytes += copy.byteLength;
+    if (session.historyCacheWriteBytes >= terminalHistoryCacheFlushBytes) {
+      flushSessionHistoryCacheWrites(session);
+    } else {
+      scheduleSessionHistoryCacheWrite(session);
+    }
+  };
+
+  const resetSessionHistoryCache = (session, generation, cursor) => {
+    if (!session || isClientInstanceName(session.name)) {
+      return;
+    }
+    clearSessionHistoryCacheWriteSchedule(session);
+    session.historyCacheDisabled = false;
+    session.historyCacheWriteQueue = [];
+    session.historyCacheWriteBytes = 0;
+    session.historyCacheSnapshot = null;
+    const previousWrites = session.historyCacheWritePromise;
+    session.historyCacheResetPromise = Promise.resolve(previousWrites)
+      .catch(() => {})
+      .then(() => terminalHistoryCache.reset(session.name, session.id, generation, cursor))
+      .then((result) => {
+        if (session.closed || session.historyGeneration !== generation) {
+          return;
+        }
+        session.localBaseCursor = result.baseCursor;
+        session.persistedHistoryCursor = result.endCursor;
+      })
+      .catch((error) => disableSessionHistoryCache(session, error));
+  };
+
+  const deleteSessionHistoryCache = (name, paneId) => terminalHistoryCache.deletePane(name, paneId).catch((error) => {
+    console.warn("[terminal-history] cache delete failed", {
+      name,
+      pane: paneId,
+      error: error?.message || String(error),
+    });
+  });
+
+  const destroySessionHistoryCache = async (session) => {
+    if (!session || isClientInstanceName(session.name)) {
+      return;
+    }
+    if (session.historyCacheDestroyPromise) {
+      return session.historyCacheDestroyPromise;
+    }
+    session.historyCacheDestroyPromise = (async () => {
+      clearSessionHistoryCacheWriteSchedule(session);
+      session.historyCacheDisabled = true;
+      session.historyCacheWriteQueue = [];
+      session.historyCacheWriteBytes = 0;
+      await Promise.allSettled([
+        session.historyCacheResetPromise,
+        session.historyCacheWritePromise,
+      ]);
+      await deleteSessionHistoryCache(session.name, session.id);
+    })();
+    return session.historyCacheDestroyPromise;
+  };
+
+  const flushAllSessionHistoryCaches = () => {
+    const writes = [];
+    for (const tab of tabs.values()) {
+      for (const pane of tab.panes.values()) {
+        writes.push(flushSessionHistoryCacheWrites(pane));
+      }
+    }
+    return Promise.allSettled(writes);
+  };
+
+  const touchAllSessionHistoryCaches = () => {
+    for (const tab of tabs.values()) {
+      for (const pane of tab.panes.values()) {
+        if (!pane.historyCacheDisabled && pane.historyGeneration && !isClientInstanceName(pane.name)) {
+          terminalHistoryCache.touch(pane.name, pane.id).catch(() => {});
+        }
+      }
+    }
+  };
+
+  const sessionHistoryRangeForConnect = (session) => {
+    if (!session?.historyGeneration || session.resetOnNextReplay) {
+      return null;
+    }
+    if (session.historyStateReady) {
+      return {
+        generation: session.historyGeneration,
+        baseCursor: session.localBaseCursor,
+        endCursor: session.appliedHistoryCursor,
+        source: "memory",
+      };
+    }
+    if (session.historyCacheDisabled) {
+      return null;
+    }
+    const snapshot = session.historyCacheSnapshot;
+    if (snapshot && snapshot.generation === session.historyGeneration) {
+      return {
+        generation: snapshot.generation,
+        baseCursor: snapshot.baseCursor,
+        endCursor: snapshot.endCursor,
+        source: "cache",
+      };
+    }
+    return null;
+  };
+
   const terminalOutputKind = (data) => {
     if (typeof data === "string") {
       return "text";
@@ -12310,13 +12549,16 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       session.outputQueueSize > 0 ||
       !session.replayVerified ||
       session.closed ||
-      session.name !== activeName
+      session.name !== activeName ||
+      (session.historyProtocolActive && session.appliedHistoryCursor < session.historyReplayTargetCursor)
     ) {
       return false;
     }
     session.replayCompletionPending = false;
     session.replayComplete = true;
     session.replayVerified = false;
+    session.historyStateReady = true;
+    session.historyCacheSnapshot = null;
     session.agentPreparing = false;
     session.allowGeneratedInputDuringReplay = false;
     clearAttachReadyTimer(session);
@@ -12383,6 +12625,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         const data = coalesceTerminalOutputBatch(batch.chunks, batch.kind, batch.byteLength);
         if (writeTerminalOutputBatch(session, data, batch.replayOutput, batch.allowGeneratedInput)) {
           wrote = true;
+          if (batch.historyEndCursor !== null) {
+            session.appliedHistoryCursor = batch.historyEndCursor;
+            if (batch.historyCacheable && data instanceof Uint8Array) {
+              queueSessionHistoryCacheWrite(session, data, batch.historyStartCursor, batch.historyEndCursor);
+            }
+          }
         }
         batch = null;
       };
@@ -12392,7 +12640,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
           !batch ||
           batch.kind !== entry.kind ||
           batch.replayOutput !== entry.replayOutput ||
-          batch.allowGeneratedInput !== entry.allowGeneratedInput
+          batch.allowGeneratedInput !== entry.allowGeneratedInput ||
+          batch.historyCacheable !== entry.historyCacheable ||
+          (batch.historyEndCursor !== null && entry.historyStartCursor !== batch.historyEndCursor)
         ) {
           flushBatch();
           batch = {
@@ -12401,10 +12651,16 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
             allowGeneratedInput: entry.allowGeneratedInput,
             chunks: [],
             byteLength: 0,
+            historyCacheable: entry.historyCacheable,
+            historyStartCursor: entry.historyStartCursor,
+            historyEndCursor: entry.historyEndCursor,
           };
         }
         batch.chunks.push(entry.data);
         batch.byteLength += entry.byteLength;
+        if (entry.historyEndCursor !== null) {
+          batch.historyEndCursor = entry.historyEndCursor;
+        }
       }
       flushBatch();
 
@@ -12429,7 +12685,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.outputFlushTimer = window.setTimeout(flush, terminalOutputFlushFallbackMs);
   };
 
-  const writeSessionOutput = (session, data) => {
+  const writeSessionOutput = (session, data, { historySource = "server", startCursor = null, endCursor = null } = {}) => {
     if (!session?.term || session.closed || session.name !== activeName) {
       return;
     }
@@ -12441,10 +12697,20 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     // Output chunks carry replay state because the replay-complete control frame can arrive before the next paint.
     const replayOutput = !session.replayComplete;
     const allowGeneratedInput = replayOutput && session.allowGeneratedInputDuringReplay === true;
+    const trackHistory = kind === "bytes" && session.historyProtocolActive && !isClientInstanceName(session.name);
+    let nextHistoryCursor = trackHistory
+      ? (startCursor === null ? session.receivedHistoryCursor : startCursor)
+      : null;
     const enqueueEntry = (entryData) => {
       const byteLength = terminalOutputByteLength(entryData);
       if (byteLength <= 0) {
         return;
+      }
+      const historyStartCursor = nextHistoryCursor;
+      const historyEndCursor = historyStartCursor === null ? null : historyStartCursor + BigInt(byteLength);
+      if (historyEndCursor !== null) {
+        nextHistoryCursor = historyEndCursor;
+        session.receivedHistoryCursor = historyEndCursor;
       }
       session.outputQueue.push({
         data: entryData,
@@ -12452,6 +12718,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         byteLength,
         replayOutput,
         allowGeneratedInput,
+        historyCacheable: historySource === "server" && historyEndCursor !== null,
+        historyStartCursor,
+        historyEndCursor,
       });
       session.outputQueueSize += byteLength;
     };
@@ -12467,6 +12736,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       }
     } else {
       enqueueEntry(outputData);
+    }
+    if (trackHistory && endCursor !== null && nextHistoryCursor !== endCursor) {
+      throw new Error("Terminal history output range does not match payload length.");
     }
     if (session.outputQueueSize >= maxQueuedTerminalOutputBytes) {
       flushSessionOutput(session);
@@ -12569,6 +12841,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       session.replayComplete = false;
       session.replayVerified = false;
       session.replayCompletionPending = false;
+      session.historyStateReady = false;
       session.resetOnNextReplay = false;
       session.selectAllBufferActive = false;
       session.term.clearSelection?.();
@@ -12797,6 +13070,20 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     ) {
       return;
     }
+    await prepareSessionHistoryCache(session);
+    flushSessionOutput(session, { force: true });
+    await flushSessionHistoryCacheWrites(session);
+    if (
+      !session ||
+      session.closed ||
+      !isCurrentInstanceSession(session) ||
+      (document.hidden && !allowHidden) ||
+      navigator.onLine === false ||
+      session.socket?.readyState === WebSocket.OPEN ||
+      session.socket?.readyState === WebSocket.CONNECTING
+    ) {
+      return;
+    }
     session.pendingConnect = false;
     clearReconnectTimer(session);
     const socketUrl = webSocketURL("./ws");
@@ -12809,8 +13096,18 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     socketUrl.searchParams.set("fg", themePayload.foreground);
     socketUrl.searchParams.set("bg", themePayload.background);
     socketUrl.searchParams.set("cursor", themePayload.cursor);
+    const historyConnectRange = isClientInstanceName(session.name) ? null : sessionHistoryRangeForConnect(session);
+    if (historyConnectRange) {
+      socketUrl.searchParams.set("history_generation", historyConnectRange.generation);
+      socketUrl.searchParams.set("local_base_cursor", historyConnectRange.baseCursor.toString());
+      socketUrl.searchParams.set("local_end_cursor", historyConnectRange.endCursor.toString());
+    }
+    if (!isClientInstanceName(session.name) && session.resetOnNextReplay) {
+      socketUrl.searchParams.set("history_replay_mode", "snapshot");
+    }
     const logSocketUrl = new URL(socketUrl.toString());
     logSocketUrl.searchParams.delete("client_id");
+    logSocketUrl.searchParams.delete("history_generation");
     const socketDebug = {
       textMessages: 0,
       binaryMessages: 0,
@@ -12826,6 +13123,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       allowHidden,
       documentHidden: document.hidden,
       reconnectAttempts: session.reconnectAttempts || 0,
+      historySource: historyConnectRange?.source || "snapshot",
+      localBaseCursor: historyConnectRange?.baseCursor?.toString?.() || "",
+      localEndCursor: historyConnectRange?.endCursor?.toString?.() || "",
     });
     const currentSocket = new WebSocket(socketUrl.toString());
     session.socket = currentSocket;
@@ -12865,6 +13165,26 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       });
       console.warn(`Rejected terminal replay for ${selector}/${paneID}; expected ${session.name}/${session.id}.`);
       currentSocket.close();
+    };
+
+    const rejectHistorySync = (reason) => {
+      session.resetOnNextReplay = true;
+      session.historyStateReady = false;
+      session.historyProtocolActive = false;
+      session.historyCacheSnapshot = null;
+      session.historyGeneration = "";
+      deleteSessionHistoryCache(session.name, session.id);
+      detachSessionSocket(session, currentSocket, { connection: "error" });
+      console.warn("[terminal-history] rejected history sync", {
+        name: session.name,
+        pane: session.id,
+        reason,
+      });
+      try {
+        currentSocket.close();
+      } catch (error) {
+      }
+      scheduleReconnect(session, { immediate: true });
     };
 
     currentSocket.addEventListener("open", () => {
@@ -12925,6 +13245,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                 paneID: message.pane_id || message.paneId || "",
                 replayVerified: session.replayVerified || false,
                 replayComplete: session.replayComplete,
+                syncMode: message.sync_mode || "",
+                serverBaseCursor: message.server_base_cursor || "",
+                serverEndCursor: message.server_end_cursor || "",
                 textMessages: socketDebug.textMessages,
               });
             }
@@ -12935,13 +13258,108 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                   return;
                 }
                 session.agentPreparing = false;
-                if (!resetTerminalForHistoryReplay(session)) {
-                  detachSessionSocket(session, currentSocket, { connection: "error" });
-                  currentSocket.close();
-                  scheduleReconnect(session, { immediate: true });
+                const historyGeneration = String(message.history_generation || "").trim();
+                const syncMode = String(message.sync_mode || "").trim();
+                const serverBaseCursor = parseHistoryCursor(message.server_base_cursor);
+                const serverEndCursor = parseHistoryCursor(message.server_end_cursor);
+                const deltaFromCursor = parseHistoryCursor(message.delta_from_cursor);
+                const deltaToCursor = parseHistoryCursor(message.delta_to_cursor);
+                const modernHistoryProtocol = !isClientInstanceName(session.name) && Boolean(historyGeneration && syncMode);
+                if (!modernHistoryProtocol) {
+                  session.historyProtocolActive = false;
+                  if (!resetTerminalForHistoryReplay(session)) {
+                    detachSessionSocket(session, currentSocket, { connection: "error" });
+                    currentSocket.close();
+                    scheduleReconnect(session, { immediate: true });
+                    return;
+                  }
+                  session.replayVerified = replayMessageHasIdentity(message) ? "identified" : "legacy";
+                  session.allowGeneratedInputDuringReplay = message.allow_generated_input === true || message.allowGeneratedInput === true;
+                  session.suppressGeneratedTerminalInputUntil = 0;
+                  session.shellEl.dataset.connection = "connecting";
                   return;
                 }
-                session.replayVerified = replayMessageHasIdentity(message) ? "identified" : "legacy";
+                if (
+                  !["snapshot", "delta", "current"].includes(syncMode) ||
+                  serverBaseCursor === null ||
+                  serverEndCursor === null ||
+                  deltaFromCursor === null ||
+                  deltaToCursor === null ||
+                  serverBaseCursor > serverEndCursor ||
+                  deltaFromCursor > deltaToCursor ||
+                  deltaToCursor !== serverEndCursor
+                ) {
+                  rejectHistorySync("invalid server history range");
+                  return;
+                }
+                session.historyProtocolActive = true;
+                session.historyGeneration = historyGeneration;
+                session.historySyncMode = syncMode;
+                session.historyReplayTargetCursor = deltaToCursor;
+                session.serverBaseCursor = serverBaseCursor;
+                session.resetOnNextReplay = false;
+                if (syncMode === "snapshot") {
+                  if (!resetTerminalForHistoryReplay(session)) {
+                    rejectHistorySync("terminal reset failed");
+                    return;
+                  }
+                  session.historyGeneration = historyGeneration;
+                  session.historyProtocolActive = true;
+                  session.historySyncMode = syncMode;
+                  session.serverBaseCursor = serverBaseCursor;
+                  session.localBaseCursor = serverBaseCursor;
+                  session.receivedHistoryCursor = deltaFromCursor;
+                  session.appliedHistoryCursor = deltaFromCursor;
+                  session.persistedHistoryCursor = deltaFromCursor;
+                  session.historyStateReady = false;
+                  resetSessionHistoryCache(session, historyGeneration, deltaFromCursor);
+                } else {
+                  if (!historyConnectRange || historyConnectRange.generation !== historyGeneration || historyConnectRange.endCursor !== deltaFromCursor) {
+                    rejectHistorySync("local and server history ranges do not match");
+                    return;
+                  }
+                  if (historyConnectRange.source === "memory") {
+                    if (!session.historyStateReady || session.appliedHistoryCursor !== deltaFromCursor) {
+                      rejectHistorySync("in-memory terminal cursor is not reusable");
+                      return;
+                    }
+                    discardSessionOutputBuffers(session);
+                    session.receivedHistoryCursor = deltaFromCursor;
+                  } else if (historyConnectRange.source === "cache") {
+                    const snapshot = session.historyCacheSnapshot;
+                    if (!snapshot || snapshot.generation !== historyGeneration || snapshot.baseCursor !== historyConnectRange.baseCursor || snapshot.endCursor !== deltaFromCursor) {
+                      rejectHistorySync("cached terminal history is unavailable");
+                      return;
+                    }
+                    if (!resetTerminalForHistoryReplay(session)) {
+                      rejectHistorySync("terminal reset for cached history failed");
+                      return;
+                    }
+                    session.historyGeneration = historyGeneration;
+                    session.historyProtocolActive = true;
+                    session.historySyncMode = syncMode;
+                    session.serverBaseCursor = serverBaseCursor;
+                    session.localBaseCursor = snapshot.baseCursor;
+                    session.receivedHistoryCursor = snapshot.baseCursor;
+                    session.appliedHistoryCursor = snapshot.baseCursor;
+                    session.persistedHistoryCursor = snapshot.endCursor;
+                    for (const chunk of snapshot.chunks) {
+                      writeSessionOutput(session, chunk.data, {
+                        historySource: "cache",
+                        startCursor: chunk.startCursor,
+                        endCursor: chunk.endCursor,
+                      });
+                    }
+                    if (session.receivedHistoryCursor !== deltaFromCursor) {
+                      rejectHistorySync("cached terminal history did not reach requested cursor");
+                      return;
+                    }
+                  } else {
+                    rejectHistorySync("unknown local history source");
+                    return;
+                  }
+                }
+                session.replayVerified = "identified";
                 session.allowGeneratedInputDuringReplay = message.allow_generated_input === true || message.allowGeneratedInput === true;
                 session.suppressGeneratedTerminalInputUntil = 0;
                 session.shellEl.dataset.connection = "connecting";
@@ -12950,6 +13368,14 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                 if (!session.replayVerified || (session.replayVerified === "identified" && !validateReplayMessage(message))) {
                   rejectMismatchedReplay(message);
                   return;
+                }
+                if (session.historyProtocolActive) {
+                  const completeGeneration = String(message.history_generation || "").trim();
+                  const completeCursor = parseHistoryCursor(message.history_cursor);
+                  if (completeGeneration !== session.historyGeneration || completeCursor === null || completeCursor !== session.historyReplayTargetCursor || session.receivedHistoryCursor < completeCursor) {
+                    rejectHistorySync("history replay completion range does not match");
+                    return;
+                  }
                 }
                 session.replayCompletionPending = true;
                 finishSessionHistoryReplayIfReady(session) || flushSessionOutput(session);
@@ -12979,6 +13405,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                 const shouldFocusAfterExit = session.tabId === activeTabId && currentTab()?.activePaneId === session.id;
                 session.exitExpected = true;
                 detachSessionSocket(session, currentSocket);
+                destroySessionHistoryCache(session);
                 disposePane(session);
                 refreshWorkspace({ focus: shouldFocusAfterExit }).catch((error) => showToast(error.message));
                 return;
@@ -13023,7 +13450,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
           }
           return;
         }
-        writeSessionOutput(session, new Uint8Array(event.data));
+        try {
+          writeSessionOutput(session, new Uint8Array(event.data));
+        } catch (error) {
+          rejectHistorySync(error?.message || "terminal history output range failed");
+        }
       }
     });
 
@@ -13227,6 +13658,27 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       replayOutputDepth: 0,
       allowGeneratedInputDuringReplay: false,
       resetOnNextReplay: false,
+      historyGeneration: "",
+      historyProtocolActive: false,
+      historySyncMode: "",
+      historyStateReady: false,
+      historyCacheLoaded: false,
+      historyCacheDisabled: false,
+      historyCacheLoadPromise: null,
+      historyCacheSnapshot: null,
+      historyCacheResetPromise: Promise.resolve(),
+      historyCacheWriteQueue: [],
+      historyCacheWriteBytes: 0,
+      historyCacheWriteFrame: 0,
+      historyCacheWriteTimer: 0,
+      historyCacheWritePromise: Promise.resolve(),
+      historyCacheDestroyPromise: null,
+      localBaseCursor: 0n,
+      receivedHistoryCursor: 0n,
+      appliedHistoryCursor: 0n,
+      persistedHistoryCursor: 0n,
+      historyReplayTargetCursor: 0n,
+      serverBaseCursor: 0n,
       suppressGeneratedTerminalInputUntil: 0,
       inputLocked: false,
       composingIME: false,
@@ -13835,6 +14287,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       const nextTabIDs = new Set((state?.tabs || []).map((tab) => tab.id));
       for (const tab of [...tabs.values()]) {
         if (!nextTabIDs.has(tab.id)) {
+          for (const pane of tab.panes.values()) {
+            if (pane.name === targetName) {
+              destroySessionHistoryCache(pane);
+            }
+          }
           closeTab(tab.id, { remember: false });
         }
       }
@@ -13863,6 +14320,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         const wantedPaneIDs = new Set((tabState.panes || []).map((pane) => pane.id));
         for (const pane of [...tab.panes.values()]) {
           if (!wantedPaneIDs.has(pane.id)) {
+            if (pane.name === targetName) {
+              destroySessionHistoryCache(pane);
+            }
             disposePane(pane);
             tab.panes.delete(pane.id);
           }
@@ -14128,6 +14588,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (!pane || pane.closed) {
       return;
     }
+    flushSessionHistoryCacheWrites(pane);
     pane.closed = true;
     pane.pendingInput = [];
     pane.pendingInputSize = 0;
@@ -14145,6 +14606,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     clearReconnectTimer(pane);
     clearSessionConnectionTimers(pane);
     discardSessionOutputBuffers(pane);
+    clearSessionHistoryCacheWriteSchedule(pane);
     runSessionCleanups(pane);
     if (pane.socket) {
       const socket = pane.socket;
@@ -14168,7 +14630,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (!applyingWorkspaceState) {
       refreshAndConfirmClose([pane], "关闭此窗格并终止正在运行的命令？").then((confirmed) => {
         if (confirmed) {
-          postWorkspaceAction("close_pane", { tab_id: tabId, pane_id: paneId }).catch((error) => showToast(error.message));
+          postWorkspaceAction("close_pane", { tab_id: tabId, pane_id: paneId })
+            .then(() => destroySessionHistoryCache(pane))
+            .catch((error) => showToast(error.message));
         }
       });
       return;
@@ -14199,9 +14663,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       finishInlineTabRename({ commit: false });
     }
     if (!applyingWorkspaceState) {
-      refreshAndConfirmClose(targetPanesFromTab(tab), "关闭此标签并终止正在运行的命令？").then((confirmed) => {
+      const panesToClose = targetPanesFromTab(tab);
+      refreshAndConfirmClose(panesToClose, "关闭此标签并终止正在运行的命令？").then((confirmed) => {
         if (confirmed) {
-          postWorkspaceAction("close_tab", { tab_id: tabId }).catch((error) => showToast(error.message));
+          postWorkspaceAction("close_tab", { tab_id: tabId })
+            .then(() => Promise.allSettled(panesToClose.map((pane) => destroySessionHistoryCache(pane))))
+            .catch((error) => showToast(error.message));
         }
       });
       return;
@@ -14242,7 +14709,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         .flatMap((tab) => targetPanesFromTab(tab));
       refreshAndConfirmClose(panes, "关闭其他标签并终止正在运行的命令？").then((confirmed) => {
         if (confirmed) {
-          postWorkspaceAction("close_other_tabs", { tab_id: tabId }).catch((error) => showToast(error.message));
+          postWorkspaceAction("close_other_tabs", { tab_id: tabId })
+            .then(() => Promise.allSettled(panes.map((pane) => destroySessionHistoryCache(pane))))
+            .catch((error) => showToast(error.message));
         }
       });
       return;
@@ -16638,11 +17107,15 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   window.addEventListener("pagehide", () => {
     rememberWorkspaceRestoreState();
     flushPendingTerminalScrollbackSave();
+    touchAllSessionHistoryCaches();
+    flushAllSessionHistoryCaches();
     sendDeviceOfflineBeacon();
   });
   window.addEventListener("beforeunload", (event) => {
     rememberWorkspaceRestoreState();
     flushPendingTerminalScrollbackSave();
+    touchAllSessionHistoryCaches();
+    flushAllSessionHistoryCaches();
     if (!suppressBeforeUnloadOnce && hasCachedBusyPane()) {
       event.preventDefault();
       event.returnValue = "";
@@ -16663,7 +17136,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       }
     }
   });
-  workspaceRestoreHeartbeatTimer = window.setInterval(rememberWorkspaceRestoreState, 5 * 1000);
+  workspaceRestoreHeartbeatTimer = window.setInterval(() => {
+    rememberWorkspaceRestoreState();
+    touchAllSessionHistoryCaches();
+  }, 5 * 1000);
+
+  terminalHistoryCache.cleanupExpired().catch(() => {});
 
   bootstrap().catch((error) => {
     const message = error.message || "WebShell startup failed.";

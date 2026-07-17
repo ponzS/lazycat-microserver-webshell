@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -89,6 +91,7 @@ type terminalPane struct {
 	ptyFile                    *os.File
 	clients                    map[*paneClient]struct{}
 	history                    paneHistory
+	historyGeneration          string
 	historyLimitBytes          int
 	cols                       int
 	rows                       int
@@ -134,10 +137,26 @@ type paneOutbound struct {
 type paneHistory struct {
 	chunks [][]byte
 	bytes  int
+	base   uint64
+	end    uint64
 }
 
 type paneHistorySnapshot struct {
-	chunks [][]byte
+	chunks     [][]byte
+	generation string
+	syncMode   string
+	serverBase uint64
+	serverEnd  uint64
+	deltaFrom  uint64
+	deltaTo    uint64
+}
+
+type historySyncRequest struct {
+	generation    string
+	localBase     uint64
+	localEnd      uint64
+	hasRange      bool
+	forceSnapshot bool
 }
 
 type workspaceState struct {
@@ -381,7 +400,32 @@ func (s *pluginServer) attachPersistentPane(w http.ResponseWriter, r *http.Reque
 		writeAuthorizationError(w, err)
 		return nil
 	}
-	return s.attachAgentPane(w, r, normalizeAgentScope(selector, accountID), paneID, cols, rows, s.currentTerminalScrollback())
+	return s.attachAgentPane(w, r, normalizeAgentScope(selector, accountID), paneID, cols, rows, s.currentTerminalScrollback(), historySyncRequestFromQuery(r))
+}
+
+func historySyncRequestFromQuery(r *http.Request) historySyncRequest {
+	if r == nil {
+		return historySyncRequest{}
+	}
+	query := r.URL.Query()
+	request := historySyncRequest{
+		generation:    strings.TrimSpace(query.Get("history_generation")),
+		forceSnapshot: strings.TrimSpace(query.Get("history_replay_mode")) == "snapshot",
+	}
+	baseText := strings.TrimSpace(query.Get("local_base_cursor"))
+	endText := strings.TrimSpace(query.Get("local_end_cursor"))
+	if request.generation == "" || len(request.generation) > 128 || baseText == "" || endText == "" {
+		return request
+	}
+	base, baseErr := strconv.ParseUint(baseText, 10, 64)
+	end, endErr := strconv.ParseUint(endText, 10, 64)
+	if baseErr != nil || endErr != nil || base > end {
+		return request
+	}
+	request.localBase = base
+	request.localEnd = end
+	request.hasRange = true
+	return request
 }
 
 func terminalThemeFromRequest(r *http.Request) (string, string, string) {
@@ -1119,6 +1163,10 @@ func (t *terminalTab) removePane(paneID string) {
 }
 
 func newTerminalPane(workspace *terminalWorkspace, paneID string, cols, rows int, initialCWD string) (*terminalPane, error) {
+	historyGeneration, err := newHistoryGeneration()
+	if err != nil {
+		return nil, fmt.Errorf("create history generation: %w", err)
+	}
 	var command *exec.Cmd
 	if workspace.localPTY {
 		command = exec.Command("/bin/sh", "-lc", buildInstanceShellBootstrapScript(workspace.username, initialCWD))
@@ -1151,6 +1199,7 @@ func newTerminalPane(workspace *terminalWorkspace, paneID string, cols, rows int
 		ptyFile:           ptyFile,
 		clients:           make(map[*paneClient]struct{}),
 		historyLimitBytes: historyLimitBytes,
+		historyGeneration: historyGeneration,
 		cols:              normalizeCols(cols),
 		rows:              normalizeRows(rows),
 		cwd:               strings.TrimSpace(initialCWD),
@@ -1347,6 +1396,7 @@ func (h *paneHistory) append(chunk []byte) {
 	}
 	h.chunks = append(h.chunks, chunk)
 	h.bytes += len(chunk)
+	h.end += uint64(len(chunk))
 }
 
 func (h *paneHistory) trim(limit int) {
@@ -1369,13 +1419,52 @@ func (h *paneHistory) trim(limit int) {
 	remaining := append([][]byte(nil), h.chunks[dropCount:]...)
 	h.chunks = remaining
 	h.bytes -= dropBytes
+	h.base += uint64(dropBytes)
 	if h.bytes < 0 {
 		h.bytes = 0
 	}
 }
 
 func (h *paneHistory) snapshot() paneHistorySnapshot {
-	return paneHistorySnapshot{chunks: append([][]byte(nil), h.chunks...)}
+	return paneHistorySnapshot{
+		chunks:     append([][]byte(nil), h.chunks...),
+		serverBase: h.base,
+		serverEnd:  h.end,
+		deltaFrom:  h.base,
+		deltaTo:    h.end,
+	}
+}
+
+func (h *paneHistory) snapshotFrom(cursor uint64) paneHistorySnapshot {
+	if cursor < h.base {
+		cursor = h.base
+	}
+	if cursor > h.end {
+		cursor = h.end
+	}
+	snapshot := paneHistorySnapshot{
+		serverBase: h.base,
+		serverEnd:  h.end,
+		deltaFrom:  cursor,
+		deltaTo:    h.end,
+	}
+	if cursor >= h.end {
+		return snapshot
+	}
+	skip := cursor - h.base
+	for _, chunk := range h.chunks {
+		chunkBytes := uint64(len(chunk))
+		if skip >= chunkBytes {
+			skip -= chunkBytes
+			continue
+		}
+		if skip > 0 {
+			chunk = chunk[skip:]
+			skip = 0
+		}
+		snapshot.chunks = append(snapshot.chunks, chunk)
+	}
+	return snapshot
 }
 
 func (s paneHistorySnapshot) bytes() []byte {
@@ -1941,14 +2030,39 @@ func (p *terminalPane) markExited(err error) {
 	close(p.done)
 }
 
-func (p *terminalPane) attachClient() (paneHistorySnapshot, *paneClient, bool, error) {
+func newHistoryGeneration() (string, error) {
+	data := make([]byte, 16)
+	if _, err := rand.Read(data); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(data), nil
+}
+
+func (p *terminalPane) attachClient(syncRequest historySyncRequest) (paneHistorySnapshot, *paneClient, bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.exited {
 		return paneHistorySnapshot{}, nil, false, errors.New("pane has exited")
 	}
+	if p.historyGeneration == "" {
+		generation, err := newHistoryGeneration()
+		if err != nil {
+			return paneHistorySnapshot{}, nil, false, fmt.Errorf("create history generation: %w", err)
+		}
+		p.historyGeneration = generation
+	}
 	history := p.history.snapshot()
-	allowGeneratedInputDuringReplay := !p.hasAttached
+	history.generation = p.historyGeneration
+	history.syncMode = "snapshot"
+	if !syncRequest.forceSnapshot && syncRequest.hasRange && syncRequest.generation == p.historyGeneration && syncRequest.localEnd >= p.history.base && syncRequest.localEnd <= p.history.end {
+		history = p.history.snapshotFrom(syncRequest.localEnd)
+		history.generation = p.historyGeneration
+		history.syncMode = "delta"
+		if syncRequest.localEnd == p.history.end {
+			history.syncMode = "current"
+		}
+	}
+	allowGeneratedInputDuringReplay := history.syncMode == "snapshot" && !p.hasAttached
 	p.hasAttached = true
 	client := &paneClient{
 		send: make(chan paneOutbound, 256),
