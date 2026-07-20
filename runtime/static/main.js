@@ -97,8 +97,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const terminalArea = document.getElementById("terminalArea");
   const emptyState = document.getElementById("emptyState");
   const emptyStateAction = document.getElementById("emptyStateAction");
-  const performanceMeterFps = document.getElementById("performanceMeterFps");
-  const performanceMeterRefresh = document.getElementById("performanceMeterRefresh");
+  let performanceMeter = null;
+  let performanceMeterFps = null;
+  let performanceMeterRefresh = null;
   const performanceTaskMeter = document.getElementById("performanceTaskMeter");
   const performanceTaskMeterList = document.getElementById("performanceTaskMeterList");
   const startupErrorPanel = document.getElementById("startupErrorPanel");
@@ -888,6 +889,40 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const recordPerformanceTask = (name, ms) => performanceTaskMonitor.record(name, ms);
   const measurePerformanceTask = (name, fn) => performanceTaskMonitor.measure(name, fn);
 
+  const mountPerformanceMeter = () => {
+    if (performanceMeter?.isConnected) {
+      return;
+    }
+    if (!terminalArea) {
+      return;
+    }
+    const meter = document.createElement("div");
+    meter.className = "fps-meter";
+    meter.id = "performanceMeter";
+    meter.setAttribute("aria-live", "off");
+
+    const fps = document.createElement("span");
+    fps.id = "performanceMeterFps";
+    fps.textContent = "-- FPS";
+
+    const refresh = document.createElement("span");
+    refresh.id = "performanceMeterRefresh";
+    refresh.textContent = "-- Hz";
+
+    meter.append(fps, refresh);
+    terminalArea.appendChild(meter);
+    performanceMeter = meter;
+    performanceMeterFps = fps;
+    performanceMeterRefresh = refresh;
+  };
+
+  const unmountPerformanceMeter = () => {
+    performanceMeter?.remove();
+    performanceMeter = null;
+    performanceMeterFps = null;
+    performanceMeterRefresh = null;
+  };
+
   const startPerformanceMeter = () => {
     if (!performanceMeterFps || !performanceMeterRefresh) {
       return;
@@ -941,12 +976,6 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       performanceMeterFrame = window.requestAnimationFrame(update);
     };
     performanceMeterFrame = window.requestAnimationFrame(update);
-    window.addEventListener("beforeunload", () => {
-      if (performanceMeterFrame) {
-        window.cancelAnimationFrame(performanceMeterFrame);
-        performanceMeterFrame = 0;
-      }
-    }, { once: true });
   };
 
   const stopPerformanceMeter = () => {
@@ -1281,14 +1310,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const applyPerformanceMeterVisibility = () => {
-    const meter = performanceMeterFps?.closest?.(".fps-meter");
-    if (meter) {
-      meter.hidden = !performanceMeterEnabled;
-    }
     if (performanceMeterEnabled) {
+      mountPerformanceMeter();
       startPerformanceMeter();
     } else {
       stopPerformanceMeter();
+      unmountPerformanceMeter();
     }
   };
 
@@ -17131,6 +17158,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return "";
     }
     disposed = true;
+    stopPerformanceMeter();
     sendDeviceOfflineBeacon();
     window.clearInterval(workspaceRestoreHeartbeatTimer);
     window.clearInterval(deviceHeartbeatTimer);

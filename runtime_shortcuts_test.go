@@ -212,7 +212,8 @@ func TestRuntimeDebugModeOnlyTogglesOptionsList(t *testing.T) {
 		"settingsDebugOptions.hidden = !debugModeEnabled;",
 		`let performanceMeterEnabled = window.localStorage.getItem(performanceMeterStorageKey) === "true";`,
 		`let performanceTasksEnabled = window.localStorage.getItem(performanceTasksStorageKey) === "true";`,
-		"meter.hidden = !performanceMeterEnabled;",
+		"mountPerformanceMeter();",
+		"unmountPerformanceMeter();",
 		"performanceTaskMonitor.setEnabled(performanceTasksEnabled);",
 		"performanceMeterEnabled = settingsPerformanceMeterToggle.checked;",
 		"performanceTasksEnabled = settingsPerformanceTasksToggle.checked;",
@@ -233,6 +234,51 @@ func TestRuntimeDebugModeOnlyTogglesOptionsList(t *testing.T) {
 	} {
 		if strings.Contains(source, forbidden) {
 			t.Fatalf("runtime debug mode must not gate feature state with %q", forbidden)
+		}
+	}
+}
+
+func TestRuntimePerformanceMeterIsLazilyMounted(t *testing.T) {
+	indexData, err := os.ReadFile("runtime/static/index.html")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
+	}
+	indexSource := string(indexData)
+	for _, forbidden := range []string{
+		`id="performanceMeter"`,
+		`id="performanceMeterFps"`,
+		`id="performanceMeterRefresh"`,
+		"-- FPS",
+	} {
+		if strings.Contains(indexSource, forbidden) {
+			t.Fatalf("runtime FPS meter must not be mounted in initial HTML with %q", forbidden)
+		}
+	}
+
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	mainSource := string(mainData)
+	for _, want := range []string{
+		"let performanceMeter = null;",
+		"const mountPerformanceMeter = () => {",
+		"if (performanceMeter?.isConnected) {",
+		`meter.id = "performanceMeter";`,
+		`fps.id = "performanceMeterFps";`,
+		`refresh.id = "performanceMeterRefresh";`,
+		"terminalArea.appendChild(meter);",
+		"const unmountPerformanceMeter = () => {",
+		"performanceMeter?.remove();",
+		"performanceMeter = null;",
+		"performanceMeterFps = null;",
+		"performanceMeterRefresh = null;",
+		"mountPerformanceMeter();",
+		"stopPerformanceMeter();",
+		"unmountPerformanceMeter();",
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime lazy FPS meter guard missing %q", want)
 		}
 	}
 }
