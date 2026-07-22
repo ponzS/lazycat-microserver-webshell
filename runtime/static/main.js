@@ -4,7 +4,6 @@ import { createTerminalHistoryCache } from "./terminal_history_cache.js";
 
 const params = new URLSearchParams(window.location.search);
 const workspaceRestoreStorageKey = "webshell.workspaceRestore";
-const workspaceRestoreTTL = 30 * 1000;
 
 const readWorkspaceRestoreState = () => {
   try {
@@ -12,12 +11,11 @@ const readWorkspaceRestoreState = () => {
     const state = raw ? JSON.parse(raw) : null;
     const name = String(state?.name || "").trim();
     const tabId = String(state?.tabId || "").trim();
-    const expiresAt = Number(state?.expiresAt || 0);
-    if (!name || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    if (!name) {
       window.localStorage.removeItem(workspaceRestoreStorageKey);
       return null;
     }
-    return { name, tabId, expiresAt };
+    return { name, tabId };
   } catch (error) {
     return null;
   }
@@ -39,10 +37,11 @@ const persistWorkspaceRestoreState = (name, tabId) => {
       targetURL.searchParams.delete("tab");
     }
     window.localStorage.setItem(workspaceRestoreStorageKey, JSON.stringify({
+      version: 1,
       name: targetName,
       tabId: targetTabId,
       url: `${targetURL.pathname}${targetURL.search}${targetURL.hash}`,
-      expiresAt: Date.now() + workspaceRestoreTTL,
+      updatedAt: Date.now(),
     }));
   } catch (error) {
   }

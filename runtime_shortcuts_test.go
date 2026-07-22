@@ -1464,12 +1464,13 @@ func TestRuntimePersistsWorkspaceForLightOSHomeReload(t *testing.T) {
 	mainSource := string(mainData)
 	for _, want := range []string{
 		`const workspaceRestoreStorageKey = "webshell.workspaceRestore";`,
-		`const workspaceRestoreTTL = 30 * 1000;`,
 		`restoreInitialWorkspaceLocation();`,
 		`params.delete("view");`,
 		`const rememberWorkspaceRestoreState = () => {`,
 		`persistWorkspaceRestoreState(activeName, activeTabId);`,
+		`version: 1,`,
 		"url: `${targetURL.pathname}${targetURL.search}${targetURL.hash}`",
+		`updatedAt: Date.now(),`,
 		`suppressWorkspaceRestoreOnce = true;`,
 		`clearWorkspaceRestoreState();`,
 		`workspaceRestoreHeartbeatTimer = window.setInterval(() => {`,
@@ -1477,6 +1478,15 @@ func TestRuntimePersistsWorkspaceForLightOSHomeReload(t *testing.T) {
 	} {
 		if !strings.Contains(mainSource, want) {
 			t.Fatalf("runtime Lazycat shell reload guard missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		`const workspaceRestoreTTL =`,
+		`expiresAt: Date.now() + workspaceRestoreTTL`,
+		`const expiresAt = Number(state?.expiresAt || 0);`,
+	} {
+		if strings.Contains(mainSource, forbidden) {
+			t.Fatalf("runtime workspace restore state must remain persistent, found %q", forbidden)
 		}
 	}
 }
