@@ -334,6 +334,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const terminalReconnectJitterRatio = 0.2;
   const terminalOutputFlushFallbackMs = 32;
   const terminalOutputFlushBudgetBytes = 128 * 1024;
+  const terminalResizeSettleMs = 100;
+  const terminalFullRenderValidationMs = 80;
+  const terminalFullRenderGuardIntervalMs = 1000;
+  const terminalFullRenderWatchdogIntervalMs = 2000;
   const terminalHistoryCacheFlushBytes = 256 * 1024;
   const terminalHistoryCacheFlushDelayMs = 50;
   const terminalHistoryCacheOrphanTTL = 30 * 1000;
@@ -545,6 +549,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const readTargetNameParam = (sourceParams) => (sourceParams.get("target") || sourceParams.get("name") || "").trim();
   let activeName = readTargetNameParam(params);
   let activeTabId = null;
+  let activeTabResizeTimer = 0;
   let inlineTabRenameState = null;
   let recentTabIds = [];
   let activeInstanceGeneration = 0;
@@ -5848,22 +5853,145 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return;
     }
     setPaneRenderReady(session, false);
+    session.fullRenderPending = false;
     session.term?.renderer?.clear?.();
     clearTerminalCanvasPixels(session);
   };
 
   const markPaneRenderedIfMeasurable = (session) => {
-    if (!session || session.closed || session.renderReady || session.replayCompletionPending || (!session.replayComplete && session.shellEl?.dataset.connection === "connecting") || !isPaneMeasurable(session)) {
+    if (
+      !session
+      || session.closed
+      || !session.fullRenderPending
+      || session.activationFitPending
+      || session.replayCompletionPending
+      || (!session.replayComplete && session.shellEl?.dataset.connection === "connecting")
+      || !isPaneMeasurable(session)
+    ) {
       return;
     }
-    setPaneRenderReady(session, true);
+    session.fullRenderPending = false;
+    session.hasPresentedFrame = true;
+    if (!session.renderReady) {
+      setPaneRenderReady(session, true);
+    }
   };
 
   const requestPaneFullRender = (session) => {
     if (!session?.term || session.closed) {
       return;
     }
+    session.fullRenderPending = true;
     session.term.requestRender?.({ full: true });
+  };
+
+  const cancelPendingTerminalRender = (term) => {
+    if (!term?.animationFrameId) {
+      return;
+    }
+    window.cancelAnimationFrame(term.animationFrameId);
+    term.animationFrameId = undefined;
+    term.renderFullNextFrame = false;
+  };
+
+  const renderPaneFullNow = (session) => {
+    const term = session?.term;
+    if (!term || session.closed || typeof term.renderNow !== "function") {
+      requestPaneFullRender(session);
+      return false;
+    }
+    cancelPendingTerminalRender(term);
+    session.fullRenderPending = true;
+    term.webshellLastFullRenderAt = performance.now();
+    term.renderNow(true);
+    return true;
+  };
+
+  const installTerminalFullRenderGuard = (session) => {
+    const term = session?.term;
+    if (!term || term.webshellFullRenderGuardInstalled || typeof term.requestRender !== "function") {
+      return;
+    }
+    term.webshellFullRenderGuardInstalled = true;
+    term.webshellLastFullRenderAt = performance.now();
+    term.webshellOriginalRequestRender = term.requestRender.bind(term);
+    term.requestRender = (options = {}) => {
+      const nextOptions = { ...options };
+      const now = performance.now();
+      if (nextOptions.full === true || now - Number(term.webshellLastFullRenderAt || 0) >= terminalFullRenderGuardIntervalMs) {
+        nextOptions.full = true;
+        term.webshellLastFullRenderAt = now;
+      }
+      return term.webshellOriginalRequestRender(nextOptions);
+    };
+  };
+
+  const scheduleTerminalFullRenderWatchdog = (session) => {
+    if (!session || session.closed || session.fullRenderWatchdogTimer) {
+      return;
+    }
+    session.fullRenderWatchdogTimer = window.setTimeout(() => {
+      session.fullRenderWatchdogTimer = 0;
+      if (!session.closed && session.replayComplete && isPaneVisibleForSizing(session)) {
+        renderPaneFullNow(session);
+      }
+      if (!session.closed) {
+        scheduleTerminalFullRenderWatchdog(session);
+      }
+    }, terminalFullRenderWatchdogIntervalMs);
+  };
+
+  const clearTerminalFullRenderWatchdog = (session) => {
+    if (!session?.fullRenderWatchdogTimer) {
+      return;
+    }
+    window.clearTimeout(session.fullRenderWatchdogTimer);
+    session.fullRenderWatchdogTimer = 0;
+  };
+
+  const clearPaneFullRenderValidation = (session) => {
+    if (!session?.fullRenderValidationTimer) {
+      return;
+    }
+    window.clearTimeout(session.fullRenderValidationTimer);
+    session.fullRenderValidationTimer = 0;
+  };
+
+  const schedulePaneFullRenderValidation = (session) => {
+    if (!session || session.closed || !session.replayComplete) {
+      return;
+    }
+    clearPaneFullRenderValidation(session);
+    session.fullRenderValidationTimer = window.setTimeout(() => {
+      session.fullRenderValidationTimer = 0;
+      if (!session.closed && session.replayComplete && isPaneVisibleForSizing(session)) {
+        renderPaneFullNow(session);
+      }
+    }, terminalFullRenderValidationMs);
+  };
+
+  const installTerminalCanvasRecovery = (session) => {
+    const canvas = session?.term?.canvas || session?.term?.renderer?.getCanvas?.();
+    if (!(canvas instanceof HTMLCanvasElement)) {
+      return;
+    }
+    const handleContextLost = (event) => {
+      event.preventDefault?.();
+      setPaneRenderReady(session, false);
+      session.fullRenderPending = false;
+    };
+    const handleContextRestored = () => {
+      if (session.closed) {
+        return;
+      }
+      window.requestAnimationFrame(() => renderPaneFullNow(session));
+    };
+    canvas.addEventListener("contextlost", handleContextLost);
+    canvas.addEventListener("contextrestored", handleContextRestored);
+    addSessionCleanup(session, () => {
+      canvas.removeEventListener("contextlost", handleContextLost);
+      canvas.removeEventListener("contextrestored", handleContextRestored);
+    });
   };
 
   const syncTabMobilePixelScroll = (tab) => {
@@ -7067,6 +7195,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     for (const node of [canvas, textarea, preview]) {
       if (node instanceof HTMLElement) {
         node.style.transform = transform;
+        node.style.willChange = transform ? "transform" : "";
       }
     }
   };
@@ -8015,7 +8144,47 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     return pane?.tabId === activeTabId && isPaneMeasurable(pane);
   };
 
-  const resizePane = (pane, { visibleOnly = true } = {}) => {
+  const stopTerminalScrollAnimation = (term) => {
+    if (!term?.scrollAnimationFrame) {
+      return;
+    }
+    window.cancelAnimationFrame(term.scrollAnimationFrame);
+    term.scrollAnimationFrame = undefined;
+    term.scrollAnimationStartTime = undefined;
+    term.scrollAnimationStartY = undefined;
+    term.scrollAnimationLastFrameTime = undefined;
+  };
+
+  const captureTerminalViewport = (term) => ({
+    atBottom: isTerminalViewportAtBottom(term),
+    viewportY: terminalViewportValue(term?.viewportY),
+    targetViewportY: terminalViewportValue(term?.targetViewportY),
+  });
+
+  const restoreTerminalViewport = (term, viewport) => {
+    if (!term || !viewport) {
+      return;
+    }
+    stopTerminalScrollAnimation(term);
+    if (viewport.atBottom) {
+      term.viewportY = 0;
+      term.targetViewportY = 0;
+      return;
+    }
+    const scrollback = Math.max(0, Number(term.getScrollbackLength?.() || 0));
+    term.viewportY = Math.max(0, Math.min(scrollback, viewport.viewportY));
+    term.targetViewportY = Math.max(0, Math.min(scrollback, viewport.targetViewportY));
+  };
+
+  const terminalCanvasSize = (pane) => {
+    const canvas = pane?.term?.canvas || pane?.term?.renderer?.getCanvas?.();
+    return {
+      width: Math.max(0, Number(canvas?.width) || 0),
+      height: Math.max(0, Number(canvas?.height) || 0),
+    };
+  };
+
+  const resizePane = (pane, { visibleOnly = true, forceFullRender = false, hideUntilRender = false } = {}) => {
     if (!pane || pane.closed) {
       return false;
     }
@@ -8034,26 +8203,48 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       if (!dimensions || dimensions.cols <= 0 || dimensions.rows <= 0) {
         return false;
       }
-      const sizeChanged = !dimensionsEqualTerminalSize(pane, dimensions);
+      const viewport = captureTerminalViewport(pane.term);
+      const sizeBefore = terminalSize(pane);
+      const canvasBefore = terminalCanvasSize(pane);
+      const expectedCanvas = pane.term.renderer?.canvasSize?.(dimensions.cols, dimensions.rows);
+      const canvasNeedsResize = Boolean(
+        expectedCanvas && (
+          canvasBefore.width !== Math.max(0, Number(expectedCanvas.pixelWidth) || 0)
+          || canvasBefore.height !== Math.max(0, Number(expectedCanvas.pixelHeight) || 0)
+          || pane.term.canvas?.style?.width !== `${expectedCanvas.cssWidth}px`
+          || pane.term.canvas?.style?.height !== `${expectedCanvas.cssHeight}px`
+        )
+      );
+      if (hideUntilRender) {
+        setPaneRenderReady(pane, false);
+      }
       try {
-        if (sizeChanged) {
-          pane.fitAddon.fit();
+        if (!dimensionsEqualTerminalSize(pane, dimensions)) {
+          pane.term.resize(dimensions.cols, dimensions.rows);
         }
       } catch (error) {
+        if (hideUntilRender && pane.hasPresentedFrame) {
+          setPaneRenderReady(pane, true);
+        }
         return false;
       }
+      restoreTerminalViewport(pane.term, viewport);
+      const sizeAfter = terminalSize(pane);
+      const canvasAfter = terminalCanvasSize(pane);
+      const sizeChanged = sizeBefore.cols !== sizeAfter.cols || sizeBefore.rows !== sizeAfter.rows;
+      const canvasChanged = canvasBefore.width !== canvasAfter.width || canvasBefore.height !== canvasAfter.height;
       resetTerminalHostViewport(pane, { clean: true });
       positionTerminalInput(pane);
       syncTerminalViewportPan(pane);
       if (!pane.initialFitResetDone && !pane.replayComplete) {
         resetTerminalAfterInitialFit(pane);
       }
-      if (sizeChanged) {
-        requestPaneFullRender(pane);
+      if (forceFullRender || sizeChanged || canvasChanged || canvasNeedsResize || hideUntilRender || !pane.hasPresentedFrame) {
+        renderPaneFullNow(pane);
       }
       sendTerminalSize(pane);
       updateMobileSelectionHandles(pane);
-      return sizeChanged;
+      return sizeChanged || canvasChanged;
     });
   };
 
@@ -8098,27 +8289,45 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   };
 
-  const resizeTab = (tab) => {
+  const resizeTab = (tab, options = {}) => {
     if (!tab) {
       return;
     }
     for (const pane of tab.panes.values()) {
-      resizePane(pane);
+      resizePane(pane, options);
     }
     connectPendingSessionsForTab(tab);
   };
 
-  const resizeActiveTab = () => resizeTab(currentTab());
+  const resizeActiveTab = (options = {}) => resizeTab(currentTab(), options);
 
   const scheduleVisibleTabResize = (tab) => {
     if (!tab) {
       return;
     }
-    window.requestAnimationFrame(() => {
-      resizeTabForCurrentDevice(tab);
-      window.requestAnimationFrame(() => resizeTabForCurrentDevice(tab));
-      window.setTimeout(() => resizeTabForCurrentDevice(tab), 80);
+    if (tab.resizeFrame) {
+      window.cancelAnimationFrame(tab.resizeFrame);
+    }
+    tab.resizeFrame = window.requestAnimationFrame(() => {
+      tab.resizeFrame = 0;
+      for (const pane of tab.panes.values()) {
+        pane.activationFitPending = false;
+      }
+      resizeTabForCurrentDevice(tab, {
+        forceFullRender: true,
+        hideUntilRender: Array.from(tab.panes.values()).some((pane) => !pane.hasPresentedFrame || !pane.renderReady),
+      });
     });
+  };
+
+  const scheduleActiveTabWindowResize = () => {
+    if (activeTabResizeTimer) {
+      window.clearTimeout(activeTabResizeTimer);
+    }
+    activeTabResizeTimer = window.setTimeout(() => {
+      activeTabResizeTimer = 0;
+      resizeActiveTabForCurrentDevice({ forceFullRender: true, hideUntilRender: true });
+    }, terminalResizeSettleMs);
   };
 
   const reassertTerminalSize = (session, { force = false } = {}) => {
@@ -8140,15 +8349,15 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     reassertTerminalSize(session, { force: true });
   };
 
-  const resizeTabForCurrentDevice = (tab) => {
+  const resizeTabForCurrentDevice = (tab, options = {}) => {
     if (!tab) {
       return;
     }
     syncTabMobilePixelScroll(tab);
-    resizeTab(tab);
+    resizeTab(tab, options);
   };
 
-  const resizeActiveTabForCurrentDevice = () => resizeTabForCurrentDevice(currentTab());
+  const resizeActiveTabForCurrentDevice = (options = {}) => resizeTabForCurrentDevice(currentTab(), options);
 
   const currentMobileViewportOrientation = () => {
     const type = String(window.screen?.orientation?.type || "").toLowerCase();
@@ -8386,6 +8595,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
 
   const syncMobileVisualViewport = ({ detectOrientation = true } = {}) => {
     const supportsViewportInsets = usesMobileViewportInsets();
+    const shouldResizeTerminal = supportsViewportInsets && isTouchShortcutLayout();
     const useKeyboardInset = isIOSPlatform();
     const visualViewport = window.visualViewport;
     const nextHeight = Math.max(0, Math.round(visualViewport?.height || window.innerHeight || 0));
@@ -8409,7 +8619,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       if (keyboardLikeHeightChange) {
         armMobileKeyboardResizeSuppression();
       }
-      if (heightChanged || insetChanged || safeOffsetChanged) {
+      if (shouldResizeTerminal && (heightChanged || insetChanged || safeOffsetChanged)) {
         scheduleMobileViewportResize();
       }
       if (shouldRecoverOrientation) {
@@ -8443,7 +8653,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (heightChanged && !orientationChanged && isTouchShortcutLayout() && (nextKeyboardActive || mobileKeyboardViewportActive)) {
       armMobileKeyboardResizeSuppression();
     }
-    if (heightChanged || insetChanged || safeOffsetChanged) {
+    if (shouldResizeTerminal && (heightChanged || insetChanged || safeOffsetChanged)) {
       scheduleMobileViewportResize();
     }
     if (shouldRecoverOrientation) {
@@ -12558,6 +12768,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     try {
       measurePerformanceTask("terminal render", () => session.term.write(data));
       drainGeneratedTerminalResponses(session);
+      if (replayOutput) {
+        cancelPendingTerminalRender(session.term);
+      }
       return true;
     } finally {
       if (replayOutput) {
@@ -12590,7 +12803,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.reconnectAttempts = 0;
     session.shellEl.dataset.connection = "open";
     clearTerminalCanvasPixels(session);
-    requestPaneFullRender(session);
+    renderPaneFullNow(session);
     flushPendingInput(session);
     return true;
   };
@@ -12692,6 +12905,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       if (wrote) {
         resetTerminalHostViewport(session, { clean: true });
         positionTerminalInput(session);
+        schedulePaneFullRenderValidation(session);
       }
       if (session.outputQueueSize > 0) {
         scheduleSessionOutputFlush(session);
@@ -12784,6 +12998,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     drainGeneratedTerminalResponses(session);
     resetTerminalHostViewport(session, { clean: true });
     positionTerminalInput(session);
+    schedulePaneFullRenderValidation(session);
   };
 
   const readAgentStartupError = async (name) => {
@@ -13721,6 +13936,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       closed: false,
       initialFitResetDone: false,
       renderReady: false,
+      fullRenderPending: false,
+      fullRenderValidationTimer: 0,
+      fullRenderWatchdogTimer: 0,
+      hasPresentedFrame: false,
+      activationFitPending: false,
       baseTheme: activeTheme,
       selectAllBufferActive: false,
       title: "",
@@ -13736,6 +13956,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       lastSizeReassertAt: 0,
       cleanupCallbacks: [],
     };
+    installTerminalFullRenderGuard(session);
+    installTerminalCanvasRecovery(session);
+    scheduleTerminalFullRenderWatchdog(session);
     clearTerminalRuntimeBuffer(session);
     clearTerminalCanvasPixels(session);
 
@@ -14101,6 +14324,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       paneEl: document.createElement("article"),
       layoutHost: document.createElement("div"),
       button: null,
+      resizeFrame: 0,
     };
     tab.paneEl.className = "terminal-pane";
     tab.paneEl.dataset.tabId = tab.id;
@@ -14167,6 +14391,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         item.button?.classList.toggle("active", isActive);
         item.button?.setAttribute("aria-selected", isActive ? "true" : "false");
         item.button?.setAttribute("tabindex", isActive ? "0" : "-1");
+      }
+      for (const pane of tab.panes.values()) {
+        if (!pane.hasPresentedFrame || !pane.renderReady) {
+          pane.activationFitPending = true;
+          setPaneRenderReady(pane, false);
+        }
       }
       setActivePane(tab, tab.activePaneId, { focus });
       const activePane = tab.panes.get(tab.activePaneId);
@@ -14641,6 +14871,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     clearReconnectTimer(pane);
     clearSessionConnectionTimers(pane);
     discardSessionOutputBuffers(pane);
+    clearPaneFullRenderValidation(pane);
+    clearTerminalFullRenderWatchdog(pane);
     clearSessionHistoryCacheWriteSchedule(pane);
     runSessionCleanups(pane);
     if (pane.socket) {
@@ -14723,6 +14955,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     for (const pane of tab.panes.values()) {
       disposePane(pane);
+    }
+    if (tab.resizeFrame) {
+      window.cancelAnimationFrame(tab.resizeFrame);
+      tab.resizeFrame = 0;
     }
     tab.button?.remove();
     tab.paneEl.remove();
@@ -17051,7 +17287,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     measureThemeCardWidth();
     redrawThemePickerOptions();
-    resizeActiveTabForCurrentDevice();
+    scheduleActiveTabWindowResize();
     updateMobileActiveTabTitle();
     updateSelectionSheet();
     if (settingsBackdrop && !settingsBackdrop.hidden) {
@@ -17115,7 +17351,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (!document.hidden) {
       rememberWorkspaceRestoreState();
       postDeviceHeartbeat().catch(() => {});
-      resizeActiveTab();
+      resizeActiveTab({ forceFullRender: true, hideUntilRender: true });
       refreshServerRevision().catch(() => {});
       reconnectVisibleSessions({ allowHidden: true, probe: true });
       refreshActivity({ silent: true }).catch(() => {});
@@ -17126,7 +17362,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   });
   window.addEventListener("focus", () => {
-    resizeActiveTab();
+    resizeActiveTab({ forceFullRender: true });
     refreshServerRevision().catch(() => {});
     reconnectVisibleSessions({ allowHidden: true, probe: true });
     refreshActivity({ silent: true }).catch(() => {});
@@ -17134,7 +17370,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   window.addEventListener("pageshow", () => {
     rememberWorkspaceRestoreState();
     postDeviceHeartbeat().catch(() => {});
-    resizeActiveTab();
+    resizeActiveTab({ forceFullRender: true, hideUntilRender: true });
     refreshServerRevision().catch(() => {});
     reconnectVisibleSessions({ allowHidden: true, probe: true });
     refreshActivity({ silent: true }).catch(() => {});
@@ -17159,13 +17395,22 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     disposed = true;
     stopPerformanceMeter();
     sendDeviceOfflineBeacon();
+    if (activeTabResizeTimer) {
+      window.clearTimeout(activeTabResizeTimer);
+      activeTabResizeTimer = 0;
+    }
     window.clearInterval(workspaceRestoreHeartbeatTimer);
     window.clearInterval(deviceHeartbeatTimer);
     stopDeviceListRefresh();
     window.clearInterval(serverRevisionRefreshTimer);
     for (const tab of tabs.values()) {
+      if (tab.resizeFrame) {
+        window.cancelAnimationFrame(tab.resizeFrame);
+        tab.resizeFrame = 0;
+      }
       for (const pane of tab.panes.values()) {
         pane.closed = true;
+        clearPaneFullRenderValidation(pane);
         clearReconnectTimer(pane);
         clearSessionConnectionTimers(pane);
         pane.socket?.close();

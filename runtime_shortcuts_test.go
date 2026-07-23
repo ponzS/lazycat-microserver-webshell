@@ -1691,16 +1691,41 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"const setPaneRenderReady = (session, ready) => {",
 		"session.shellEl.dataset.renderReady = session.renderReady ? \"true\" : \"false\";",
 		"const markPaneRenderPending = (session) => {",
+		"session.fullRenderPending = false;",
 		"session.term?.renderer?.clear?.();",
 		"clearTerminalCanvasPixels(session);",
 		"const markPaneRenderedIfMeasurable = (session) => {",
+		"|| !session.fullRenderPending",
+		"|| session.activationFitPending",
 		"session.replayCompletionPending",
+		"session.hasPresentedFrame = true;",
 		"setPaneRenderReady(session, true);",
+		"const cancelPendingTerminalRender = (term) => {",
+		"const renderPaneFullNow = (session) => {",
+		"term.renderNow(true);",
+		"const installTerminalFullRenderGuard = (session) => {",
+		"term.webshellOriginalRequestRender = term.requestRender.bind(term);",
+		"now - Number(term.webshellLastFullRenderAt || 0) >= terminalFullRenderGuardIntervalMs",
+		"const scheduleTerminalFullRenderWatchdog = (session) => {",
+		"session.fullRenderWatchdogTimer = window.setTimeout(() => {",
+		"const clearTerminalFullRenderWatchdog = (session) => {",
+		"const schedulePaneFullRenderValidation = (session) => {",
+		"const installTerminalCanvasRecovery = (session) => {",
+		"canvas.addEventListener(\"contextlost\", handleContextLost);",
+		"canvas.addEventListener(\"contextrestored\", handleContextRestored);",
 		"session.shellEl.dataset.connection = \"open\";",
 		"clearTerminalCanvasPixels(session);",
 		"shellEl.dataset.renderReady = \"false\";",
 		"initialFitResetDone: false,",
+		"fullRenderPending: false,",
+		"fullRenderValidationTimer: 0,",
+		"fullRenderWatchdogTimer: 0,",
+		"hasPresentedFrame: false,",
+		"activationFitPending: false,",
 		"cleanupCallbacks: [],",
+		"installTerminalFullRenderGuard(session);",
+		"installTerminalCanvasRecovery(session);",
+		"scheduleTerminalFullRenderWatchdog(session);",
 		"clearTerminalRuntimeBuffer(session);",
 		"clearTerminalCanvasPixels(session);",
 		"term.onRender(() => markPaneRenderedIfMeasurable(session))",
@@ -1710,7 +1735,11 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"if (!resetTerminalRuntimeState(session)) {",
 		"const disposePane = (pane) => {",
 		"clearTerminalCanvasPixels(pane);",
+		"clearTerminalFullRenderWatchdog(pane);",
 		"requestPaneFullRender(session);",
+		"renderPaneFullNow(session);",
+		"cancelPendingTerminalRender(session.term);",
+		"schedulePaneFullRenderValidation(session);",
 	}
 	for _, want := range mainSnippets {
 		if !strings.Contains(mainSource, want) {
@@ -2080,16 +2109,26 @@ func TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs(t *testing.T) {
 	source := string(data)
 
 	wantSnippets := []string{
-		"const resizeTabForCurrentDevice = (tab) => {",
-		"const resizeActiveTabForCurrentDevice = () => resizeTabForCurrentDevice(currentTab());",
+		"const resizeTabForCurrentDevice = (tab, options = {}) => {",
+		"const resizeActiveTabForCurrentDevice = (options = {}) => resizeTabForCurrentDevice(currentTab(), options);",
 		"syncTabMobilePixelScroll(tab);",
-		"resizeActiveTabForCurrentDevice();",
+		"scheduleActiveTabWindowResize();",
 		"const isPaneVisibleForSizing = (pane) => {",
-		"const resizePane = (pane, { visibleOnly = true } = {}) => {",
+		"const resizePane = (pane, { visibleOnly = true, forceFullRender = false, hideUntilRender = false } = {}) => {",
 		"return false;",
 		"pane.fitAddon?.proposeDimensions?.();",
+		"const viewport = captureTerminalViewport(pane.term);",
+		"const expectedCanvas = pane.term.renderer?.canvasSize?.(dimensions.cols, dimensions.rows);",
+		"if (!dimensionsEqualTerminalSize(pane, dimensions)) {",
+		"pane.term.resize(dimensions.cols, dimensions.rows);",
+		"restoreTerminalViewport(pane.term, viewport);",
 		"const scheduleVisibleTabResize = (tab) => {",
-		"window.setTimeout(() => resizeTabForCurrentDevice(tab), 80);",
+		"tab.resizeFrame = window.requestAnimationFrame(() => {",
+		"const scheduleActiveTabWindowResize = () => {",
+		"activeTabResizeTimer = window.setTimeout(() => {",
+		"resizeActiveTabForCurrentDevice({ forceFullRender: true, hideUntilRender: true });",
+		"const shouldResizeTerminal = supportsViewportInsets && isTouchShortcutLayout();",
+		"if (shouldResizeTerminal && (heightChanged || insetChanged || safeOffsetChanged)) {",
 		"scheduleVisibleTabResize(tab);",
 	}
 	for _, want := range wantSnippets {
@@ -2099,7 +2138,7 @@ func TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs(t *testing.T) {
 	}
 
 	visibilityIndex := strings.Index(source, "const isPaneVisibleForSizing = (pane) => {")
-	resizeIndex := strings.Index(source, "const resizePane = (pane, { visibleOnly = true } = {}) => {")
+	resizeIndex := strings.Index(source, "const resizePane = (pane, { visibleOnly = true, forceFullRender = false, hideUntilRender = false } = {}) => {")
 	resetIndex := strings.Index(source, "resetTerminalHostViewport(pane, { clean: true });")
 	if visibilityIndex < 0 || resizeIndex < 0 || resetIndex < 0 || !(visibilityIndex < resizeIndex && resizeIndex < resetIndex) {
 		t.Fatalf("runtime hidden pane resize guard is not before terminal viewport reset")
