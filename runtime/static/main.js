@@ -594,6 +594,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   let tabOverviewDragState = null;
   let tabOverviewSuppressClickUntil = 0;
   let lightOSHomeURL = "";
+  let lightOSHomeURLPromise = null;
   let mobileActionSheetIgnoreClicksUntil = 0;
   let mobileCloseConfirmResolve = null;
   let mobileCustomSelectState = null;
@@ -4112,18 +4113,37 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     return targetName;
   };
 
-  const buildCurrentOriginHomeURL = () => {
-    const targetURL = new URL("/", window.location.origin);
-    targetURL.searchParams.set("view", "home");
+  const normalizeLightOSHomeURL = (value) => {
+    const homeURL = String(value || "").trim();
+    if (!homeURL) {
+      throw new Error("LightOS 首页地址不可用。");
+    }
+    const targetURL = new URL(homeURL, window.location.href);
+    if (targetURL.protocol !== "http:" && targetURL.protocol !== "https:") {
+      throw new Error("LightOS 首页地址协议无效。");
+    }
     return targetURL.toString();
   };
 
   const loadLightOSHomeURL = () => {
     if (lightOSHomeURL) {
-      return lightOSHomeURL;
+      return Promise.resolve(lightOSHomeURL);
     }
-    lightOSHomeURL = buildCurrentOriginHomeURL();
-    return lightOSHomeURL;
+    if (!lightOSHomeURLPromise) {
+      lightOSHomeURLPromise = fetch("./api/lightos-admin-info", { cache: "no-store" })
+        .then(async (response) => {
+          if (!response.ok) {
+            throw new Error(await response.text() || `无法获取 LightOS 首页地址 (${response.status})`);
+          }
+          const info = await response.json();
+          lightOSHomeURL = normalizeLightOSHomeURL(info?.home_url);
+          return lightOSHomeURL;
+        })
+        .finally(() => {
+          lightOSHomeURLPromise = null;
+        });
+    }
+    return lightOSHomeURLPromise;
   };
 
   const terminalEstimatedSizeForElement = (element) => {

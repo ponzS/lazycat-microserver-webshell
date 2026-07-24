@@ -62,6 +62,7 @@ type adminInfo struct {
 	DeployID string `json:"deploy_id"`
 	Domain   string `json:"domain"`
 	BaseURL  string `json:"base_url"`
+	HomeURL  string `json:"home_url,omitempty"`
 }
 
 type serverRevisionInfo struct {
@@ -304,6 +305,11 @@ func (s *pluginServer) handleLightOSAdminInfo(w http.ResponseWriter, r *http.Req
 		return
 	}
 	info, err := s.resolveLightOSAdminInfo(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	info.HomeURL, err = buildLightOSHomeURL(info)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -1227,6 +1233,21 @@ func buildLightOSAdminURL(baseURL string, requestURL *url.URL) (string, error) {
 	target := *base
 	target.Path = joinURLPath(base.Path, requestURL.Path)
 	target.RawQuery = requestURL.RawQuery
+	target.Fragment = ""
+	return target.String(), nil
+}
+
+func buildLightOSHomeURL(info adminInfo) (string, error) {
+	if strings.TrimSpace(lightOSConfigValue(lazyCatAppIDEnv)) == lightOSAdminAppID {
+		return "/?view=home", nil
+	}
+	target, err := parseLightOSAdminBaseURL(info.BaseURL)
+	if err != nil {
+		return "", err
+	}
+	query := target.Query()
+	query.Set("view", "home")
+	target.RawQuery = query.Encode()
 	target.Fragment = ""
 	return target.String(), nil
 }
