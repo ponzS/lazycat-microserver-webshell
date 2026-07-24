@@ -111,14 +111,14 @@ class V {
 const z = class K {
   constructor(A, B, g = 80, E = 24, C) {
     var I;
-    this.viewportBufferPtr = 0, this.viewportBufferSize = 0, this.cellPool = [], this.graphemeBuffer = null, this.graphemeBufferPtr = 0, this.exports = A, this.memory = B, this._cols = g, this._rows = E, this.logicalScrollbackLimit = K.normalizeScrollbackLimit(C == null ? void 0 : C.scrollbackLimit);
+    this.viewportBufferPtr = 0, this.viewportBufferSize = 0, this.cellPool = [], this.graphemeBuffer = null, this.graphemeBufferPtr = 0, this.exports = A, this.memory = B, this._cols = g, this._rows = E, this.logicalScrollbackLimit = K.normalizeScrollbackLimit(C == null ? void 0 : C.scrollbackLimit), this.scrollbackByteCapacity = this.estimateScrollbackBytes(g, E);
     const D = this.exports.ghostty_wasm_alloc_u8_array(d);
     if (D === 0)
       throw new Error("Failed to allocate config (out of memory)");
     try {
       const i = new DataView(this.memory.buffer);
       let w = D;
-      i.setUint32(w, this.estimateScrollbackBytes(), !0), w += 4, i.setUint32(w, (C == null ? void 0 : C.fgColor) ?? 0, !0), w += 4, i.setUint32(w, (C == null ? void 0 : C.bgColor) ?? 0, !0), w += 4, i.setUint32(w, (C == null ? void 0 : C.cursorColor) ?? 0, !0), w += 4;
+      i.setUint32(w, this.scrollbackByteCapacity, !0), w += 4, i.setUint32(w, (C == null ? void 0 : C.fgColor) ?? 0, !0), w += 4, i.setUint32(w, (C == null ? void 0 : C.bgColor) ?? 0, !0), w += 4, i.setUint32(w, (C == null ? void 0 : C.cursorColor) ?? 0, !0), w += 4;
       for (let s = 0; s < 16; s++)
         i.setUint32(w, ((I = C == null ? void 0 : C.palette) == null ? void 0 : I[s]) ?? 0, !0), w += 4;
       this.handle = this.exports.ghostty_terminal_new_with_config(g, E, D);
@@ -138,12 +138,16 @@ const z = class K {
   static normalizeScrollbackLimit(A) {
     return A === void 0 || !Number.isFinite(A) ? 1e4 : Math.max(0, Math.floor(A));
   }
-  estimateScrollbackBytes() {
-    const A = (this.logicalScrollbackLimit + Math.max(1, this._rows)) * (Math.max(1, this._cols) + 64) * K.CELL_SIZE, B = Number.isFinite(A) ? A + K.SCROLLBACK_PAGE_SIZE : K.MAX_SCROLLBACK_BYTES;
+  estimateScrollbackBytes(A, B) {
+    const g = (this.logicalScrollbackLimit + Math.max(1, B)) * (Math.max(1, A) + 64) * K.CELL_SIZE, E = Number.isFinite(g) ? g + K.SCROLLBACK_PAGE_SIZE : K.MAX_SCROLLBACK_BYTES;
     return Math.min(
       K.MAX_SCROLLBACK_BYTES,
-      Math.max(2 * K.SCROLLBACK_PAGE_SIZE, Math.ceil(B))
+      Math.max(2 * K.SCROLLBACK_PAGE_SIZE, Math.ceil(E))
     );
+  }
+  ensureScrollbackCapacity(A, B) {
+    const g = this.estimateScrollbackBytes(A, B);
+    g <= this.scrollbackByteCapacity || (this.exports.ghostty_terminal_set_scrollback_limit(this.handle, g), this.scrollbackByteCapacity = g);
   }
   getRawScrollbackLength() {
     return this.exports.ghostty_terminal_get_scrollback_length(this.handle);
@@ -160,7 +164,7 @@ const z = class K {
     new Uint8Array(this.memory.buffer).set(B, g), this.exports.ghostty_terminal_write(this.handle, g, B.length), this.exports.ghostty_wasm_free_u8_array(g, B.length);
   }
   resize(A, B) {
-    A === this._cols && B === this._rows || (this._cols = A, this._rows = B, this.exports.ghostty_terminal_resize(this.handle, A, B), this.invalidateBuffers(), this.initCellPool());
+    A === this._cols && B === this._rows || (this.ensureScrollbackCapacity(A, B), this._cols = A, this._rows = B, this.exports.ghostty_terminal_resize(this.handle, A, B), this.invalidateBuffers(), this.initCellPool());
   }
   free() {
     this.viewportBufferPtr && (this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize), this.viewportBufferPtr = 0), this.exports.ghostty_terminal_free(this.handle);
@@ -3105,8 +3109,8 @@ class DA {
   }
 }
 let R = null;
-async function oA() {
-  R || (R = await q.load());
+async function oA(A) {
+  R || (R = await q.load(A));
 }
 function CA() {
   if (!R)

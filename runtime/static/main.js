@@ -83,7 +83,7 @@ const isEmbedMode = params.has("embed");
 document.body?.classList.toggle("is-embed-mode", isEmbedMode);
 
 (async () => {
-  await initGhostty();
+  await initGhostty("./static/ghostty-vt.wasm");
 
   const tabsEl = document.getElementById("tabs");
   const newTabButton = document.getElementById("newTab");
@@ -336,8 +336,6 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const terminalOutputFlushBudgetBytes = 128 * 1024;
   const terminalResizeSettleMs = 100;
   const terminalFullRenderValidationMs = 80;
-  const terminalFullRenderGuardIntervalMs = 1000;
-  const terminalFullRenderWatchdogIntervalMs = 2000;
   const terminalHistoryCacheFlushBytes = 256 * 1024;
   const terminalHistoryCacheFlushDelayMs = 50;
   const terminalHistoryCacheOrphanTTL = 30 * 1000;
@@ -5807,10 +5805,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
 
   const resetTerminalAfterInitialFit = (session) => {
     const term = session?.term;
-    if (!term || session.initialFitResetDone) {
+    if (!term || session.initialRuntimeResetDone || Number(session.measuredFitGeneration || 0) <= 0) {
       return;
     }
-    session.initialFitResetDone = true;
+    session.initialRuntimeResetDone = true;
     resetTerminalRuntimeState(session);
   };
 
@@ -5845,8 +5843,17 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return;
     }
     session.renderReady = ready === true;
+    session.presentationPending = !session.renderReady;
     session.shellEl.dataset.renderReady = session.renderReady ? "true" : "false";
   };
+
+  const panePresentationIsCurrent = (session) => Boolean(
+    session
+    && session.renderReady
+    && Number(session.measuredFitGeneration || 0) > 0
+    && session.presentedFitGeneration === session.measuredFitGeneration
+    && session.presentedReplayGeneration === session.terminalReplayGeneration
+  );
 
   const markPaneRenderPending = (session) => {
     if (!session || session.closed) {
@@ -5854,6 +5861,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     setPaneRenderReady(session, false);
     session.fullRenderPending = false;
+    session.pendingRenderFitGeneration = 0;
+    session.pendingRenderReplayGeneration = 0;
     session.term?.renderer?.clear?.();
     clearTerminalCanvasPixels(session);
   };
@@ -5865,12 +5874,18 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       || !session.fullRenderPending
       || session.activationFitPending
       || session.replayCompletionPending
-      || (!session.replayComplete && session.shellEl?.dataset.connection === "connecting")
+      || !session.replayComplete
+      || Number(session.measuredFitGeneration || 0) <= 0
+      || session.pendingRenderFitGeneration !== session.measuredFitGeneration
+      || session.pendingRenderReplayGeneration !== session.terminalReplayGeneration
       || !isPaneMeasurable(session)
+      || !terminalCanvasMatchesExpectedSize(session)
     ) {
       return;
     }
     session.fullRenderPending = false;
+    session.presentedFitGeneration = session.measuredFitGeneration;
+    session.presentedReplayGeneration = session.terminalReplayGeneration;
     session.hasPresentedFrame = true;
     if (!session.renderReady) {
       setPaneRenderReady(session, true);
@@ -5882,6 +5897,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return;
     }
     session.fullRenderPending = true;
+    session.pendingRenderFitGeneration = session.measuredFitGeneration;
+    session.pendingRenderReplayGeneration = session.terminalReplayGeneration;
     session.term.requestRender?.({ full: true });
   };
 
@@ -5902,51 +5919,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     cancelPendingTerminalRender(term);
     session.fullRenderPending = true;
-    term.webshellLastFullRenderAt = performance.now();
+    session.pendingRenderFitGeneration = session.measuredFitGeneration;
+    session.pendingRenderReplayGeneration = session.terminalReplayGeneration;
     term.renderNow(true);
     return true;
-  };
-
-  const installTerminalFullRenderGuard = (session) => {
-    const term = session?.term;
-    if (!term || term.webshellFullRenderGuardInstalled || typeof term.requestRender !== "function") {
-      return;
-    }
-    term.webshellFullRenderGuardInstalled = true;
-    term.webshellLastFullRenderAt = performance.now();
-    term.webshellOriginalRequestRender = term.requestRender.bind(term);
-    term.requestRender = (options = {}) => {
-      const nextOptions = { ...options };
-      const now = performance.now();
-      if (nextOptions.full === true || now - Number(term.webshellLastFullRenderAt || 0) >= terminalFullRenderGuardIntervalMs) {
-        nextOptions.full = true;
-        term.webshellLastFullRenderAt = now;
-      }
-      return term.webshellOriginalRequestRender(nextOptions);
-    };
-  };
-
-  const scheduleTerminalFullRenderWatchdog = (session) => {
-    if (!session || session.closed || session.fullRenderWatchdogTimer) {
-      return;
-    }
-    session.fullRenderWatchdogTimer = window.setTimeout(() => {
-      session.fullRenderWatchdogTimer = 0;
-      if (!session.closed && session.replayComplete && isPaneVisibleForSizing(session)) {
-        renderPaneFullNow(session);
-      }
-      if (!session.closed) {
-        scheduleTerminalFullRenderWatchdog(session);
-      }
-    }, terminalFullRenderWatchdogIntervalMs);
-  };
-
-  const clearTerminalFullRenderWatchdog = (session) => {
-    if (!session?.fullRenderWatchdogTimer) {
-      return;
-    }
-    window.clearTimeout(session.fullRenderWatchdogTimer);
-    session.fullRenderWatchdogTimer = 0;
   };
 
   const clearPaneFullRenderValidation = (session) => {
@@ -5958,14 +5934,14 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const schedulePaneFullRenderValidation = (session) => {
-    if (!session || session.closed || !session.replayComplete) {
+    if (!session || session.closed || !session.replayComplete || panePresentationIsCurrent(session)) {
       return;
     }
     clearPaneFullRenderValidation(session);
     session.fullRenderValidationTimer = window.setTimeout(() => {
       session.fullRenderValidationTimer = 0;
-      if (!session.closed && session.replayComplete && isPaneVisibleForSizing(session)) {
-        renderPaneFullNow(session);
+      if (!session.closed && session.replayComplete && !panePresentationIsCurrent(session) && isPaneVisibleForSizing(session)) {
+        resizePane(session, { forceFullRender: true, hideUntilRender: true });
       }
     }, terminalFullRenderValidationMs);
   };
@@ -5979,12 +5955,14 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       event.preventDefault?.();
       setPaneRenderReady(session, false);
       session.fullRenderPending = false;
+      session.pendingRenderFitGeneration = 0;
+      session.pendingRenderReplayGeneration = 0;
     };
     const handleContextRestored = () => {
       if (session.closed) {
         return;
       }
-      window.requestAnimationFrame(() => renderPaneFullNow(session));
+      window.requestAnimationFrame(() => resizePane(session, { forceFullRender: true, hideUntilRender: true }));
     };
     canvas.addEventListener("contextlost", handleContextLost);
     canvas.addEventListener("contextrestored", handleContextRestored);
@@ -8184,67 +8162,102 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     };
   };
 
-  const resizePane = (pane, { visibleOnly = true, forceFullRender = false, hideUntilRender = false } = {}) => {
-    if (!pane || pane.closed) {
+  const terminalCanvasMatchesExpectedSize = (pane, dimensions = terminalSize(pane)) => {
+    const canvas = pane?.term?.canvas || pane?.term?.renderer?.getCanvas?.();
+    const cols = Math.max(0, Math.floor(Number(dimensions?.cols) || 0));
+    const rows = Math.max(0, Math.floor(Number(dimensions?.rows) || 0));
+    const expected = pane?.term?.renderer?.canvasSize?.(cols, rows);
+    if (!(canvas instanceof HTMLCanvasElement) || !expected || cols <= 0 || rows <= 0) {
       return false;
     }
+    return canvas.width === Math.max(0, Number(expected.pixelWidth) || 0)
+      && canvas.height === Math.max(0, Number(expected.pixelHeight) || 0)
+      && canvas.style.width === `${expected.cssWidth}px`
+      && canvas.style.height === `${expected.cssHeight}px`;
+  };
+
+  const failedPaneFit = (measurable = false) => ({
+    ok: false,
+    measurable,
+    cols: 0,
+    rows: 0,
+    sizeChanged: false,
+    canvasChanged: false,
+  });
+
+  const resizePane = (pane, { visibleOnly = true, forceFullRender = false, hideUntilRender = false } = {}) => {
+    if (!pane || pane.closed) {
+      return failedPaneFit();
+    }
     if (visibleOnly && !isPaneVisibleForSizing(pane)) {
-      return false;
+      return failedPaneFit(isPaneMeasurable(pane));
     }
     if (isMobileKeyboardResizeSuppressed()) {
       resetTerminalHostViewport(pane, { clean: true });
       positionTerminalInput(pane);
       syncTerminalViewportPan(pane);
       updateMobileSelectionHandles(pane);
-      return false;
+      return failedPaneFit(isPaneMeasurable(pane));
     }
     return measurePerformanceTask("resize/fit", () => {
       const dimensions = pane.fitAddon?.proposeDimensions?.();
       if (!dimensions || dimensions.cols <= 0 || dimensions.rows <= 0) {
-        return false;
+        return failedPaneFit(isPaneMeasurable(pane));
       }
+      const fittedDimensions = {
+        cols: Math.max(1, Math.floor(Number(dimensions.cols) || 0)),
+        rows: Math.max(1, Math.floor(Number(dimensions.rows) || 0)),
+      };
       const viewport = captureTerminalViewport(pane.term);
       const sizeBefore = terminalSize(pane);
       const canvasBefore = terminalCanvasSize(pane);
-      const expectedCanvas = pane.term.renderer?.canvasSize?.(dimensions.cols, dimensions.rows);
-      const canvasNeedsResize = Boolean(
-        expectedCanvas && (
-          canvasBefore.width !== Math.max(0, Number(expectedCanvas.pixelWidth) || 0)
-          || canvasBefore.height !== Math.max(0, Number(expectedCanvas.pixelHeight) || 0)
-          || pane.term.canvas?.style?.width !== `${expectedCanvas.cssWidth}px`
-          || pane.term.canvas?.style?.height !== `${expectedCanvas.cssHeight}px`
-        )
-      );
+      const canvasNeedsResize = !terminalCanvasMatchesExpectedSize(pane, fittedDimensions);
       if (hideUntilRender) {
         setPaneRenderReady(pane, false);
       }
       try {
-        if (!dimensionsEqualTerminalSize(pane, dimensions)) {
-          pane.term.resize(dimensions.cols, dimensions.rows);
+        if (!dimensionsEqualTerminalSize(pane, fittedDimensions)) {
+          pane.term.resize(fittedDimensions.cols, fittedDimensions.rows);
         }
       } catch (error) {
         if (hideUntilRender && pane.hasPresentedFrame) {
           setPaneRenderReady(pane, true);
         }
-        return false;
+        return failedPaneFit(true);
       }
       restoreTerminalViewport(pane.term, viewport);
       const sizeAfter = terminalSize(pane);
       const canvasAfter = terminalCanvasSize(pane);
       const sizeChanged = sizeBefore.cols !== sizeAfter.cols || sizeBefore.rows !== sizeAfter.rows;
       const canvasChanged = canvasBefore.width !== canvasAfter.width || canvasBefore.height !== canvasAfter.height;
+      const firstMeasuredFit = Number(pane.measuredFitGeneration || 0) <= 0;
+      const fitGenerationChanged = firstMeasuredFit || sizeChanged || canvasChanged || canvasNeedsResize;
+      if (fitGenerationChanged) {
+        pane.measuredFitGeneration = Number(pane.measuredFitGeneration || 0) + 1;
+      }
+      pane.activationFitPending = false;
       resetTerminalHostViewport(pane, { clean: true });
       positionTerminalInput(pane);
       syncTerminalViewportPan(pane);
-      if (!pane.initialFitResetDone && !pane.replayComplete) {
+      if (!pane.initialRuntimeResetDone && !pane.replayComplete) {
         resetTerminalAfterInitialFit(pane);
       }
-      if (forceFullRender || sizeChanged || canvasChanged || canvasNeedsResize || hideUntilRender || !pane.hasPresentedFrame) {
+      if (fitGenerationChanged && pane.replayComplete) {
+        setPaneRenderReady(pane, false);
+      }
+      if (forceFullRender || fitGenerationChanged || hideUntilRender || !pane.hasPresentedFrame) {
         renderPaneFullNow(pane);
       }
       sendTerminalSize(pane);
       updateMobileSelectionHandles(pane);
-      return sizeChanged || canvasChanged;
+      return {
+        ok: true,
+        measurable: true,
+        cols: sizeAfter.cols,
+        rows: sizeAfter.rows,
+        sizeChanged,
+        canvasChanged,
+      };
     });
   };
 
@@ -8261,13 +8274,16 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       if (document.hidden && !allowHidden) {
         return;
       }
-      resizePane(session);
+      const fit = resizePane(session);
+      if (!fit.ok || Number(session.measuredFitGeneration || 0) <= 0) {
+        return;
+      }
       connectSession(session, { allowHidden }).catch((error) => {
         showSessionStartupError(session, error.message || "WebSocket connection failed.");
       });
       return;
     }
-    if (session.initialCols > 0 && session.initialRows > 0) {
+    if (allowHidden && Number(session.measuredFitGeneration || 0) > 0) {
       connectSession(session, { allowHidden: true }).catch((error) => {
         showSessionStartupError(session, error.message || "WebSocket connection failed.");
       });
@@ -8310,13 +8326,14 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     tab.resizeFrame = window.requestAnimationFrame(() => {
       tab.resizeFrame = 0;
+      syncTabMobilePixelScroll(tab);
       for (const pane of tab.panes.values()) {
-        pane.activationFitPending = false;
+        resizePane(pane, {
+          forceFullRender: true,
+          hideUntilRender: !panePresentationIsCurrent(pane),
+        });
       }
-      resizeTabForCurrentDevice(tab, {
-        forceFullRender: true,
-        hideUntilRender: Array.from(tab.panes.values()).some((pane) => !pane.hasPresentedFrame || !pane.renderReady),
-      });
+      connectPendingSessionsForTab(tab);
     });
   };
 
@@ -8358,6 +8375,38 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const resizeActiveTabForCurrentDevice = (options = {}) => resizeTabForCurrentDevice(currentTab(), options);
+
+  const installTerminalResizeObserver = (session) => {
+    if (!session?.terminalHost || typeof ResizeObserver !== "function") {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      if (session.closed || session.tabId !== activeTabId || session.resizeObserverFrame) {
+        return;
+      }
+      session.resizeObserverFrame = window.requestAnimationFrame(() => {
+        session.resizeObserverFrame = 0;
+        if (session.closed || session.tabId !== activeTabId) {
+          return;
+        }
+        const fit = resizePane(session, {
+          forceFullRender: !panePresentationIsCurrent(session) || !session.hasPresentedFrame,
+          hideUntilRender: !panePresentationIsCurrent(session),
+        });
+        if (fit.ok) {
+          connectPendingSession(session);
+        }
+      });
+    });
+    observer.observe(session.terminalHost);
+    addSessionCleanup(session, () => {
+      observer.disconnect();
+      if (session.resizeObserverFrame) {
+        window.cancelAnimationFrame(session.resizeObserverFrame);
+        session.resizeObserverFrame = 0;
+      }
+    });
+  };
 
   const currentMobileViewportOrientation = () => {
     const type = String(window.screen?.orientation?.type || "").toLowerCase();
@@ -12802,8 +12851,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     clearAttachReadyTimer(session);
     session.reconnectAttempts = 0;
     session.shellEl.dataset.connection = "open";
-    clearTerminalCanvasPixels(session);
+    setPaneRenderReady(session, false);
     renderPaneFullNow(session);
+    schedulePaneFullRenderValidation(session);
     flushPendingInput(session);
     return true;
   };
@@ -13072,7 +13122,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const resetTerminalForHistoryReplay = (session) => {
-    if (!session?.term || session.closed || session.name !== activeName) {
+    if (
+      !session?.term
+      || session.closed
+      || session.name !== activeName
+      || Number(session.measuredFitGeneration || 0) <= 0
+    ) {
       return false;
     }
     return measurePerformanceTask("history replay", () => {
@@ -13091,11 +13146,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         if (!resetTerminalRuntimeState(session)) {
           return false;
         }
-        session.initialFitResetDone = true;
+        session.initialRuntimeResetDone = true;
+        session.replayFitGeneration = session.measuredFitGeneration;
       } catch (error) {
         return false;
       }
-      resizePane(session);
       resetTerminalHostViewport(session, { clean: true });
       positionTerminalInput(session);
       return true;
@@ -13303,6 +13358,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       !session ||
       session.closed ||
       !isCurrentInstanceSession(session) ||
+      Number(session.measuredFitGeneration || 0) <= 0 ||
       (document.hidden && !allowHidden) ||
       navigator.onLine === false ||
       session.socket?.readyState === WebSocket.OPEN ||
@@ -13317,6 +13373,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       !session ||
       session.closed ||
       !isCurrentInstanceSession(session) ||
+      Number(session.measuredFitGeneration || 0) <= 0 ||
       (document.hidden && !allowHidden) ||
       navigator.onLine === false ||
       session.socket?.readyState === WebSocket.OPEN ||
@@ -13326,6 +13383,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     session.pendingConnect = false;
     clearReconnectTimer(session);
+    session.terminalReplayGeneration = Number(session.terminalReplayGeneration || 0) + 1;
+    session.replayFitGeneration = session.measuredFitGeneration;
     const socketUrl = webSocketURL("./ws");
     socketUrl.searchParams.set("name", String(session.name || "").trim());
     socketUrl.searchParams.set("pane", session.id);
@@ -13934,13 +13993,21 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       composingIME: false,
       exitExpected: false,
       closed: false,
-      initialFitResetDone: false,
+      initialRuntimeResetDone: false,
+      measuredFitGeneration: 0,
+      terminalReplayGeneration: 0,
+      replayFitGeneration: 0,
+      pendingRenderFitGeneration: 0,
+      pendingRenderReplayGeneration: 0,
+      presentedFitGeneration: 0,
+      presentedReplayGeneration: 0,
       renderReady: false,
+      presentationPending: true,
       fullRenderPending: false,
       fullRenderValidationTimer: 0,
-      fullRenderWatchdogTimer: 0,
       hasPresentedFrame: false,
       activationFitPending: false,
+      resizeObserverFrame: 0,
       baseTheme: activeTheme,
       selectAllBufferActive: false,
       title: "",
@@ -13956,9 +14023,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       lastSizeReassertAt: 0,
       cleanupCallbacks: [],
     };
-    installTerminalFullRenderGuard(session);
     installTerminalCanvasRecovery(session);
-    scheduleTerminalFullRenderWatchdog(session);
     clearTerminalRuntimeBuffer(session);
     clearTerminalCanvasPixels(session);
 
@@ -13973,6 +14038,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     installMobileTouchSelection(session);
     installTerminalMouseTracking(session);
     installDesktopMouseClipboard(session);
+    installTerminalResizeObserver(session);
     const renderDisposable = typeof term.onRender === "function" ? term.onRender(() => markPaneRenderedIfMeasurable(session)) : null;
     if (renderDisposable && typeof renderDisposable.dispose === "function") {
       session.cleanupCallbacks.push(() => renderDisposable.dispose());
@@ -14393,8 +14459,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         item.button?.setAttribute("tabindex", isActive ? "0" : "-1");
       }
       for (const pane of tab.panes.values()) {
-        if (!pane.hasPresentedFrame || !pane.renderReady) {
-          pane.activationFitPending = true;
+        pane.activationFitPending = !wasActive || !panePresentationIsCurrent(pane);
+        if (!panePresentationIsCurrent(pane)) {
           setPaneRenderReady(pane, false);
         }
       }
@@ -14872,7 +14938,6 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     clearSessionConnectionTimers(pane);
     discardSessionOutputBuffers(pane);
     clearPaneFullRenderValidation(pane);
-    clearTerminalFullRenderWatchdog(pane);
     clearSessionHistoryCacheWriteSchedule(pane);
     runSessionCleanups(pane);
     if (pane.socket) {

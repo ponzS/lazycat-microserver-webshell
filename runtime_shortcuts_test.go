@@ -1697,35 +1697,39 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"const markPaneRenderedIfMeasurable = (session) => {",
 		"|| !session.fullRenderPending",
 		"|| session.activationFitPending",
-		"session.replayCompletionPending",
+		"|| !session.replayComplete",
+		"session.pendingRenderFitGeneration !== session.measuredFitGeneration",
+		"session.pendingRenderReplayGeneration !== session.terminalReplayGeneration",
+		"terminalCanvasMatchesExpectedSize(session)",
 		"session.hasPresentedFrame = true;",
 		"setPaneRenderReady(session, true);",
+		"const panePresentationIsCurrent = (session) => Boolean(",
 		"const cancelPendingTerminalRender = (term) => {",
 		"const renderPaneFullNow = (session) => {",
+		"session.pendingRenderFitGeneration = session.measuredFitGeneration;",
+		"session.pendingRenderReplayGeneration = session.terminalReplayGeneration;",
 		"term.renderNow(true);",
-		"const installTerminalFullRenderGuard = (session) => {",
-		"term.webshellOriginalRequestRender = term.requestRender.bind(term);",
-		"now - Number(term.webshellLastFullRenderAt || 0) >= terminalFullRenderGuardIntervalMs",
-		"const scheduleTerminalFullRenderWatchdog = (session) => {",
-		"session.fullRenderWatchdogTimer = window.setTimeout(() => {",
-		"const clearTerminalFullRenderWatchdog = (session) => {",
 		"const schedulePaneFullRenderValidation = (session) => {",
+		"!panePresentationIsCurrent(session)",
 		"const installTerminalCanvasRecovery = (session) => {",
 		"canvas.addEventListener(\"contextlost\", handleContextLost);",
 		"canvas.addEventListener(\"contextrestored\", handleContextRestored);",
 		"session.shellEl.dataset.connection = \"open\";",
-		"clearTerminalCanvasPixels(session);",
+		"setPaneRenderReady(session, false);",
 		"shellEl.dataset.renderReady = \"false\";",
-		"initialFitResetDone: false,",
+		"initialRuntimeResetDone: false,",
+		"measuredFitGeneration: 0,",
+		"terminalReplayGeneration: 0,",
+		"presentedFitGeneration: 0,",
+		"presentedReplayGeneration: 0,",
 		"fullRenderPending: false,",
 		"fullRenderValidationTimer: 0,",
-		"fullRenderWatchdogTimer: 0,",
 		"hasPresentedFrame: false,",
 		"activationFitPending: false,",
+		"resizeObserverFrame: 0,",
 		"cleanupCallbacks: [],",
-		"installTerminalFullRenderGuard(session);",
 		"installTerminalCanvasRecovery(session);",
-		"scheduleTerminalFullRenderWatchdog(session);",
+		"installTerminalResizeObserver(session);",
 		"clearTerminalRuntimeBuffer(session);",
 		"clearTerminalCanvasPixels(session);",
 		"term.onRender(() => markPaneRenderedIfMeasurable(session))",
@@ -1735,7 +1739,6 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"if (!resetTerminalRuntimeState(session)) {",
 		"const disposePane = (pane) => {",
 		"clearTerminalCanvasPixels(pane);",
-		"clearTerminalFullRenderWatchdog(pane);",
 		"requestPaneFullRender(session);",
 		"renderPaneFullNow(session);",
 		"cancelPendingTerminalRender(session.term);",
@@ -1756,6 +1759,17 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 			t.Fatalf("runtime terminal replay mode guard missing %q", want)
 		}
 	}
+	for _, forbidden := range []string{
+		"initialFitResetDone",
+		"scheduleTerminalFullRenderWatchdog",
+		"terminalFullRenderWatchdogIntervalMs",
+		"installTerminalFullRenderGuard",
+		"if (session.initialCols > 0 && session.initialRows > 0)",
+	} {
+		if strings.Contains(mainSource, forbidden) {
+			t.Fatalf("runtime terminal replay regression detected: found %q", forbidden)
+		}
+	}
 
 	styleSnippets := []string{
 		`.pane-shell[data-render-ready="false"] .terminal-host canvas {`,
@@ -1768,6 +1782,11 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	}
 
 	rendererSnippets := []string{
+		"async function oA(A)",
+		"R || (R = await q.load(A))",
+		"this.scrollbackByteCapacity = this.estimateScrollbackBytes(g, E)",
+		"this.exports.ghostty_terminal_set_scrollback_limit(this.handle, g)",
+		"this.ensureScrollbackCapacity(A, B)",
 		"this.ctx.fillRect(0, 0, this.canvas.width / this.devicePixelRatio, this.canvas.height / this.devicePixelRatio)",
 		"this.ctx.fillRect(0, C, this.canvas.width / this.devicePixelRatio, this.metrics.height)",
 		"i.text = D.grapheme_len > 0 && typeof A.getGraphemeString == \"function\" ? A.getGraphemeString(Math.floor(I / B.cols), I % B.cols) : String.fromCodePoint(D.codepoint || 32)",
@@ -1778,6 +1797,9 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		if !strings.Contains(rendererSource, want) {
 			t.Fatalf("runtime terminal canvas residue guard missing renderer snippet %q", want)
 		}
+	}
+	if !strings.Contains(mainSource, `await initGhostty("./static/ghostty-vt.wasm");`) {
+		t.Fatal("runtime must explicitly initialize ghostty-web with the vendored WASM resource")
 	}
 }
 
@@ -2115,13 +2137,24 @@ func TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs(t *testing.T) {
 		"scheduleActiveTabWindowResize();",
 		"const isPaneVisibleForSizing = (pane) => {",
 		"const resizePane = (pane, { visibleOnly = true, forceFullRender = false, hideUntilRender = false } = {}) => {",
-		"return false;",
+		"const failedPaneFit = (measurable = false) => ({",
+		"ok: false,",
 		"pane.fitAddon?.proposeDimensions?.();",
 		"const viewport = captureTerminalViewport(pane.term);",
-		"const expectedCanvas = pane.term.renderer?.canvasSize?.(dimensions.cols, dimensions.rows);",
-		"if (!dimensionsEqualTerminalSize(pane, dimensions)) {",
-		"pane.term.resize(dimensions.cols, dimensions.rows);",
+		"const canvasNeedsResize = !terminalCanvasMatchesExpectedSize(pane, fittedDimensions);",
+		"if (!dimensionsEqualTerminalSize(pane, fittedDimensions)) {",
+		"pane.term.resize(fittedDimensions.cols, fittedDimensions.rows);",
 		"restoreTerminalViewport(pane.term, viewport);",
+		"pane.measuredFitGeneration = Number(pane.measuredFitGeneration || 0) + 1;",
+		"pane.activationFitPending = false;",
+		"ok: true,",
+		"const installTerminalResizeObserver = (session) => {",
+		"const observer = new ResizeObserver(() => {",
+		"observer.observe(session.terminalHost);",
+		"const fit = resizePane(session);",
+		"if (!fit.ok || Number(session.measuredFitGeneration || 0) <= 0) {",
+		"if (allowHidden && Number(session.measuredFitGeneration || 0) > 0) {",
+		"Number(session.measuredFitGeneration || 0) <= 0 ||",
 		"const scheduleVisibleTabResize = (tab) => {",
 		"tab.resizeFrame = window.requestAnimationFrame(() => {",
 		"const scheduleActiveTabWindowResize = () => {",
@@ -2186,7 +2219,8 @@ func TestRuntimeMobileOrientationReplaysVisibleTerminalAfterViewportSettle(t *te
 		"replayActiveTabFromServerAfterViewportChange();",
 		"const resetTerminalForHistoryReplay = (session) => {",
 		"resetTerminalRuntimeState(session)",
-		"session.initialFitResetDone = true;",
+		"session.initialRuntimeResetDone = true;",
+		"session.replayFitGeneration = session.measuredFitGeneration;",
 		"const requestSessionHistoryReplay = (session) => {",
 		"session.resetOnNextReplay = true;",
 		"socket.close(4000, \"viewport changed\");",
