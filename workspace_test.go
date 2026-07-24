@@ -1519,7 +1519,7 @@ func TestTerminalPaneFirstAttachAllowsGeneratedInputDuringReplay(t *testing.T) {
 		history: newTestPaneHistory("\x1b[c"),
 	}
 
-	history, client, allowGeneratedInput, err := pane.attachClient()
+	history, client, allowGeneratedInput, err := pane.attachClient(historySyncRequest{})
 	if err != nil {
 		t.Fatalf("attachClient returned error: %v", err)
 	}
@@ -1531,7 +1531,7 @@ func TestTerminalPaneFirstAttachAllowsGeneratedInputDuringReplay(t *testing.T) {
 	}
 	pane.detachClient(client)
 
-	_, client, allowGeneratedInput, err = pane.attachClient()
+	_, client, allowGeneratedInput, err = pane.attachClient(historySyncRequest{})
 	if err != nil {
 		t.Fatalf("second attachClient returned error: %v", err)
 	}
@@ -1624,7 +1624,7 @@ func TestTerminalPaneAppendOutputBroadcastsAllGeneratedChunks(t *testing.T) {
 		clients:           make(map[*paneClient]struct{}),
 		historyLimitBytes: historyChunkMaxBytes * 3,
 	}
-	_, client, _, err := pane.attachClient()
+	_, client, _, err := pane.attachClient(historySyncRequest{})
 	if err != nil {
 		t.Fatalf("attachClient returned error: %v", err)
 	}
@@ -1665,6 +1665,139 @@ func TestPaneHistoryTrimRebuildsRemainingChunkSlice(t *testing.T) {
 	}
 }
 
+func TestPaneHistoryMaintainsAbsoluteRangeAfterTrim(t *testing.T) {
+	history := newTestPaneHistory("drop", "keep")
+
+	history.trim(4)
+
+	if got, want := history.base, uint64(4); got != want {
+		t.Fatalf("history base = %d, want %d", got, want)
+	}
+	if got, want := history.end, uint64(8); got != want {
+		t.Fatalf("history end = %d, want %d", got, want)
+	}
+}
+
+func TestPaneHistorySnapshotFromAbsoluteCursor(t *testing.T) {
+	history := newTestPaneHistory("hello", "world")
+
+	snapshot := history.snapshotFrom(7)
+
+	if got, want := string(snapshot.bytes()), "rld"; got != want {
+		t.Fatalf("snapshot bytes = %q, want %q", got, want)
+	}
+	if snapshot.serverBase != 0 || snapshot.serverEnd != 10 || snapshot.deltaFrom != 7 || snapshot.deltaTo != 10 {
+		t.Fatalf("unexpected snapshot range: base=%d end=%d from=%d to=%d", snapshot.serverBase, snapshot.serverEnd, snapshot.deltaFrom, snapshot.deltaTo)
+	}
+}
+
+func TestTerminalPaneAttachSelectsHistorySyncMode(t *testing.T) {
+	tests := []struct {
+		name       string
+		request    historySyncRequest
+		wantMode   string
+		wantOutput string
+	}{
+		{name: "snapshot without range", wantMode: "snapshot", wantOutput: "helloworld"},
+		{
+			name:       "delta from local end",
+			request:    historySyncRequest{generation: "generation-one", localBase: 0, localEnd: 5, hasRange: true},
+			wantMode:   "delta",
+			wantOutput: "world",
+		},
+		{
+			name:       "current at server end",
+			request:    historySyncRequest{generation: "generation-one", localBase: 0, localEnd: 10, hasRange: true},
+			wantMode:   "current",
+			wantOutput: "",
+		},
+		{
+			name:       "snapshot for generation mismatch",
+			request:    historySyncRequest{generation: "generation-two", localBase: 0, localEnd: 5, hasRange: true},
+			wantMode:   "snapshot",
+			wantOutput: "helloworld",
+		},
+		{
+			name:       "snapshot for local cursor ahead",
+			request:    historySyncRequest{generation: "generation-one", localBase: 0, localEnd: 11, hasRange: true},
+			wantMode:   "snapshot",
+			wantOutput: "helloworld",
+		},
+		{
+			name:       "forced snapshot",
+			request:    historySyncRequest{generation: "generation-one", localBase: 0, localEnd: 5, hasRange: true, forceSnapshot: true},
+			wantMode:   "snapshot",
+			wantOutput: "helloworld",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pane := &terminalPane{
+				clients:           make(map[*paneClient]struct{}),
+				history:           newTestPaneHistory("hello", "world"),
+				historyGeneration: "generation-one",
+				historyLimitBytes: 1024,
+			}
+			history, client, _, err := pane.attachClient(tt.request)
+			if err != nil {
+				t.Fatalf("attachClient returned error: %v", err)
+			}
+			defer pane.detachClient(client)
+			if history.syncMode != tt.wantMode {
+				t.Fatalf("sync mode = %q, want %q", history.syncMode, tt.wantMode)
+			}
+			if got := string(history.bytes()); got != tt.wantOutput {
+				t.Fatalf("history bytes = %q, want %q", got, tt.wantOutput)
+			}
+		})
+	}
+}
+
+func TestTerminalPaneAttachUsesSnapshotWhenLocalEndWasTrimmed(t *testing.T) {
+	history := newTestPaneHistory("drop", "keep")
+	history.trim(4)
+	pane := &terminalPane{
+		clients:           make(map[*paneClient]struct{}),
+		history:           history,
+		historyGeneration: "generation-one",
+		historyLimitBytes: 1024,
+	}
+
+	snapshot, client, _, err := pane.attachClient(historySyncRequest{
+		generation: "generation-one",
+		localBase:  0,
+		localEnd:   3,
+		hasRange:   true,
+	})
+	if err != nil {
+		t.Fatalf("attachClient returned error: %v", err)
+	}
+	defer pane.detachClient(client)
+
+	if snapshot.syncMode != "snapshot" {
+		t.Fatalf("sync mode = %q, want snapshot", snapshot.syncMode)
+	}
+	if snapshot.serverBase != 4 || snapshot.serverEnd != 8 || string(snapshot.bytes()) != "keep" {
+		t.Fatalf("unexpected trimmed snapshot: base=%d end=%d bytes=%q", snapshot.serverBase, snapshot.serverEnd, string(snapshot.bytes()))
+	}
+}
+
+func TestHistorySyncRequestFromQuery(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/ws?history_generation=generation-one&local_base_cursor=4&local_end_cursor=9", nil)
+
+	syncRequest := historySyncRequestFromQuery(request)
+
+	if !syncRequest.hasRange || syncRequest.generation != "generation-one" || syncRequest.localBase != 4 || syncRequest.localEnd != 9 {
+		t.Fatalf("unexpected sync request: %+v", syncRequest)
+	}
+
+	invalid := httptest.NewRequest(http.MethodGet, "/ws?history_generation=generation-one&local_base_cursor=10&local_end_cursor=9", nil)
+	if got := historySyncRequestFromQuery(invalid); got.hasRange {
+		t.Fatalf("invalid range must not be accepted: %+v", got)
+	}
+}
+
 func TestTerminalPaneAttachSnapshotSurvivesLaterTrim(t *testing.T) {
 	pane := &terminalPane{
 		clients:           make(map[*paneClient]struct{}),
@@ -1672,7 +1805,7 @@ func TestTerminalPaneAttachSnapshotSurvivesLaterTrim(t *testing.T) {
 		historyLimitBytes: 4,
 	}
 
-	history, client, _, err := pane.attachClient()
+	history, client, _, err := pane.attachClient(historySyncRequest{})
 	if err != nil {
 		t.Fatalf("attachClient returned error: %v", err)
 	}
@@ -1695,7 +1828,7 @@ func TestTerminalPaneAttachClientQueuesLaterOutput(t *testing.T) {
 		historyLimitBytes: 1024,
 	}
 
-	history, client, _, err := pane.attachClient()
+	history, client, _, err := pane.attachClient(historySyncRequest{})
 	if err != nil {
 		t.Fatalf("attachClient returned error: %v", err)
 	}
@@ -2339,7 +2472,15 @@ func TestHandleServerRevisionInputLockOnlyRequestDoesNotProbeRevision(t *testing
 
 func TestAgentHistoryReplayFramesIncludeSelectorAndPane(t *testing.T) {
 	var out bytes.Buffer
-	history := paneHistorySnapshot{chunks: [][]byte{[]byte("hello")}}
+	history := paneHistorySnapshot{
+		chunks:     [][]byte{[]byte("hello")},
+		generation: "generation-one",
+		syncMode:   "delta",
+		serverBase: 2,
+		serverEnd:  9,
+		deltaFrom:  4,
+		deltaTo:    9,
+	}
 	if !writeAgentHistoryReplay(&out, "demo@owner", "pane-1", history, false) {
 		t.Fatal("writeAgentHistoryReplay returned false")
 	}
@@ -2357,6 +2498,9 @@ func TestAgentHistoryReplayFramesIncludeSelectorAndPane(t *testing.T) {
 	}
 	if start["type"] != "history-replay-start" || start["selector"] != "demo@owner" || start["pane_id"] != "pane-1" {
 		t.Fatalf("unexpected replay start payload: %+v", start)
+	}
+	if start["history_generation"] != "generation-one" || start["sync_mode"] != "delta" || start["server_base_cursor"] != "2" || start["server_end_cursor"] != "9" || start["delta_from_cursor"] != "4" || start["delta_to_cursor"] != "9" {
+		t.Fatalf("unexpected replay range payload: %+v", start)
 	}
 
 	frameType, payload, err = readAgentFrame(&out)
@@ -2380,6 +2524,9 @@ func TestAgentHistoryReplayFramesIncludeSelectorAndPane(t *testing.T) {
 	}
 	if complete["type"] != "history-replay-complete" || complete["selector"] != "demo@owner" || complete["pane_id"] != "pane-1" {
 		t.Fatalf("unexpected replay complete payload: %+v", complete)
+	}
+	if complete["history_generation"] != "generation-one" || complete["history_cursor"] != "9" {
+		t.Fatalf("unexpected replay complete range: %+v", complete)
 	}
 }
 

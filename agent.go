@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -22,7 +23,7 @@ import (
 )
 
 const (
-	agentProtocolVersion = "lcmd-webshell-agent-v5"
+	agentProtocolVersion = "lcmd-webshell-agent-v6"
 
 	agentFrameBinary         = byte('B')
 	agentFrameText           = byte('T')
@@ -44,6 +45,10 @@ type agentRequest struct {
 	Cols               int                     `json:"cols,omitempty"`
 	Rows               int                     `json:"rows,omitempty"`
 	TerminalScrollback int                     `json:"terminal_scrollback,omitempty"`
+	HistoryGeneration  string                  `json:"history_generation,omitempty"`
+	LocalBaseCursor    string                  `json:"local_base_cursor,omitempty"`
+	LocalEndCursor     string                  `json:"local_end_cursor,omitempty"`
+	HistoryReplayMode  string                  `json:"history_replay_mode,omitempty"`
 	Action             *workspaceActionRequest `json:"action,omitempty"`
 	CloseIdle          bool                    `json:"close_idle,omitempty"`
 }
@@ -110,10 +115,14 @@ func runAgentCommand(args []string) error {
 		cols := fs.Int("cols", 0, "terminal columns")
 		rows := fs.Int("rows", 0, "terminal rows")
 		terminalScrollback := fs.Int("terminal-scrollback", fonts.DefaultTerminalScrollback, "terminal scrollback lines")
+		historyGeneration := fs.String("history-generation", "", "terminal history generation")
+		localBaseCursor := fs.String("local-base-cursor", "", "local terminal history base cursor")
+		localEndCursor := fs.String("local-end-cursor", "", "local terminal history end cursor")
+		historyReplayMode := fs.String("history-replay-mode", "", "terminal history replay mode")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		return runAgentAttachClient(*socketPath, *selector, *accountID, *paneID, *cols, *rows, *terminalScrollback)
+		return runAgentAttachClient(*socketPath, *selector, *accountID, *paneID, *cols, *rows, *terminalScrollback, *historyGeneration, *localBaseCursor, *localEndCursor, *historyReplayMode)
 	default:
 		return fmt.Errorf("unknown agent command %q", args[0])
 	}
@@ -338,7 +347,18 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 	if request.Cols > 0 && request.Rows > 0 {
 		_ = pane.resize(request.Cols, request.Rows)
 	}
-	history, client, allowGeneratedInputDuringReplay, err := pane.attachClient()
+	syncRequest := historySyncRequest{
+		generation:    strings.TrimSpace(request.HistoryGeneration),
+		forceSnapshot: strings.TrimSpace(request.HistoryReplayMode) == "snapshot",
+	}
+	base, baseErr := strconv.ParseUint(strings.TrimSpace(request.LocalBaseCursor), 10, 64)
+	end, endErr := strconv.ParseUint(strings.TrimSpace(request.LocalEndCursor), 10, 64)
+	if syncRequest.generation != "" && baseErr == nil && endErr == nil && base <= end {
+		syncRequest.localBase = base
+		syncRequest.localEnd = end
+		syncRequest.hasRange = true
+	}
+	history, client, allowGeneratedInputDuringReplay, err := pane.attachClient(syncRequest)
 	if err != nil {
 		_ = writeAgentControlFrame(conn, map[string]any{"type": "process-exit", "message": err.Error(), "exit_code": -1})
 		return
@@ -433,7 +453,7 @@ func runAgentRequestClient(socketPath, encodedRequest string) error {
 	return err
 }
 
-func runAgentAttachClient(socketPath, selector, accountID, paneID string, cols, rows, terminalScrollback int) error {
+func runAgentAttachClient(socketPath, selector, accountID, paneID string, cols, rows, terminalScrollback int, historyGeneration, localBaseCursor, localEndCursor, historyReplayMode string) error {
 	if strings.TrimSpace(paneID) == "" {
 		return errors.New("pane is required")
 	}
@@ -450,6 +470,10 @@ func runAgentAttachClient(socketPath, selector, accountID, paneID string, cols, 
 		Cols:               cols,
 		Rows:               rows,
 		TerminalScrollback: terminalScrollback,
+		HistoryGeneration:  strings.TrimSpace(historyGeneration),
+		LocalBaseCursor:    strings.TrimSpace(localBaseCursor),
+		LocalEndCursor:     strings.TrimSpace(localEndCursor),
+		HistoryReplayMode:  strings.TrimSpace(historyReplayMode),
 	}
 	data, err := json.Marshal(request)
 	if err != nil {
@@ -479,6 +503,12 @@ func writeAgentHistoryReplay(w io.Writer, selector, paneID string, history paneH
 		"selector":              selector,
 		"pane_id":               paneID,
 		"allow_generated_input": allowGeneratedInput,
+		"history_generation":    history.generation,
+		"server_base_cursor":    strconv.FormatUint(history.serverBase, 10),
+		"server_end_cursor":     strconv.FormatUint(history.serverEnd, 10),
+		"sync_mode":             history.syncMode,
+		"delta_from_cursor":     strconv.FormatUint(history.deltaFrom, 10),
+		"delta_to_cursor":       strconv.FormatUint(history.deltaTo, 10),
 	}); err != nil {
 		return false
 	}
@@ -495,9 +525,11 @@ func writeAgentHistoryReplay(w io.Writer, selector, paneID string, history paneH
 		}
 	}
 	return writeAgentControlFrame(w, map[string]any{
-		"type":     "history-replay-complete",
-		"selector": selector,
-		"pane_id":  paneID,
+		"type":               "history-replay-complete",
+		"selector":           selector,
+		"pane_id":            paneID,
+		"history_generation": history.generation,
+		"history_cursor":     strconv.FormatUint(history.deltaTo, 10),
 	}) == nil
 }
 

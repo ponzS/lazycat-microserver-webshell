@@ -1,12 +1,89 @@
 import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
 import { createPerformanceTaskMonitor } from "./performance_tasks.js";
+import { createTerminalHistoryCache } from "./terminal_history_cache.js";
 
 const params = new URLSearchParams(window.location.search);
+const workspaceRestoreStorageKey = "webshell.workspaceRestore";
+
+const readWorkspaceRestoreState = () => {
+  try {
+    const raw = window.localStorage.getItem(workspaceRestoreStorageKey);
+    const state = raw ? JSON.parse(raw) : null;
+    const name = String(state?.name || "").trim();
+    const tabId = String(state?.tabId || "").trim();
+    if (!name) {
+      window.localStorage.removeItem(workspaceRestoreStorageKey);
+      return null;
+    }
+    return { name, tabId };
+  } catch (error) {
+    return null;
+  }
+};
+
+const persistWorkspaceRestoreState = (name, tabId) => {
+  const targetName = String(name || "").trim();
+  if (!targetName) {
+    return;
+  }
+  try {
+    const targetURL = new URL(window.location.href);
+    targetURL.searchParams.delete("view");
+    targetURL.searchParams.set("name", targetName);
+    const targetTabId = String(tabId || "").trim();
+    if (targetTabId) {
+      targetURL.searchParams.set("tab", targetTabId);
+    } else {
+      targetURL.searchParams.delete("tab");
+    }
+    window.localStorage.setItem(workspaceRestoreStorageKey, JSON.stringify({
+      version: 1,
+      name: targetName,
+      tabId: targetTabId,
+      url: `${targetURL.pathname}${targetURL.search}${targetURL.hash}`,
+      updatedAt: Date.now(),
+    }));
+  } catch (error) {
+  }
+};
+
+const clearWorkspaceRestoreState = () => {
+  try {
+    window.localStorage.removeItem(workspaceRestoreStorageKey);
+  } catch (error) {
+  }
+};
+
+const restoreInitialWorkspaceLocation = () => {
+  const state = readWorkspaceRestoreState();
+  if (!state) {
+    return;
+  }
+  const requestedName = (params.get("target") || params.get("name") || "").trim();
+  let changed = false;
+  if (!requestedName) {
+    params.set("name", state.name);
+    changed = true;
+  }
+  if (!params.get("tab") && (!requestedName || requestedName === state.name) && state.tabId) {
+    params.set("tab", state.tabId);
+    changed = true;
+  }
+  if (!changed) {
+    return;
+  }
+  params.delete("view");
+  const nextURL = new URL(window.location.href);
+  nextURL.search = params.toString();
+  window.history.replaceState(window.history.state, "", nextURL);
+};
+
+restoreInitialWorkspaceLocation();
 const isEmbedMode = params.has("embed");
 document.body?.classList.toggle("is-embed-mode", isEmbedMode);
 
 (async () => {
-  await initGhostty();
+  await initGhostty("./static/ghostty-vt.wasm");
 
   const tabsEl = document.getElementById("tabs");
   const newTabButton = document.getElementById("newTab");
@@ -19,8 +96,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const terminalArea = document.getElementById("terminalArea");
   const emptyState = document.getElementById("emptyState");
   const emptyStateAction = document.getElementById("emptyStateAction");
-  const performanceMeterFps = document.getElementById("performanceMeterFps");
-  const performanceMeterRefresh = document.getElementById("performanceMeterRefresh");
+  let performanceMeter = null;
+  let performanceMeterFps = null;
+  let performanceMeterRefresh = null;
   const performanceTaskMeter = document.getElementById("performanceTaskMeter");
   const performanceTaskMeterList = document.getElementById("performanceTaskMeterList");
   const startupErrorPanel = document.getElementById("startupErrorPanel");
@@ -256,6 +334,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const terminalReconnectJitterRatio = 0.2;
   const terminalOutputFlushFallbackMs = 32;
   const terminalOutputFlushBudgetBytes = 128 * 1024;
+  const terminalResizeSettleMs = 100;
+  const terminalFullRenderValidationMs = 80;
+  const terminalHistoryCacheFlushBytes = 256 * 1024;
+  const terminalHistoryCacheFlushDelayMs = 50;
+  const terminalHistoryCacheOrphanTTL = 30 * 1000;
+  const averageTerminalHistoryBytesPerLine = 350;
   const performanceMeterSampleMs = 500;
   const performanceMeterWarmupFrames = 12;
   const performanceTaskPanelLimit = 10;
@@ -277,6 +361,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const terminalPixelScrollOffsetEpsilon = 0.001;
   const terminalMouseLegacyCoordinateLimit = 95;
   const maxQueuedTerminalOutputBytes = 4 * 1024 * 1024;
+  const terminalHistoryCache = createTerminalHistoryCache({ orphanTTL: terminalHistoryCacheOrphanTTL });
   const activityPollIntervalMs = 4000;
   const maxAttachmentUploadBytes = 2 * 1024 * 1024 * 1024;
   const maxAttachmentUploadCount = 32;
@@ -462,6 +547,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const readTargetNameParam = (sourceParams) => (sourceParams.get("target") || sourceParams.get("name") || "").trim();
   let activeName = readTargetNameParam(params);
   let activeTabId = null;
+  let activeTabResizeTimer = 0;
   let inlineTabRenameState = null;
   let recentTabIds = [];
   let activeInstanceGeneration = 0;
@@ -502,6 +588,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   let suppressLocationUpdate = false;
   let suppressBeforeUnloadOnce = false;
   let suppressBeforeUnloadResetTimer = 0;
+  let suppressWorkspaceRestoreOnce = false;
+  let workspaceRestoreHeartbeatTimer = 0;
   let tabOverviewRenderFrame = 0;
   let tabOverviewDragState = null;
   let tabOverviewSuppressClickUntil = 0;
@@ -803,6 +891,40 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const recordPerformanceTask = (name, ms) => performanceTaskMonitor.record(name, ms);
   const measurePerformanceTask = (name, fn) => performanceTaskMonitor.measure(name, fn);
 
+  const mountPerformanceMeter = () => {
+    if (performanceMeter?.isConnected) {
+      return;
+    }
+    if (!terminalArea) {
+      return;
+    }
+    const meter = document.createElement("div");
+    meter.className = "fps-meter";
+    meter.id = "performanceMeter";
+    meter.setAttribute("aria-live", "off");
+
+    const fps = document.createElement("span");
+    fps.id = "performanceMeterFps";
+    fps.textContent = "-- FPS";
+
+    const refresh = document.createElement("span");
+    refresh.id = "performanceMeterRefresh";
+    refresh.textContent = "-- Hz";
+
+    meter.append(fps, refresh);
+    terminalArea.appendChild(meter);
+    performanceMeter = meter;
+    performanceMeterFps = fps;
+    performanceMeterRefresh = refresh;
+  };
+
+  const unmountPerformanceMeter = () => {
+    performanceMeter?.remove();
+    performanceMeter = null;
+    performanceMeterFps = null;
+    performanceMeterRefresh = null;
+  };
+
   const startPerformanceMeter = () => {
     if (!performanceMeterFps || !performanceMeterRefresh) {
       return;
@@ -856,12 +978,6 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       performanceMeterFrame = window.requestAnimationFrame(update);
     };
     performanceMeterFrame = window.requestAnimationFrame(update);
-    window.addEventListener("beforeunload", () => {
-      if (performanceMeterFrame) {
-        window.cancelAnimationFrame(performanceMeterFrame);
-        performanceMeterFrame = 0;
-      }
-    }, { once: true });
   };
 
   const stopPerformanceMeter = () => {
@@ -1196,14 +1312,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const applyPerformanceMeterVisibility = () => {
-    const meter = performanceMeterFps?.closest?.(".fps-meter");
-    if (meter) {
-      meter.hidden = !performanceMeterEnabled;
-    }
     if (performanceMeterEnabled) {
+      mountPerformanceMeter();
       startPerformanceMeter();
     } else {
       stopPerformanceMeter();
+      unmountPerformanceMeter();
     }
   };
 
@@ -4292,7 +4406,14 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     return true;
   };
 
+  const rememberWorkspaceRestoreState = () => {
+    if (!suppressWorkspaceRestoreOnce) {
+      persistWorkspaceRestoreState(activeName, activeTabId);
+    }
+  };
+
   const rememberActiveTab = () => {
+    rememberWorkspaceRestoreState();
     if (!activeName || !activeTabId) {
       return;
     }
@@ -4364,9 +4485,13 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     try {
       const targetURL = await loadLightOSHomeURL();
+      suppressWorkspaceRestoreOnce = true;
+      clearWorkspaceRestoreState();
       suppressBeforeUnloadForNavigation();
       window.location.assign(targetURL);
     } catch (error) {
+      suppressWorkspaceRestoreOnce = false;
+      rememberWorkspaceRestoreState();
       if (homeMenuButton) {
         homeMenuButton.disabled = false;
       }
@@ -5680,10 +5805,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
 
   const resetTerminalAfterInitialFit = (session) => {
     const term = session?.term;
-    if (!term || session.initialFitResetDone) {
+    if (!term || session.initialRuntimeResetDone || Number(session.measuredFitGeneration || 0) <= 0) {
       return;
     }
-    session.initialFitResetDone = true;
+    session.initialRuntimeResetDone = true;
     resetTerminalRuntimeState(session);
   };
 
@@ -5718,30 +5843,133 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return;
     }
     session.renderReady = ready === true;
+    session.presentationPending = !session.renderReady;
     session.shellEl.dataset.renderReady = session.renderReady ? "true" : "false";
   };
+
+  const panePresentationIsCurrent = (session) => Boolean(
+    session
+    && session.renderReady
+    && Number(session.measuredFitGeneration || 0) > 0
+    && session.presentedFitGeneration === session.measuredFitGeneration
+    && session.presentedReplayGeneration === session.terminalReplayGeneration
+  );
 
   const markPaneRenderPending = (session) => {
     if (!session || session.closed) {
       return;
     }
     setPaneRenderReady(session, false);
+    session.fullRenderPending = false;
+    session.pendingRenderFitGeneration = 0;
+    session.pendingRenderReplayGeneration = 0;
     session.term?.renderer?.clear?.();
     clearTerminalCanvasPixels(session);
   };
 
   const markPaneRenderedIfMeasurable = (session) => {
-    if (!session || session.closed || session.renderReady || session.replayCompletionPending || (!session.replayComplete && session.shellEl?.dataset.connection === "connecting") || !isPaneMeasurable(session)) {
+    if (
+      !session
+      || session.closed
+      || !session.fullRenderPending
+      || session.activationFitPending
+      || session.replayCompletionPending
+      || !session.replayComplete
+      || Number(session.measuredFitGeneration || 0) <= 0
+      || session.pendingRenderFitGeneration !== session.measuredFitGeneration
+      || session.pendingRenderReplayGeneration !== session.terminalReplayGeneration
+      || !isPaneMeasurable(session)
+      || !terminalCanvasMatchesExpectedSize(session)
+    ) {
       return;
     }
-    setPaneRenderReady(session, true);
+    session.fullRenderPending = false;
+    session.presentedFitGeneration = session.measuredFitGeneration;
+    session.presentedReplayGeneration = session.terminalReplayGeneration;
+    session.hasPresentedFrame = true;
+    if (!session.renderReady) {
+      setPaneRenderReady(session, true);
+    }
   };
 
   const requestPaneFullRender = (session) => {
     if (!session?.term || session.closed) {
       return;
     }
+    session.fullRenderPending = true;
+    session.pendingRenderFitGeneration = session.measuredFitGeneration;
+    session.pendingRenderReplayGeneration = session.terminalReplayGeneration;
     session.term.requestRender?.({ full: true });
+  };
+
+  const cancelPendingTerminalRender = (term) => {
+    if (!term?.animationFrameId) {
+      return;
+    }
+    window.cancelAnimationFrame(term.animationFrameId);
+    term.animationFrameId = undefined;
+    term.renderFullNextFrame = false;
+  };
+
+  const renderPaneFullNow = (session) => {
+    const term = session?.term;
+    if (!term || session.closed || typeof term.renderNow !== "function") {
+      requestPaneFullRender(session);
+      return false;
+    }
+    cancelPendingTerminalRender(term);
+    session.fullRenderPending = true;
+    session.pendingRenderFitGeneration = session.measuredFitGeneration;
+    session.pendingRenderReplayGeneration = session.terminalReplayGeneration;
+    term.renderNow(true);
+    return true;
+  };
+
+  const clearPaneFullRenderValidation = (session) => {
+    if (!session?.fullRenderValidationTimer) {
+      return;
+    }
+    window.clearTimeout(session.fullRenderValidationTimer);
+    session.fullRenderValidationTimer = 0;
+  };
+
+  const schedulePaneFullRenderValidation = (session) => {
+    if (!session || session.closed || !session.replayComplete || panePresentationIsCurrent(session)) {
+      return;
+    }
+    clearPaneFullRenderValidation(session);
+    session.fullRenderValidationTimer = window.setTimeout(() => {
+      session.fullRenderValidationTimer = 0;
+      if (!session.closed && session.replayComplete && !panePresentationIsCurrent(session) && isPaneVisibleForSizing(session)) {
+        resizePane(session, { forceFullRender: true, hideUntilRender: true });
+      }
+    }, terminalFullRenderValidationMs);
+  };
+
+  const installTerminalCanvasRecovery = (session) => {
+    const canvas = session?.term?.canvas || session?.term?.renderer?.getCanvas?.();
+    if (!(canvas instanceof HTMLCanvasElement)) {
+      return;
+    }
+    const handleContextLost = (event) => {
+      event.preventDefault?.();
+      setPaneRenderReady(session, false);
+      session.fullRenderPending = false;
+      session.pendingRenderFitGeneration = 0;
+      session.pendingRenderReplayGeneration = 0;
+    };
+    const handleContextRestored = () => {
+      if (session.closed) {
+        return;
+      }
+      window.requestAnimationFrame(() => resizePane(session, { forceFullRender: true, hideUntilRender: true }));
+    };
+    canvas.addEventListener("contextlost", handleContextLost);
+    canvas.addEventListener("contextrestored", handleContextRestored);
+    addSessionCleanup(session, () => {
+      canvas.removeEventListener("contextlost", handleContextLost);
+      canvas.removeEventListener("contextrestored", handleContextRestored);
+    });
   };
 
   const syncTabMobilePixelScroll = (tab) => {
@@ -6945,6 +7173,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     for (const node of [canvas, textarea, preview]) {
       if (node instanceof HTMLElement) {
         node.style.transform = transform;
+        node.style.willChange = transform ? "transform" : "";
       }
     }
   };
@@ -7893,45 +8122,142 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     return pane?.tabId === activeTabId && isPaneMeasurable(pane);
   };
 
-  const resizePane = (pane, { visibleOnly = true } = {}) => {
-    if (!pane || pane.closed) {
+  const stopTerminalScrollAnimation = (term) => {
+    if (!term?.scrollAnimationFrame) {
+      return;
+    }
+    window.cancelAnimationFrame(term.scrollAnimationFrame);
+    term.scrollAnimationFrame = undefined;
+    term.scrollAnimationStartTime = undefined;
+    term.scrollAnimationStartY = undefined;
+    term.scrollAnimationLastFrameTime = undefined;
+  };
+
+  const captureTerminalViewport = (term) => ({
+    atBottom: isTerminalViewportAtBottom(term),
+    viewportY: terminalViewportValue(term?.viewportY),
+    targetViewportY: terminalViewportValue(term?.targetViewportY),
+  });
+
+  const restoreTerminalViewport = (term, viewport) => {
+    if (!term || !viewport) {
+      return;
+    }
+    stopTerminalScrollAnimation(term);
+    if (viewport.atBottom) {
+      term.viewportY = 0;
+      term.targetViewportY = 0;
+      return;
+    }
+    const scrollback = Math.max(0, Number(term.getScrollbackLength?.() || 0));
+    term.viewportY = Math.max(0, Math.min(scrollback, viewport.viewportY));
+    term.targetViewportY = Math.max(0, Math.min(scrollback, viewport.targetViewportY));
+  };
+
+  const terminalCanvasSize = (pane) => {
+    const canvas = pane?.term?.canvas || pane?.term?.renderer?.getCanvas?.();
+    return {
+      width: Math.max(0, Number(canvas?.width) || 0),
+      height: Math.max(0, Number(canvas?.height) || 0),
+    };
+  };
+
+  const terminalCanvasMatchesExpectedSize = (pane, dimensions = terminalSize(pane)) => {
+    const canvas = pane?.term?.canvas || pane?.term?.renderer?.getCanvas?.();
+    const cols = Math.max(0, Math.floor(Number(dimensions?.cols) || 0));
+    const rows = Math.max(0, Math.floor(Number(dimensions?.rows) || 0));
+    const expected = pane?.term?.renderer?.canvasSize?.(cols, rows);
+    if (!(canvas instanceof HTMLCanvasElement) || !expected || cols <= 0 || rows <= 0) {
       return false;
     }
+    return canvas.width === Math.max(0, Number(expected.pixelWidth) || 0)
+      && canvas.height === Math.max(0, Number(expected.pixelHeight) || 0)
+      && canvas.style.width === `${expected.cssWidth}px`
+      && canvas.style.height === `${expected.cssHeight}px`;
+  };
+
+  const failedPaneFit = (measurable = false) => ({
+    ok: false,
+    measurable,
+    cols: 0,
+    rows: 0,
+    sizeChanged: false,
+    canvasChanged: false,
+  });
+
+  const resizePane = (pane, { visibleOnly = true, forceFullRender = false, hideUntilRender = false } = {}) => {
+    if (!pane || pane.closed) {
+      return failedPaneFit();
+    }
     if (visibleOnly && !isPaneVisibleForSizing(pane)) {
-      return false;
+      return failedPaneFit(isPaneMeasurable(pane));
     }
     if (isMobileKeyboardResizeSuppressed()) {
       resetTerminalHostViewport(pane, { clean: true });
       positionTerminalInput(pane);
       syncTerminalViewportPan(pane);
       updateMobileSelectionHandles(pane);
-      return false;
+      return failedPaneFit(isPaneMeasurable(pane));
     }
     return measurePerformanceTask("resize/fit", () => {
       const dimensions = pane.fitAddon?.proposeDimensions?.();
       if (!dimensions || dimensions.cols <= 0 || dimensions.rows <= 0) {
-        return false;
+        return failedPaneFit(isPaneMeasurable(pane));
       }
-      const sizeChanged = !dimensionsEqualTerminalSize(pane, dimensions);
+      const fittedDimensions = {
+        cols: Math.max(1, Math.floor(Number(dimensions.cols) || 0)),
+        rows: Math.max(1, Math.floor(Number(dimensions.rows) || 0)),
+      };
+      const viewport = captureTerminalViewport(pane.term);
+      const sizeBefore = terminalSize(pane);
+      const canvasBefore = terminalCanvasSize(pane);
+      const canvasNeedsResize = !terminalCanvasMatchesExpectedSize(pane, fittedDimensions);
+      if (hideUntilRender) {
+        setPaneRenderReady(pane, false);
+      }
       try {
-        if (sizeChanged) {
-          pane.fitAddon.fit();
+        if (!dimensionsEqualTerminalSize(pane, fittedDimensions)) {
+          pane.term.resize(fittedDimensions.cols, fittedDimensions.rows);
         }
       } catch (error) {
-        return false;
+        if (hideUntilRender && pane.hasPresentedFrame) {
+          setPaneRenderReady(pane, true);
+        }
+        return failedPaneFit(true);
       }
+      restoreTerminalViewport(pane.term, viewport);
+      const sizeAfter = terminalSize(pane);
+      const canvasAfter = terminalCanvasSize(pane);
+      const sizeChanged = sizeBefore.cols !== sizeAfter.cols || sizeBefore.rows !== sizeAfter.rows;
+      const canvasChanged = canvasBefore.width !== canvasAfter.width || canvasBefore.height !== canvasAfter.height;
+      const firstMeasuredFit = Number(pane.measuredFitGeneration || 0) <= 0;
+      const fitGenerationChanged = firstMeasuredFit || sizeChanged || canvasChanged || canvasNeedsResize;
+      if (fitGenerationChanged) {
+        pane.measuredFitGeneration = Number(pane.measuredFitGeneration || 0) + 1;
+      }
+      pane.activationFitPending = false;
       resetTerminalHostViewport(pane, { clean: true });
       positionTerminalInput(pane);
       syncTerminalViewportPan(pane);
-      if (!pane.initialFitResetDone && !pane.replayComplete) {
+      if (!pane.initialRuntimeResetDone && !pane.replayComplete) {
         resetTerminalAfterInitialFit(pane);
       }
-      if (sizeChanged) {
-        requestPaneFullRender(pane);
+      if (fitGenerationChanged && pane.replayComplete) {
+        setPaneRenderReady(pane, false);
+      }
+      if (forceFullRender || fitGenerationChanged || hideUntilRender || !pane.hasPresentedFrame) {
+        renderPaneFullNow(pane);
       }
       sendTerminalSize(pane);
       updateMobileSelectionHandles(pane);
-      return sizeChanged;
+      return {
+        ok: true,
+        measurable: true,
+        cols: sizeAfter.cols,
+        rows: sizeAfter.rows,
+        sizeChanged,
+        canvasChanged,
+      };
     });
   };
 
@@ -7948,13 +8274,16 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       if (document.hidden && !allowHidden) {
         return;
       }
-      resizePane(session);
+      const fit = resizePane(session);
+      if (!fit.ok || Number(session.measuredFitGeneration || 0) <= 0) {
+        return;
+      }
       connectSession(session, { allowHidden }).catch((error) => {
         showSessionStartupError(session, error.message || "WebSocket connection failed.");
       });
       return;
     }
-    if (session.initialCols > 0 && session.initialRows > 0) {
+    if (allowHidden && Number(session.measuredFitGeneration || 0) > 0) {
       connectSession(session, { allowHidden: true }).catch((error) => {
         showSessionStartupError(session, error.message || "WebSocket connection failed.");
       });
@@ -7976,27 +8305,46 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   };
 
-  const resizeTab = (tab) => {
+  const resizeTab = (tab, options = {}) => {
     if (!tab) {
       return;
     }
     for (const pane of tab.panes.values()) {
-      resizePane(pane);
+      resizePane(pane, options);
     }
     connectPendingSessionsForTab(tab);
   };
 
-  const resizeActiveTab = () => resizeTab(currentTab());
+  const resizeActiveTab = (options = {}) => resizeTab(currentTab(), options);
 
   const scheduleVisibleTabResize = (tab) => {
     if (!tab) {
       return;
     }
-    window.requestAnimationFrame(() => {
-      resizeTabForCurrentDevice(tab);
-      window.requestAnimationFrame(() => resizeTabForCurrentDevice(tab));
-      window.setTimeout(() => resizeTabForCurrentDevice(tab), 80);
+    if (tab.resizeFrame) {
+      window.cancelAnimationFrame(tab.resizeFrame);
+    }
+    tab.resizeFrame = window.requestAnimationFrame(() => {
+      tab.resizeFrame = 0;
+      syncTabMobilePixelScroll(tab);
+      for (const pane of tab.panes.values()) {
+        resizePane(pane, {
+          forceFullRender: true,
+          hideUntilRender: !panePresentationIsCurrent(pane),
+        });
+      }
+      connectPendingSessionsForTab(tab);
     });
+  };
+
+  const scheduleActiveTabWindowResize = () => {
+    if (activeTabResizeTimer) {
+      window.clearTimeout(activeTabResizeTimer);
+    }
+    activeTabResizeTimer = window.setTimeout(() => {
+      activeTabResizeTimer = 0;
+      resizeActiveTabForCurrentDevice({ forceFullRender: true, hideUntilRender: true });
+    }, terminalResizeSettleMs);
   };
 
   const reassertTerminalSize = (session, { force = false } = {}) => {
@@ -8018,15 +8366,47 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     reassertTerminalSize(session, { force: true });
   };
 
-  const resizeTabForCurrentDevice = (tab) => {
+  const resizeTabForCurrentDevice = (tab, options = {}) => {
     if (!tab) {
       return;
     }
     syncTabMobilePixelScroll(tab);
-    resizeTab(tab);
+    resizeTab(tab, options);
   };
 
-  const resizeActiveTabForCurrentDevice = () => resizeTabForCurrentDevice(currentTab());
+  const resizeActiveTabForCurrentDevice = (options = {}) => resizeTabForCurrentDevice(currentTab(), options);
+
+  const installTerminalResizeObserver = (session) => {
+    if (!session?.terminalHost || typeof ResizeObserver !== "function") {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      if (session.closed || session.tabId !== activeTabId || session.resizeObserverFrame) {
+        return;
+      }
+      session.resizeObserverFrame = window.requestAnimationFrame(() => {
+        session.resizeObserverFrame = 0;
+        if (session.closed || session.tabId !== activeTabId) {
+          return;
+        }
+        const fit = resizePane(session, {
+          forceFullRender: !panePresentationIsCurrent(session) || !session.hasPresentedFrame,
+          hideUntilRender: !panePresentationIsCurrent(session),
+        });
+        if (fit.ok) {
+          connectPendingSession(session);
+        }
+      });
+    });
+    observer.observe(session.terminalHost);
+    addSessionCleanup(session, () => {
+      observer.disconnect();
+      if (session.resizeObserverFrame) {
+        window.cancelAnimationFrame(session.resizeObserverFrame);
+        session.resizeObserverFrame = 0;
+      }
+    });
+  };
 
   const currentMobileViewportOrientation = () => {
     const type = String(window.screen?.orientation?.type || "").toLowerCase();
@@ -8264,6 +8644,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
 
   const syncMobileVisualViewport = ({ detectOrientation = true } = {}) => {
     const supportsViewportInsets = usesMobileViewportInsets();
+    const shouldResizeTerminal = supportsViewportInsets && isTouchShortcutLayout();
     const useKeyboardInset = isIOSPlatform();
     const visualViewport = window.visualViewport;
     const nextHeight = Math.max(0, Math.round(visualViewport?.height || window.innerHeight || 0));
@@ -8287,7 +8668,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       if (keyboardLikeHeightChange) {
         armMobileKeyboardResizeSuppression();
       }
-      if (heightChanged || insetChanged || safeOffsetChanged) {
+      if (shouldResizeTerminal && (heightChanged || insetChanged || safeOffsetChanged)) {
         scheduleMobileViewportResize();
       }
       if (shouldRecoverOrientation) {
@@ -8321,7 +8702,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (heightChanged && !orientationChanged && isTouchShortcutLayout() && (nextKeyboardActive || mobileKeyboardViewportActive)) {
       armMobileKeyboardResizeSuppression();
     }
-    if (heightChanged || insetChanged || safeOffsetChanged) {
+    if (shouldResizeTerminal && (heightChanged || insetChanged || safeOffsetChanged)) {
       scheduleMobileViewportResize();
     }
     if (shouldRecoverOrientation) {
@@ -12119,6 +12500,238 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   };
 
+  const parseHistoryCursor = (value) => {
+    const text = String(value ?? "").trim();
+    if (!/^\d+$/.test(text)) {
+      return null;
+    }
+    try {
+      return BigInt(text);
+    } catch (error) {
+      return null;
+    }
+  };
+
+  const clearSessionHistoryCacheWriteSchedule = (session) => {
+    if (!session) {
+      return;
+    }
+    if (session.historyCacheWriteFrame) {
+      window.cancelAnimationFrame(session.historyCacheWriteFrame);
+      session.historyCacheWriteFrame = 0;
+    }
+    if (session.historyCacheWriteTimer) {
+      window.clearTimeout(session.historyCacheWriteTimer);
+      session.historyCacheWriteTimer = 0;
+    }
+  };
+
+  const disableSessionHistoryCache = (session, error = null) => {
+    if (!session) {
+      return;
+    }
+    clearSessionHistoryCacheWriteSchedule(session);
+    session.historyCacheDisabled = true;
+    session.historyCacheWriteQueue = [];
+    session.historyCacheWriteBytes = 0;
+    session.historyCacheSnapshot = null;
+    if (error) {
+      console.warn("[terminal-history] local cache disabled", {
+        name: session.name,
+        pane: session.id,
+        error: error?.message || String(error),
+      });
+    }
+    terminalHistoryCache.deletePane(session.name, session.id).catch(() => {});
+  };
+
+  const prepareSessionHistoryCache = async (session) => {
+    if (!session || session.historyCacheLoaded) {
+      if (session) {
+        session.historyCacheLoaded = true;
+      }
+      return session?.historyCacheSnapshot || null;
+    }
+    if (session.historyCacheLoadPromise) {
+      return session.historyCacheLoadPromise;
+    }
+    session.historyCacheLoadPromise = terminalHistoryCache.load(session.name, session.id)
+      .then((snapshot) => {
+        if (session.closed) {
+          return null;
+        }
+        session.historyCacheSnapshot = snapshot;
+        if (snapshot) {
+          session.historyGeneration = snapshot.generation;
+          session.localBaseCursor = snapshot.baseCursor;
+          session.persistedHistoryCursor = snapshot.endCursor;
+        }
+        return snapshot;
+      })
+      .catch((error) => {
+        disableSessionHistoryCache(session, error);
+        return null;
+      })
+      .finally(() => {
+        session.historyCacheLoaded = true;
+        session.historyCacheLoadPromise = null;
+      });
+    return session.historyCacheLoadPromise;
+  };
+
+  const flushSessionHistoryCacheWrites = (session) => {
+    if (!session || session.historyCacheDisabled || session.historyCacheWriteQueue.length === 0) {
+      return session?.historyCacheWritePromise || Promise.resolve();
+    }
+    clearSessionHistoryCacheWriteSchedule(session);
+    const chunks = session.historyCacheWriteQueue;
+    session.historyCacheWriteQueue = [];
+    session.historyCacheWriteBytes = 0;
+    const generation = session.historyGeneration;
+    session.historyCacheWritePromise = session.historyCacheWritePromise
+      .then(() => session.historyCacheResetPromise)
+      .then(() => terminalHistoryCache.append(session.name, session.id, generation, chunks, {
+        limitBytes: Math.max(1, Number(terminalOptionsBase.scrollback || 0) * averageTerminalHistoryBytesPerLine),
+      }))
+      .then((result) => {
+        if (!result || session.closed || session.historyGeneration !== generation) {
+          return;
+        }
+        session.localBaseCursor = result.baseCursor;
+        session.persistedHistoryCursor = result.endCursor;
+      })
+      .catch((error) => disableSessionHistoryCache(session, error));
+    return session.historyCacheWritePromise;
+  };
+
+  const scheduleSessionHistoryCacheWrite = (session) => {
+    if (!session || session.historyCacheDisabled || session.historyCacheWriteFrame || session.historyCacheWriteTimer) {
+      return;
+    }
+    const flush = () => flushSessionHistoryCacheWrites(session);
+    session.historyCacheWriteFrame = window.requestAnimationFrame(flush);
+    session.historyCacheWriteTimer = window.setTimeout(flush, terminalHistoryCacheFlushDelayMs);
+  };
+
+  const queueSessionHistoryCacheWrite = (session, data, startCursor, endCursor) => {
+    if (
+      !session ||
+      session.historyCacheDisabled ||
+      !session.historyGeneration ||
+      !(data instanceof Uint8Array) ||
+      endCursor <= startCursor
+    ) {
+      return;
+    }
+    const copy = new Uint8Array(data);
+    session.historyCacheWriteQueue.push({ startCursor, endCursor, data: copy });
+    session.historyCacheWriteBytes += copy.byteLength;
+    if (session.historyCacheWriteBytes >= terminalHistoryCacheFlushBytes) {
+      flushSessionHistoryCacheWrites(session);
+    } else {
+      scheduleSessionHistoryCacheWrite(session);
+    }
+  };
+
+  const resetSessionHistoryCache = (session, generation, cursor) => {
+    if (!session) {
+      return;
+    }
+    clearSessionHistoryCacheWriteSchedule(session);
+    session.historyCacheDisabled = false;
+    session.historyCacheWriteQueue = [];
+    session.historyCacheWriteBytes = 0;
+    session.historyCacheSnapshot = null;
+    const previousWrites = session.historyCacheWritePromise;
+    session.historyCacheResetPromise = Promise.resolve(previousWrites)
+      .catch(() => {})
+      .then(() => terminalHistoryCache.reset(session.name, session.id, generation, cursor))
+      .then((result) => {
+        if (session.closed || session.historyGeneration !== generation) {
+          return;
+        }
+        session.localBaseCursor = result.baseCursor;
+        session.persistedHistoryCursor = result.endCursor;
+      })
+      .catch((error) => disableSessionHistoryCache(session, error));
+  };
+
+  const deleteSessionHistoryCache = (name, paneId) => terminalHistoryCache.deletePane(name, paneId).catch((error) => {
+    console.warn("[terminal-history] cache delete failed", {
+      name,
+      pane: paneId,
+      error: error?.message || String(error),
+    });
+  });
+
+  const destroySessionHistoryCache = async (session) => {
+    if (!session) {
+      return;
+    }
+    if (session.historyCacheDestroyPromise) {
+      return session.historyCacheDestroyPromise;
+    }
+    session.historyCacheDestroyPromise = (async () => {
+      clearSessionHistoryCacheWriteSchedule(session);
+      session.historyCacheDisabled = true;
+      session.historyCacheWriteQueue = [];
+      session.historyCacheWriteBytes = 0;
+      await Promise.allSettled([
+        session.historyCacheResetPromise,
+        session.historyCacheWritePromise,
+      ]);
+      await deleteSessionHistoryCache(session.name, session.id);
+    })();
+    return session.historyCacheDestroyPromise;
+  };
+
+  const flushAllSessionHistoryCaches = () => {
+    const writes = [];
+    for (const tab of tabs.values()) {
+      for (const pane of tab.panes.values()) {
+        writes.push(flushSessionHistoryCacheWrites(pane));
+      }
+    }
+    return Promise.allSettled(writes);
+  };
+
+  const touchAllSessionHistoryCaches = () => {
+    for (const tab of tabs.values()) {
+      for (const pane of tab.panes.values()) {
+        if (!pane.historyCacheDisabled && pane.historyGeneration) {
+          terminalHistoryCache.touch(pane.name, pane.id).catch(() => {});
+        }
+      }
+    }
+  };
+
+  const sessionHistoryRangeForConnect = (session) => {
+    if (!session?.historyGeneration || session.resetOnNextReplay) {
+      return null;
+    }
+    if (session.historyStateReady) {
+      return {
+        generation: session.historyGeneration,
+        baseCursor: session.localBaseCursor,
+        endCursor: session.appliedHistoryCursor,
+        source: "memory",
+      };
+    }
+    if (session.historyCacheDisabled) {
+      return null;
+    }
+    const snapshot = session.historyCacheSnapshot;
+    if (snapshot && snapshot.generation === session.historyGeneration) {
+      return {
+        generation: snapshot.generation,
+        baseCursor: snapshot.baseCursor,
+        endCursor: snapshot.endCursor,
+        source: "cache",
+      };
+    }
+    return null;
+  };
+
   const terminalOutputKind = (data) => {
     if (typeof data === "string") {
       return "text";
@@ -12204,6 +12817,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     try {
       measurePerformanceTask("terminal render", () => session.term.write(data));
       drainGeneratedTerminalResponses(session);
+      if (replayOutput) {
+        cancelPendingTerminalRender(session.term);
+      }
       return true;
     } finally {
       if (replayOutput) {
@@ -12220,20 +12836,24 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       session.outputQueueSize > 0 ||
       !session.replayVerified ||
       session.closed ||
-      session.name !== activeName
+      session.name !== activeName ||
+      (session.historyProtocolActive && session.appliedHistoryCursor < session.historyReplayTargetCursor)
     ) {
       return false;
     }
     session.replayCompletionPending = false;
     session.replayComplete = true;
     session.replayVerified = false;
+    session.historyStateReady = true;
+    session.historyCacheSnapshot = null;
     session.agentPreparing = false;
     session.allowGeneratedInputDuringReplay = false;
     clearAttachReadyTimer(session);
     session.reconnectAttempts = 0;
     session.shellEl.dataset.connection = "open";
-    clearTerminalCanvasPixels(session);
-    requestPaneFullRender(session);
+    setPaneRenderReady(session, false);
+    renderPaneFullNow(session);
+    schedulePaneFullRenderValidation(session);
     flushPendingInput(session);
     return true;
   };
@@ -12293,6 +12913,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         const data = coalesceTerminalOutputBatch(batch.chunks, batch.kind, batch.byteLength);
         if (writeTerminalOutputBatch(session, data, batch.replayOutput, batch.allowGeneratedInput)) {
           wrote = true;
+          if (batch.historyEndCursor !== null) {
+            session.appliedHistoryCursor = batch.historyEndCursor;
+            if (batch.historyCacheable && data instanceof Uint8Array) {
+              queueSessionHistoryCacheWrite(session, data, batch.historyStartCursor, batch.historyEndCursor);
+            }
+          }
         }
         batch = null;
       };
@@ -12302,7 +12928,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
           !batch ||
           batch.kind !== entry.kind ||
           batch.replayOutput !== entry.replayOutput ||
-          batch.allowGeneratedInput !== entry.allowGeneratedInput
+          batch.allowGeneratedInput !== entry.allowGeneratedInput ||
+          batch.historyCacheable !== entry.historyCacheable ||
+          (batch.historyEndCursor !== null && entry.historyStartCursor !== batch.historyEndCursor)
         ) {
           flushBatch();
           batch = {
@@ -12311,16 +12939,23 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
             allowGeneratedInput: entry.allowGeneratedInput,
             chunks: [],
             byteLength: 0,
+            historyCacheable: entry.historyCacheable,
+            historyStartCursor: entry.historyStartCursor,
+            historyEndCursor: entry.historyEndCursor,
           };
         }
         batch.chunks.push(entry.data);
         batch.byteLength += entry.byteLength;
+        if (entry.historyEndCursor !== null) {
+          batch.historyEndCursor = entry.historyEndCursor;
+        }
       }
       flushBatch();
 
       if (wrote) {
         resetTerminalHostViewport(session, { clean: true });
         positionTerminalInput(session);
+        schedulePaneFullRenderValidation(session);
       }
       if (session.outputQueueSize > 0) {
         scheduleSessionOutputFlush(session);
@@ -12339,7 +12974,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.outputFlushTimer = window.setTimeout(flush, terminalOutputFlushFallbackMs);
   };
 
-  const writeSessionOutput = (session, data) => {
+  const writeSessionOutput = (session, data, { historySource = "server", startCursor = null, endCursor = null } = {}) => {
     if (!session?.term || session.closed || session.name !== activeName) {
       return;
     }
@@ -12351,10 +12986,20 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     // Output chunks carry replay state because the replay-complete control frame can arrive before the next paint.
     const replayOutput = !session.replayComplete;
     const allowGeneratedInput = replayOutput && session.allowGeneratedInputDuringReplay === true;
+    const trackHistory = kind === "bytes" && session.historyProtocolActive;
+    let nextHistoryCursor = trackHistory
+      ? (startCursor === null ? session.receivedHistoryCursor : startCursor)
+      : null;
     const enqueueEntry = (entryData) => {
       const byteLength = terminalOutputByteLength(entryData);
       if (byteLength <= 0) {
         return;
+      }
+      const historyStartCursor = nextHistoryCursor;
+      const historyEndCursor = historyStartCursor === null ? null : historyStartCursor + BigInt(byteLength);
+      if (historyEndCursor !== null) {
+        nextHistoryCursor = historyEndCursor;
+        session.receivedHistoryCursor = historyEndCursor;
       }
       session.outputQueue.push({
         data: entryData,
@@ -12362,6 +13007,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         byteLength,
         replayOutput,
         allowGeneratedInput,
+        historyCacheable: historySource === "server" && historyEndCursor !== null,
+        historyStartCursor,
+        historyEndCursor,
       });
       session.outputQueueSize += byteLength;
     };
@@ -12377,6 +13025,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       }
     } else {
       enqueueEntry(outputData);
+    }
+    if (trackHistory && endCursor !== null && nextHistoryCursor !== endCursor) {
+      throw new Error("Terminal history output range does not match payload length.");
     }
     if (session.outputQueueSize >= maxQueuedTerminalOutputBytes) {
       flushSessionOutput(session);
@@ -12397,6 +13048,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     drainGeneratedTerminalResponses(session);
     resetTerminalHostViewport(session, { clean: true });
     positionTerminalInput(session);
+    schedulePaneFullRenderValidation(session);
   };
 
   const readAgentStartupError = async (name) => {
@@ -12470,7 +13122,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const resetTerminalForHistoryReplay = (session) => {
-    if (!session?.term || session.closed || session.name !== activeName) {
+    if (
+      !session?.term
+      || session.closed
+      || session.name !== activeName
+      || Number(session.measuredFitGeneration || 0) <= 0
+    ) {
       return false;
     }
     return measurePerformanceTask("history replay", () => {
@@ -12479,6 +13136,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       session.replayComplete = false;
       session.replayVerified = false;
       session.replayCompletionPending = false;
+      session.historyStateReady = false;
       session.resetOnNextReplay = false;
       session.selectAllBufferActive = false;
       session.term.clearSelection?.();
@@ -12488,11 +13146,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         if (!resetTerminalRuntimeState(session)) {
           return false;
         }
-        session.initialFitResetDone = true;
+        session.initialRuntimeResetDone = true;
+        session.replayFitGeneration = session.measuredFitGeneration;
       } catch (error) {
         return false;
       }
-      resizePane(session);
       resetTerminalHostViewport(session, { clean: true });
       positionTerminalInput(session);
       return true;
@@ -12700,6 +13358,22 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       !session ||
       session.closed ||
       !isCurrentInstanceSession(session) ||
+      Number(session.measuredFitGeneration || 0) <= 0 ||
+      (document.hidden && !allowHidden) ||
+      navigator.onLine === false ||
+      session.socket?.readyState === WebSocket.OPEN ||
+      session.socket?.readyState === WebSocket.CONNECTING
+    ) {
+      return;
+    }
+    await prepareSessionHistoryCache(session);
+    flushSessionOutput(session, { force: true });
+    await flushSessionHistoryCacheWrites(session);
+    if (
+      !session ||
+      session.closed ||
+      !isCurrentInstanceSession(session) ||
+      Number(session.measuredFitGeneration || 0) <= 0 ||
       (document.hidden && !allowHidden) ||
       navigator.onLine === false ||
       session.socket?.readyState === WebSocket.OPEN ||
@@ -12709,6 +13383,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     session.pendingConnect = false;
     clearReconnectTimer(session);
+    session.terminalReplayGeneration = Number(session.terminalReplayGeneration || 0) + 1;
+    session.replayFitGeneration = session.measuredFitGeneration;
     const socketUrl = webSocketURL("./ws");
     socketUrl.searchParams.set("name", String(session.name || "").trim());
     socketUrl.searchParams.set("pane", session.id);
@@ -12719,8 +13395,18 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     socketUrl.searchParams.set("fg", themePayload.foreground);
     socketUrl.searchParams.set("bg", themePayload.background);
     socketUrl.searchParams.set("cursor", themePayload.cursor);
+    const historyConnectRange = sessionHistoryRangeForConnect(session);
+    if (historyConnectRange) {
+      socketUrl.searchParams.set("history_generation", historyConnectRange.generation);
+      socketUrl.searchParams.set("local_base_cursor", historyConnectRange.baseCursor.toString());
+      socketUrl.searchParams.set("local_end_cursor", historyConnectRange.endCursor.toString());
+    }
+    if (session.resetOnNextReplay) {
+      socketUrl.searchParams.set("history_replay_mode", "snapshot");
+    }
     const logSocketUrl = new URL(socketUrl.toString());
     logSocketUrl.searchParams.delete("client_id");
+    logSocketUrl.searchParams.delete("history_generation");
     const socketDebug = {
       textMessages: 0,
       binaryMessages: 0,
@@ -12736,6 +13422,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       allowHidden,
       documentHidden: document.hidden,
       reconnectAttempts: session.reconnectAttempts || 0,
+      historySource: historyConnectRange?.source || "snapshot",
+      localBaseCursor: historyConnectRange?.baseCursor?.toString?.() || "",
+      localEndCursor: historyConnectRange?.endCursor?.toString?.() || "",
     });
     const currentSocket = new WebSocket(socketUrl.toString());
     session.socket = currentSocket;
@@ -12775,6 +13464,26 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       });
       console.warn(`Rejected terminal replay for ${selector}/${paneID}; expected ${session.name}/${session.id}.`);
       currentSocket.close();
+    };
+
+    const rejectHistorySync = (reason) => {
+      session.resetOnNextReplay = true;
+      session.historyStateReady = false;
+      session.historyProtocolActive = false;
+      session.historyCacheSnapshot = null;
+      session.historyGeneration = "";
+      deleteSessionHistoryCache(session.name, session.id);
+      detachSessionSocket(session, currentSocket, { connection: "error" });
+      console.warn("[terminal-history] rejected history sync", {
+        name: session.name,
+        pane: session.id,
+        reason,
+      });
+      try {
+        currentSocket.close();
+      } catch (error) {
+      }
+      scheduleReconnect(session, { immediate: true });
     };
 
     currentSocket.addEventListener("open", () => {
@@ -12835,6 +13544,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                 paneID: message.pane_id || message.paneId || "",
                 replayVerified: session.replayVerified || false,
                 replayComplete: session.replayComplete,
+                syncMode: message.sync_mode || "",
+                serverBaseCursor: message.server_base_cursor || "",
+                serverEndCursor: message.server_end_cursor || "",
                 textMessages: socketDebug.textMessages,
               });
             }
@@ -12845,13 +13557,118 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                   return;
                 }
                 session.agentPreparing = false;
-                if (!resetTerminalForHistoryReplay(session)) {
-                  detachSessionSocket(session, currentSocket, { connection: "error" });
-                  currentSocket.close();
-                  scheduleReconnect(session, { immediate: true });
+                const historyGeneration = String(message.history_generation || "").trim();
+                const syncMode = String(message.sync_mode || "").trim();
+                const serverBaseCursor = parseHistoryCursor(message.server_base_cursor);
+                const serverEndCursor = parseHistoryCursor(message.server_end_cursor);
+                const deltaFromCursor = parseHistoryCursor(message.delta_from_cursor);
+                const deltaToCursor = parseHistoryCursor(message.delta_to_cursor);
+                const modernHistoryProtocol = Boolean(historyGeneration && syncMode);
+                if (!modernHistoryProtocol) {
+                  session.historyProtocolActive = false;
+                  session.historyStateReady = false;
+                  session.historyGeneration = "";
+                  session.historyCacheSnapshot = null;
+                  session.localBaseCursor = 0n;
+                  session.receivedHistoryCursor = 0n;
+                  session.appliedHistoryCursor = 0n;
+                  session.persistedHistoryCursor = 0n;
+                  session.historyReplayTargetCursor = 0n;
+                  session.serverBaseCursor = 0n;
+                  disableSessionHistoryCache(session);
+                  if (!resetTerminalForHistoryReplay(session)) {
+                    detachSessionSocket(session, currentSocket, { connection: "error" });
+                    currentSocket.close();
+                    scheduleReconnect(session, { immediate: true });
+                    return;
+                  }
+                  session.replayVerified = replayMessageHasIdentity(message) ? "identified" : "legacy";
+                  session.allowGeneratedInputDuringReplay = message.allow_generated_input === true || message.allowGeneratedInput === true;
+                  session.suppressGeneratedTerminalInputUntil = 0;
+                  session.shellEl.dataset.connection = "connecting";
                   return;
                 }
-                session.replayVerified = replayMessageHasIdentity(message) ? "identified" : "legacy";
+                if (
+                  !["snapshot", "delta", "current"].includes(syncMode) ||
+                  serverBaseCursor === null ||
+                  serverEndCursor === null ||
+                  deltaFromCursor === null ||
+                  deltaToCursor === null ||
+                  serverBaseCursor > serverEndCursor ||
+                  deltaFromCursor > deltaToCursor ||
+                  deltaToCursor !== serverEndCursor
+                ) {
+                  rejectHistorySync("invalid server history range");
+                  return;
+                }
+                session.historyProtocolActive = true;
+                session.historyGeneration = historyGeneration;
+                session.historySyncMode = syncMode;
+                session.historyReplayTargetCursor = deltaToCursor;
+                session.serverBaseCursor = serverBaseCursor;
+                session.resetOnNextReplay = false;
+                if (syncMode === "snapshot") {
+                  if (!resetTerminalForHistoryReplay(session)) {
+                    rejectHistorySync("terminal reset failed");
+                    return;
+                  }
+                  session.historyGeneration = historyGeneration;
+                  session.historyProtocolActive = true;
+                  session.historySyncMode = syncMode;
+                  session.serverBaseCursor = serverBaseCursor;
+                  session.localBaseCursor = serverBaseCursor;
+                  session.receivedHistoryCursor = deltaFromCursor;
+                  session.appliedHistoryCursor = deltaFromCursor;
+                  session.persistedHistoryCursor = deltaFromCursor;
+                  session.historyStateReady = false;
+                  resetSessionHistoryCache(session, historyGeneration, deltaFromCursor);
+                } else {
+                  if (!historyConnectRange || historyConnectRange.generation !== historyGeneration || historyConnectRange.endCursor !== deltaFromCursor) {
+                    rejectHistorySync("local and server history ranges do not match");
+                    return;
+                  }
+                  if (historyConnectRange.source === "memory") {
+                    if (!session.historyStateReady || session.appliedHistoryCursor !== deltaFromCursor) {
+                      rejectHistorySync("in-memory terminal cursor is not reusable");
+                      return;
+                    }
+                    discardSessionOutputBuffers(session);
+                    session.receivedHistoryCursor = deltaFromCursor;
+                  } else if (historyConnectRange.source === "cache") {
+                    const snapshot = session.historyCacheSnapshot;
+                    if (!snapshot || snapshot.generation !== historyGeneration || snapshot.baseCursor !== historyConnectRange.baseCursor || snapshot.endCursor !== deltaFromCursor) {
+                      rejectHistorySync("cached terminal history is unavailable");
+                      return;
+                    }
+                    if (!resetTerminalForHistoryReplay(session)) {
+                      rejectHistorySync("terminal reset for cached history failed");
+                      return;
+                    }
+                    session.historyGeneration = historyGeneration;
+                    session.historyProtocolActive = true;
+                    session.historySyncMode = syncMode;
+                    session.serverBaseCursor = serverBaseCursor;
+                    session.localBaseCursor = snapshot.baseCursor;
+                    session.receivedHistoryCursor = snapshot.baseCursor;
+                    session.appliedHistoryCursor = snapshot.baseCursor;
+                    session.persistedHistoryCursor = snapshot.endCursor;
+                    for (const chunk of snapshot.chunks) {
+                      writeSessionOutput(session, chunk.data, {
+                        historySource: "cache",
+                        startCursor: chunk.startCursor,
+                        endCursor: chunk.endCursor,
+                      });
+                    }
+                    if (session.receivedHistoryCursor !== deltaFromCursor) {
+                      rejectHistorySync("cached terminal history did not reach requested cursor");
+                      return;
+                    }
+                  } else {
+                    rejectHistorySync("unknown local history source");
+                    return;
+                  }
+                }
+                session.replayVerified = "identified";
                 session.allowGeneratedInputDuringReplay = message.allow_generated_input === true || message.allowGeneratedInput === true;
                 session.suppressGeneratedTerminalInputUntil = 0;
                 session.shellEl.dataset.connection = "connecting";
@@ -12860,6 +13677,14 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                 if (!session.replayVerified || (session.replayVerified === "identified" && !validateReplayMessage(message))) {
                   rejectMismatchedReplay(message);
                   return;
+                }
+                if (session.historyProtocolActive) {
+                  const completeGeneration = String(message.history_generation || "").trim();
+                  const completeCursor = parseHistoryCursor(message.history_cursor);
+                  if (completeGeneration !== session.historyGeneration || completeCursor === null || completeCursor !== session.historyReplayTargetCursor || session.receivedHistoryCursor < completeCursor) {
+                    rejectHistorySync("history replay completion range does not match");
+                    return;
+                  }
                 }
                 session.replayCompletionPending = true;
                 finishSessionHistoryReplayIfReady(session) || flushSessionOutput(session);
@@ -12889,6 +13714,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                 const shouldFocusAfterExit = session.tabId === activeTabId && currentTab()?.activePaneId === session.id;
                 session.exitExpected = true;
                 detachSessionSocket(session, currentSocket);
+                destroySessionHistoryCache(session);
                 disposePane(session);
                 refreshWorkspace({ focus: shouldFocusAfterExit }).catch((error) => showToast(error.message));
                 return;
@@ -12933,7 +13759,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
           }
           return;
         }
-        writeSessionOutput(session, new Uint8Array(event.data));
+        try {
+          writeSessionOutput(session, new Uint8Array(event.data));
+        } catch (error) {
+          rejectHistorySync(error?.message || "terminal history output range failed");
+        }
       }
     });
 
@@ -13137,13 +13967,47 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       replayOutputDepth: 0,
       allowGeneratedInputDuringReplay: false,
       resetOnNextReplay: false,
+      historyGeneration: "",
+      historyProtocolActive: false,
+      historySyncMode: "",
+      historyStateReady: false,
+      historyCacheLoaded: false,
+      historyCacheDisabled: false,
+      historyCacheLoadPromise: null,
+      historyCacheSnapshot: null,
+      historyCacheResetPromise: Promise.resolve(),
+      historyCacheWriteQueue: [],
+      historyCacheWriteBytes: 0,
+      historyCacheWriteFrame: 0,
+      historyCacheWriteTimer: 0,
+      historyCacheWritePromise: Promise.resolve(),
+      historyCacheDestroyPromise: null,
+      localBaseCursor: 0n,
+      receivedHistoryCursor: 0n,
+      appliedHistoryCursor: 0n,
+      persistedHistoryCursor: 0n,
+      historyReplayTargetCursor: 0n,
+      serverBaseCursor: 0n,
       suppressGeneratedTerminalInputUntil: 0,
       inputLocked: false,
       composingIME: false,
       exitExpected: false,
       closed: false,
-      initialFitResetDone: false,
+      initialRuntimeResetDone: false,
+      measuredFitGeneration: 0,
+      terminalReplayGeneration: 0,
+      replayFitGeneration: 0,
+      pendingRenderFitGeneration: 0,
+      pendingRenderReplayGeneration: 0,
+      presentedFitGeneration: 0,
+      presentedReplayGeneration: 0,
       renderReady: false,
+      presentationPending: true,
+      fullRenderPending: false,
+      fullRenderValidationTimer: 0,
+      hasPresentedFrame: false,
+      activationFitPending: false,
+      resizeObserverFrame: 0,
       baseTheme: activeTheme,
       selectAllBufferActive: false,
       title: "",
@@ -13159,6 +14023,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       lastSizeReassertAt: 0,
       cleanupCallbacks: [],
     };
+    installTerminalCanvasRecovery(session);
     clearTerminalRuntimeBuffer(session);
     clearTerminalCanvasPixels(session);
 
@@ -13173,6 +14038,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     installMobileTouchSelection(session);
     installTerminalMouseTracking(session);
     installDesktopMouseClipboard(session);
+    installTerminalResizeObserver(session);
     const renderDisposable = typeof term.onRender === "function" ? term.onRender(() => markPaneRenderedIfMeasurable(session)) : null;
     if (renderDisposable && typeof renderDisposable.dispose === "function") {
       session.cleanupCallbacks.push(() => renderDisposable.dispose());
@@ -13524,6 +14390,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       paneEl: document.createElement("article"),
       layoutHost: document.createElement("div"),
       button: null,
+      resizeFrame: 0,
     };
     tab.paneEl.className = "terminal-pane";
     tab.paneEl.dataset.tabId = tab.id;
@@ -13590,6 +14457,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         item.button?.classList.toggle("active", isActive);
         item.button?.setAttribute("aria-selected", isActive ? "true" : "false");
         item.button?.setAttribute("tabindex", isActive ? "0" : "-1");
+      }
+      for (const pane of tab.panes.values()) {
+        pane.activationFitPending = !wasActive || !panePresentationIsCurrent(pane);
+        if (!panePresentationIsCurrent(pane)) {
+          setPaneRenderReady(pane, false);
+        }
       }
       setActivePane(tab, tab.activePaneId, { focus });
       const activePane = tab.panes.get(tab.activePaneId);
@@ -13745,6 +14618,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       const nextTabIDs = new Set((state?.tabs || []).map((tab) => tab.id));
       for (const tab of [...tabs.values()]) {
         if (!nextTabIDs.has(tab.id)) {
+          for (const pane of tab.panes.values()) {
+            if (pane.name === targetName) {
+              destroySessionHistoryCache(pane);
+            }
+          }
           closeTab(tab.id, { remember: false });
         }
       }
@@ -13773,6 +14651,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         const wantedPaneIDs = new Set((tabState.panes || []).map((pane) => pane.id));
         for (const pane of [...tab.panes.values()]) {
           if (!wantedPaneIDs.has(pane.id)) {
+            if (pane.name === targetName) {
+              destroySessionHistoryCache(pane);
+            }
             disposePane(pane);
             tab.panes.delete(pane.id);
           }
@@ -14038,6 +14919,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (!pane || pane.closed) {
       return;
     }
+    flushSessionHistoryCacheWrites(pane);
     pane.closed = true;
     pane.pendingInput = [];
     pane.pendingInputSize = 0;
@@ -14055,6 +14937,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     clearReconnectTimer(pane);
     clearSessionConnectionTimers(pane);
     discardSessionOutputBuffers(pane);
+    clearPaneFullRenderValidation(pane);
+    clearSessionHistoryCacheWriteSchedule(pane);
     runSessionCleanups(pane);
     if (pane.socket) {
       const socket = pane.socket;
@@ -14078,7 +14962,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (!applyingWorkspaceState) {
       refreshAndConfirmClose([pane], "关闭此窗格并终止正在运行的命令？").then((confirmed) => {
         if (confirmed) {
-          postWorkspaceAction("close_pane", { tab_id: tabId, pane_id: paneId }).catch((error) => showToast(error.message));
+          postWorkspaceAction("close_pane", { tab_id: tabId, pane_id: paneId })
+            .then(() => destroySessionHistoryCache(pane))
+            .catch((error) => showToast(error.message));
         }
       });
       return;
@@ -14109,9 +14995,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       finishInlineTabRename({ commit: false });
     }
     if (!applyingWorkspaceState) {
-      refreshAndConfirmClose(targetPanesFromTab(tab), "关闭此标签并终止正在运行的命令？").then((confirmed) => {
+      const panesToClose = targetPanesFromTab(tab);
+      refreshAndConfirmClose(panesToClose, "关闭此标签并终止正在运行的命令？").then((confirmed) => {
         if (confirmed) {
-          postWorkspaceAction("close_tab", { tab_id: tabId }).catch((error) => showToast(error.message));
+          postWorkspaceAction("close_tab", { tab_id: tabId })
+            .then(() => Promise.allSettled(panesToClose.map((pane) => destroySessionHistoryCache(pane))))
+            .catch((error) => showToast(error.message));
         }
       });
       return;
@@ -14131,6 +15020,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     for (const pane of tab.panes.values()) {
       disposePane(pane);
+    }
+    if (tab.resizeFrame) {
+      window.cancelAnimationFrame(tab.resizeFrame);
+      tab.resizeFrame = 0;
     }
     tab.button?.remove();
     tab.paneEl.remove();
@@ -14152,7 +15045,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         .flatMap((tab) => targetPanesFromTab(tab));
       refreshAndConfirmClose(panes, "关闭其他标签并终止正在运行的命令？").then((confirmed) => {
         if (confirmed) {
-          postWorkspaceAction("close_other_tabs", { tab_id: tabId }).catch((error) => showToast(error.message));
+          postWorkspaceAction("close_other_tabs", { tab_id: tabId })
+            .then(() => Promise.allSettled(panes.map((pane) => destroySessionHistoryCache(pane))))
+            .catch((error) => showToast(error.message));
         }
       });
       return;
@@ -16457,7 +17352,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     measureThemeCardWidth();
     redrawThemePickerOptions();
-    resizeActiveTabForCurrentDevice();
+    scheduleActiveTabWindowResize();
     updateMobileActiveTabTitle();
     updateSelectionSheet();
     if (settingsBackdrop && !settingsBackdrop.hidden) {
@@ -16519,8 +17414,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   });
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
+      rememberWorkspaceRestoreState();
       postDeviceHeartbeat().catch(() => {});
-      resizeActiveTab();
+      resizeActiveTab({ forceFullRender: true, hideUntilRender: true });
       refreshServerRevision().catch(() => {});
       reconnectVisibleSessions({ allowHidden: true, probe: true });
       refreshActivity({ silent: true }).catch(() => {});
@@ -16531,43 +17427,67 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   });
   window.addEventListener("focus", () => {
-    resizeActiveTab();
+    resizeActiveTab({ forceFullRender: true });
     refreshServerRevision().catch(() => {});
     reconnectVisibleSessions({ allowHidden: true, probe: true });
     refreshActivity({ silent: true }).catch(() => {});
   });
   window.addEventListener("pageshow", () => {
+    rememberWorkspaceRestoreState();
     postDeviceHeartbeat().catch(() => {});
-    resizeActiveTab();
+    resizeActiveTab({ forceFullRender: true, hideUntilRender: true });
     refreshServerRevision().catch(() => {});
     reconnectVisibleSessions({ allowHidden: true, probe: true });
     refreshActivity({ silent: true }).catch(() => {});
   });
   window.addEventListener("pagehide", () => {
+    rememberWorkspaceRestoreState();
     flushPendingTerminalScrollbackSave();
+    touchAllSessionHistoryCaches();
+    flushAllSessionHistoryCaches();
     sendDeviceOfflineBeacon();
   });
   window.addEventListener("beforeunload", (event) => {
+    rememberWorkspaceRestoreState();
     flushPendingTerminalScrollbackSave();
+    touchAllSessionHistoryCaches();
+    flushAllSessionHistoryCaches();
     if (!suppressBeforeUnloadOnce && hasCachedBusyPane()) {
       event.preventDefault();
       event.returnValue = "";
       return "";
     }
     disposed = true;
+    stopPerformanceMeter();
     sendDeviceOfflineBeacon();
+    if (activeTabResizeTimer) {
+      window.clearTimeout(activeTabResizeTimer);
+      activeTabResizeTimer = 0;
+    }
+    window.clearInterval(workspaceRestoreHeartbeatTimer);
     window.clearInterval(deviceHeartbeatTimer);
     stopDeviceListRefresh();
     window.clearInterval(serverRevisionRefreshTimer);
     for (const tab of tabs.values()) {
+      if (tab.resizeFrame) {
+        window.cancelAnimationFrame(tab.resizeFrame);
+        tab.resizeFrame = 0;
+      }
       for (const pane of tab.panes.values()) {
         pane.closed = true;
+        clearPaneFullRenderValidation(pane);
         clearReconnectTimer(pane);
         clearSessionConnectionTimers(pane);
         pane.socket?.close();
       }
     }
   });
+  workspaceRestoreHeartbeatTimer = window.setInterval(() => {
+    rememberWorkspaceRestoreState();
+    touchAllSessionHistoryCaches();
+  }, 5 * 1000);
+
+  terminalHistoryCache.cleanupExpired().catch(() => {});
 
   bootstrap().catch((error) => {
     const message = error.message || "WebShell startup failed.";

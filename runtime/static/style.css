@@ -745,7 +745,6 @@ body.split-resize-active * {
   -webkit-touch-callout: none;
   -webkit-user-select: none;
   user-select: none;
-  will-change: transform;
 }
 
 .pane-shell[data-render-ready="false"] .terminal-host canvas {

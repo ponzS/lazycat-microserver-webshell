@@ -414,6 +414,11 @@ func clientTerminalAttachURL(ticket clientTerminalTicket, r *http.Request, paneI
 	for key, value := range clientTerminalSessionQuery(cols, rows, terminalScrollback) {
 		query.Set(key, value)
 	}
+	for _, key := range []string{"history_generation", "local_base_cursor", "local_end_cursor", "history_replay_mode"} {
+		if value := strings.TrimSpace(r.URL.Query().Get(key)); value != "" {
+			query.Set(key, value)
+		}
+	}
 	if foreground, background, cursor := terminalThemeFromRequest(r); foreground != "" || background != "" || cursor != "" {
 		if foreground != "" {
 			query.Set("fg", foreground)
