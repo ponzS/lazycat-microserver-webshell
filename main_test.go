@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -124,5 +126,55 @@ func TestLightOSConfigFileValueSupportsQuotedEnv(t *testing.T) {
 	value, ok := readLightOSConfigFileValue(filename, lightOSRequireCookieAuthEnv)
 	if !ok || value != "false" {
 		t.Fatalf("readLightOSConfigFileValue() = %q, %v; want false, true", value, ok)
+	}
+}
+
+func TestHandleLightOSAdminInfoReturnsStandaloneHomeURL(t *testing.T) {
+	t.Setenv(lazyCatAppIDEnv, "cloud.lazycat.webshell.lcmd")
+	server := &pluginServer{
+		adminInfoResolver: func(context.Context) (adminInfo, error) {
+			return adminInfo{
+				DeployID: "admin-deploy",
+				Domain:   "admin.example",
+				BaseURL:  "https://admin.example/lightos/?source=provider#section",
+			}, nil
+		},
+	}
+	recorder := httptest.NewRecorder()
+
+	server.handleLightOSAdminInfo(recorder, httptest.NewRequest(http.MethodGet, "/api/lightos-admin-info", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var response adminInfo
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response error = %v", err)
+	}
+	if got, want := response.HomeURL, "https://admin.example/lightos/?source=provider&view=home"; got != want {
+		t.Fatalf("home_url = %q, want %q", got, want)
+	}
+}
+
+func TestHandleLightOSAdminInfoReturnsRelativeBuiltinHomeURL(t *testing.T) {
+	t.Setenv(lazyCatAppIDEnv, lightOSAdminAppID)
+	server := &pluginServer{
+		adminInfoResolver: func(context.Context) (adminInfo, error) {
+			return adminInfo{BaseURL: "https://internal-admin.example/lightos/"}, nil
+		},
+	}
+	recorder := httptest.NewRecorder()
+
+	server.handleLightOSAdminInfo(recorder, httptest.NewRequest(http.MethodGet, "/api/lightos-admin-info", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var response adminInfo
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response error = %v", err)
+	}
+	if got, want := response.HomeURL, "/?view=home"; got != want {
+		t.Fatalf("home_url = %q, want %q", got, want)
 	}
 }
