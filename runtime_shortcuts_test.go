@@ -75,6 +75,43 @@ func TestRuntimeHomeNavigationUsesResolvedAdminURL(t *testing.T) {
 	}
 }
 
+func TestRuntimeIOSHostAlwaysHidesCloseButton(t *testing.T) {
+	indexData, err := os.ReadFile("runtime/static/index.html")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
+	}
+	index := string(indexData)
+	hostScript := `<script src="./static/ios_terminal_host.js"></script>`
+	if !strings.Contains(index, hostScript) {
+		t.Fatalf("runtime index missing iOS terminal host script")
+	}
+	if strings.Index(index, hostScript) > strings.Index(index, `<script type="module" src="./static/main.js"></script>`) {
+		t.Fatalf("iOS terminal host script must load before the terminal module")
+	}
+
+	scriptData, err := os.ReadFile("runtime/static/ios_terminal_host.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/ios_terminal_host.js) error = %v", err)
+	}
+	source := string(scriptData)
+	for _, want := range []string{
+		`const lazycatIOSUserAgent = "Lazycat_103";`,
+		`const closeButtonBridgeName = "SetCloseBtnShowStatus";`,
+		`bridge.postMessage({ params: [false] });`,
+		`document.addEventListener("DOMContentLoaded", reinforceHiddenCloseButton, { once: true });`,
+		`window.addEventListener("pageshow", reinforceHiddenCloseButton);`,
+		`window.addEventListener("focus", reinforceHiddenCloseButton);`,
+		`document.addEventListener("visibilitychange", () => {`,
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("iOS terminal host guard missing %q", want)
+		}
+	}
+	if strings.Contains(source, "params: [true]") {
+		t.Fatalf("terminal page must never show the iOS host close button")
+	}
+}
+
 func TestRuntimeDeviceManagementStaticGuards(t *testing.T) {
 	indexData, err := os.ReadFile("runtime/static/index.html")
 	if err != nil {
