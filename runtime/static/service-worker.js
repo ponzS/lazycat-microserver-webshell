@@ -1,0 +1,91 @@
+const appShellCachePrefix = "lcmd-webshell-app-shell-";
+const assetVersion = "__LCMD_ASSET_VERSION__";
+const assetBase = "__LCMD_ASSET_BASE__";
+const appShellCacheName = `${appShellCachePrefix}${assetVersion}`;
+const terminalCacheName = "lcmd-webshell-terminal-v2";
+const appShellAssets = [
+  `${assetBase}style.css`,
+  `${assetBase}main.js`,
+  `${assetBase}ghostty-web.js`,
+  `${assetBase}ghostty-vt.wasm`,
+  `${assetBase}icon-192.png`,
+  `${assetBase}icon-512.png`,
+  `${assetBase}manifest.webmanifest`,
+  `${assetBase}performance_tasks.js`,
+  `${assetBase}terminal_cache_v2.js`,
+  `${assetBase}terminal_history_cache.js`,
+  `${assetBase}terminal_size_sync.js`,
+  `${assetBase}themes.json`,
+  `${assetBase}ios_terminal_host.js`,
+  `${assetBase}claude_fullscreen_context_menu_adapter.js`,
+  `${assetBase}claude_fullscreen_desktop_selection_adapter.js`,
+  `${assetBase}claude_fullscreen_touch.js`,
+  `${assetBase}claude_fullscreen_touch_adapter.js`,
+  `${assetBase}__vite-browser-external-2447137e.js`,
+];
+
+self.addEventListener("install", (event) => {
+  event.waitUntil((async () => {
+    const cache = await caches.open(appShellCacheName);
+    await Promise.all(appShellAssets.map(async (asset) => {
+      try {
+        const response = await fetch(asset, { cache: "no-cache", credentials: "same-origin" });
+        if (response.ok) {
+          await cache.put(asset, response);
+        }
+      } catch (error) {
+      }
+    }));
+    await self.skipWaiting();
+  })());
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil((async () => {
+    const names = await caches.keys();
+    await Promise.all(names.map((name) => {
+      if (name.startsWith(appShellCachePrefix) && name !== appShellCacheName && name !== terminalCacheName) {
+        return caches.delete(name);
+      }
+      return Promise.resolve(false);
+    }));
+    await self.clients.claim();
+  })());
+});
+
+const isNetworkOnly = (url) => (
+  url.pathname.endsWith("/service-worker.js")
+  || url.pathname.includes("/api/")
+  || url.pathname.endsWith("/ws")
+  || url.pathname.includes("/__terminal_cache__/")
+);
+
+self.addEventListener("fetch", (event) => {
+  const request = event.request;
+  if (request.method !== "GET") {
+    return;
+  }
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin || isNetworkOnly(url) || request.mode === "navigate") {
+    return;
+  }
+  if (!url.pathname.includes("/assets/") && !url.pathname.includes("/static/")) {
+    return;
+  }
+  event.respondWith((async () => {
+    try {
+      const response = await fetch(request, { cache: "no-cache" });
+      if (response.ok) {
+        const cache = await caches.open(appShellCacheName);
+        await cache.put(request, response.clone());
+      }
+      return response;
+    } catch (error) {
+      const cached = await caches.match(request, { cacheName: appShellCacheName });
+      if (cached) {
+        return cached;
+      }
+      throw error;
+    }
+  })());
+});

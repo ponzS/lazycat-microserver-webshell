@@ -1784,17 +1784,76 @@ func TestTerminalPaneAttachUsesSnapshotWhenLocalEndWasTrimmed(t *testing.T) {
 }
 
 func TestHistorySyncRequestFromQuery(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "/ws?history_generation=generation-one&local_base_cursor=4&local_end_cursor=9", nil)
+	request := httptest.NewRequest(http.MethodGet, "/ws?cache_protocol_version=2&workspace_generation=workspace-one&history_generation=generation-one&local_base_cursor=4&local_end_cursor=9", nil)
 
 	syncRequest := historySyncRequestFromQuery(request)
 
 	if !syncRequest.hasRange || syncRequest.generation != "generation-one" || syncRequest.localBase != 4 || syncRequest.localEnd != 9 {
 		t.Fatalf("unexpected sync request: %+v", syncRequest)
 	}
+	if syncRequest.cacheProtocolVersion != terminalCacheProtocolVersion || syncRequest.workspaceGeneration != "workspace-one" {
+		t.Fatalf("unexpected cache identity request: %+v", syncRequest)
+	}
 
 	invalid := httptest.NewRequest(http.MethodGet, "/ws?history_generation=generation-one&local_base_cursor=10&local_end_cursor=9", nil)
 	if got := historySyncRequestFromQuery(invalid); got.hasRange {
 		t.Fatalf("invalid range must not be accepted: %+v", got)
+	}
+}
+
+func TestWorkspaceSnapshotAdvertisesCacheV2OnlyWithCompleteServerIdentity(t *testing.T) {
+	workspace := testWorkspaceWithTabs("tab-1")
+	workspace.cacheScopeID = "scope-one"
+	workspace.workspaceGeneration = "workspace-one"
+
+	state := workspace.snapshot()
+	if state.CacheProtocolVersion != terminalCacheProtocolVersion || state.CacheScopeID != "scope-one" || state.WorkspaceGeneration != "workspace-one" {
+		t.Fatalf("unexpected workspace cache identity: %+v", state)
+	}
+
+	workspace.cacheScopeID = ""
+	state = workspace.snapshot()
+	if state.CacheProtocolVersion != 0 || state.CacheScopeID != "" || state.WorkspaceGeneration != "" {
+		t.Fatalf("incomplete cache identity must not be advertised: %+v", state)
+	}
+}
+
+func TestPaneForAttachRejectsStaleWorkspaceGeneration(t *testing.T) {
+	workspace := testWorkspaceWithTabs("tab-1")
+	workspace.cacheScopeID = "scope-one"
+	workspace.workspaceGeneration = "workspace-current"
+
+	_, _, err := workspace.paneForAttach("pane-1", historySyncRequest{
+		cacheProtocolVersion: terminalCacheProtocolVersion,
+		workspaceGeneration:  "workspace-stale",
+	})
+	if err == nil || !strings.Contains(err.Error(), "workspace generation mismatch") {
+		t.Fatalf("paneForAttach() error = %v, want workspace generation mismatch", err)
+	}
+
+	pane, identity, err := workspace.paneForAttach("pane-1", historySyncRequest{
+		cacheProtocolVersion: terminalCacheProtocolVersion,
+		workspaceGeneration:  "workspace-current",
+	})
+	if err != nil {
+		t.Fatalf("paneForAttach() returned error: %v", err)
+	}
+	if pane == nil || identity.tabID != "tab-1" || identity.paneID != "pane-1" || identity.cacheScopeID != "scope-one" {
+		t.Fatalf("unexpected attach identity: pane=%v identity=%+v", pane, identity)
+	}
+}
+
+func TestTerminalCacheScopeIDSeparatesAccounts(t *testing.T) {
+	first := terminalCacheScopeID("account-a")
+	second := terminalCacheScopeID("account-b")
+	if first == "" || second == "" || first == second {
+		t.Fatalf("cache scope ids must be non-empty and isolated: first=%q second=%q", first, second)
+	}
+	if first != terminalCacheScopeID("account-a") {
+		t.Fatal("cache scope id must be stable for the same account")
+	}
+	if strings.Contains(first, "account-a") {
+		t.Fatalf("cache scope id must not expose the raw account: %q", first)
 	}
 }
 
@@ -2481,7 +2540,15 @@ func TestAgentHistoryReplayFramesIncludeSelectorAndPane(t *testing.T) {
 		deltaFrom:  4,
 		deltaTo:    9,
 	}
-	if !writeAgentHistoryReplay(&out, "demo@owner", "pane-1", history, false) {
+	identity := terminalReplayIdentity{
+		cacheProtocolVersion: terminalCacheProtocolVersion,
+		cacheScopeID:         "scope-one",
+		selector:             "demo@owner",
+		workspaceGeneration:  "workspace-one",
+		tabID:                "tab-1",
+		paneID:               "pane-1",
+	}
+	if !writeAgentHistoryReplay(&out, identity, history, false) {
 		t.Fatal("writeAgentHistoryReplay returned false")
 	}
 
@@ -2501,6 +2568,9 @@ func TestAgentHistoryReplayFramesIncludeSelectorAndPane(t *testing.T) {
 	}
 	if start["history_generation"] != "generation-one" || start["sync_mode"] != "delta" || start["server_base_cursor"] != "2" || start["server_end_cursor"] != "9" || start["delta_from_cursor"] != "4" || start["delta_to_cursor"] != "9" {
 		t.Fatalf("unexpected replay range payload: %+v", start)
+	}
+	if start["cache_protocol_version"] != float64(terminalCacheProtocolVersion) || start["cache_scope_id"] != "scope-one" || start["workspace_generation"] != "workspace-one" || start["tab_id"] != "tab-1" {
+		t.Fatalf("unexpected replay cache identity: %+v", start)
 	}
 
 	frameType, payload, err = readAgentFrame(&out)
@@ -2528,12 +2598,15 @@ func TestAgentHistoryReplayFramesIncludeSelectorAndPane(t *testing.T) {
 	if complete["history_generation"] != "generation-one" || complete["history_cursor"] != "9" {
 		t.Fatalf("unexpected replay complete range: %+v", complete)
 	}
+	if complete["cache_protocol_version"] != float64(terminalCacheProtocolVersion) || complete["workspace_generation"] != "workspace-one" || complete["tab_id"] != "tab-1" {
+		t.Fatalf("unexpected replay complete cache identity: %+v", complete)
+	}
 }
 
 func TestAgentHistoryReplayWritesMultipleChunksInOrder(t *testing.T) {
 	var out bytes.Buffer
 	history := paneHistorySnapshot{chunks: [][]byte{[]byte("one"), []byte("two")}}
-	if !writeAgentHistoryReplay(&out, "demo@owner", "pane-1", history, false) {
+	if !writeAgentHistoryReplay(&out, terminalReplayIdentity{selector: "demo@owner", paneID: "pane-1"}, history, false) {
 		t.Fatal("writeAgentHistoryReplay returned false")
 	}
 
@@ -2564,7 +2637,7 @@ func TestAgentHistoryReplayWritesMultipleChunksInOrder(t *testing.T) {
 
 func TestAgentHistoryReplayWritesStartAndCompleteForEmptyHistory(t *testing.T) {
 	var out bytes.Buffer
-	if !writeAgentHistoryReplay(&out, "demo@owner", "pane-1", paneHistorySnapshot{}, true) {
+	if !writeAgentHistoryReplay(&out, terminalReplayIdentity{selector: "demo@owner", paneID: "pane-1"}, paneHistorySnapshot{}, true) {
 		t.Fatal("writeAgentHistoryReplay returned false")
 	}
 

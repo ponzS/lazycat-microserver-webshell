@@ -10,12 +10,14 @@ import {
 import { isClaudeFullscreenTouchCandidate } from "./claude_fullscreen_touch.js";
 import { installClaudeFullscreenTouchAdapter } from "./claude_fullscreen_touch_adapter.js";
 import { createPerformanceTaskMonitor } from "./performance_tasks.js";
+import { createTerminalCacheV2 } from "./terminal_cache_v2.js";
 import { createTerminalHistoryCache } from "./terminal_history_cache.js";
 import {
   shouldSendTerminalSize,
   terminalSizeDiffersFromServer,
 } from "./terminal_size_sync.js";
 
+const runtimeAssetURL = (path) => new URL(path, import.meta.url).toString();
 const params = new URLSearchParams(window.location.search);
 const workspaceRestoreStorageKey = "webshell.workspaceRestore";
 
@@ -97,7 +99,7 @@ const isEmbedMode = params.has("embed");
 document.body?.classList.toggle("is-embed-mode", isEmbedMode);
 
 (async () => {
-  await initGhostty("./static/ghostty-vt.wasm");
+  await initGhostty(runtimeAssetURL("./ghostty-vt.wasm"));
 
   const tabsEl = document.getElementById("tabs");
   const newTabButton = document.getElementById("newTab");
@@ -354,7 +356,13 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const terminalFullRenderValidationMs = 80;
   const terminalHistoryCacheFlushBytes = 256 * 1024;
   const terminalHistoryCacheFlushDelayMs = 50;
+  const terminalCacheV2FlushDelayMs = 1000;
   const terminalHistoryCacheOrphanTTL = 30 * 1000;
+  const terminalCacheV2TouchIntervalMs = 5 * 60 * 1000;
+  const terminalCacheV2ManifestTimeoutMs = 1500;
+  const terminalCacheV2PreviewTimeoutMs = 3000;
+  const terminalCacheV2ReplayTimeoutMs = 15 * 1000;
+  const terminalCacheV2CommitTimeoutMs = 3000;
   const averageTerminalHistoryBytesPerLine = 350;
   const performanceMeterSampleMs = 500;
   const performanceMeterWarmupFrames = 12;
@@ -593,8 +601,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   let activityRefreshDelayTimer = 0;
   let deployRestartDialogOpen = false;
   let currentServerRevision = "";
+  let activeWorkspaceCacheV2Identity = null;
+  let activeWorkspaceCacheV2Epoch = 0;
+  let latestWorkspaceRecoveryMetrics = null;
   let serverRevisionReloadPrompted = false;
   let serverRevisionRefreshTimer = 0;
+  let terminalStoragePersistenceRequested = false;
   let deviceHeartbeatTimer = 0;
   let deviceHeartbeatInFlight = null;
   let deviceListRefreshTimer = 0;
@@ -679,6 +691,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const mobileSticky = { ctrl: false, alt: false, shift: false };
   let touchShortcutFeedbackEnabled = loadTouchShortcutFeedbackEnabled();
   const textEncoder = new TextEncoder();
+  const terminalCacheV2 = createTerminalCacheV2();
   const serverRevisionClientID = loadStableClientID();
   let terminalUserRecoveryLastAt = 0;
   const themePickerSwipeEdgeWidth = 24;
@@ -1011,7 +1024,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
 
   const loadThemeCatalog = async () => {
     try {
-      const response = await fetch("./static/themes.json", { cache: "no-cache" });
+      const response = await fetch(runtimeAssetURL("./themes.json"), { cache: "no-cache" });
       if (!response.ok) {
         return;
       }
@@ -3452,11 +3465,45 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const getActiveInstance = () => currentInstances.find((item) => instanceSelector(item) === activeName) || null;
   const isClientInstanceName = (name = activeName) => String(name || "").trim().startsWith("client:");
   const isRunningInstance = (item) => item?.status === "running";
+  const workspaceCacheV2IdentityFromState = (state, expectedSelector = activeName) => {
+    const selector = String(state?.selector || expectedSelector || "").trim();
+    const cacheProtocolVersion = Number(state?.cache_protocol_version || 0);
+    const cacheScopeID = String(state?.cache_scope_id || "").trim();
+    const workspaceGeneration = String(state?.workspace_generation || "").trim();
+    if (
+      isClientInstanceName(selector)
+      || cacheProtocolVersion !== 2
+      || !cacheScopeID
+      || !workspaceGeneration
+      || !selector
+    ) {
+      return null;
+    }
+    return { cacheProtocolVersion, cacheScopeID, selector, workspaceGeneration };
+  };
+  const workspaceCacheV2IdentityKey = (identity) => identity
+    ? JSON.stringify([
+      identity.cacheProtocolVersion,
+      identity.cacheScopeID,
+      identity.selector,
+      identity.workspaceGeneration,
+    ])
+    : "";
+  const setActiveWorkspaceCacheV2Identity = (identity) => {
+    const next = identity ? { ...identity } : null;
+    if (workspaceCacheV2IdentityKey(next) === workspaceCacheV2IdentityKey(activeWorkspaceCacheV2Identity)) {
+      return false;
+    }
+    activeWorkspaceCacheV2Identity = next;
+    activeWorkspaceCacheV2Epoch += 1;
+    return true;
+  };
   const setActiveInstanceName = (name) => {
     const normalized = String(name || "").trim();
     if (normalized !== activeName) {
       activeName = normalized;
       activeInstanceGeneration += 1;
+      setActiveWorkspaceCacheV2Identity(null);
     }
     return activeInstanceGeneration;
   };
@@ -3465,6 +3512,122 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const isCurrentInstanceSession = (session) => {
     const name = String(session?.name || "").trim();
     return Boolean(name) && name === activeName;
+  };
+  const storedSessionTerminalCacheV2Identity = (session, historyGeneration = session?.historyGeneration || "") => {
+    if (
+      !session?.cacheV2WorkspaceIdentity
+      || isClientInstanceName(session.name)
+    ) {
+      return null;
+    }
+    return {
+      ...session.cacheV2WorkspaceIdentity,
+      tabID: String(session.tabId || "").trim(),
+      paneID: String(session.id || "").trim(),
+      historyGeneration: String(historyGeneration || "").trim(),
+    };
+  };
+  const sessionHasTerminalCacheV2Protocol = (session) => Boolean(
+    session
+    && !session.closed
+    && !isClientInstanceName(session.name)
+    && session.cacheV2WorkspaceIdentity
+    && session.cacheV2Epoch === activeWorkspaceCacheV2Epoch
+    && workspaceCacheV2IdentityKey(session.cacheV2WorkspaceIdentity) === workspaceCacheV2IdentityKey(activeWorkspaceCacheV2Identity)
+  );
+  const sessionUsesTerminalCacheV2 = (session) => Boolean(
+    terminalCacheV2.available && sessionHasTerminalCacheV2Protocol(session)
+  );
+  const sessionUsesLegacyHistoryCache = (session) => Boolean(session && isClientInstanceName(session.name));
+  const sessionTerminalCacheV2ProtocolIdentity = (session, historyGeneration = session?.historyGeneration || "") => {
+    if (!sessionHasTerminalCacheV2Protocol(session)) {
+      return null;
+    }
+    return storedSessionTerminalCacheV2Identity(session, historyGeneration);
+  };
+  const sessionTerminalCacheV2Identity = (session, historyGeneration = session?.historyGeneration || "") => {
+    if (!sessionUsesTerminalCacheV2(session)) {
+      return null;
+    }
+    return storedSessionTerminalCacheV2Identity(session, historyGeneration);
+  };
+  const terminalCacheV2MetricNow = () => (
+    typeof globalThis.performance?.now === "function" ? globalThis.performance.now() : Date.now()
+  );
+  const startSessionCacheV2RecoveryMetrics = (session) => {
+    if (!sessionHasTerminalCacheV2Protocol(session)) {
+      session.cacheV2RecoveryMetrics = null;
+      return null;
+    }
+    const now = terminalCacheV2MetricNow();
+    const workspaceMetrics = latestWorkspaceRecoveryMetrics;
+    const hasRecentWorkspaceMetrics = Boolean(
+      workspaceMetrics
+      && workspaceMetrics.selector === session.name
+      && workspaceMetrics.readyAt > 0
+      && now - workspaceMetrics.readyAt <= 5000
+    );
+    session.cacheV2RecoveryMetrics = {
+      startedAt: hasRecentWorkspaceMetrics ? workspaceMetrics.startedAt : now,
+      workspaceRequestStartedAt: hasRecentWorkspaceMetrics ? workspaceMetrics.startedAt : 0,
+      workspaceReadyAt: hasRecentWorkspaceMetrics ? workspaceMetrics.readyAt : 0,
+      cacheManifestReadyAt: 0,
+      websocketOpenAt: 0,
+      replayStartAt: 0,
+      previewVisibleAt: 0,
+      previewPreparedAt: 0,
+      localFirstFrameAt: 0,
+      localReplayCompleteAt: 0,
+      historyReplayCompleteAt: 0,
+      cacheCommitCompleteAt: 0,
+      realCanvasVisibleAt: 0,
+      inputReadyAt: 0,
+      historySource: "snapshot",
+      syncMode: "",
+      previewHit: false,
+      previewLayoutMatch: null,
+      previewMissReason: "",
+      localReplayBytes: 0,
+      serverReplayBytes: 0,
+      reported: false,
+    };
+    return session.cacheV2RecoveryMetrics;
+  };
+  const markSessionCacheV2RecoveryMetric = (session, key) => {
+    const metrics = session?.cacheV2RecoveryMetrics;
+    if (metrics && Object.prototype.hasOwnProperty.call(metrics, key) && !metrics[key]) {
+      metrics[key] = terminalCacheV2MetricNow();
+    }
+  };
+  const reportSessionCacheV2RecoveryMetrics = (session) => {
+    const metrics = session?.cacheV2RecoveryMetrics;
+    if (!metrics || metrics.reported || !metrics.realCanvasVisibleAt || !session?.replayComplete) {
+      return;
+    }
+    metrics.reported = true;
+    const elapsed = (timestamp) => timestamp > 0 ? Math.round(timestamp - metrics.startedAt) : null;
+    console.info("[terminal-cache-v2] recovery metrics", {
+      historySource: metrics.historySource,
+      syncMode: metrics.syncMode,
+      previewHit: metrics.previewHit,
+      previewLayoutMatch: metrics.previewLayoutMatch,
+      previewMissReason: metrics.previewMissReason || "",
+      workspaceRequestStartMs: elapsed(metrics.workspaceRequestStartedAt),
+      workspaceReadyMs: elapsed(metrics.workspaceReadyAt),
+      cacheManifestReadyMs: elapsed(metrics.cacheManifestReadyAt),
+      websocketOpenMs: elapsed(metrics.websocketOpenAt),
+      replayStartMs: elapsed(metrics.replayStartAt),
+      previewPreparedMs: elapsed(metrics.previewPreparedAt),
+      previewVisibleMs: elapsed(metrics.previewVisibleAt),
+      localFirstFrameMs: elapsed(metrics.localFirstFrameAt),
+      localReplayCompleteMs: elapsed(metrics.localReplayCompleteAt),
+      historyReplayCompleteMs: elapsed(metrics.historyReplayCompleteAt),
+      cacheCommitCompleteMs: elapsed(metrics.cacheCommitCompleteAt),
+      realCanvasVisibleMs: elapsed(metrics.realCanvasVisibleAt),
+      inputReadyMs: elapsed(metrics.inputReadyAt),
+      localReplayBytes: metrics.localReplayBytes,
+      serverReplayBytes: metrics.serverReplayBytes,
+    });
   };
   const responseSelector = (state) => String(state?.selector || "").trim();
   const ensureResponseSelector = (state, expectedName, label = "Workspace") => {
@@ -5875,6 +6038,54 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     return true;
   };
 
+  const terminalCacheV2ThemeFingerprint = () => JSON.stringify({
+    theme: activeTheme?.id || "",
+    foreground: terminalThemePayload().foreground,
+    background: terminalThemePayload().background,
+    fontSize: terminalFontSize,
+    fontFamily: terminalOptionsBase.fontFamily || "",
+    lineHeight: terminalOptionsBase.lineHeight || 1,
+  });
+
+  const clearSessionCacheV2PreparedPreview = (session) => {
+    if (!session) {
+      return;
+    }
+    session.cacheV2PreviewPrepareSeq = Number(session.cacheV2PreviewPrepareSeq || 0) + 1;
+    session.cacheV2PreviewAuthorizedSnapshot = null;
+    const prepared = session.cacheV2PreparedPreview;
+    session.cacheV2PreparedPreview = null;
+    session.cacheV2PreviewPreparePromise = null;
+    if (prepared?.objectURL) {
+      URL.revokeObjectURL(prepared.objectURL);
+    }
+  };
+
+  const clearSessionCacheV2OverviewPreview = (session) => {
+    if (!session) {
+      return;
+    }
+    session.cacheV2OverviewPreviewSeq = Number(session.cacheV2OverviewPreviewSeq || 0) + 1;
+    const prepared = session.cacheV2OverviewPreview;
+    session.cacheV2OverviewPreview = null;
+    session.cacheV2OverviewPreviewPromise = null;
+    prepared?.image?.close?.();
+  };
+
+  const hideSessionTerminalPreview = (session) => {
+    if (!session?.terminalPreview) {
+      return;
+    }
+    session.cacheV2PreviewAuthorizedSnapshot = null;
+    session.terminalPreview.hidden = true;
+    session.terminalPreview.removeAttribute("src");
+    session.shellEl.dataset.previewReady = "false";
+    if (session.cacheV2PreviewURL) {
+      URL.revokeObjectURL(session.cacheV2PreviewURL);
+      session.cacheV2PreviewURL = "";
+    }
+  };
+
   const setPaneRenderReady = (session, ready) => {
     if (!session?.shellEl) {
       return;
@@ -5882,6 +6093,43 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.renderReady = ready === true;
     session.presentationPending = !session.renderReady;
     session.shellEl.dataset.renderReady = session.renderReady ? "true" : "false";
+    if (session.renderReady) {
+      hideSessionTerminalPreview(session);
+      clearSessionCacheV2PreparedPreview(session);
+      flushPendingInput(session);
+      scheduleSessionCacheV2PreviewCapture(session);
+      markSessionCacheV2RecoveryMetric(session, "realCanvasVisibleAt");
+      if (session.replayComplete) {
+        markSessionCacheV2RecoveryMetric(session, "inputReadyAt");
+      } else if (
+        sessionHasCacheV2WarmFrame(session)
+        && session.cacheV2WarmCanvasVisibleGeneration !== session.terminalReplayGeneration
+      ) {
+        session.cacheV2WarmCanvasVisibleGeneration = session.terminalReplayGeneration;
+        console.info("[terminal-cache-v2] warm canvas visible", JSON.stringify({
+          replayGeneration: session.terminalReplayGeneration,
+        }));
+      }
+      reportSessionCacheV2RecoveryMetrics(session);
+    }
+  };
+
+  const sessionHasCacheV2WarmFrame = (session) => Boolean(
+    session?.cacheV2WarmFrameReady || session?.cacheV2WarmReplayReady
+  );
+
+  const terminalHasVisibleContent = (session) => {
+    const term = session?.term;
+    const buffer = term?.buffer?.active;
+    const length = Math.max(0, Number(buffer?.length || 0));
+    const rows = Math.max(1, Number(term?.rows || 1));
+    for (let row = Math.max(0, length - rows); row < length; row += 1) {
+      const line = buffer?.getLine?.(row);
+      if (String(line?.translateToString?.(true) || "").trim()) {
+        return true;
+      }
+    }
+    return false;
   };
 
   const panePresentationIsCurrent = (session) => Boolean(
@@ -5910,8 +6158,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       || session.closed
       || !session.fullRenderPending
       || session.activationFitPending
-      || session.replayCompletionPending
-      || !session.replayComplete
+      || (session.replayCompletionPending && !sessionHasCacheV2WarmFrame(session))
+      || (!session.replayComplete && !sessionHasCacheV2WarmFrame(session))
       || Number(session.measuredFitGeneration || 0) <= 0
       || session.pendingRenderFitGeneration !== session.measuredFitGeneration
       || session.pendingRenderReplayGeneration !== session.terminalReplayGeneration
@@ -5971,13 +6219,23 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const schedulePaneFullRenderValidation = (session) => {
-    if (!session || session.closed || !session.replayComplete || panePresentationIsCurrent(session)) {
+    if (
+      !session
+      || session.closed
+      || (!session.replayComplete && !sessionHasCacheV2WarmFrame(session))
+      || panePresentationIsCurrent(session)
+    ) {
       return;
     }
     clearPaneFullRenderValidation(session);
     session.fullRenderValidationTimer = window.setTimeout(() => {
       session.fullRenderValidationTimer = 0;
-      if (!session.closed && session.replayComplete && !panePresentationIsCurrent(session) && isPaneVisibleForSizing(session)) {
+      if (
+        !session.closed
+        && (session.replayComplete || sessionHasCacheV2WarmFrame(session))
+        && !panePresentationIsCurrent(session)
+        && isPaneVisibleForSizing(session)
+      ) {
         resizePane(session, { forceFullRender: true, hideUntilRender: true });
       }
     }, terminalFullRenderValidationMs);
@@ -6295,6 +6553,121 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     return { width, height };
   };
 
+  const sessionCacheV2OverviewPreviewMatches = (pane, prepared) => {
+    if (!pane || !prepared?.identity || !prepared.image || !prepared.historyGeneration) {
+      return false;
+    }
+    const expected = sessionTerminalCacheV2Identity(pane, prepared.historyGeneration);
+    try {
+      return Boolean(
+        expected
+        && terminalCacheV2.identityMatches(expected, prepared.identity, { requireHistory: true })
+        && prepared.endCursor === prepared.identity.endCursor
+      );
+    } catch (error) {
+      return false;
+    }
+  };
+
+  const decodeTabOverviewPreviewBlob = async (blob) => {
+    if (typeof globalThis.createImageBitmap === "function") {
+      try {
+        return await globalThis.createImageBitmap(blob);
+      } catch (error) {
+      }
+    }
+    const objectURL = URL.createObjectURL(blob);
+    try {
+      return await new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error("Terminal overview preview image decode failed."));
+        image.src = objectURL;
+        if (typeof image.decode === "function") {
+          image.decode().then(() => resolve(image)).catch(() => {});
+        }
+      });
+    } finally {
+      URL.revokeObjectURL(objectURL);
+    }
+  };
+
+  const preparePaneTabOverviewPreview = (pane) => {
+    if (!sessionUsesTerminalCacheV2(pane) || pane.closed) {
+      return Promise.resolve(null);
+    }
+    if (sessionCacheV2OverviewPreviewMatches(pane, pane.cacheV2OverviewPreview)) {
+      return Promise.resolve(pane.cacheV2OverviewPreview);
+    }
+    if (pane.cacheV2OverviewPreviewPromise) {
+      return pane.cacheV2OverviewPreviewPromise;
+    }
+    clearSessionCacheV2OverviewPreview(pane);
+    const previewSeq = pane.cacheV2OverviewPreviewSeq;
+    let previewPromise = null;
+    previewPromise = (async () => {
+      const snapshot = await prepareSessionHistoryCache(pane);
+      const expected = snapshot
+        ? sessionTerminalCacheV2Identity(pane, snapshot.historyGeneration)
+        : null;
+      if (
+        !snapshot?.preview
+        || !expected
+        || !terminalCacheV2.identityMatches(expected, snapshot, { requireHistory: true })
+      ) {
+        return null;
+      }
+      const preview = await terminalCacheV2.loadPreview(snapshot);
+      if (!preview) {
+        return null;
+      }
+      const image = await decodeTabOverviewPreviewBlob(preview.blob);
+      if (
+        pane.closed
+        || pane.cacheV2OverviewPreviewSeq !== previewSeq
+        || pane.historyCacheSnapshot !== snapshot
+        || !sessionUsesTerminalCacheV2(pane)
+      ) {
+        image?.close?.();
+        return null;
+      }
+      const prepared = {
+        image,
+        identity: snapshot,
+        historyGeneration: snapshot.historyGeneration,
+        endCursor: snapshot.endCursor,
+      };
+      if (!sessionCacheV2OverviewPreviewMatches(pane, prepared)) {
+        image?.close?.();
+        return null;
+      }
+      pane.cacheV2OverviewPreview = prepared;
+      scheduleTabOverviewRender();
+      return prepared;
+    })().catch((error) => {
+      console.warn("[terminal-cache-v2] overview preview load failed", {
+        name: pane.name,
+        pane: pane.id,
+        error: error?.message || String(error),
+      });
+      return null;
+    }).finally(() => {
+      if (pane.cacheV2OverviewPreviewPromise === previewPromise) {
+        pane.cacheV2OverviewPreviewPromise = null;
+      }
+    });
+    pane.cacheV2OverviewPreviewPromise = previewPromise;
+    return previewPromise;
+  };
+
+  const prepareTabOverviewCachePreviews = (tab) => {
+    for (const pane of tab?.panes?.values?.() || []) {
+      if (!pane.renderReady || !pane.hasPresentedFrame) {
+        preparePaneTabOverviewPreview(pane);
+      }
+    }
+  };
+
   const drawTabOverviewFallback = (ctx, x, y, width, height, colors) => {
     ctx.fillStyle = colors.muted;
     ctx.font = "13px sans-serif";
@@ -6314,7 +6687,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     ctx.fillStyle = colors.bg;
     ctx.fillRect(x, y, width, height);
 
-    const source = pane?.term?.canvas || pane?.term?.element?.querySelector?.("canvas");
+    const liveCanvas = pane?.term?.canvas || pane?.term?.element?.querySelector?.("canvas");
+    const cachedPreview = sessionCacheV2OverviewPreviewMatches(pane, pane?.cacheV2OverviewPreview)
+      ? pane.cacheV2OverviewPreview.image
+      : null;
+    const source = pane?.renderReady && pane?.hasPresentedFrame ? liveCanvas : cachedPreview;
     if (source?.width > 0 && source?.height > 0) {
       try {
         const scale = Math.min(width / source.width, height / source.height);
@@ -6871,6 +7248,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     for (const item of previewItems) {
       drawTabOverviewPreview(item.canvas, item.tab, colors);
+      prepareTabOverviewCachePreviews(item.tab);
     }
   });
 
@@ -8334,7 +8712,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       if (!pane.initialRuntimeResetDone && !pane.replayComplete) {
         resetTerminalAfterInitialFit(pane);
       }
-      if (fitGenerationChanged && pane.replayComplete) {
+      if (fitGenerationChanged && (pane.replayComplete || sessionHasCacheV2WarmFrame(pane))) {
         setPaneRenderReady(pane, false);
       }
       if (forceFullRender || fitGenerationChanged || hideUntilRender || !pane.hasPresentedFrame) {
@@ -12547,7 +12925,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
 
   const isSessionInputReady = (session) => (
-    Boolean(session?.replayComplete && session.socket?.readyState === WebSocket.OPEN)
+    Boolean(
+      session?.replayComplete
+      && session.renderReady
+      && session.shellEl?.dataset.previewReady !== "true"
+      && session.socket?.readyState === WebSocket.OPEN
+    )
   );
 
   const sendSessionInputChunk = (session, data, { generated = false } = {}) => {
@@ -12813,6 +13196,29 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   };
 
+  const withTerminalCacheTimeout = (promise, timeoutMs, message) => new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error(message));
+      }
+    }, timeoutMs);
+    Promise.resolve(promise).then((value) => {
+      if (!settled) {
+        settled = true;
+        window.clearTimeout(timer);
+        resolve(value);
+      }
+    }, (error) => {
+      if (!settled) {
+        settled = true;
+        window.clearTimeout(timer);
+        reject(error);
+      }
+    });
+  });
+
   const disableSessionHistoryCache = (session, error = null) => {
     if (!session) {
       return;
@@ -12822,6 +13228,21 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.historyCacheWriteQueue = [];
     session.historyCacheWriteBytes = 0;
     session.historyCacheSnapshot = null;
+    session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
+    session.cacheV2WarmReplayActive = false;
+    session.cacheV2WarmFrameReady = false;
+    session.cacheV2WarmReplayReady = false;
+    session.cacheV2WarmReplayPromise = null;
+    session.cacheV2WarmReplaySnapshot = null;
+    session.cacheV2ServerSnapshotPending = false;
+    session.cacheV2ServerSnapshotStartCursor = 0n;
+    session.cacheV2ReplayActive = false;
+    session.cacheV2NetworkQueue = [];
+    session.cacheV2NetworkQueueBytes = 0;
+    session.cacheV2PreviewCaptureSeq = Number(session.cacheV2PreviewCaptureSeq || 0) + 1;
+    hideSessionTerminalPreview(session);
+    clearSessionCacheV2PreparedPreview(session);
+    clearSessionCacheV2OverviewPreview(session);
     if (error) {
       console.warn("[terminal-history] local cache disabled", {
         name: session.name,
@@ -12829,7 +13250,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         error: error?.message || String(error),
       });
     }
-    terminalHistoryCache.deletePane(session.name, session.id).catch(() => {});
+    const cacheV2Identity = terminalCacheV2.available ? storedSessionTerminalCacheV2Identity(session) : null;
+    if (cacheV2Identity) {
+      terminalCacheV2.deletePane(cacheV2Identity).catch(() => {});
+    } else if (sessionUsesLegacyHistoryCache(session)) {
+      terminalHistoryCache.deletePane(session.name, session.id).catch(() => {});
+    }
   };
 
   const prepareSessionHistoryCache = async (session) => {
@@ -12842,14 +13268,33 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (session.historyCacheLoadPromise) {
       return session.historyCacheLoadPromise;
     }
-    session.historyCacheLoadPromise = terminalHistoryCache.load(session.name, session.id)
+    const cacheV2Identity = sessionTerminalCacheV2Identity(session);
+    const legacyCache = sessionUsesLegacyHistoryCache(session);
+    if (!cacheV2Identity && !legacyCache) {
+      session.historyCacheDisabled = true;
+      session.historyCacheLoaded = true;
+      session.historyCacheSnapshot = null;
+      return null;
+    }
+    const load = cacheV2Identity
+      ? withTerminalCacheTimeout(
+        terminalCacheV2.loadManifest(cacheV2Identity),
+        terminalCacheV2ManifestTimeoutMs,
+        "Terminal cache manifest read timed out.",
+      )
+      : terminalHistoryCache.load(session.name, session.id);
+    session.historyCacheLoadPromise = load
       .then((snapshot) => {
-        if (session.closed) {
+        if (
+          session.closed
+          || (cacheV2Identity && !sessionUsesTerminalCacheV2(session))
+          || (!cacheV2Identity && !sessionUsesLegacyHistoryCache(session))
+        ) {
           return null;
         }
         session.historyCacheSnapshot = snapshot;
         if (snapshot) {
-          session.historyGeneration = snapshot.generation;
+          session.historyGeneration = snapshot.historyGeneration || snapshot.generation;
           session.localBaseCursor = snapshot.baseCursor;
           session.persistedHistoryCursor = snapshot.endCursor;
         }
@@ -12875,9 +13320,18 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.historyCacheWriteQueue = [];
     session.historyCacheWriteBytes = 0;
     const generation = session.historyGeneration;
+    const cacheV2Identity = sessionTerminalCacheV2Identity(session, generation);
+    const legacyCache = sessionUsesLegacyHistoryCache(session);
+    if (!cacheV2Identity && !legacyCache) {
+      disableSessionHistoryCache(session);
+      return session.historyCacheWritePromise;
+    }
     session.historyCacheWritePromise = session.historyCacheWritePromise
       .then(() => session.historyCacheResetPromise)
-      .then(() => terminalHistoryCache.append(session.name, session.id, generation, chunks, {
+      .then(() => (cacheV2Identity ? terminalCacheV2 : terminalHistoryCache).append(
+        ...(cacheV2Identity
+          ? [cacheV2Identity, generation, chunks]
+          : [session.name, session.id, generation, chunks]), {
         limitBytes: Math.max(1, Number(terminalOptionsBase.scrollback || 0) * averageTerminalHistoryBytesPerLine),
       }))
       .then((result) => {
@@ -12886,6 +13340,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         }
         session.localBaseCursor = result.baseCursor;
         session.persistedHistoryCursor = result.endCursor;
+        scheduleSessionCacheV2PreviewCapture(session);
       })
       .catch((error) => disableSessionHistoryCache(session, error));
     return session.historyCacheWritePromise;
@@ -12896,8 +13351,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return;
     }
     const flush = () => flushSessionHistoryCacheWrites(session);
-    session.historyCacheWriteFrame = window.requestAnimationFrame(flush);
-    session.historyCacheWriteTimer = window.setTimeout(flush, terminalHistoryCacheFlushDelayMs);
+    if (sessionUsesTerminalCacheV2(session)) {
+      session.historyCacheWriteTimer = window.setTimeout(flush, terminalCacheV2FlushDelayMs);
+    } else {
+      session.historyCacheWriteFrame = window.requestAnimationFrame(flush);
+      session.historyCacheWriteTimer = window.setTimeout(flush, terminalHistoryCacheFlushDelayMs);
+    }
   };
 
   const queueSessionHistoryCacheWrite = (session, data, startCursor, endCursor) => {
@@ -12920,19 +13379,34 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   };
 
-  const resetSessionHistoryCache = (session, generation, cursor) => {
+  const resetSessionHistoryCache = (session, generation, cursor, { preservePreview = false } = {}) => {
     if (!session) {
       return;
     }
+    const previewPreparation = preservePreview ? session.cacheV2PreviewPreparePromise : null;
     clearSessionHistoryCacheWriteSchedule(session);
-    session.historyCacheDisabled = false;
     session.historyCacheWriteQueue = [];
     session.historyCacheWriteBytes = 0;
     session.historyCacheSnapshot = null;
+    clearSessionCacheV2OverviewPreview(session);
+    if (!preservePreview) {
+      clearSessionCacheV2PreparedPreview(session);
+    }
     const previousWrites = session.historyCacheWritePromise;
+    const cacheV2Identity = sessionTerminalCacheV2Identity(session, generation);
+    const legacyCache = sessionUsesLegacyHistoryCache(session);
+    if (!cacheV2Identity && !legacyCache) {
+      session.historyCacheDisabled = true;
+      session.historyCacheResetPromise = Promise.resolve();
+      return;
+    }
+    session.historyCacheDisabled = false;
     session.historyCacheResetPromise = Promise.resolve(previousWrites)
       .catch(() => {})
-      .then(() => terminalHistoryCache.reset(session.name, session.id, generation, cursor))
+      .then(() => previewPreparation ? Promise.resolve(previewPreparation).catch(() => null) : null)
+      .then(() => cacheV2Identity
+        ? terminalCacheV2.reset(cacheV2Identity, generation, cursor)
+        : terminalHistoryCache.reset(session.name, session.id, generation, cursor))
       .then((result) => {
         if (session.closed || session.historyGeneration !== generation) {
           return;
@@ -12943,13 +13417,21 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       .catch((error) => disableSessionHistoryCache(session, error));
   };
 
-  const deleteSessionHistoryCache = (name, paneId) => terminalHistoryCache.deletePane(name, paneId).catch((error) => {
-    console.warn("[terminal-history] cache delete failed", {
-      name,
-      pane: paneId,
-      error: error?.message || String(error),
+  const deleteSessionHistoryCache = (session) => {
+    const cacheV2Identity = terminalCacheV2.available ? storedSessionTerminalCacheV2Identity(session) : null;
+    const deletion = cacheV2Identity
+      ? terminalCacheV2.deletePane(cacheV2Identity)
+      : sessionUsesLegacyHistoryCache(session)
+        ? terminalHistoryCache.deletePane(session?.name, session?.id)
+        : Promise.resolve(false);
+    return deletion.catch((error) => {
+      console.warn("[terminal-history] cache delete failed", {
+        name: session?.name,
+        pane: session?.id,
+        error: error?.message || String(error),
+      });
     });
-  });
+  };
 
   const destroySessionHistoryCache = async (session) => {
     if (!session) {
@@ -12963,11 +13445,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       session.historyCacheDisabled = true;
       session.historyCacheWriteQueue = [];
       session.historyCacheWriteBytes = 0;
+      clearSessionCacheV2PreparedPreview(session);
       await Promise.allSettled([
         session.historyCacheResetPromise,
         session.historyCacheWritePromise,
       ]);
-      await deleteSessionHistoryCache(session.name, session.id);
+      await deleteSessionHistoryCache(session);
     })();
     return session.historyCacheDestroyPromise;
   };
@@ -12986,7 +13469,16 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     for (const tab of tabs.values()) {
       for (const pane of tab.panes.values()) {
         if (!pane.historyCacheDisabled && pane.historyGeneration) {
-          terminalHistoryCache.touch(pane.name, pane.id).catch(() => {});
+          const cacheV2Identity = sessionTerminalCacheV2Identity(pane, pane.historyGeneration);
+          if (cacheV2Identity) {
+            const now = Date.now();
+            if (now - Number(pane.cacheV2LastTouchAt || 0) >= terminalCacheV2TouchIntervalMs) {
+              pane.cacheV2LastTouchAt = now;
+              terminalCacheV2.touch(cacheV2Identity).catch(() => {});
+            }
+          } else if (sessionUsesLegacyHistoryCache(pane)) {
+            terminalHistoryCache.touch(pane.name, pane.id).catch(() => {});
+          }
         }
       }
     }
@@ -13008,15 +13500,637 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return null;
     }
     const snapshot = session.historyCacheSnapshot;
-    if (snapshot && snapshot.generation === session.historyGeneration) {
+    const snapshotGeneration = snapshot?.historyGeneration || snapshot?.generation || "";
+    if (snapshot && snapshotGeneration === session.historyGeneration) {
       return {
-        generation: snapshot.generation,
+        generation: snapshotGeneration,
         baseCursor: snapshot.baseCursor,
         endCursor: snapshot.endCursor,
-        source: "cache",
+        source: snapshot.historyGeneration ? "cache-v2" : "cache",
       };
     }
     return null;
+  };
+
+  const cacheV2ReplayIdentityFromMessage = (message) => ({
+    cacheProtocolVersion: Number(message?.cache_protocol_version || 0),
+    cacheScopeID: String(message?.cache_scope_id || "").trim(),
+    selector: String(message?.selector || "").trim(),
+    workspaceGeneration: String(message?.workspace_generation || "").trim(),
+    tabID: String(message?.tab_id || "").trim(),
+    paneID: String(message?.pane_id || "").trim(),
+    historyGeneration: String(message?.history_generation || "").trim(),
+  });
+
+  const validateSessionCacheV2MessageIdentity = (session, message, historyGeneration) => {
+    if (!sessionHasTerminalCacheV2Protocol(session)) {
+      return true;
+    }
+    const expected = sessionTerminalCacheV2ProtocolIdentity(session, historyGeneration);
+    const actual = cacheV2ReplayIdentityFromMessage(message);
+    return Boolean(expected && terminalCacheV2.identityMatches(expected, actual, { requireHistory: true }));
+  };
+
+  const validateSessionCacheV2ReplayIdentity = (session, message, snapshot, deltaFromCursor) => {
+    if (!sessionUsesTerminalCacheV2(session) || !snapshot || !snapshot.historyGeneration) {
+      return false;
+    }
+    const expected = sessionTerminalCacheV2Identity(session, snapshot.historyGeneration);
+    const actual = cacheV2ReplayIdentityFromMessage(message);
+    if (!expected || !terminalCacheV2.identityMatches(expected, actual, { requireHistory: true })) {
+      return false;
+    }
+    return snapshot.endCursor === deltaFromCursor;
+  };
+
+  const validateSessionCacheV2PreviewIdentity = (
+    session,
+    message,
+    snapshot,
+    syncMode,
+    deltaFromCursor,
+    serverEndCursor,
+  ) => {
+    if (
+      !sessionUsesTerminalCacheV2(session)
+      || !snapshot?.preview
+      || !snapshot.historyGeneration
+      || serverEndCursor === null
+    ) {
+      return false;
+    }
+    const expected = sessionTerminalCacheV2Identity(session, snapshot.historyGeneration);
+    const actual = cacheV2ReplayIdentityFromMessage(message);
+    if (!expected || !terminalCacheV2.identityMatches(expected, actual, { requireHistory: true })) {
+      return false;
+    }
+    if (syncMode === "snapshot") {
+      return snapshot.endCursor <= serverEndCursor;
+    }
+    return (syncMode === "delta" || syncMode === "current") && snapshot.endCursor === deltaFromCursor;
+  };
+
+  const setSessionCacheV2PreviewMiss = (session, reason) => {
+    const metrics = session?.cacheV2RecoveryMetrics;
+    if (metrics && !metrics.previewMissReason) {
+      metrics.previewMissReason = String(reason || "unknown");
+    }
+  };
+
+  const sessionCacheV2PreviewMatchesSnapshot = (prepared, snapshot) => {
+    if (!prepared || !snapshot || prepared.historyGeneration !== snapshot.historyGeneration || prepared.endCursor !== snapshot.endCursor) {
+      return false;
+    }
+    try {
+      return terminalCacheV2.identityMatches(prepared.identity, snapshot, { requireHistory: true });
+    } catch (error) {
+      return false;
+    }
+  };
+
+  const decodeSessionCacheV2Preview = (objectURL) => new Promise((resolve, reject) => {
+    const image = new Image();
+    let settled = false;
+    const finish = (error = null) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      image.onload = null;
+      image.onerror = null;
+      if (error) {
+        reject(error);
+      } else {
+        resolve(image);
+      }
+    };
+    image.onload = () => finish();
+    image.onerror = () => finish(new Error("Terminal cache preview image decode failed."));
+    image.src = objectURL;
+    if (typeof image.decode === "function") {
+      image.decode().then(() => finish()).catch(() => {});
+    }
+  });
+
+  const prepareSessionCacheV2Preview = (session, snapshot) => {
+    clearSessionCacheV2PreparedPreview(session);
+    if (!sessionUsesTerminalCacheV2(session) || !snapshot?.preview) {
+      setSessionCacheV2PreviewMiss(session, snapshot ? "manifest-preview-missing" : "manifest-missing");
+      return Promise.resolve(null);
+    }
+    const prepareSeq = session.cacheV2PreviewPrepareSeq;
+    let pendingObjectURL = "";
+    let preparePromise = null;
+    preparePromise = withTerminalCacheTimeout((async () => {
+      const preview = await terminalCacheV2.loadPreview(snapshot);
+      if (!preview) {
+        setSessionCacheV2PreviewMiss(session, "preview-record-missing");
+        return null;
+      }
+      pendingObjectURL = URL.createObjectURL(preview.blob);
+      await decodeSessionCacheV2Preview(pendingObjectURL);
+      if (
+        session.closed
+        || session.cacheV2PreviewPrepareSeq !== prepareSeq
+        || !sessionUsesTerminalCacheV2(session)
+        || (
+          session.historyCacheSnapshot !== snapshot
+          && session.cacheV2PreviewAuthorizedSnapshot !== snapshot
+        )
+      ) {
+        return null;
+      }
+      const prepared = {
+        objectURL: pendingObjectURL,
+        identity: snapshot,
+        historyGeneration: snapshot.historyGeneration,
+        endCursor: snapshot.endCursor,
+        metadata: preview.metadata,
+      };
+      pendingObjectURL = "";
+      session.cacheV2PreparedPreview = prepared;
+      markSessionCacheV2RecoveryMetric(session, "previewPreparedAt");
+      return prepared;
+      })(), terminalCacheV2PreviewTimeoutMs, "Terminal cache preview prepare timed out.")
+      .catch((error) => {
+        if (session.cacheV2PreviewPrepareSeq === prepareSeq) {
+          session.cacheV2PreviewPrepareSeq += 1;
+        }
+        setSessionCacheV2PreviewMiss(session, "preview-prepare-failed");
+        console.warn("[terminal-cache-v2] preview prepare failed", {
+          name: session.name,
+          pane: session.id,
+          error: error?.message || String(error),
+        });
+        return null;
+      })
+      .finally(() => {
+        if (pendingObjectURL) {
+          URL.revokeObjectURL(pendingObjectURL);
+        }
+        if (session.cacheV2PreviewPreparePromise === preparePromise) {
+          session.cacheV2PreviewPreparePromise = null;
+        }
+      });
+    session.cacheV2PreviewPreparePromise = preparePromise;
+    return preparePromise;
+  };
+
+  const showSessionCacheV2Preview = async (session, snapshot, currentSocket, replayGeneration) => {
+    const previewElement = session?.terminalPreview;
+    if (!previewElement || !snapshot?.preview || session.socket !== currentSocket) {
+      setSessionCacheV2PreviewMiss(session, snapshot?.preview ? "preview-element-missing" : "manifest-preview-missing");
+      return false;
+    }
+    if (session.cacheV2PreviewAuthorizedSnapshot !== snapshot) {
+      setSessionCacheV2PreviewMiss(session, "preview-not-authorized");
+      return false;
+    }
+    let prepared = sessionCacheV2PreviewMatchesSnapshot(session.cacheV2PreparedPreview, snapshot)
+      ? session.cacheV2PreparedPreview
+      : null;
+    if (!prepared) {
+      const pending = session.cacheV2PreviewPreparePromise || prepareSessionCacheV2Preview(session, snapshot);
+      prepared = await pending;
+    }
+    if (!sessionCacheV2PreviewMatchesSnapshot(prepared, snapshot)) {
+      setSessionCacheV2PreviewMiss(session, "prepared-preview-mismatch");
+      return false;
+    }
+    if (
+      session.socket !== currentSocket
+      || session.terminalReplayGeneration !== replayGeneration
+      || session.replayVerified !== "identified"
+      || session.replayComplete
+      || !sessionUsesTerminalCacheV2(session)
+    ) {
+      setSessionCacheV2PreviewMiss(session, "preview-session-changed");
+      return false;
+    }
+    const { cols, rows } = terminalSize(session);
+    const metadata = prepared.metadata;
+    const canvas = session.term?.canvas || session.term?.renderer?.getCanvas?.();
+    const layoutMatches = Boolean(
+      metadata.cols === cols
+      && metadata.rows === rows
+      && metadata.themeFingerprint === terminalCacheV2ThemeFingerprint()
+      && Math.abs(metadata.devicePixelRatio - (window.devicePixelRatio || 1)) <= 0.01
+      && canvas instanceof HTMLCanvasElement
+      && metadata.width === canvas.width
+      && metadata.height === canvas.height
+    );
+    hideSessionTerminalPreview(session);
+    session.cacheV2PreparedPreview = null;
+    session.cacheV2PreviewURL = prepared.objectURL;
+    previewElement.src = prepared.objectURL;
+    previewElement.hidden = false;
+    session.shellEl.dataset.previewReady = "true";
+    const metrics = session.cacheV2RecoveryMetrics;
+    if (metrics) {
+      metrics.previewHit = true;
+      metrics.previewLayoutMatch = layoutMatches;
+      metrics.previewMissReason = "";
+      markSessionCacheV2RecoveryMetric(session, "previewVisibleAt");
+    }
+    console.info("[terminal-cache-v2] preview visible", JSON.stringify({ layoutMatches }));
+    return true;
+  };
+
+  const revealSessionCacheV2Preview = (
+    session,
+    message,
+    snapshot,
+    syncMode,
+    deltaFromCursor,
+    serverEndCursor,
+    currentSocket,
+  ) => {
+    if (!snapshot?.preview) {
+      return false;
+    }
+    const authorized = session.replayVerified === "identified"
+      && validateSessionCacheV2PreviewIdentity(
+        session,
+        message,
+        snapshot,
+        syncMode,
+        deltaFromCursor,
+        serverEndCursor,
+      );
+    console.info("[terminal-cache-v2] preview decision", JSON.stringify({
+      syncMode,
+      authorized,
+      prepared: sessionCacheV2PreviewMatchesSnapshot(session.cacheV2PreparedPreview, snapshot),
+    }));
+    if (!authorized) {
+      setSessionCacheV2PreviewMiss(session, "preview-replay-identity-mismatch");
+      return false;
+    }
+    session.cacheV2PreviewAuthorizedSnapshot = snapshot;
+    showSessionCacheV2Preview(
+      session,
+      snapshot,
+      currentSocket,
+      session.terminalReplayGeneration,
+    ).catch((error) => {
+      console.warn("[terminal-cache-v2] preview load failed", {
+        name: session.name,
+        pane: session.id,
+        error: error?.message || String(error),
+      });
+    });
+    return true;
+  };
+
+  const sessionCacheV2WarmReplayMatchesSnapshot = (session, snapshot) => Boolean(
+    session
+    && snapshot
+    && session.cacheV2WarmReplaySnapshot === snapshot
+    && session.cacheV2WarmReplayGeneration === session.terminalReplayGeneration
+    && (session.cacheV2WarmReplayActive || session.cacheV2WarmReplayReady)
+  );
+
+  const drainSessionCacheV2NetworkQueue = (session) => {
+    const queued = session.cacheV2NetworkQueue;
+    session.cacheV2NetworkQueue = [];
+    session.cacheV2NetworkQueueBytes = 0;
+    for (const data of queued) {
+      writeSessionOutput(session, data);
+    }
+    flushSessionOutput(session, { force: true });
+  };
+
+  const failSessionCacheV2WarmReplay = (session, replaySeq, error) => {
+    if (!session || session.closed || session.cacheV2WarmReplaySeq !== replaySeq) {
+      return;
+    }
+    session.cacheV2WarmReplayActive = false;
+    session.cacheV2WarmFrameReady = false;
+    session.cacheV2WarmReplayReady = false;
+    session.cacheV2WarmReplaySnapshot = null;
+    session.cacheV2ReplayActive = false;
+    session.cacheV2ServerSnapshotPending = false;
+    session.cacheV2NetworkQueue = [];
+    session.cacheV2NetworkQueueBytes = 0;
+    session.resetOnNextReplay = true;
+    markPaneRenderPending(session);
+    disableSessionHistoryCache(session, error);
+    const socket = session.socket;
+    if (socket) {
+      detachSessionSocket(session, socket, { connection: "connecting" });
+      try {
+        socket.close(4000, "local cache replay failed");
+      } catch (closeError) {
+      }
+    }
+    scheduleReconnect(session, { immediate: true });
+  };
+
+  const startSessionCacheV2WarmReplay = (session, snapshot) => {
+    if (
+      !sessionUsesTerminalCacheV2(session)
+      || !snapshot?.historyGeneration
+      || session.resetOnNextReplay
+      || session.closed
+    ) {
+      return false;
+    }
+    if (
+      session.cacheV2WarmReplayReady
+      && session.cacheV2WarmReplaySnapshot === snapshot
+      && session.appliedHistoryCursor === snapshot.endCursor
+    ) {
+      session.cacheV2WarmReplayGeneration = session.terminalReplayGeneration;
+      session.cacheV2WarmFrameReady = true;
+      session.replayFitGeneration = session.measuredFitGeneration;
+      return true;
+    }
+    if (sessionCacheV2WarmReplayMatchesSnapshot(session, snapshot)) {
+      return true;
+    }
+    if (!resetTerminalForHistoryReplay(session)) {
+      return false;
+    }
+    const replayGeneration = session.terminalReplayGeneration;
+    const replaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
+    session.cacheV2WarmReplaySeq = replaySeq;
+    session.cacheV2WarmReplayGeneration = replayGeneration;
+    session.cacheV2WarmReplayActive = true;
+    session.cacheV2WarmFrameReady = false;
+    session.cacheV2WarmReplayReady = false;
+    session.cacheV2WarmReplaySnapshot = snapshot;
+    session.cacheV2ServerSnapshotPending = false;
+    session.cacheV2ReplayActive = true;
+    session.cacheV2NetworkQueue = [];
+    session.cacheV2NetworkQueueBytes = 0;
+    session.historyGeneration = snapshot.historyGeneration;
+    session.historyProtocolActive = true;
+    session.historySyncMode = "cache-warm";
+    session.historyStateReady = false;
+    session.localBaseCursor = snapshot.baseCursor;
+    session.receivedHistoryCursor = snapshot.baseCursor;
+    session.appliedHistoryCursor = snapshot.baseCursor;
+    session.persistedHistoryCursor = snapshot.endCursor;
+    session.replayFitGeneration = session.measuredFitGeneration;
+    let replayPromise = null;
+    replayPromise = withTerminalCacheTimeout(terminalCacheV2.readChunks(snapshot, ({
+      data,
+      startCursor,
+      endCursor,
+      batchEnd,
+    }) => {
+      if (
+        session.closed
+        || session.cacheV2WarmReplaySeq !== replaySeq
+        || session.terminalReplayGeneration !== replayGeneration
+      ) {
+        throw new Error("terminal warm cache replay session changed");
+      }
+      writeSessionOutput(session, data, {
+        historySource: "cache-v2",
+        startCursor,
+        endCursor,
+      });
+      clearSessionOutputFlushSchedule(session);
+      if (session.cacheV2RecoveryMetrics) {
+        session.cacheV2RecoveryMetrics.localReplayBytes += data.byteLength;
+      }
+      if (batchEnd && !session.cacheV2WarmFrameReady) {
+        flushSessionOutput(session, { force: true });
+        if (terminalHasVisibleContent(session)) {
+          session.cacheV2WarmFrameReady = true;
+          markSessionCacheV2RecoveryMetric(session, "localFirstFrameAt");
+          renderPaneFullNow(session);
+          console.info("[terminal-cache-v2] warm canvas first frame", JSON.stringify({
+            cursor: session.appliedHistoryCursor.toString(),
+          }));
+        }
+      }
+    }), terminalCacheV2ReplayTimeoutMs, "Terminal warm cache replay timed out.").then(() => {
+      if (
+        session.closed
+        || session.cacheV2WarmReplaySeq !== replaySeq
+        || session.terminalReplayGeneration !== replayGeneration
+      ) {
+        return;
+      }
+      flushSessionOutput(session, { force: true });
+      if (session.appliedHistoryCursor !== snapshot.endCursor) {
+        throw new Error("terminal warm cache replay did not reach its manifest cursor");
+      }
+      session.cacheV2WarmReplayActive = false;
+      session.cacheV2WarmFrameReady = true;
+      session.cacheV2WarmReplayReady = true;
+      markSessionCacheV2RecoveryMetric(session, "localFirstFrameAt");
+      markSessionCacheV2RecoveryMetric(session, "localReplayCompleteAt");
+      renderPaneFullNow(session);
+      console.info("[terminal-cache-v2] warm canvas ready", JSON.stringify({
+        chunks: snapshot.chunks.length,
+        bytes: Number(snapshot.endCursor - snapshot.baseCursor),
+      }));
+      if (!session.cacheV2ServerSnapshotPending) {
+        session.cacheV2ReplayActive = false;
+        drainSessionCacheV2NetworkQueue(session);
+      }
+    }).catch((error) => {
+      failSessionCacheV2WarmReplay(session, replaySeq, error);
+    }).finally(() => {
+      if (session.cacheV2WarmReplayPromise === replayPromise) {
+        session.cacheV2WarmReplayPromise = null;
+      }
+    });
+    session.cacheV2WarmReplayPromise = replayPromise;
+    return true;
+  };
+
+  const applySessionCacheV2ServerSnapshot = (session, currentSocket, rejectHistorySync) => {
+    if (!session.cacheV2ServerSnapshotPending || session.socket !== currentSocket) {
+      return false;
+    }
+    const queued = session.cacheV2NetworkQueue;
+    const snapshotStartCursor = session.cacheV2ServerSnapshotStartCursor;
+    session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
+    session.cacheV2WarmReplayActive = false;
+    session.cacheV2WarmFrameReady = false;
+    session.cacheV2WarmReplayReady = false;
+    session.cacheV2WarmReplaySnapshot = null;
+    session.cacheV2ServerSnapshotPending = false;
+    session.cacheV2ServerSnapshotStartCursor = 0n;
+    session.cacheV2ReplayActive = false;
+    session.cacheV2NetworkQueue = [];
+    session.cacheV2NetworkQueueBytes = 0;
+    if (!resetTerminalForHistoryReplay(session)) {
+      rejectHistorySync("terminal reset for server snapshot failed");
+      return true;
+    }
+    session.historyProtocolActive = true;
+    session.historySyncMode = "snapshot";
+    session.localBaseCursor = snapshotStartCursor;
+    session.receivedHistoryCursor = snapshotStartCursor;
+    session.appliedHistoryCursor = snapshotStartCursor;
+    session.persistedHistoryCursor = snapshotStartCursor;
+    session.historyStateReady = false;
+    session.replayVerified = "identified";
+    session.replayCompletionPending = true;
+    resetSessionHistoryCache(session, session.historyGeneration, snapshotStartCursor);
+    try {
+      for (const data of queued) {
+        writeSessionOutput(session, data);
+      }
+      if (session.receivedHistoryCursor !== session.historyReplayTargetCursor) {
+        throw new Error("server snapshot did not reach its target cursor");
+      }
+      session.cacheV2WarmReplayGeneration = session.terminalReplayGeneration;
+      session.cacheV2WarmFrameReady = true;
+      session.cacheV2WarmReplayReady = true;
+      flushSessionOutput(session, { force: true });
+      renderPaneFullNow(session);
+    } catch (error) {
+      rejectHistorySync(error?.message || "server snapshot replay failed");
+    }
+    return true;
+  };
+
+  const beginSessionCacheV2Replay = (session, snapshot, deltaFromCursor, currentSocket, rejectHistorySync) => {
+    const replayGeneration = session.terminalReplayGeneration;
+    session.cacheV2ReplayActive = true;
+    session.cacheV2NetworkQueue = [];
+    session.cacheV2NetworkQueueBytes = 0;
+    let replayPromise = null;
+    replayPromise = withTerminalCacheTimeout(terminalCacheV2.readChunks(snapshot, ({ data, startCursor, endCursor }) => {
+      if (session.socket !== currentSocket || session.terminalReplayGeneration !== replayGeneration) {
+        throw new Error("terminal cache replay session changed");
+      }
+      writeSessionOutput(session, data, {
+        historySource: "cache-v2",
+        startCursor,
+        endCursor,
+      });
+      if (session.cacheV2RecoveryMetrics) {
+        session.cacheV2RecoveryMetrics.localReplayBytes += data.byteLength;
+      }
+    }), terminalCacheV2ReplayTimeoutMs, "Terminal cache replay timed out.").then(() => {
+      if (session.socket !== currentSocket || session.terminalReplayGeneration !== replayGeneration) {
+        return;
+      }
+      if (session.receivedHistoryCursor !== deltaFromCursor) {
+        throw new Error("cached terminal history did not reach requested cursor");
+      }
+      markSessionCacheV2RecoveryMetric(session, "localReplayCompleteAt");
+      session.cacheV2ReplayActive = false;
+      drainSessionCacheV2NetworkQueue(session);
+    }).catch((error) => {
+      if (session.socket !== currentSocket || session.terminalReplayGeneration !== replayGeneration) {
+        return;
+      }
+      session.cacheV2ReplayActive = false;
+      session.cacheV2NetworkQueue = [];
+      session.cacheV2NetworkQueueBytes = 0;
+      rejectHistorySync(error?.message || "terminal cache replay failed");
+    }).finally(() => {
+      if (session.cacheV2ReplayPromise === replayPromise) {
+        session.cacheV2ReplayPromise = null;
+      }
+    });
+    session.cacheV2ReplayPromise = replayPromise;
+  };
+
+  const terminalCanvasBlob = (canvas) => new Promise((resolve, reject) => {
+    if (!(canvas instanceof HTMLCanvasElement) || typeof canvas.toBlob !== "function") {
+      reject(new Error("Terminal canvas capture is unavailable."));
+      return;
+    }
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob);
+      } else {
+        reject(new Error("Terminal canvas capture returned no data."));
+      }
+    }, "image/png");
+  });
+
+  const captureSessionCacheV2Preview = async (session, captureSeq) => {
+    if (
+      !sessionUsesTerminalCacheV2(session)
+      || session.cacheV2PreviewCaptureSeq !== captureSeq
+      || !session.replayComplete
+      || !session.renderReady
+      || !session.historyStateReady
+      || !session.historyGeneration
+      || session.outputQueueSize > 0
+    ) {
+      return;
+    }
+    await flushSessionHistoryCacheWrites(session);
+    const cursor = session.appliedHistoryCursor;
+    if (
+      !sessionUsesTerminalCacheV2(session)
+      || session.cacheV2PreviewCaptureSeq !== captureSeq
+      || !panePresentationIsCurrent(session)
+      || session.persistedHistoryCursor !== cursor
+      || session.outputQueueSize > 0
+    ) {
+      return;
+    }
+    const identity = sessionTerminalCacheV2Identity(session, session.historyGeneration);
+    const canvas = session.term?.canvas || session.term?.renderer?.getCanvas?.();
+    if (!identity || !(canvas instanceof HTMLCanvasElement) || canvas.width <= 0 || canvas.height <= 0) {
+      return;
+    }
+    const width = canvas.width;
+    const height = canvas.height;
+    const { cols, rows } = terminalSize(session);
+    const devicePixelRatio = window.devicePixelRatio || 1;
+    const themeFingerprint = terminalCacheV2ThemeFingerprint();
+    const blob = await terminalCanvasBlob(canvas);
+    const currentSize = terminalSize(session);
+    if (
+      !sessionUsesTerminalCacheV2(session)
+      || session.cacheV2PreviewCaptureSeq !== captureSeq
+      || !session.replayComplete
+      || !session.historyStateReady
+      || !panePresentationIsCurrent(session)
+      || session.outputQueueSize > 0
+      || session.appliedHistoryCursor !== cursor
+      || session.persistedHistoryCursor !== cursor
+      || canvas.width !== width
+      || canvas.height !== height
+      || currentSize.cols !== cols
+      || currentSize.rows !== rows
+      || Math.abs((window.devicePixelRatio || 1) - devicePixelRatio) > 0.01
+      || terminalCacheV2ThemeFingerprint() !== themeFingerprint
+    ) {
+      return;
+    }
+    await terminalCacheV2.savePreview(identity, session.historyGeneration, cursor, blob, {
+      width,
+      height,
+      cols,
+      rows,
+      devicePixelRatio,
+      themeFingerprint,
+    });
+  };
+
+  const scheduleSessionCacheV2PreviewCapture = (session) => {
+    if (!sessionUsesTerminalCacheV2(session) || session.closed) {
+      return;
+    }
+    if (session.cacheV2PreviewCaptureTimer) {
+      window.clearTimeout(session.cacheV2PreviewCaptureTimer);
+    }
+    const captureSeq = Number(session.cacheV2PreviewCaptureSeq || 0) + 1;
+    session.cacheV2PreviewCaptureSeq = captureSeq;
+    session.cacheV2PreviewCaptureTimer = window.setTimeout(() => {
+      session.cacheV2PreviewCaptureTimer = 0;
+      captureSessionCacheV2Preview(session, captureSeq).catch((error) => {
+        console.warn("[terminal-cache-v2] preview capture failed", {
+          name: session.name,
+          pane: session.id,
+          error: error?.message || String(error),
+        });
+      });
+    }, 180);
   };
 
   const terminalOutputKind = (data) => {
@@ -13121,6 +14235,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       !session ||
       !session.replayCompletionPending ||
       session.outputQueueSize > 0 ||
+      session.cacheV2ReplayActive ||
       !session.replayVerified ||
       session.closed ||
       session.name !== activeName ||
@@ -13128,13 +14243,41 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     ) {
       return false;
     }
+    if (
+      session.historyProtocolActive
+      && !session.historyCacheDisabled
+      && session.persistedHistoryCursor < session.historyReplayTargetCursor
+    ) {
+      if (!session.historyCacheReplayCommitPending) {
+        session.historyCacheReplayCommitPending = true;
+        const commit = flushSessionHistoryCacheWrites(session);
+        const waitForCommit = sessionUsesTerminalCacheV2(session)
+          ? withTerminalCacheTimeout(commit, terminalCacheV2CommitTimeoutMs, "Terminal cache commit timed out.")
+          : commit;
+        waitForCommit.catch((error) => disableSessionHistoryCache(session, error)).finally(() => {
+          session.historyCacheReplayCommitPending = false;
+          finishSessionHistoryReplayIfReady(session);
+        });
+      }
+      return false;
+    }
     session.replayCompletionPending = false;
     session.replayComplete = true;
     session.replayVerified = false;
     session.historyStateReady = true;
     session.historyCacheSnapshot = null;
+    session.historyCacheReplayCommitPending = false;
+    session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
+    session.cacheV2WarmReplayActive = false;
+    session.cacheV2WarmFrameReady = false;
+    session.cacheV2WarmReplayReady = false;
+    session.cacheV2WarmReplayPromise = null;
+    session.cacheV2WarmReplaySnapshot = null;
+    session.cacheV2ServerSnapshotPending = false;
+    session.cacheV2ServerSnapshotStartCursor = 0n;
     session.agentPreparing = false;
     session.allowGeneratedInputDuringReplay = false;
+    markSessionCacheV2RecoveryMetric(session, "cacheCommitCompleteAt");
     clearAttachReadyTimer(session);
     session.reconnectAttempts = 0;
     session.shellEl.dataset.connection = "open";
@@ -13153,6 +14296,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.outputQueue = [];
     session.outputQueueSize = 0;
     session.replayCompletionPending = false;
+    session.historyCacheReplayCommitPending = false;
   };
 
   const flushSessionOutput = (session, { force = false } = {}) => {
@@ -13162,6 +14306,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     clearSessionOutputFlushSchedule(session);
     const queue = Array.isArray(session.outputQueue) ? session.outputQueue : [];
     if (queue.length === 0) {
+      finishSessionHistoryReplayIfReady(session);
       return;
     }
     if (!session.term || (!force && (session.closed || session.name !== activeName))) {
@@ -13396,8 +14541,15 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.replayComplete = false;
     session.replayVerified = false;
     session.replayCompletionPending = false;
+    session.historyCacheReplayCommitPending = false;
     session.allowGeneratedInputDuringReplay = false;
     session.agentPreparing = false;
+    session.cacheV2ServerSnapshotPending = false;
+    session.cacheV2ServerSnapshotStartCursor = 0n;
+    session.cacheV2ReplayActive = session.cacheV2WarmReplayActive === true;
+    session.cacheV2NetworkQueue = [];
+    session.cacheV2NetworkQueueBytes = 0;
+    hideSessionTerminalPreview(session);
     session.attachStartedAt = 0;
     session.attachReadyTimeoutMs = 0;
     session.lastSocketHealthAt = 0;
@@ -13449,6 +14601,17 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return;
     }
     session.resetOnNextReplay = true;
+    session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
+    session.cacheV2WarmReplayActive = false;
+    session.cacheV2WarmFrameReady = false;
+    session.cacheV2WarmReplayReady = false;
+    session.cacheV2WarmReplayPromise = null;
+    session.cacheV2WarmReplaySnapshot = null;
+    session.cacheV2ServerSnapshotPending = false;
+    session.cacheV2ReplayActive = false;
+    session.cacheV2NetworkQueue = [];
+    session.cacheV2NetworkQueueBytes = 0;
+    hideSessionTerminalPreview(session);
     discardSessionOutputBuffers(session);
     const socket = session.socket;
     if (socket) {
@@ -13653,9 +14816,18 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     ) {
       return;
     }
+    startSessionCacheV2RecoveryMetrics(session);
     await prepareSessionHistoryCache(session);
+    markSessionCacheV2RecoveryMetric(session, "cacheManifestReadyAt");
     flushSessionOutput(session, { force: true });
-    await flushSessionHistoryCacheWrites(session);
+    try {
+      const flush = flushSessionHistoryCacheWrites(session);
+      await (sessionUsesTerminalCacheV2(session)
+        ? withTerminalCacheTimeout(flush, terminalCacheV2CommitTimeoutMs, "Terminal cache flush before connect timed out.")
+        : flush);
+    } catch (error) {
+      disableSessionHistoryCache(session, error);
+    }
     if (
       !session ||
       session.closed ||
@@ -13682,7 +14854,21 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     socketUrl.searchParams.set("fg", themePayload.foreground);
     socketUrl.searchParams.set("bg", themePayload.background);
     socketUrl.searchParams.set("cursor", themePayload.cursor);
+    const cacheV2Identity = sessionTerminalCacheV2ProtocolIdentity(session);
+    if (cacheV2Identity) {
+      socketUrl.searchParams.set("cache_protocol_version", String(cacheV2Identity.cacheProtocolVersion));
+      socketUrl.searchParams.set("workspace_generation", cacheV2Identity.workspaceGeneration);
+    }
     const historyConnectRange = sessionHistoryRangeForConnect(session);
+    const cacheV2WarmSnapshot = historyConnectRange?.source === "cache-v2"
+      ? session.historyCacheSnapshot
+      : null;
+    const cacheV2WarmReplayStarted = cacheV2WarmSnapshot
+      ? startSessionCacheV2WarmReplay(session, cacheV2WarmSnapshot)
+      : false;
+    if (session.cacheV2RecoveryMetrics) {
+      session.cacheV2RecoveryMetrics.historySource = historyConnectRange?.source || "snapshot";
+    }
     if (historyConnectRange) {
       socketUrl.searchParams.set("history_generation", historyConnectRange.generation);
       socketUrl.searchParams.set("local_base_cursor", historyConnectRange.baseCursor.toString());
@@ -13694,6 +14880,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     const logSocketUrl = new URL(socketUrl.toString());
     logSocketUrl.searchParams.delete("client_id");
     logSocketUrl.searchParams.delete("history_generation");
+    logSocketUrl.searchParams.delete("workspace_generation");
     const socketDebug = {
       textMessages: 0,
       binaryMessages: 0,
@@ -13719,6 +14906,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.replayVerified = false;
     session.replayCompletionPending = false;
     session.allowGeneratedInputDuringReplay = false;
+    if (!cacheV2WarmReplayStarted) {
+      session.cacheV2ReplayActive = false;
+      session.cacheV2NetworkQueue = [];
+      session.cacheV2NetworkQueueBytes = 0;
+    }
+    hideSessionTerminalPreview(session);
     session.startupErrorShown = false;
     session.shellEl.dataset.connection = "connecting";
     currentSocket.binaryType = "arraybuffer";
@@ -13741,6 +14934,13 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     const rejectMismatchedReplay = (message) => {
       const selector = String(message?.selector || "").trim() || "unknown";
       const paneID = String(message?.pane_id || message?.paneId || "").trim() || "unknown";
+      session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
+      session.cacheV2WarmReplayActive = false;
+      session.cacheV2WarmFrameReady = false;
+      session.cacheV2WarmReplayReady = false;
+      session.cacheV2WarmReplayPromise = null;
+      session.cacheV2WarmReplaySnapshot = null;
+      markPaneRenderPending(session);
       detachSessionSocket(session, currentSocket, { connection: "error" });
       console.warn("[client-terminal] rejected terminal replay", {
         selector,
@@ -13759,7 +14959,15 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       session.historyProtocolActive = false;
       session.historyCacheSnapshot = null;
       session.historyGeneration = "";
-      deleteSessionHistoryCache(session.name, session.id);
+      session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
+      session.cacheV2WarmReplayActive = false;
+      session.cacheV2WarmFrameReady = false;
+      session.cacheV2WarmReplayReady = false;
+      session.cacheV2WarmReplayPromise = null;
+      session.cacheV2WarmReplaySnapshot = null;
+      session.cacheV2ServerSnapshotPending = false;
+      markPaneRenderPending(session);
+      deleteSessionHistoryCache(session);
       detachSessionSocket(session, currentSocket, { connection: "error" });
       console.warn("[terminal-history] rejected history sync", {
         name: session.name,
@@ -13778,6 +14986,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         return;
       }
       socketDebug.openedAt = Date.now();
+      markSessionCacheV2RecoveryMetric(session, "websocketOpenAt");
       console.info("[client-terminal] websocket open", {
         name: session.name,
         pane: session.id,
@@ -13888,27 +15097,51 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                   rejectHistorySync("invalid server history range");
                   return;
                 }
+                if (!validateSessionCacheV2MessageIdentity(session, message, historyGeneration)) {
+                  rejectHistorySync("terminal cache-v2 replay identity does not match");
+                  return;
+                }
                 session.historyProtocolActive = true;
                 session.historyGeneration = historyGeneration;
                 session.historySyncMode = syncMode;
+                if (session.cacheV2RecoveryMetrics) {
+                  session.cacheV2RecoveryMetrics.syncMode = syncMode;
+                  markSessionCacheV2RecoveryMetric(session, "replayStartAt");
+                }
                 session.historyReplayTargetCursor = deltaToCursor;
                 session.serverBaseCursor = serverBaseCursor;
                 session.resetOnNextReplay = false;
                 if (syncMode === "snapshot") {
-                  if (!resetTerminalForHistoryReplay(session)) {
-                    rejectHistorySync("terminal reset failed");
-                    return;
+                  const snapshot = session.historyCacheSnapshot;
+                  const keepWarmCanvas = Boolean(
+                    sessionCacheV2WarmReplayMatchesSnapshot(session, snapshot)
+                    && snapshot.historyGeneration === historyGeneration
+                    && snapshot.endCursor <= serverEndCursor
+                  );
+                  if (keepWarmCanvas) {
+                    session.cacheV2ServerSnapshotPending = true;
+                    session.cacheV2ServerSnapshotStartCursor = deltaFromCursor;
+                    session.cacheV2ReplayActive = true;
+                    session.cacheV2NetworkQueue = [];
+                    session.cacheV2NetworkQueueBytes = 0;
+                    session.replayVerified = "identified";
+                  } else {
+                    if (!resetTerminalForHistoryReplay(session)) {
+                      rejectHistorySync("terminal reset failed");
+                      return;
+                    }
+                    session.historyGeneration = historyGeneration;
+                    session.historyProtocolActive = true;
+                    session.historySyncMode = syncMode;
+                    session.serverBaseCursor = serverBaseCursor;
+                    session.localBaseCursor = serverBaseCursor;
+                    session.receivedHistoryCursor = deltaFromCursor;
+                    session.appliedHistoryCursor = deltaFromCursor;
+                    session.persistedHistoryCursor = deltaFromCursor;
+                    session.historyStateReady = false;
+                    session.replayVerified = "identified";
+                    resetSessionHistoryCache(session, historyGeneration, deltaFromCursor);
                   }
-                  session.historyGeneration = historyGeneration;
-                  session.historyProtocolActive = true;
-                  session.historySyncMode = syncMode;
-                  session.serverBaseCursor = serverBaseCursor;
-                  session.localBaseCursor = serverBaseCursor;
-                  session.receivedHistoryCursor = deltaFromCursor;
-                  session.appliedHistoryCursor = deltaFromCursor;
-                  session.persistedHistoryCursor = deltaFromCursor;
-                  session.historyStateReady = false;
-                  resetSessionHistoryCache(session, historyGeneration, deltaFromCursor);
                 } else {
                   if (!historyConnectRange || historyConnectRange.generation !== historyGeneration || historyConnectRange.endCursor !== deltaFromCursor) {
                     rejectHistorySync("local and server history ranges do not match");
@@ -13950,6 +15183,40 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                       rejectHistorySync("cached terminal history did not reach requested cursor");
                       return;
                     }
+                  } else if (historyConnectRange.source === "cache-v2") {
+                    const snapshot = session.historyCacheSnapshot;
+                    if (
+                      !snapshot
+                      || snapshot.historyGeneration !== historyGeneration
+                      || snapshot.baseCursor !== historyConnectRange.baseCursor
+                      || !validateSessionCacheV2ReplayIdentity(session, message, snapshot, deltaFromCursor)
+                    ) {
+                      rejectHistorySync("cached terminal cache-v2 history is unavailable");
+                      return;
+                    }
+                    if (sessionCacheV2WarmReplayMatchesSnapshot(session, snapshot)) {
+                      session.historyGeneration = historyGeneration;
+                      session.historyProtocolActive = true;
+                      session.historySyncMode = syncMode;
+                      session.serverBaseCursor = serverBaseCursor;
+                      session.persistedHistoryCursor = snapshot.endCursor;
+                      session.replayVerified = "identified";
+                    } else {
+                      if (!resetTerminalForHistoryReplay(session)) {
+                        rejectHistorySync("terminal reset for cache-v2 history failed");
+                        return;
+                      }
+                      session.historyGeneration = historyGeneration;
+                      session.historyProtocolActive = true;
+                      session.historySyncMode = syncMode;
+                      session.serverBaseCursor = serverBaseCursor;
+                      session.localBaseCursor = snapshot.baseCursor;
+                      session.receivedHistoryCursor = snapshot.baseCursor;
+                      session.appliedHistoryCursor = snapshot.baseCursor;
+                      session.persistedHistoryCursor = snapshot.endCursor;
+                      session.replayVerified = "identified";
+                      beginSessionCacheV2Replay(session, snapshot, deltaFromCursor, currentSocket, rejectHistorySync);
+                    }
                   } else {
                     rejectHistorySync("unknown local history source");
                     return;
@@ -13968,10 +15235,26 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                 if (session.historyProtocolActive) {
                   const completeGeneration = String(message.history_generation || "").trim();
                   const completeCursor = parseHistoryCursor(message.history_cursor);
-                  if (completeGeneration !== session.historyGeneration || completeCursor === null || completeCursor !== session.historyReplayTargetCursor || session.receivedHistoryCursor < completeCursor) {
+                  const completeCacheV2IdentityValid = !sessionHasTerminalCacheV2Protocol(session) || (
+                    Number(message.cache_protocol_version || 0) === 2
+                    && String(message.workspace_generation || "").trim() === session.cacheV2WorkspaceIdentity.workspaceGeneration
+                    && String(message.tab_id || "").trim() === session.tabId
+                  );
+                  if (
+                    completeGeneration !== session.historyGeneration
+                    || completeCursor === null
+                    || completeCursor !== session.historyReplayTargetCursor
+                    || (!session.cacheV2ReplayActive && session.receivedHistoryCursor < completeCursor)
+                    || !completeCacheV2IdentityValid
+                  ) {
                     rejectHistorySync("history replay completion range does not match");
                     return;
                   }
+                }
+                markSessionCacheV2RecoveryMetric(session, "historyReplayCompleteAt");
+                if (session.cacheV2ServerSnapshotPending) {
+                  applySessionCacheV2ServerSnapshot(session, currentSocket, rejectHistorySync);
+                  return;
                 }
                 session.replayCompletionPending = true;
                 finishSessionHistoryReplayIfReady(session) || flushSessionOutput(session);
@@ -13980,6 +15263,14 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                 session.agentPreparing = true;
                 startAttachReadyTimer(session, currentSocket, terminalAgentPrepareTimeoutMs);
                 session.shellEl.dataset.connection = "connecting";
+                return;
+              case "workspace-refresh-required":
+                detachSessionSocket(session, currentSocket, { connection: "connecting" });
+                try {
+                  currentSocket.close();
+                } catch (error) {
+                }
+                refreshWorkspace({ focus: session.tabId === activeTabId }).catch((error) => showToast(error.message));
                 return;
               case "pong":
                 return;
@@ -14046,7 +15337,22 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
           }
           return;
         }
+        if (session.cacheV2ReplayActive) {
+          const data = new Uint8Array(event.data);
+          if (session.cacheV2RecoveryMetrics) {
+            session.cacheV2RecoveryMetrics.serverReplayBytes += data.byteLength;
+          }
+          session.cacheV2NetworkQueue.push(data);
+          session.cacheV2NetworkQueueBytes += data.byteLength;
+          if (session.cacheV2NetworkQueueBytes > maxQueuedTerminalOutputBytes) {
+            rejectHistorySync("terminal cache-v2 network delta queue exceeded its limit");
+          }
+          return;
+        }
         try {
+          if (session.cacheV2RecoveryMetrics) {
+            session.cacheV2RecoveryMetrics.serverReplayBytes += event.data.byteLength;
+          }
           writeSessionOutput(session, new Uint8Array(event.data));
         } catch (error) {
           rejectHistorySync(error?.message || "terminal history output range failed");
@@ -14195,6 +15501,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     shellEl.dataset.paneId = normalizedID;
     shellEl.dataset.connection = connect ? "connecting" : "idle";
     shellEl.dataset.renderReady = "false";
+    shellEl.dataset.previewReady = "false";
     shellEl.setAttribute("tabindex", "-1");
 
     const terminalHost = document.createElement("div");
@@ -14208,6 +15515,12 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       term.options.mobilePixelScroll = mobilePixelScrollEnabled && isMobileLayout();
     }
     term.open(terminalHost);
+    const terminalPreview = document.createElement("img");
+    terminalPreview.className = "terminal-cache-preview";
+    terminalPreview.alt = "";
+    terminalPreview.hidden = true;
+    terminalPreview.draggable = false;
+    terminalHost.appendChild(terminalPreview);
     const compositionPreview = document.createElement("span");
     compositionPreview.className = "terminal-composition-preview";
     compositionPreview.hidden = true;
@@ -14218,6 +15531,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       name: instanceName,
       shellEl,
       terminalHost,
+      terminalPreview,
       compositionPreview,
       term,
       fitAddon,
@@ -14269,6 +15583,38 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       historyCacheWriteTimer: 0,
       historyCacheWritePromise: Promise.resolve(),
       historyCacheDestroyPromise: null,
+      historyCacheReplayCommitPending: false,
+      cacheV2WorkspaceIdentity: activeWorkspaceCacheV2Identity && activeWorkspaceCacheV2Identity.selector === instanceName
+        ? { ...activeWorkspaceCacheV2Identity }
+        : null,
+      cacheV2Epoch: activeWorkspaceCacheV2Epoch,
+      cacheV2ReplayActive: false,
+      cacheV2ReplayPromise: null,
+      cacheV2NetworkQueue: [],
+      cacheV2NetworkQueueBytes: 0,
+      cacheV2WarmReplaySeq: 0,
+      cacheV2WarmReplayGeneration: 0,
+      cacheV2WarmCanvasLoggedGeneration: 0,
+      cacheV2WarmReplayActive: false,
+      cacheV2WarmFrameReady: false,
+      cacheV2WarmReplayReady: false,
+      cacheV2WarmReplayPromise: null,
+      cacheV2WarmReplaySnapshot: null,
+      cacheV2WarmCanvasVisibleGeneration: 0,
+      cacheV2ServerSnapshotPending: false,
+      cacheV2ServerSnapshotStartCursor: 0n,
+      cacheV2PreviewURL: "",
+      cacheV2PreparedPreview: null,
+      cacheV2PreviewAuthorizedSnapshot: null,
+      cacheV2PreviewPreparePromise: null,
+      cacheV2PreviewPrepareSeq: 0,
+      cacheV2PreviewCaptureTimer: 0,
+      cacheV2PreviewCaptureSeq: 0,
+      cacheV2OverviewPreview: null,
+      cacheV2OverviewPreviewPromise: null,
+      cacheV2OverviewPreviewSeq: 0,
+      cacheV2LastTouchAt: 0,
+      cacheV2RecoveryMetrics: null,
       localBaseCursor: 0n,
       receivedHistoryCursor: 0n,
       appliedHistoryCursor: 0n,
@@ -14907,8 +16253,14 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     const restartTab = readRestartTabForName(targetName);
     const requestedTab = (new URLSearchParams(window.location.search).get("tab") || "").trim();
+    const cacheV2IdentityChanged = setActiveWorkspaceCacheV2Identity(workspaceCacheV2IdentityFromState(state, targetName));
     applyingWorkspaceState = true;
     try {
+      if (cacheV2IdentityChanged) {
+        for (const tab of [...tabs.values()]) {
+          closeTab(tab.id, { remember: false });
+        }
+      }
       const nextTabIDs = new Set((state?.tabs || []).map((tab) => tab.id));
       for (const tab of [...tabs.values()]) {
         if (!nextTabIDs.has(tab.id)) {
@@ -14984,6 +16336,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       }
       updateEmptyState();
       scheduleTabOverviewRender();
+      for (const tab of tabs.values()) {
+        prepareTabOverviewCachePreviews(tab);
+      }
       window.requestAnimationFrame(() => {
         resizeActiveTabForCurrentDevice();
         connectPendingSessions({ allowHidden: true });
@@ -14997,10 +16352,20 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
 
   const refreshWorkspace = async ({ focus = false, instanceName = activeName, generation = activeInstanceGeneration } = {}) => measurePerformanceTask("workspace refresh", async () => {
     const requestName = String(instanceName || "").trim();
+    const recoveryMetrics = {
+      selector: requestName,
+      generation,
+      startedAt: terminalCacheV2MetricNow(),
+      readyAt: 0,
+    };
+    if (isCurrentInstanceRequest(requestName, generation)) {
+      latestWorkspaceRecoveryMetrics = recoveryMetrics;
+    }
     const state = await fetchWorkspaceState(requestName);
     if (!isCurrentInstanceRequest(requestName, generation)) {
       return state;
     }
+    recoveryMetrics.readyAt = terminalCacheV2MetricNow();
     ensureResponseSelector(state, requestName);
     observeServerRevision(state);
     applyWorkspaceState(state, { focus, instanceName: requestName, generation });
@@ -15233,6 +16598,25 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     discardSessionOutputBuffers(pane);
     clearPaneFullRenderValidation(pane);
     clearSessionHistoryCacheWriteSchedule(pane);
+    if (pane.cacheV2PreviewCaptureTimer) {
+      window.clearTimeout(pane.cacheV2PreviewCaptureTimer);
+      pane.cacheV2PreviewCaptureTimer = 0;
+    }
+    pane.cacheV2PreviewCaptureSeq = Number(pane.cacheV2PreviewCaptureSeq || 0) + 1;
+    pane.cacheV2WarmReplaySeq = Number(pane.cacheV2WarmReplaySeq || 0) + 1;
+    pane.cacheV2WarmReplayActive = false;
+    pane.cacheV2WarmFrameReady = false;
+    pane.cacheV2WarmReplayReady = false;
+    pane.cacheV2WarmReplayPromise = null;
+    pane.cacheV2WarmReplaySnapshot = null;
+    pane.cacheV2ServerSnapshotPending = false;
+    pane.cacheV2ServerSnapshotStartCursor = 0n;
+    pane.cacheV2ReplayActive = false;
+    pane.cacheV2NetworkQueue = [];
+    pane.cacheV2NetworkQueueBytes = 0;
+    hideSessionTerminalPreview(pane);
+    clearSessionCacheV2PreparedPreview(pane);
+    clearSessionCacheV2OverviewPreview(pane);
     runSessionCleanups(pane);
     if (pane.socket) {
       const socket = pane.socket;
@@ -16745,10 +18129,51 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     await clearStartupServerRevisionInputLock().catch(() => {});
     ensureInitialInteractiveTab({ focus: true });
     await refreshWorkspace({ focus: true });
+    requestTerminalStoragePersistence().catch(() => {});
     await refreshServerRevision().catch(() => {});
     startServerRevisionRefresh();
     startActivityRefresh();
     refreshActivity({ silent: true }).catch(() => {});
+  };
+
+  const requestTerminalStoragePersistence = async () => {
+    if (terminalStoragePersistenceRequested || !navigator.storage) {
+      return false;
+    }
+    terminalStoragePersistenceRequested = true;
+    let persisted = false;
+    try {
+      persisted = typeof navigator.storage.persisted === "function"
+        ? await navigator.storage.persisted()
+        : false;
+      if (!persisted && typeof navigator.storage.persist === "function") {
+        persisted = await navigator.storage.persist();
+      }
+      const estimate = typeof navigator.storage.estimate === "function"
+        ? await navigator.storage.estimate()
+        : null;
+      console.info("[terminal-cache-v2] browser storage", {
+        persisted,
+        usage: Number(estimate?.usage || 0),
+        quota: Number(estimate?.quota || 0),
+      });
+    } catch (error) {
+      console.warn("[terminal-cache-v2] persistent storage request failed", {
+        error: error?.message || String(error),
+      });
+    }
+    return persisted;
+  };
+
+  const registerWebShellServiceWorker = () => {
+    if (!window.isSecureContext || !("serviceWorker" in navigator)) {
+      return;
+    }
+    navigator.serviceWorker.register("./service-worker.js", { scope: "./" }).catch((error) => {
+      console.warn("[webshell-pwa] service worker registration failed", {
+        error: error?.message || String(error),
+      });
+    });
   };
 
   async function createUserTab() {
@@ -17784,7 +19209,13 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     touchAllSessionHistoryCaches();
   }, 5 * 1000);
 
+  registerWebShellServiceWorker();
+  document.addEventListener("pointerdown", () => {
+    requestTerminalStoragePersistence().catch(() => {});
+  }, { capture: true, once: true });
+
   terminalHistoryCache.cleanupExpired().catch(() => {});
+  terminalCacheV2.cleanup().catch(() => {});
 
   bootstrap().catch((error) => {
     const message = error.message || "WebShell startup failed.";

@@ -508,13 +508,7 @@ func ensureAgentBinaryInstalled(ctx context.Context, scope agentScope, trace *pe
 
 	installCtx, installCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer installCancel()
-	installScript := strings.Join([]string{
-		"set -eu",
-		"mkdir -p " + shellScriptQuote(filepath.Dir(agentInstallPath)),
-		"tar -xpf - -C /",
-		"chmod 755 " + shellScriptQuote(agentInstallPath),
-		"printf '%s\\n' " + shellScriptQuote(agentReadyMarker),
-	}, "\n")
+	installScript := buildAgentInstallScript(manifest, agentInstallPath, agentManifestPath)
 	command := exec.CommandContext(installCtx, lightosctlPath, "exec", "-i", scope.Selector, "/bin/sh", "-lc", installScript)
 	command.Stdin = bytes.NewReader(payload)
 	output, err = command.CombinedOutput()
@@ -533,6 +527,46 @@ func ensureAgentBinaryInstalled(ctx context.Context, scope agentScope, trace *pe
 	persistentAgentCache.installed[cacheKey] = manifest
 	persistentAgentCache.Unlock()
 	return manifest, nil
+}
+
+func buildAgentInstallScript(manifest, installPath, manifestPath string) string {
+	installPath = filepath.Clean(installPath)
+	manifestPath = filepath.Clean(manifestPath)
+	installDir := filepath.Dir(installPath)
+	manifestDir := filepath.Dir(manifestPath)
+	agentArchivePath := strings.TrimPrefix(installPath, string(filepath.Separator))
+	manifestArchivePath := strings.TrimPrefix(manifestPath, string(filepath.Separator))
+	return strings.Join([]string{
+		"set -eu",
+		"agent=" + shellScriptQuote(installPath),
+		"manifest_path=" + shellScriptQuote(manifestPath),
+		"expected=" + shellScriptQuote(manifest),
+		"stage_parent=" + shellScriptQuote(installDir),
+		"agent_archive_path=" + shellScriptQuote(filepath.ToSlash(agentArchivePath)),
+		"manifest_archive_path=" + shellScriptQuote(filepath.ToSlash(manifestArchivePath)),
+		"mkdir -p \"$stage_parent\" " + shellScriptQuote(manifestDir),
+		"stage=\"$stage_parent/.lcmd-webshell-agent.install.$$\"",
+		"cleanup() { rm -rf \"$stage\" 2>/dev/null || true; }",
+		"trap cleanup 0 1 2 15",
+		"rm -rf \"$stage\"",
+		"mkdir -p \"$stage\"",
+		"tar -xpf - -C \"$stage\"",
+		"new_agent=\"$stage/$agent_archive_path\"",
+		"new_manifest=\"$stage/$manifest_archive_path\"",
+		"if [ ! -f \"$new_agent\" ] || [ ! -f \"$new_manifest\" ]; then",
+		"  printf 'agent archive is incomplete\\n' >&2",
+		"  exit 1",
+		"fi",
+		"if [ \"$(cat \"$new_manifest\")\" != \"$expected\" ]; then",
+		"  printf 'agent archive manifest mismatch\\n' >&2",
+		"  exit 1",
+		"fi",
+		"chmod 755 \"$new_agent\"",
+		"mv -f \"$new_agent\" \"$agent\"",
+		"chmod 644 \"$new_manifest\"",
+		"mv -f \"$new_manifest\" \"$manifest_path\"",
+		"printf '%s\\n' " + shellScriptQuote(agentReadyMarker),
+	}, "\n")
 }
 
 func cachedAgentRuntimeArchive() ([]byte, string, error) {
@@ -875,6 +909,12 @@ func persistentAgentAttachCommandArgs(scope agentScope, paneID string, cols, row
 		strconv.Itoa(normalizeRows(rows)),
 		"--terminal-scrollback",
 		strconv.Itoa(terminalScrollback),
+	}
+	if syncRequest.cacheProtocolVersion > 0 {
+		commandArgs = append(commandArgs, "--cache-protocol-version", strconv.Itoa(syncRequest.cacheProtocolVersion))
+	}
+	if syncRequest.workspaceGeneration != "" {
+		commandArgs = append(commandArgs, "--workspace-generation", syncRequest.workspaceGeneration)
 	}
 	if syncRequest.generation != "" {
 		commandArgs = append(commandArgs, "--history-generation", syncRequest.generation)

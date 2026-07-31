@@ -1,8 +1,12 @@
 package main
 
 import (
+	"archive/tar"
+	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -119,6 +123,67 @@ func TestEnsureAgentBinaryInstalledVerifiesCacheHit(t *testing.T) {
 	if strings.Contains(block, staleReturn) {
 		t.Fatal("ensureAgentBinaryInstalled must not return before verifying cached installs")
 	}
+	if !strings.Contains(block, "buildAgentInstallScript(manifest, agentInstallPath, agentManifestPath)") {
+		t.Fatal("ensureAgentBinaryInstalled must stage and atomically replace an existing agent")
+	}
+	if strings.Contains(block, "tar -xpf - -C /") {
+		t.Fatal("ensureAgentBinaryInstalled must not extract directly over a running agent binary")
+	}
+}
+
+func TestAgentInstallScriptReplacesExistingBinary(t *testing.T) {
+	root := t.TempDir()
+	installPath := filepath.Join(root, "usr", "local", "bin", "lcmd-webshell-agent")
+	manifestPath := filepath.Join(root, "usr", "local", "bin", ".lcmd-webshell-agent.manifest")
+	if err := os.MkdirAll(filepath.Dir(installPath), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(installPath, []byte("old-agent"), 0o755); err != nil {
+		t.Fatalf("WriteFile(old agent) error = %v", err)
+	}
+	if err := os.WriteFile(manifestPath, []byte("old-manifest"), 0o644); err != nil {
+		t.Fatalf("WriteFile(old manifest) error = %v", err)
+	}
+
+	const manifest = "lcmd-webshell-agent-v7\tnew-hash"
+	var payload bytes.Buffer
+	writer := tar.NewWriter(&payload)
+	if err := writeAgentTarFile(writer, strings.TrimPrefix(installPath, "/"), []byte("new-agent"), 0o755); err != nil {
+		t.Fatalf("writeAgentTarFile(agent) error = %v", err)
+	}
+	if err := writeAgentTarFile(writer, strings.TrimPrefix(manifestPath, "/"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("writeAgentTarFile(manifest) error = %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("tar.Close() error = %v", err)
+	}
+
+	command := exec.Command("/bin/sh", "-lc", buildAgentInstallScript(manifest, installPath, manifestPath))
+	command.Stdin = bytes.NewReader(payload.Bytes())
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("agent install script failed: %v\n%s", err, output)
+	}
+	if got := strings.TrimSpace(string(output)); got != agentReadyMarker {
+		t.Fatalf("install output = %q, want %q", got, agentReadyMarker)
+	}
+	if data, err := os.ReadFile(installPath); err != nil || string(data) != "new-agent" {
+		t.Fatalf("installed agent = %q, %v; want new-agent", data, err)
+	}
+	if data, err := os.ReadFile(manifestPath); err != nil || string(data) != manifest {
+		t.Fatalf("installed manifest = %q, %v; want %q", data, err, manifest)
+	}
+	info, err := os.Stat(installPath)
+	if err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("installed agent mode = %v, %v; want 0755", info, err)
+	}
+	stagingDirs, err := filepath.Glob(filepath.Join(filepath.Dir(installPath), ".lcmd-webshell-agent.install.*"))
+	if err != nil {
+		t.Fatalf("Glob(staging dirs) error = %v", err)
+	}
+	if len(stagingDirs) != 0 {
+		t.Fatalf("staging directories were not cleaned up: %v", stagingDirs)
+	}
 }
 
 func TestStartPersistentAgentChecksExecutableBeforeReadyMarker(t *testing.T) {
@@ -190,14 +255,18 @@ func TestPersistentAgentNoticeIsConsumedOnce(t *testing.T) {
 func TestPersistentAgentAttachCommandArgsIncludeHistoryRange(t *testing.T) {
 	scope := normalizeAgentScope("demo@owner", "account-a")
 	args := persistentAgentAttachCommandArgs(scope, "pane-2", 132, 43, 22000, historySyncRequest{
-		generation:    "generation-one",
-		localBase:     12,
-		localEnd:      34,
-		hasRange:      true,
-		forceSnapshot: true,
+		cacheProtocolVersion: terminalCacheProtocolVersion,
+		workspaceGeneration:  "workspace-one",
+		generation:           "generation-one",
+		localBase:            12,
+		localEnd:             34,
+		hasRange:             true,
+		forceSnapshot:        true,
 	})
 	joined := strings.Join(args, "\x00")
 	for _, want := range []string{
+		"--cache-protocol-version\x002",
+		"--workspace-generation\x00workspace-one",
 		"--history-generation\x00generation-one",
 		"--local-base-cursor\x0012",
 		"--local-end-cursor\x0034",

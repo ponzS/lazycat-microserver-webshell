@@ -4,6 +4,14 @@ buildscript: |
   CONTENT_DIR="./dist/content"
   rm -rf "$CONTENT_DIR"
   mkdir -p "$CONTENT_DIR/runtime"
+  LPK_VERSION="$(awk '/^version:[[:space:]]*/ { print $2; exit }' package.yml)"
+  case "$LPK_VERSION" in
+    ""|*[!A-Za-z0-9._+-]*)
+      printf 'invalid package.yml version: %s\n' "$LPK_VERSION" >&2
+      exit 1
+      ;;
+  esac
+  printf '%s\n' "$LPK_VERSION" > "$CONTENT_DIR/.lpk-version"
   {
     printf 'LIGHTOS_REQUIRE_COOKIE_AUTH=%s\n' "${LIGHTOS_REQUIRE_COOKIE_AUTH:-true}"
     if [ -n "${LIGHTOS_ADMIN_INTERNAL_BASE_URL:-}" ]; then
