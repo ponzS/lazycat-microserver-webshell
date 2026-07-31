@@ -127,7 +127,7 @@ func TestVersionedStaticFileServerRequiresExactVersion(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "main.js"), []byte("console.log('versioned');"), 0o600); err != nil {
 		t.Fatalf("WriteFile(main.js) error = %v", err)
 	}
-	handler := versionedStaticFileServer(root, "1.2.3")
+	handler := versionedStaticFileServer(root, func() string { return "1.2.3" })
 
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/assets/1.2.3/main.js", nil))
@@ -150,6 +150,39 @@ func TestVersionedStaticFileServerRequiresExactVersion(t *testing.T) {
 	handler.ServeHTTP(traversal, traversalRequest)
 	if traversal.Code != http.StatusNotFound {
 		t.Fatalf("traversal status = %d, want 404", traversal.Code)
+	}
+}
+
+func TestVersionedStaticFileServerTracksLPKVersionWithoutRestart(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.js"), []byte("console.log('versioned');"), 0o600); err != nil {
+		t.Fatalf("WriteFile(main.js) error = %v", err)
+	}
+	versionFile := filepath.Join(root, ".lpk-version")
+	if err := os.WriteFile(versionFile, []byte("1.0.6\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(.lpk-version) error = %v", err)
+	}
+	server := &pluginServer{rootDir: root, assetVersion: "1.0.6"}
+	handler := versionedStaticFileServer(root, server.currentAssetVersion)
+
+	before := httptest.NewRecorder()
+	handler.ServeHTTP(before, httptest.NewRequest(http.MethodGet, "/assets/1.0.6/main.js", nil))
+	if before.Code != http.StatusOK {
+		t.Fatalf("initial asset status = %d, want 200", before.Code)
+	}
+
+	if err := os.WriteFile(versionFile, []byte("1.0.7\n"), 0o600); err != nil {
+		t.Fatalf("update .lpk-version error = %v", err)
+	}
+	oldVersion := httptest.NewRecorder()
+	handler.ServeHTTP(oldVersion, httptest.NewRequest(http.MethodGet, "/assets/1.0.6/main.js", nil))
+	if oldVersion.Code != http.StatusNotFound {
+		t.Fatalf("old asset status after LPK update = %d, want 404", oldVersion.Code)
+	}
+	newVersion := httptest.NewRecorder()
+	handler.ServeHTTP(newVersion, httptest.NewRequest(http.MethodGet, "/assets/1.0.7/main.js", nil))
+	if newVersion.Code != http.StatusOK {
+		t.Fatalf("new asset status after LPK update = %d, want 200", newVersion.Code)
 	}
 }
 
@@ -205,6 +238,55 @@ func TestServiceWorkerIsServedAtRootScope(t *testing.T) {
 	}
 	if body := recorder.Body.String(); !strings.Contains(body, `"3.4.5"`) || !strings.Contains(body, `"/assets/3.4.5/"`) {
 		t.Fatalf("service worker version injection failed: %s", body)
+	}
+}
+
+func TestDynamicAssetResponsesTrackLPKVersionWithoutRestart(t *testing.T) {
+	root := t.TempDir()
+	staticDir := filepath.Join(root, "runtime", "static")
+	if err := os.MkdirAll(staticDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	index := `<script src="__LCMD_ASSET_BASE__main.js"></script>`
+	if err := os.WriteFile(filepath.Join(staticDir, "index.html"), []byte(index), 0o600); err != nil {
+		t.Fatalf("WriteFile(index.html) error = %v", err)
+	}
+	workerSource := `const version = "__LCMD_ASSET_VERSION__"; const base = "__LCMD_ASSET_BASE__";`
+	if err := os.WriteFile(filepath.Join(staticDir, "service-worker.js"), []byte(workerSource), 0o600); err != nil {
+		t.Fatalf("WriteFile(service-worker.js) error = %v", err)
+	}
+	versionFile := filepath.Join(root, ".lpk-version")
+	if err := os.WriteFile(versionFile, []byte("1.0.6\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(.lpk-version) error = %v", err)
+	}
+	server := &pluginServer{rootDir: root, assetVersion: "1.0.6", serverRevision: "process-one"}
+	if revision := server.currentServerRevision(); revision != "process-one:assets=1.0.6" {
+		t.Fatalf("initial server revision = %q, want process-one:assets=1.0.6", revision)
+	}
+
+	if err := os.WriteFile(versionFile, []byte("1.0.7\n"), 0o600); err != nil {
+		t.Fatalf("update .lpk-version error = %v", err)
+	}
+	indexRecorder := httptest.NewRecorder()
+	server.handleIndex(indexRecorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if body := indexRecorder.Body.String(); !strings.Contains(body, `./assets/1.0.7/main.js`) {
+		t.Fatalf("index did not use updated LPK version: %s", body)
+	}
+
+	workerRecorder := httptest.NewRecorder()
+	server.handleServiceWorker(workerRecorder, httptest.NewRequest(http.MethodGet, "/service-worker.js", nil))
+	if body := workerRecorder.Body.String(); !strings.Contains(body, `"1.0.7"`) || !strings.Contains(body, `"/assets/1.0.7/"`) {
+		t.Fatalf("service worker did not use updated LPK version: %s", body)
+	}
+
+	revisionRecorder := httptest.NewRecorder()
+	server.handleServerRevision(revisionRecorder, httptest.NewRequest(http.MethodGet, "/api/server-revision", nil))
+	var info serverRevisionInfo
+	if err := json.Unmarshal(revisionRecorder.Body.Bytes(), &info); err != nil {
+		t.Fatalf("unmarshal server revision response: %v", err)
+	}
+	if info.ServerRevision != "process-one:assets=1.0.7" {
+		t.Fatalf("server revision = %q, want process-one:assets=1.0.7", info.ServerRevision)
 	}
 }
 

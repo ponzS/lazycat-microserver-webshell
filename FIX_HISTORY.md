@@ -277,6 +277,42 @@ git diff --check
 - 验证结果：`node --check` 通过 `main.js`、`service-worker.js` 和 `terminal_cache_v2.js`；Node cache-v2 行为测试 8/8、完整 `go test ./...`、`git diff --check` 和 `lzc-cli project release` 均通过。已生成 `cloud.lazycat.webshell.lcmd-v1.0.5.lpk`，包内 `.lpk-version`、首批 warm frame、总览缩略图身份校验、32 路读取 batch metadata 和测试文件排除均已核对，SHA-256 为 `f0195ecdc86bcf6e1bb1f7557b527cfc133e06d9f97b5a58baaa787f13a0eb78`。当前环境没有页面级浏览器运行时，现场仍需验证第一个 tab 不再先停留黑屏、未打开 tab 的总览直接出现，并确认总览不会跨完整身份显示旧图。
 - 禁止复现：不得重新把第一次 canvas render 推迟到全部本地 chunk 完成；不得让 `cacheV2WarmFrameReady` 进入输入门禁或冒充 manifest end；不得在总览中无条件复制空 live canvas；不得按 pane ID、最近记录或缺失账号/workspace/tab/history 身份的 key 读取缩略图；总览 preview 不得重新进入终端启动显示链。
 
+### LCMD-20260731-01：历史裁剪后 canvas 只显示底部内容，resize 才恢复
+
+- 日期：2026-07-31
+- 来源：`1.0.5` 现场复验；页面重载约 10% 概率出现终端上半部分纯黑且仍可滚动，继续输出时部分已存在历史从画面消失，调整窗口尺寸后无需重新拉取即可恢复受行数限制的完整历史
+- 影响模块：Ghostty Screen/WASM scrollback ABI、WebShell 定制 Ghostty viewport 锚点、Cache API warm replay 批次刷新和 pane canvas 呈现状态
+- 错误现象：缓存字节已经进入 Ghostty/WASM，但历史达到容量并裁剪旧页时，canvas 可能只在底部绘制最新一段内容，上方留下可滚动的黑区；刷新仍可能保持错误画面，只有 resize 触发整帧重绘后恢复。大量 warm replay 时首批之后的 chunk 也可能一直积压到最终 flush，削弱渐进显示并放大错误窗口。
+- 根因：前端仅以 `getScrollbackLength()` 的差值判断新增历史；达到逻辑或物理容量后，新行进入历史与旧行裁剪同时发生，长度保持不变，viewport 因而没有随历史前进。Ghostty 已请求的 full render 又会被 replay 写入后的 rAF 取消逻辑清除。WebShell 只在首个可见 batch 和 manifest end 强制 flush/render，且 pane current 判断只绑定 fit/replay generation，没有绑定实际终端内容代际，旧 canvas 可以在内容继续变化后仍被视为 current。
+- 实施方案：Ghostty `Screen` 增加可回绕的 `scrollback_generation`，普通屏幕每有一行进入历史即递增，并通过 C/WASM ABI 暴露；JS 使用无符号 generation 差值维护历史 viewport，generation 前进时要求 full redraw。容器 cache-v2 warm replay 在每个 32-chunk 有序批次末尾都强制 flush 并同步 full render，首个有内容批次仍单独标记 warm frame。pane 增加 terminal/pending/presented content generation，只有当前内容已真实绘制才允许 presentation 判定为 current；取消旧 rAF 时保留已有 full-render 意图，同步 full render 完成后再消费该意图。LPK version 提升到 `1.0.6`。
+- Guard：Ghostty `Scrollback Viewport Stability` 测试覆盖可见 scrollback 长度保持不变时的历史锚点，以及活动屏幕删除行不得推进 generation；Ghostty `test-lib-vt` 覆盖 `Screen` 的普通滚屏、区域滚屏和 clear-to-history 计数。`TestRuntimeContainerCacheV2AndPWAContract` 固定每个 `batchEnd` 都 flush/render；`TestRuntimeTerminalCanvasResidueGuard` 固定 WASM generation 导出、定制 bundle 的无符号 generation 差值/full redraw、pane content generation 和 full-render 取消保留逻辑。
+- 验证结果：Ghostty `prettier --check`、Biome、TypeScript、380 个 Bun 测试和正式 build 通过；`zig build test-lib-vt -Dtarget=x86_64-linux-gnu.2.28` 与 wasm32 ReleaseSmall 构建通过，WASM 导出表已确认包含 `ghostty_terminal_get_scrollback_generation`。WebShell 的 Node cache-v2 行为测试 8/8、相关 JavaScript 语法检查、完整 `go test ./...`、`git diff --check` 和 `lzc-cli project release` 均通过。已生成 `cloud.lazycat.webshell.lcmd-v1.0.6.lpk`，包内 `.lpk-version`、generation WASM 导出、逐 batch render 和 content generation 已核对，SHA-256 为 `b6b9608c53664faf161df32cc3293442be0bd20035e9358836d4cff69020f49c`。真实浏览器仍需复验长历史重载、持续输出、滚动停留和 resize 前后画面一致性。
+- 禁止复现：不得再用保留历史长度代替历史前进量；达到 scrollback 上限后 generation 仍必须递增。不得在取消 replay rAF 时丢弃已请求的 full render；不得只渲染 warm replay 的首批和最终批次；不得在 presented content generation 落后时把 pane 视为 current。resize 只能作为恢复验证，不得成为正常渲染依赖。
+
+### LCMD-20260731-02：LPK 热更新后 Provider 继续发布旧 JS/WASM
+
+- 日期：2026-07-31
+- 来源：`1.0.6` 现场复验仍出现 `LCMD-20260731-01`，用户怀疑 WASM 未更新；包内和工作区 WASM 均确认包含 `ghostty_terminal_get_scrollback_generation`
+- 影响模块：Provider 版本化静态路由、首页与 Service Worker 注入、server revision 轮询、Ghostty WASM 初始化兼容性
+- 错误现象：LPK 中 `ghostty-vt.wasm` 已是新文件，但升级后浏览器仍可能执行旧 `main.js`、旧 `ghostty-web.js` 和旧 WASM，继续出现历史只渲染底部、resize 后恢复；清理浏览器缓存后才可能切到新文件。
+- 根因：Provider 在进程启动时只计算一次 `assetVersion` 和 `serverRevision`。LPK 热更新若没有重启 Provider，首页和 Service Worker 仍注入 `/assets/<旧版本>/`，静态 handler 也只接受旧版本 URL；该 URL 带一年 `immutable`，浏览器因此持续复用旧资源。固定 `serverRevision` 又使现有轮询无法发现 LPK 文件已经切换。Ghostty JS 对 generation ABI 缺失还会静默回退到 scrollback 长度差，使现场看不到明确的版本不兼容错误。
+- 实施方案：Provider 每次请求都优先读取当前 `.lpk-version`/`package.yml`；首页、Service Worker 和 `/assets/` handler 使用同一次请求解析出的当前版本，版本切换后旧 asset URL 立即 404，新 URL 继续 immutable。对外 server revision 在稳定进程 revision 后拼入当前 asset version，workspace、activity 和 revision observation 全部使用动态值；前端也直接比较前后 revision，不能持久化 revision 状态的 target 同样能提示刷新。Ghostty 初始化强制要求 `ghostty_terminal_get_scrollback_generation`，缺失时抛出明确错误，并移除长度差 fallback。LPK version 提升到 `1.0.7`。
+- Guard：`TestVersionedStaticFileServerTracksLPKVersionWithoutRestart` 模拟同一 handler 运行期间改写 `.lpk-version`，固定旧 URL 404/新 URL 200；`TestDynamicAssetResponsesTrackLPKVersionWithoutRestart` 固定首页、Service Worker 和 server revision 同步切换；`TestRuntimeTerminalCanvasResidueGuard` 固定 runtime WASM ABI 硬校验、禁止长度差 fallback，并要求前端主动比较 revision。Ghostty `Ghostty WASM compatibility` 测试覆盖缺失 generation 导出时必须失败。
+- 验证结果：`go test ./...`、Node cache-v2 8/8、运行时 JavaScript 语法检查、Ghostty Prettier/Biome/TypeScript、两个仓库的 `git diff --check` 和 `lzc-cli project release` 均通过；当前环境没有 Bun，因此新增 Ghostty Bun 单测未单独执行，但同一兼容性分支已通过运行时 bundle 的 Node 构造测试。已生成 `cloud.lazycat.webshell.lcmd-v1.0.7.lpk`，SHA-256 为 `54be66f9c5d91cc4c78432f04d6e45207a14ba0d9dd10921ffcd6bc482715e8c`；包内 `.lpk-version` 为 `1.0.7`，WASM SHA-256 与工作区一致为 `04c1a6f1ae963c4665886073d275d373d1b1f3b81bf71952b4f4ff77c537129a`，导出表包含 generation API，JS bundle 包含硬校验、动态 revision 比较和无 fallback generation 逻辑。由于旧 `1.0.6` Provider 本身没有动态版本逻辑，如果平台升级 LPK 时不自动重启 Provider，从 `1.0.6` 升到 `1.0.7` 需要让 Provider 至少重启一次；新 Provider 生效后，后续纯前端资源版本切换无需依赖清理浏览器缓存。
+- 禁止复现：不得在 Provider 启动时冻结对外 asset version；不得让旧版本 asset URL 在 `.lpk-version` 变化后继续返回新文件；不得只修改 Service Worker 而遗漏首页、静态 handler 和 server revision；不得在 generation ABI 缺失时退回 scrollback 长度差并继续运行。
+
+### LCMD-20260731-03：普通 PTY 输出发生整屏位移时只重画底部脏行
+
+- 日期：2026-07-31
+- 来源：`1.0.7` 现场复验；多次刷新可高概率复现终端上半部分为可滚动黑区，且不只发生于初始化，Agent 持续输出内容时也会出现；调整窗口尺寸后无需重新获取字节即可恢复完整画面
+- 影响模块：Ghostty Web canvas render 调度、WebShell 缓存回放、WebSocket PTY 批量输出和即时错误输出
+- 错误现象：终端模型中仍保留受行数限制的历史内容，但 canvas 偶发只显示底部最新一段，上方为纯黑且仍可滚动；继续输出时已有画面也可能消失。resize 强制整帧绘制后内容立即恢复，说明不是 Cache API、IndexedDB、WASM 数据丢失或单纯首次 fit 失败。
+- 根因：`scrollback_generation` 只能识别有新行进入历史，不能完整表达活动屏幕行删除、插入、滚动区域滚动及部分控制序列造成的多行像素位移。Ghostty renderer 的局部 dirty row 范围在这些组合状态下可能只覆盖底部新行；旧区域已被清除或发生逻辑位移，却没有被重新绘制，因此留下黑区。此前只在 generation 前进、回放批次结束或 resize 时要求 full render，普通 Agent 输出仍可能走不完整的局部重绘。
+- 实施方案：所有进入 Ghostty 的 PTY 输出均在 write 后合并请求下一动画帧 full render；Ghostty Web 的 `writeInternal` 本身无条件设置 full-render 意图，WebShell 的队列批量输出与即时输出路径再显式固定该契约。缓存 replay 取消待执行 rAF 时保留 full-render 标记，并继续在有序批次边界同步整帧绘制。多个 write 在同一动画帧内只合并为一次整帧绘制，不按字节或单条 WebSocket 消息重复绘制。
+- Guard：Ghostty `active-screen line edits do not move a history viewport` 同时断言 generation 不变、历史 viewport 不移动且下一帧仍必须 full render；`TestRuntimeTerminalCanvasResidueGuard` 要求定制 bundle 的每次 write 无条件 full render，要求 WebShell 队列和即时输出路径均显式请求 full render，并禁止恢复 generation-only 的 `this.requestRender({ full: s })`。
+- 验证结果：`node --check` 通过 `runtime/static/main.js`、`runtime/static/ghostty-web.js`、`service-worker.js` 和 `terminal_cache_v2.js`；Node cache-v2 行为测试 8/8、完整 `go test ./...`、Ghostty Prettier/Biome/TypeScript 和两个仓库的 `git diff --check` 均通过。`lzc-cli project release` 已生成 `cloud.lazycat.webshell.lcmd-v1.0.8.lpk`，包内 `package.yml` 与 `.lpk-version` 均为 `1.0.8`，Ghostty write、WebShell 队列输出和即时输出的 full-render 路径均已核对；包内 WASM SHA-256 为 `04c1a6f1ae963c4665886073d275d373d1b1f3b81bf71952b4f4ff77c537129a` 且包含 generation 导出，LPK SHA-256 为 `223a2a5ca4e0c08e609667607c7a9484161c2c381ef32da97f23025992d7fa90`。当前环境没有 Bun，Ghostty Bun 单测无法执行；真实浏览器仍需复验多次刷新、长历史缓存回放和 Agent 持续输出期间不再出现黑区。
+- 禁止复现：不得再以 scrollback generation 是否变化作为 PTY 输出需要整帧绘制的唯一条件；不得让 replay 的 rAF 取消路径清除尚未消费的 full-render 意图；不得把修复退化为逐字节同步绘制。resize 只能作为结果对照，不能成为恢复终端历史画面的正常依赖。
+
 ## 新增记录模板
 
 ```md
