@@ -22,13 +22,14 @@ LightOS WebShell 的目标是为懒猫微服提供一个开箱即用的网页终
 - 使用实例内的持久 agent 管理终端工作区，刷新页面、重新打开页面或短暂断网后可重新连接到已有 tab 和 pane。
 - 服务升级后优先复用兼容的旧 agent，尽量保留正在运行的终端会话；协议不兼容时会明确提示。
 - 支持终端输出历史回放，减少重连后的上下文丢失。
-- LightOS 实例端使用 PTY 原始字节范围游标同步历史；网络重连只获取本地终端缺失的增量，页面刷新优先从按 pane 隔离的本地缓存恢复后再接续服务端输出。
+- LightOS 实例端使用 PTY 原始字节范围游标同步历史；容器页面在 workspace HTTP 响应确认账号、实例、workspace、tab 和 pane 身份后，立即从 Cache API v2 回放对应 history generation 的本地字节，首个有内容的有序读取批次即可显示不可交互的真实 Ghostty canvas，WebSocket 连接后再从本地 end cursor 接续服务端增量。
 - 支持终端活动检测、自动标签命名、忙闲状态和当前工作目录显示。
 
 ### 标签、分屏和搜索
 
 - 支持多标签页、上下/左右分屏、窗格关闭、标签重命名和标签排序。
 - 支持标签总览，可快速查看、切换、新建、关闭和拖拽排序标签。
+- 标签总览会按完整 cache-v2 身份读取未激活 pane 已提交的缩略图，因此不需要先逐个打开 tab 才能显示历史画面；缩略图不参与终端启动或同步状态。
 - 支持终端内容搜索、结果跳转、全选缓冲区、复制选区、粘贴和链接识别/复制。
 - 支持上下文菜单和键盘快捷键操作。
 
@@ -95,7 +96,9 @@ lzc-cli project deploy
 
 - 后端使用 Go 实现，Web UI 通过 `/=exec://8080` 由 LPK 启动。
 - 终端会话通过实例内 persistent agent 管理，并通过 WebSocket 转发到浏览器。
-- 实例端终端历史由 persistent agent 作为可信数据源维护，浏览器使用 IndexedDB 按 selector、pane 和 history generation 隔离缓存；`client:` PC target 继续使用完整历史回放协议。
+- 实例端终端历史由 persistent agent 作为可信数据源维护。容器浏览器使用 Cache API v2 字节 warm replay 提前显示真实 canvas，期间保持输入锁定；`client:` PC target 继续使用 IndexedDB 与原完整历史回放协议，暂不启用容器 cache-v2 warm replay。
+- HTML 入口由当前 LPK 版本生成 `/assets/<version>/` 静态资源路径，LPK 升级后旧 Service Worker 无法继续命中旧 JS/CSS/module/WASM；版本化资源可长期缓存，旧 `/static/` 仅保留兼容。
+- PWA Service Worker 只缓存当前 LPK 版本的静态 app shell，并对静态资源使用 network-first；终端 API、WebSocket 和 Cache API 虚拟记录始终绕过 Service Worker。
 - 终端渲染使用项目内随包分发的 Ghostty Web 运行时资源。
 - 本项目不使用 `tmux`，也不使用 `xterm.js`。
 

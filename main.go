@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -33,6 +34,7 @@ import (
 type pluginServer struct {
 	rootDir                string
 	fontDir                string
+	assetVersion           string
 	serverRevision         string
 	workspaces             *workspaceManager
 	adminInfoResolver      func(context.Context) (adminInfo, error)
@@ -101,6 +103,8 @@ const lightOSAdminAppID = "cloud.lazycat.lightos.entry"
 const defaultLightOSAdminInternalBaseURL = "http://127.0.0.1:18081"
 const serverRevisionInputLockTTL = 60 * time.Second
 const webshellDeviceTTL = 1500 * time.Millisecond
+const assetBasePlaceholder = "__LCMD_ASSET_BASE__"
+const assetVersionPlaceholder = "__LCMD_ASSET_VERSION__"
 
 var errInstanceForbidden = errors.New("instance is not accessible by current account")
 var errInvalidPublishCreatePayload = errors.New("invalid publish create payload")
@@ -133,6 +137,7 @@ func main() {
 	server := &pluginServer{
 		rootDir:        rootDir,
 		fontDir:        fonts.ResolveDir(rootDir),
+		assetVersion:   computeAssetVersion(rootDir),
 		serverRevision: computeServerRevision(rootDir),
 		workspaces:     newWorkspaceManager(rootDir),
 	}
@@ -155,7 +160,7 @@ func resolvePluginRoot() string {
 	return "."
 }
 
-func computeServerRevision(rootDir string) string {
+func computeContentRevision(rootDir string) string {
 	hash := sha256.New()
 	if exe, err := os.Executable(); err == nil {
 		if data, readErr := os.ReadFile(exe); readErr == nil {
@@ -188,14 +193,66 @@ func computeServerRevision(rootDir string) string {
 		_, _ = hash.Write(data)
 		_, _ = hash.Write([]byte{0})
 	}
-	contentRevision := hex.EncodeToString(hash.Sum(nil))
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func computeServerRevision(rootDir string) string {
+	contentRevision := computeContentRevision(rootDir)
 	startEpoch := strconv.FormatInt(time.Now().UnixNano(), 36)
 	return contentRevision + ":" + startEpoch + ":" + strconv.Itoa(os.Getpid())
+}
+
+func computeAssetVersion(rootDir string) string {
+	if data, err := os.ReadFile(filepath.Join(rootDir, ".lpk-version")); err == nil {
+		if version := strings.TrimSpace(string(data)); isValidAssetVersion(version) {
+			return version
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(rootDir, "package.yml")); err == nil {
+		if version := packageVersion(data); isValidAssetVersion(version) {
+			return version
+		}
+	}
+	revision := computeContentRevision(rootDir)
+	if len(revision) > 24 {
+		revision = revision[:24]
+	}
+	return "content-" + revision
+}
+
+func packageVersion(data []byte) string {
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimLeft(line, " \t") != line || !strings.HasPrefix(line, "version:") {
+			continue
+		}
+		return strings.TrimSpace(strings.TrimPrefix(line, "version:"))
+	}
+	return ""
+}
+
+func isValidAssetVersion(version string) bool {
+	if version == "" || len(version) > 128 {
+		return false
+	}
+	for _, char := range version {
+		switch {
+		case char >= 'a' && char <= 'z':
+		case char >= 'A' && char <= 'Z':
+		case char >= '0' && char <= '9':
+		case strings.ContainsRune("._+-", char):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (s *pluginServer) run(ctx context.Context) error {
 	if s.workspaces == nil {
 		s.workspaces = newWorkspaceManager(s.rootDir)
+	}
+	if s.assetVersion == "" {
+		s.assetVersion = computeAssetVersion(s.rootDir)
 	}
 
 	listener, err := net.Listen("tcp", "127.0.0.1:8080")
@@ -205,6 +262,7 @@ func (s *pluginServer) run(ctx context.Context) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
+	mux.HandleFunc("/service-worker.js", s.handleServiceWorker)
 	mux.HandleFunc("/api/instances", s.handleInstances)
 	mux.HandleFunc("/api/lightos-admin-info", s.handleLightOSAdminInfo)
 	mux.HandleFunc("/api/publish/", s.handlePublishProxy)
@@ -222,29 +280,78 @@ func (s *pluginServer) run(ctx context.Context) error {
 	mux.HandleFunc("/api/workspace/activity", s.handleWorkspaceActivity)
 	mux.HandleFunc("/api/agent/startup-error", s.handleAgentStartupError)
 	mux.HandleFunc("/ws", s.handleWebSocket)
+	mux.Handle("/assets/", versionedStaticFileServer(filepath.Join(s.rootDir, "runtime", "static"), s.assetVersion))
 	mux.Handle("/static/", http.StripPrefix("/static/", staticFileServer(filepath.Join(s.rootDir, "runtime", "static"))))
 
 	return s.serveHTTP(ctx, listener, mux)
 }
 
 func staticFileServer(root string) http.Handler {
+	return staticFileServerWithCachePolicy(root, false)
+}
+
+func staticFileServerWithCachePolicy(root string, immutable bool) http.Handler {
 	files := http.FileServer(http.Dir(root))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ext := filepath.Ext(r.URL.Path)
-		switch ext {
-		case ".html":
-			w.Header().Set("Cache-Control", "no-store")
-		case ".css", ".js", ".json", ".wasm":
-			w.Header().Set("Cache-Control", "no-cache")
+		if immutable && ext != ".html" {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			switch ext {
+			case ".html":
+				w.Header().Set("Cache-Control", "no-store")
+			case ".css", ".js", ".json", ".wasm", ".webmanifest":
+				w.Header().Set("Cache-Control", "no-cache")
+			}
 		}
 		switch ext {
 		case ".wasm":
 			w.Header().Set("Content-Type", "application/wasm")
 		case ".js":
 			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		case ".webmanifest":
+			w.Header().Set("Content-Type", "application/manifest+json; charset=utf-8")
 		}
 		files.ServeHTTP(w, r)
 	})
+}
+
+func versionedStaticFileServer(root, assetVersion string) http.Handler {
+	prefix := "/assets/" + assetVersion + "/"
+	files := http.StripPrefix(prefix, staticFileServerWithCachePolicy(root, true))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isValidAssetVersion(assetVersion) || !strings.HasPrefix(r.URL.Path, prefix) {
+			http.NotFound(w, r)
+			return
+		}
+		assetPath := strings.TrimPrefix(r.URL.Path, prefix)
+		if assetPath == "" || strings.Contains(assetPath, "\\") || path.Clean("/"+assetPath) != "/"+assetPath {
+			http.NotFound(w, r)
+			return
+		}
+		files.ServeHTTP(w, r)
+	})
+}
+
+func (s *pluginServer) handleServiceWorker(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(s.rootDir, "runtime", "static", "service-worker.js"))
+	if err != nil {
+		http.Error(w, "service worker is unavailable", http.StatusInternalServerError)
+		return
+	}
+	data = bytes.ReplaceAll(data, []byte(assetVersionPlaceholder), []byte(s.assetVersion))
+	data = bytes.ReplaceAll(data, []byte(assetBasePlaceholder), []byte(s.versionedAssetBase()))
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.Header().Set("Service-Worker-Allowed", "/")
+	if r.Method == http.MethodHead {
+		return
+	}
+	_, _ = w.Write(data)
 }
 
 func (s *pluginServer) serveHTTP(ctx context.Context, listener net.Listener, mux http.Handler) error {
@@ -270,11 +377,29 @@ func (s *pluginServer) serveHTTP(ctx context.Context, listener net.Listener, mux
 func (s *pluginServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/", "":
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		data, err := os.ReadFile(filepath.Join(s.rootDir, "runtime", "static", "index.html"))
+		if err != nil {
+			http.Error(w, "webshell index is unavailable", http.StatusInternalServerError)
+			return
+		}
+		data = bytes.ReplaceAll(data, []byte(assetBasePlaceholder), []byte("."+s.versionedAssetBase()))
 		w.Header().Set("Cache-Control", "no-store")
-		http.ServeFile(w, r, filepath.Join(s.rootDir, "runtime", "static", "index.html"))
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if r.Method == http.MethodHead {
+			return
+		}
+		_, _ = w.Write(data)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *pluginServer) versionedAssetBase() string {
+	return "/assets/" + s.assetVersion + "/"
 }
 
 func (s *pluginServer) handleInstances(w http.ResponseWriter, r *http.Request) {

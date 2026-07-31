@@ -2,9 +2,257 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
+
+func TestTerminalCacheV2Behavior(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is unavailable")
+	}
+	command := exec.Command(node, "--test", "terminal_cache_v2_test.mjs")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("terminal cache-v2 tests failed: %v\n%s", err, output)
+	}
+}
+
+func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(main.js) error = %v", err)
+	}
+	cacheData, err := os.ReadFile("runtime/static/terminal_cache_v2.js")
+	if err != nil {
+		t.Fatalf("ReadFile(terminal_cache_v2.js) error = %v", err)
+	}
+	workerData, err := os.ReadFile("runtime/static/service-worker.js")
+	if err != nil {
+		t.Fatalf("ReadFile(service-worker.js) error = %v", err)
+	}
+	indexData, err := os.ReadFile("runtime/static/index.html")
+	if err != nil {
+		t.Fatalf("ReadFile(index.html) error = %v", err)
+	}
+	styleData, err := os.ReadFile("runtime/static/style.css")
+	if err != nil {
+		t.Fatalf("ReadFile(style.css) error = %v", err)
+	}
+	mainSource := string(mainData)
+	for _, want := range []string{
+		`import { createTerminalCacheV2 } from "./terminal_cache_v2.js";`,
+		`isClientInstanceName(session.name)`,
+		`sessionHasTerminalCacheV2Protocol`,
+		`sessionUsesLegacyHistoryCache = (session) => Boolean(session && isClientInstanceName(session.name))`,
+		`socketUrl.searchParams.set("cache_protocol_version"`,
+		`socketUrl.searchParams.set("workspace_generation"`,
+		`validateSessionCacheV2ReplayIdentity`,
+		`startSessionCacheV2WarmReplay`,
+		`session.cacheV2WarmFrameReady`,
+		`session.cacheV2WarmReplayReady`,
+		`[terminal-cache-v2] warm canvas first frame`,
+		`[terminal-cache-v2] warm canvas ready`,
+		`[terminal-cache-v2] warm canvas visible`,
+		`prepareTabOverviewCachePreviews`,
+		`sessionCacheV2OverviewPreviewMatches`,
+		`[terminal-cache-v2] overview preview load failed`,
+		`applySessionCacheV2ServerSnapshot`,
+		`session.cacheV2ServerSnapshotPending`,
+		`beginSessionCacheV2Replay`,
+		`session.cacheV2NetworkQueue.push(data);`,
+		`(!session.replayComplete && !sessionHasCacheV2WarmFrame(session))`,
+		`session.renderReady`,
+		`session.shellEl?.dataset.previewReady !== "true"`,
+		`requestTerminalStoragePersistence`,
+		`[terminal-cache-v2] recovery metrics`,
+		`workspaceReadyMs`,
+		`localReplayBytes`,
+		`serverReplayBytes`,
+		`previewPreparedMs`,
+		`previewLayoutMatch`,
+		`previewMissReason`,
+		`navigator.serviceWorker.register("./service-worker.js"`,
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime cache-v2 guard missing %q", want)
+		}
+	}
+	cacheSource := string(cacheData)
+	chunkPut := strings.Index(cacheSource, "await store.put(chunkURL(identity, merged.startCursor, merged.endCursor), response);")
+	manifestPut := strings.Index(cacheSource[chunkPut+1:], "await putManifest(store, manifest);")
+	if chunkPut < 0 || manifestPut < 0 {
+		t.Fatal("cache-v2 must write immutable bytes before committing its manifest")
+	}
+	for _, want := range []string{
+		`cacheScopeID: requiredText`,
+		`workspaceGeneration: requiredText`,
+		`tabID: requiredText`,
+		`paneID: requiredText`,
+		`historyGeneration: source.historyGeneration`,
+		`checkpointCursor !== endCursor`,
+		`const defaultReadConcurrency = 32;`,
+		`const loaded = await Promise.all(batch.map(async (chunk) => {`,
+		`batchEnd: batchIndex === loaded.length - 1`,
+	} {
+		if !strings.Contains(cacheSource, want) {
+			t.Fatalf("cache-v2 isolation guard missing %q", want)
+		}
+	}
+	workerSource := string(workerData)
+	for _, want := range []string{
+		`url.pathname.includes("/api/")`,
+		`url.pathname.endsWith("/ws")`,
+		`url.pathname.includes("/__terminal_cache__/")`,
+		`request.mode === "navigate"`,
+		`url.pathname.includes("/assets/")`,
+		`const assetVersion = "__LCMD_ASSET_VERSION__";`,
+		`const assetBase = "__LCMD_ASSET_BASE__";`,
+		`fetch(request, { cache: "no-cache" })`,
+	} {
+		if !strings.Contains(workerSource, want) {
+			t.Fatalf("service worker network-only guard missing %q", want)
+		}
+	}
+	if !strings.Contains(string(indexData), `rel="manifest" href="__LCMD_ASSET_BASE__manifest.webmanifest"`) {
+		t.Fatal("PWA manifest link is missing")
+	}
+	if !strings.Contains(string(indexData), `rel="apple-touch-icon" href="__LCMD_ASSET_BASE__icon-192.png"`) {
+		t.Fatal("PWA Apple touch icon link is missing")
+	}
+	if strings.Contains(string(indexData), `./static/`) {
+		t.Fatal("runtime index must not reference the legacy unversioned static path")
+	}
+	manifestData, err := os.ReadFile("runtime/static/manifest.webmanifest")
+	if err != nil {
+		t.Fatalf("ReadFile(manifest.webmanifest) error = %v", err)
+	}
+	for _, want := range []string{`"icon-192.png"`, `"icon-512.png"`, `"display": "standalone"`} {
+		if !strings.Contains(string(manifestData), want) {
+			t.Fatalf("PWA manifest guard missing %q", want)
+		}
+	}
+	for _, path := range []string{"runtime/static/icon-192.png", "runtime/static/icon-512.png"} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("PWA icon %s is unavailable: %v", path, err)
+		}
+	}
+	if !strings.Contains(string(styleData), ".terminal-cache-preview") {
+		t.Fatal("terminal cache preview layer CSS is missing")
+	}
+	historyRangeIndex := strings.Index(mainSource, `const historyConnectRange = sessionHistoryRangeForConnect(session);`)
+	warmStartIndex := strings.Index(mainSource, `const cacheV2WarmReplayStarted = cacheV2WarmSnapshot`)
+	socketStartIndex := strings.Index(mainSource, `const currentSocket = new WebSocket(socketUrl.toString());`)
+	if historyRangeIndex < 0 || warmStartIndex < 0 || socketStartIndex < 0 || historyRangeIndex > warmStartIndex || warmStartIndex > socketStartIndex {
+		t.Fatal("cache-v2 byte replay must start from the validated local range before WebSocket construction")
+	}
+	cacheV2ReplayBlock := sourceBetween(t, mainSource,
+		`} else if (historyConnectRange.source === "cache-v2") {`,
+		"} else {\n                    rejectHistorySync(\"unknown local history source\");")
+	for _, want := range []string{
+		`if (sessionCacheV2WarmReplayMatchesSnapshot(session, snapshot)) {`,
+		`session.replayVerified = "identified";`,
+		`} else {`,
+		`beginSessionCacheV2Replay(session, snapshot, deltaFromCursor, currentSocket, rejectHistorySync);`,
+	} {
+		if !strings.Contains(cacheV2ReplayBlock, want) {
+			t.Fatalf("cache-v2 warm delta reuse guard missing %q", want)
+		}
+	}
+	snapshotReplayBlock := sourceBetween(t, mainSource,
+		`if (syncMode === "snapshot") {`,
+		`} else {
+                  if (!historyConnectRange`)
+	for _, want := range []string{
+		`const keepWarmCanvas = Boolean(`,
+		`sessionCacheV2WarmReplayMatchesSnapshot(session, snapshot)`,
+		`snapshot.historyGeneration === historyGeneration`,
+		`snapshot.endCursor <= serverEndCursor`,
+		`session.cacheV2ServerSnapshotPending = true;`,
+	} {
+		if !strings.Contains(snapshotReplayBlock, want) {
+			t.Fatalf("snapshot warm canvas guard missing %q", want)
+		}
+	}
+	completeReplayBlock := sourceBetween(t, mainSource,
+		`case "history-replay-complete":`,
+		`case "agent-preparing":`)
+	if !strings.Contains(completeReplayBlock, `applySessionCacheV2ServerSnapshot(session, currentSocket, rejectHistorySync);`) {
+		t.Fatal("completed server snapshot must atomically replace the already visible warm cache canvas")
+	}
+	warmReplayBlock := sourceBetween(t, mainSource,
+		"const startSessionCacheV2WarmReplay = (session, snapshot) => {",
+		"const applySessionCacheV2ServerSnapshot = (session, currentSocket, rejectHistorySync) => {")
+	for _, want := range []string{
+		`terminalCacheV2.readChunks(snapshot`,
+		`batchEnd`,
+		`clearSessionOutputFlushSchedule(session);`,
+		`if (batchEnd && !session.cacheV2WarmFrameReady) {`,
+		`terminalHasVisibleContent(session)`,
+		`session.cacheV2WarmFrameReady = true;`,
+		`markSessionCacheV2RecoveryMetric(session, "localFirstFrameAt");`,
+		`flushSessionOutput(session, { force: true });`,
+		`session.cacheV2WarmReplayReady = true;`,
+		`renderPaneFullNow(session);`,
+		`if (!session.cacheV2ServerSnapshotPending) {`,
+		`drainSessionCacheV2NetworkQueue(session);`,
+	} {
+		if !strings.Contains(warmReplayBlock, want) {
+			t.Fatalf("warm byte replay guard missing %q", want)
+		}
+	}
+	renderReadyBlock := sourceBetween(t, mainSource,
+		"const markPaneRenderedIfMeasurable = (session) => {",
+		"const requestPaneFullRender = (session) => {")
+	for _, want := range []string{
+		`session.replayCompletionPending && !sessionHasCacheV2WarmFrame(session)`,
+		`!session.replayComplete && !sessionHasCacheV2WarmFrame(session)`,
+	} {
+		if !strings.Contains(renderReadyBlock, want) {
+			t.Fatalf("warm canvas presentation guard missing %q", want)
+		}
+	}
+	inputReadyBlock := sourceBetween(t, mainSource,
+		"const isSessionInputReady = (session) => (",
+		"const sendSessionInputChunk = (session, data, { generated = false } = {}) => {")
+	if !strings.Contains(inputReadyBlock, `session?.replayComplete`) ||
+		strings.Contains(inputReadyBlock, `cacheV2WarmReplayReady`) ||
+		strings.Contains(inputReadyBlock, `cacheV2WarmFrameReady`) {
+		t.Fatal("warm canvas must not unlock terminal input before network replay completes")
+	}
+	prepareCacheBlock := sourceBetween(t, mainSource,
+		"const prepareSessionHistoryCache = async (session) => {",
+		"const flushSessionHistoryCacheWrites = (session) => {")
+	if strings.Contains(prepareCacheBlock, `prepareSessionCacheV2Preview(session, snapshot)`) {
+		t.Fatal("container startup must replay cached bytes instead of waiting on a visual preview")
+	}
+	overviewBlock := sourceBetween(t, mainSource,
+		"const preparePaneTabOverviewPreview = (pane) => {",
+		"const drawTabOverviewFallback = (ctx, x, y, width, height, colors) => {")
+	for _, want := range []string{
+		`const snapshot = await prepareSessionHistoryCache(pane);`,
+		`terminalCacheV2.identityMatches(expected, snapshot, { requireHistory: true })`,
+		`const preview = await terminalCacheV2.loadPreview(snapshot);`,
+		`pane.historyCacheSnapshot !== snapshot`,
+		`sessionCacheV2OverviewPreviewMatches(pane, prepared)`,
+	} {
+		if !strings.Contains(overviewBlock, want) {
+			t.Fatalf("tab overview cache preview guard missing %q", want)
+		}
+	}
+	drawOverviewBlock := sourceBetween(t, mainSource,
+		"const drawPaneOverviewPreview = (ctx, pane, x, y, width, height, colors) => {",
+		"const drawLayoutOverviewPreview = (ctx, tab, node, x, y, width, height, colors) => {")
+	for _, want := range []string{
+		`pane?.renderReady && pane?.hasPresentedFrame ? liveCanvas : cachedPreview`,
+		`sessionCacheV2OverviewPreviewMatches(pane, pane?.cacheV2OverviewPreview)`,
+	} {
+		if !strings.Contains(drawOverviewBlock, want) {
+			t.Fatalf("tab overview must use an identity-checked cached preview for unopened tabs: missing %q", want)
+		}
+	}
+}
 
 func sourceBetween(t *testing.T, source, start, end string) string {
 	t.Helper()
@@ -81,11 +329,11 @@ func TestRuntimeIOSHostAlwaysHidesCloseButton(t *testing.T) {
 		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
 	}
 	index := string(indexData)
-	hostScript := `<script src="./static/ios_terminal_host.js"></script>`
+	hostScript := `<script src="__LCMD_ASSET_BASE__ios_terminal_host.js"></script>`
 	if !strings.Contains(index, hostScript) {
 		t.Fatalf("runtime index missing iOS terminal host script")
 	}
-	if strings.Index(index, hostScript) > strings.Index(index, `<script type="module" src="./static/main.js"></script>`) {
+	if strings.Index(index, hostScript) > strings.Index(index, `<script type="module" src="__LCMD_ASSET_BASE__main.js"></script>`) {
 		t.Fatalf("iOS terminal host script must load before the terminal module")
 	}
 
@@ -1885,8 +2133,11 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 			t.Fatalf("runtime terminal canvas residue guard missing renderer snippet %q", want)
 		}
 	}
-	if !strings.Contains(mainSource, `await initGhostty("./static/ghostty-vt.wasm");`) {
+	if !strings.Contains(mainSource, `await initGhostty(runtimeAssetURL("./ghostty-vt.wasm"));`) {
 		t.Fatal("runtime must explicitly initialize ghostty-web with the vendored WASM resource")
+	}
+	if !strings.Contains(mainSource, `fetch(runtimeAssetURL("./themes.json"), { cache: "no-cache" })`) {
+		t.Fatal("runtime theme catalog must inherit the LPK-versioned asset path")
 	}
 }
 

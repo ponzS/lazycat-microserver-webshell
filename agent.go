@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	agentProtocolVersion = "lcmd-webshell-agent-v6"
+	agentProtocolVersion = "lcmd-webshell-agent-v7"
 
 	agentFrameBinary         = byte('B')
 	agentFrameText           = byte('T')
@@ -37,20 +37,22 @@ const (
 )
 
 type agentRequest struct {
-	Type               string                  `json:"type"`
-	Selector           string                  `json:"selector,omitempty"`
-	AccountID          string                  `json:"account_id,omitempty"`
-	Username           string                  `json:"username,omitempty"`
-	PaneID             string                  `json:"pane_id,omitempty"`
-	Cols               int                     `json:"cols,omitempty"`
-	Rows               int                     `json:"rows,omitempty"`
-	TerminalScrollback int                     `json:"terminal_scrollback,omitempty"`
-	HistoryGeneration  string                  `json:"history_generation,omitempty"`
-	LocalBaseCursor    string                  `json:"local_base_cursor,omitempty"`
-	LocalEndCursor     string                  `json:"local_end_cursor,omitempty"`
-	HistoryReplayMode  string                  `json:"history_replay_mode,omitempty"`
-	Action             *workspaceActionRequest `json:"action,omitempty"`
-	CloseIdle          bool                    `json:"close_idle,omitempty"`
+	Type                 string                  `json:"type"`
+	Selector             string                  `json:"selector,omitempty"`
+	AccountID            string                  `json:"account_id,omitempty"`
+	Username             string                  `json:"username,omitempty"`
+	PaneID               string                  `json:"pane_id,omitempty"`
+	Cols                 int                     `json:"cols,omitempty"`
+	Rows                 int                     `json:"rows,omitempty"`
+	TerminalScrollback   int                     `json:"terminal_scrollback,omitempty"`
+	HistoryGeneration    string                  `json:"history_generation,omitempty"`
+	WorkspaceGeneration  string                  `json:"workspace_generation,omitempty"`
+	CacheProtocolVersion int                     `json:"cache_protocol_version,omitempty"`
+	LocalBaseCursor      string                  `json:"local_base_cursor,omitempty"`
+	LocalEndCursor       string                  `json:"local_end_cursor,omitempty"`
+	HistoryReplayMode    string                  `json:"history_replay_mode,omitempty"`
+	Action               *workspaceActionRequest `json:"action,omitempty"`
+	CloseIdle            bool                    `json:"close_idle,omitempty"`
 }
 
 type agentResponse struct {
@@ -116,13 +118,15 @@ func runAgentCommand(args []string) error {
 		rows := fs.Int("rows", 0, "terminal rows")
 		terminalScrollback := fs.Int("terminal-scrollback", fonts.DefaultTerminalScrollback, "terminal scrollback lines")
 		historyGeneration := fs.String("history-generation", "", "terminal history generation")
+		workspaceGeneration := fs.String("workspace-generation", "", "terminal workspace generation")
+		cacheProtocolVersion := fs.Int("cache-protocol-version", 0, "terminal cache protocol version")
 		localBaseCursor := fs.String("local-base-cursor", "", "local terminal history base cursor")
 		localEndCursor := fs.String("local-end-cursor", "", "local terminal history end cursor")
 		historyReplayMode := fs.String("history-replay-mode", "", "terminal history replay mode")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		return runAgentAttachClient(*socketPath, *selector, *accountID, *paneID, *cols, *rows, *terminalScrollback, *historyGeneration, *localBaseCursor, *localEndCursor, *historyReplayMode)
+		return runAgentAttachClient(*socketPath, *selector, *accountID, *paneID, *cols, *rows, *terminalScrollback, *cacheProtocolVersion, *workspaceGeneration, *historyGeneration, *localBaseCursor, *localEndCursor, *historyReplayMode)
 	default:
 		return fmt.Errorf("unknown agent command %q", args[0])
 	}
@@ -231,15 +235,21 @@ func (d *agentDaemon) ensureWorkspaceLocked(request agentRequest) (*terminalWork
 	}
 	historyLimitBytes := historyLimitBytesForTerminalScrollback(request.TerminalScrollback)
 	if d.workspace == nil {
+		workspaceGeneration, err := newHistoryGeneration()
+		if err != nil {
+			return nil, fmt.Errorf("create workspace generation: %w", err)
+		}
 		workspace := &terminalWorkspace{
-			selector:          d.selector,
-			username:          d.username,
-			rootDir:           "/",
-			localPTY:          true,
-			historyLimitBytes: historyLimitBytes,
-			panes:             make(map[string]*terminalPane),
-			nextTabID:         1,
-			nextPaneID:        1,
+			selector:            d.selector,
+			cacheScopeID:        terminalCacheScopeID(d.accountID),
+			workspaceGeneration: workspaceGeneration,
+			username:            d.username,
+			rootDir:             "/",
+			localPTY:            true,
+			historyLimitBytes:   historyLimitBytes,
+			panes:               make(map[string]*terminalPane),
+			nextTabID:           1,
+			nextPaneID:          1,
 		}
 		if err := workspace.createTabLocked("", "", normalizeCols(request.Cols), normalizeRows(request.Rows)); err != nil {
 			return nil, err
@@ -248,6 +258,16 @@ func (d *agentDaemon) ensureWorkspaceLocked(request agentRequest) (*terminalWork
 	}
 	if d.workspace.selector == "" {
 		d.workspace.selector = d.selector
+	}
+	if d.workspace.cacheScopeID == "" && d.accountID != "" {
+		d.workspace.cacheScopeID = terminalCacheScopeID(d.accountID)
+	}
+	if d.workspace.workspaceGeneration == "" {
+		workspaceGeneration, err := newHistoryGeneration()
+		if err != nil {
+			return nil, fmt.Errorf("create workspace generation: %w", err)
+		}
+		d.workspace.workspaceGeneration = workspaceGeneration
 	}
 	if d.workspace.username == "" || strings.TrimSpace(request.Username) != "" {
 		d.workspace.username = d.username
@@ -339,17 +359,11 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 		_ = writeAgentControlFrame(conn, map[string]any{"type": "process-exit", "message": err.Error(), "exit_code": -1})
 		return
 	}
-	pane := workspace.getPane(request.PaneID)
-	if pane == nil {
-		_ = writeAgentControlFrame(conn, map[string]any{"type": "process-exit", "message": "pane not found", "exit_code": -1})
-		return
-	}
-	if request.Cols > 0 && request.Rows > 0 {
-		_ = pane.resize(request.Cols, request.Rows)
-	}
 	syncRequest := historySyncRequest{
-		generation:    strings.TrimSpace(request.HistoryGeneration),
-		forceSnapshot: strings.TrimSpace(request.HistoryReplayMode) == "snapshot",
+		generation:           strings.TrimSpace(request.HistoryGeneration),
+		workspaceGeneration:  strings.TrimSpace(request.WorkspaceGeneration),
+		cacheProtocolVersion: request.CacheProtocolVersion,
+		forceSnapshot:        strings.TrimSpace(request.HistoryReplayMode) == "snapshot",
 	}
 	base, baseErr := strconv.ParseUint(strings.TrimSpace(request.LocalBaseCursor), 10, 64)
 	end, endErr := strconv.ParseUint(strings.TrimSpace(request.LocalEndCursor), 10, 64)
@@ -357,6 +371,23 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 		syncRequest.localBase = base
 		syncRequest.localEnd = end
 		syncRequest.hasRange = true
+	}
+	pane, replayIdentity, err := workspace.paneForAttach(request.PaneID, syncRequest)
+	if err != nil {
+		if strings.Contains(err.Error(), "workspace generation") || strings.Contains(err.Error(), "cache protocol") {
+			_ = writeAgentControlFrame(conn, map[string]any{
+				"type":                   "workspace-refresh-required",
+				"selector":               workspace.selector,
+				"cache_protocol_version": terminalCacheProtocolVersion,
+				"reason":                 err.Error(),
+			})
+			return
+		}
+		_ = writeAgentControlFrame(conn, map[string]any{"type": "process-exit", "message": err.Error(), "exit_code": -1})
+		return
+	}
+	if request.Cols > 0 && request.Rows > 0 {
+		_ = pane.resize(request.Cols, request.Rows)
 	}
 	history, client, allowGeneratedInputDuringReplay, err := pane.attachClient(syncRequest)
 	if err != nil {
@@ -373,7 +404,7 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 	writerDone := make(chan struct{})
 	go func() {
 		defer close(writerDone)
-		if !writeAgentHistoryReplay(conn, workspace.selector, pane.id, history, allowGeneratedInputDuringReplay) {
+		if !writeAgentHistoryReplay(conn, replayIdentity, history, allowGeneratedInputDuringReplay) {
 			return
 		}
 		for {
@@ -453,7 +484,7 @@ func runAgentRequestClient(socketPath, encodedRequest string) error {
 	return err
 }
 
-func runAgentAttachClient(socketPath, selector, accountID, paneID string, cols, rows, terminalScrollback int, historyGeneration, localBaseCursor, localEndCursor, historyReplayMode string) error {
+func runAgentAttachClient(socketPath, selector, accountID, paneID string, cols, rows, terminalScrollback, cacheProtocolVersion int, workspaceGeneration, historyGeneration, localBaseCursor, localEndCursor, historyReplayMode string) error {
 	if strings.TrimSpace(paneID) == "" {
 		return errors.New("pane is required")
 	}
@@ -463,17 +494,19 @@ func runAgentAttachClient(socketPath, selector, accountID, paneID string, cols, 
 	}
 	defer conn.Close()
 	request := agentRequest{
-		Type:               "attach",
-		Selector:           strings.TrimSpace(selector),
-		AccountID:          strings.TrimSpace(accountID),
-		PaneID:             paneID,
-		Cols:               cols,
-		Rows:               rows,
-		TerminalScrollback: terminalScrollback,
-		HistoryGeneration:  strings.TrimSpace(historyGeneration),
-		LocalBaseCursor:    strings.TrimSpace(localBaseCursor),
-		LocalEndCursor:     strings.TrimSpace(localEndCursor),
-		HistoryReplayMode:  strings.TrimSpace(historyReplayMode),
+		Type:                 "attach",
+		Selector:             strings.TrimSpace(selector),
+		AccountID:            strings.TrimSpace(accountID),
+		PaneID:               paneID,
+		Cols:                 cols,
+		Rows:                 rows,
+		TerminalScrollback:   terminalScrollback,
+		CacheProtocolVersion: cacheProtocolVersion,
+		WorkspaceGeneration:  strings.TrimSpace(workspaceGeneration),
+		HistoryGeneration:    strings.TrimSpace(historyGeneration),
+		LocalBaseCursor:      strings.TrimSpace(localBaseCursor),
+		LocalEndCursor:       strings.TrimSpace(localEndCursor),
+		HistoryReplayMode:    strings.TrimSpace(historyReplayMode),
 	}
 	data, err := json.Marshal(request)
 	if err != nil {
@@ -497,11 +530,11 @@ func runAgentAttachClient(socketPath, selector, accountID, paneID string, cols, 
 	return <-done
 }
 
-func writeAgentHistoryReplay(w io.Writer, selector, paneID string, history paneHistorySnapshot, allowGeneratedInput bool) bool {
-	if err := writeAgentControlFrame(w, map[string]any{
+func writeAgentHistoryReplay(w io.Writer, identity terminalReplayIdentity, history paneHistorySnapshot, allowGeneratedInput bool) bool {
+	start := map[string]any{
 		"type":                  "history-replay-start",
-		"selector":              selector,
-		"pane_id":               paneID,
+		"selector":              identity.selector,
+		"pane_id":               identity.paneID,
 		"allow_generated_input": allowGeneratedInput,
 		"history_generation":    history.generation,
 		"server_base_cursor":    strconv.FormatUint(history.serverBase, 10),
@@ -509,7 +542,14 @@ func writeAgentHistoryReplay(w io.Writer, selector, paneID string, history paneH
 		"sync_mode":             history.syncMode,
 		"delta_from_cursor":     strconv.FormatUint(history.deltaFrom, 10),
 		"delta_to_cursor":       strconv.FormatUint(history.deltaTo, 10),
-	}); err != nil {
+	}
+	if identity.cacheProtocolVersion == terminalCacheProtocolVersion && identity.cacheScopeID != "" && identity.workspaceGeneration != "" && identity.tabID != "" {
+		start["cache_protocol_version"] = terminalCacheProtocolVersion
+		start["cache_scope_id"] = identity.cacheScopeID
+		start["workspace_generation"] = identity.workspaceGeneration
+		start["tab_id"] = identity.tabID
+	}
+	if err := writeAgentControlFrame(w, start); err != nil {
 		return false
 	}
 	for _, chunk := range history.chunks {
@@ -524,13 +564,19 @@ func writeAgentHistoryReplay(w io.Writer, selector, paneID string, history paneH
 			chunk = chunk[chunkSize:]
 		}
 	}
-	return writeAgentControlFrame(w, map[string]any{
+	complete := map[string]any{
 		"type":               "history-replay-complete",
-		"selector":           selector,
-		"pane_id":            paneID,
+		"selector":           identity.selector,
+		"pane_id":            identity.paneID,
 		"history_generation": history.generation,
 		"history_cursor":     strconv.FormatUint(history.deltaTo, 10),
-	}) == nil
+	}
+	if identity.cacheProtocolVersion == terminalCacheProtocolVersion && identity.workspaceGeneration != "" && identity.tabID != "" {
+		complete["cache_protocol_version"] = terminalCacheProtocolVersion
+		complete["workspace_generation"] = identity.workspaceGeneration
+		complete["tab_id"] = identity.tabID
+	}
+	return writeAgentControlFrame(w, complete) == nil
 }
 
 func writeAgentControlFrame(w io.Writer, payload any) error {

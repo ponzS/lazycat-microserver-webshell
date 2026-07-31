@@ -160,7 +160,7 @@ func TestClientTerminalWorkspaceRequestsForwardScrollback(t *testing.T) {
 }
 
 func TestClientTerminalAttachURLForwardsScrollbackAndHistoryRange(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "/ws?fg=%23ffffff&bg=%23000000&cursor=%23ff5000&history_generation=generation-one&local_base_cursor=4&local_end_cursor=9&history_replay_mode=snapshot", nil)
+	request := httptest.NewRequest(http.MethodGet, "/ws?fg=%23ffffff&bg=%23000000&cursor=%23ff5000&cache_protocol_version=2&workspace_generation=workspace-one&history_generation=generation-one&local_base_cursor=4&local_end_cursor=9&history_replay_mode=snapshot", nil)
 	ticket := clientTerminalTicket{
 		DeviceAPIURL:        "https://device.example.com/root/",
 		TerminalServiceName: "cloud.lazycat.lightos.client-terminal.client-a",
@@ -191,5 +191,22 @@ func TestClientTerminalAttachURLForwardsScrollbackAndHistoryRange(t *testing.T) 
 		if got := target.Query().Get(key); got != value {
 			t.Fatalf("query %s = %q, want %q; query=%v", key, got, value, target.Query())
 		}
+	}
+	for _, key := range []string{"cache_protocol_version", "workspace_generation"} {
+		if got := target.Query().Get(key); got != "" {
+			t.Fatalf("client attach must not forward container cache-v2 query %s=%q", key, got)
+		}
+	}
+}
+
+func TestDisableWorkspaceCacheV2(t *testing.T) {
+	state := workspaceState{
+		CacheProtocolVersion: terminalCacheProtocolVersion,
+		CacheScopeID:         "scope-one",
+		WorkspaceGeneration:  "workspace-one",
+	}
+	disableWorkspaceCacheV2(&state)
+	if state.CacheProtocolVersion != 0 || state.CacheScopeID != "" || state.WorkspaceGeneration != "" {
+		t.Fatalf("client workspace cache-v2 identity was not removed: %+v", state)
 	}
 }

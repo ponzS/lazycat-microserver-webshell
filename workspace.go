@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,8 +28,9 @@ import (
 )
 
 const (
-	defaultTerminalCols = 120
-	defaultTerminalRows = 32
+	defaultTerminalCols          = 120
+	defaultTerminalRows          = 32
+	terminalCacheProtocolVersion = 2
 
 	averageHistoryBytesPerLine = 350
 	historyChunkMaxBytes       = 32 << 10
@@ -46,12 +48,14 @@ type workspaceManager struct {
 }
 
 type terminalWorkspace struct {
-	manager           *workspaceManager
-	selector          string
-	username          string
-	rootDir           string
-	localPTY          bool
-	historyLimitBytes int
+	manager             *workspaceManager
+	selector            string
+	cacheScopeID        string
+	workspaceGeneration string
+	username            string
+	rootDir             string
+	localPTY            bool
+	historyLimitBytes   int
 
 	mu         sync.Mutex
 	tabs       []*terminalTab
@@ -152,20 +156,25 @@ type paneHistorySnapshot struct {
 }
 
 type historySyncRequest struct {
-	generation    string
-	localBase     uint64
-	localEnd      uint64
-	hasRange      bool
-	forceSnapshot bool
+	generation           string
+	workspaceGeneration  string
+	localBase            uint64
+	localEnd             uint64
+	cacheProtocolVersion int
+	hasRange             bool
+	forceSnapshot        bool
 }
 
 type workspaceState struct {
-	Selector       string     `json:"selector"`
-	ServerRevision string     `json:"server_revision,omitempty"`
-	AgentNotice    string     `json:"agent_notice,omitempty"`
-	ActiveTabID    string     `json:"active_tab_id"`
-	RecentTabIDs   []string   `json:"recent_tab_ids"`
-	Tabs           []tabState `json:"tabs"`
+	Selector             string     `json:"selector"`
+	ServerRevision       string     `json:"server_revision,omitempty"`
+	AgentNotice          string     `json:"agent_notice,omitempty"`
+	CacheProtocolVersion int        `json:"cache_protocol_version,omitempty"`
+	CacheScopeID         string     `json:"cache_scope_id,omitempty"`
+	WorkspaceGeneration  string     `json:"workspace_generation,omitempty"`
+	ActiveTabID          string     `json:"active_tab_id"`
+	RecentTabIDs         []string   `json:"recent_tab_ids"`
+	Tabs                 []tabState `json:"tabs"`
 }
 
 type tabState struct {
@@ -259,15 +268,20 @@ func (m *workspaceManager) getOrCreate(ctx context.Context, selector string, col
 	if workspace := m.workspaces[selector]; workspace != nil {
 		return workspace, nil
 	}
+	workspaceGeneration, err := newHistoryGeneration()
+	if err != nil {
+		return nil, fmt.Errorf("create workspace generation: %w", err)
+	}
 	workspace := &terminalWorkspace{
-		manager:           m,
-		selector:          selector,
-		username:          username,
-		rootDir:           m.rootDir,
-		historyLimitBytes: historyLimitBytesForTerminalScrollback(fonts.DefaultTerminalScrollback),
-		panes:             make(map[string]*terminalPane),
-		nextTabID:         1,
-		nextPaneID:        1,
+		manager:             m,
+		selector:            selector,
+		workspaceGeneration: workspaceGeneration,
+		username:            username,
+		rootDir:             m.rootDir,
+		historyLimitBytes:   historyLimitBytesForTerminalScrollback(fonts.DefaultTerminalScrollback),
+		panes:               make(map[string]*terminalPane),
+		nextTabID:           1,
+		nextPaneID:          1,
 	}
 	if err := workspace.createTabLocked("", "", normalizeCols(cols), normalizeRows(rows)); err != nil {
 		return nil, err
@@ -409,8 +423,12 @@ func historySyncRequestFromQuery(r *http.Request) historySyncRequest {
 	}
 	query := r.URL.Query()
 	request := historySyncRequest{
-		generation:    strings.TrimSpace(query.Get("history_generation")),
-		forceSnapshot: strings.TrimSpace(query.Get("history_replay_mode")) == "snapshot",
+		generation:          strings.TrimSpace(query.Get("history_generation")),
+		workspaceGeneration: strings.TrimSpace(query.Get("workspace_generation")),
+		forceSnapshot:       strings.TrimSpace(query.Get("history_replay_mode")) == "snapshot",
+	}
+	if version, err := strconv.Atoi(strings.TrimSpace(query.Get("cache_protocol_version"))); err == nil && version > 0 {
+		request.cacheProtocolVersion = version
 	}
 	baseText := strings.TrimSpace(query.Get("local_base_cursor"))
 	endText := strings.TrimSpace(query.Get("local_end_cursor"))
@@ -535,6 +553,11 @@ func (w *terminalWorkspace) snapshot() workspaceState {
 		ActiveTabID:  w.activeTab,
 		RecentTabIDs: append([]string{}, w.recentTabs...),
 		Tabs:         make([]tabState, 0, len(w.tabs)),
+	}
+	if w.cacheScopeID != "" && w.workspaceGeneration != "" {
+		state.CacheProtocolVersion = terminalCacheProtocolVersion
+		state.CacheScopeID = w.cacheScopeID
+		state.WorkspaceGeneration = w.workspaceGeneration
 	}
 	for _, tab := range w.tabs {
 		nextTab := tabState{
@@ -1108,6 +1131,48 @@ func (w *terminalWorkspace) getPane(paneID string) *terminalPane {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.panes[paneID]
+}
+
+type terminalReplayIdentity struct {
+	cacheProtocolVersion int
+	cacheScopeID         string
+	selector             string
+	workspaceGeneration  string
+	tabID                string
+	paneID               string
+}
+
+func (w *terminalWorkspace) paneForAttach(paneID string, syncRequest historySyncRequest) (*terminalPane, terminalReplayIdentity, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	identity := terminalReplayIdentity{
+		cacheScopeID:        w.cacheScopeID,
+		selector:            w.selector,
+		workspaceGeneration: w.workspaceGeneration,
+		paneID:              paneID,
+	}
+	if identity.cacheScopeID != "" && identity.workspaceGeneration != "" {
+		identity.cacheProtocolVersion = terminalCacheProtocolVersion
+	}
+	if syncRequest.cacheProtocolVersion != 0 {
+		if syncRequest.cacheProtocolVersion != terminalCacheProtocolVersion || identity.cacheProtocolVersion != terminalCacheProtocolVersion {
+			return nil, identity, fmt.Errorf("unsupported terminal cache protocol %d", syncRequest.cacheProtocolVersion)
+		}
+		if syncRequest.workspaceGeneration == "" || syncRequest.workspaceGeneration != w.workspaceGeneration {
+			return nil, identity, errors.New("workspace generation mismatch")
+		}
+	}
+	pane := w.panes[paneID]
+	if pane == nil {
+		return nil, identity, errors.New("pane not found")
+	}
+	for _, tab := range w.tabs {
+		if tab.hasPane(paneID) {
+			identity.tabID = tab.ID
+			return pane, identity, nil
+		}
+	}
+	return nil, identity, errors.New("pane tab not found")
 }
 
 func (w *terminalWorkspace) setHistoryLimitBytes(limit int) {
@@ -2036,6 +2101,15 @@ func newHistoryGeneration() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(data), nil
+}
+
+func terminalCacheScopeID(accountID string) string {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte("lcmd-webshell-terminal-cache-scope-v1\x00" + accountID))
+	return hex.EncodeToString(sum[:])
 }
 
 func (p *terminalPane) attachClient(syncRequest historySyncRequest) (paneHistorySnapshot, *paneClient, bool, error) {

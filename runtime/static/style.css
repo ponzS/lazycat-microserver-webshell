@@ -747,6 +747,25 @@ body.split-resize-active * {
   user-select: none;
 }
 
+.terminal-cache-preview {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: left top;
+  background: var(--terminal-bg);
+  pointer-events: none;
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+.terminal-cache-preview[hidden] {
+  display: none;
+}
+
 .pane-shell[data-render-ready="false"] .terminal-host canvas {
   visibility: hidden;
 }
