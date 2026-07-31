@@ -5,6 +5,8 @@ const cachePathPrefix = "__terminal_cache__/v2";
 const defaultMaxAgeMs = 30 * 24 * 60 * 60 * 1000;
 const defaultMaxManifests = 64;
 const defaultReadConcurrency = 32;
+const defaultWriteBlockBytes = 128 * 1024;
+const defaultCompactionMinChunks = 64;
 
 //  https://webshell.invalid/ 是内部兜底用的虚拟 URL，不是真实服务器域名，也不会发起网络请求。
 
@@ -240,6 +242,7 @@ export const createTerminalCacheV2 = ({
   maxAgeMs = defaultMaxAgeMs,
   maxManifests = defaultMaxManifests,
   readConcurrency = defaultReadConcurrency,
+  writeBlockBytes = defaultWriteBlockBytes,
 } = {}) => {
   const available = Boolean(cacheStorage && typeof cacheStorage.open === "function" && globalThis.Response);
   let mutationChain = Promise.resolve();
@@ -273,6 +276,18 @@ export const createTerminalCacheV2 = ({
   const putManifest = async (store, manifest) => {
     const identity = normalizeIdentity(manifest, { requireHistory: true });
     await store.put(manifestURL(identity), responseJSON(serializedManifest(manifest)));
+  };
+
+  const putChunk = async (store, identity, chunk) => {
+    const response = new Response(chunk.data, {
+      headers: {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/octet-stream",
+        "X-Terminal-Start-Cursor": cursorText(chunk.startCursor),
+        "X-Terminal-End-Cursor": cursorText(chunk.endCursor),
+      },
+    });
+    await store.put(chunkURL(identity, chunk.startCursor, chunk.endCursor), response);
   };
 
   const deleteManifestEntries = async (store, manifest, { keepManifest = false } = {}) => {
@@ -318,21 +333,39 @@ export const createTerminalCacheV2 = ({
       if (!previous || previous.historyGeneration !== identity.historyGeneration || previous.endCursor !== merged.startCursor) {
         throw new Error("Terminal cache append range does not match manifest.");
       }
-      const response = new Response(merged.data, {
-        headers: {
-          "Cache-Control": "no-store",
-          "Content-Type": "application/octet-stream",
-          "X-Terminal-Start-Cursor": cursorText(merged.startCursor),
-          "X-Terminal-End-Cursor": cursorText(merged.endCursor),
+      const targetBlockBytes = Math.max(1, Math.floor(Number(writeBlockBytes) || defaultWriteBlockBytes));
+      const previousTail = previous.chunks[previous.chunks.length - 1] || null;
+      let stored = merged;
+      let replacedTail = null;
+      if (
+        previousTail
+        && previousTail.endCursor === merged.startCursor
+        && previousTail.byteLength + merged.data.byteLength <= targetBlockBytes
+      ) {
+        const tailResponse = await store.match(chunkURL(identity, previousTail.startCursor, previousTail.endCursor));
+        if (!tailResponse) {
+          throw new Error("Terminal cache tail chunk is missing.");
+        }
+        const tailData = new Uint8Array(await tailResponse.arrayBuffer());
+        if (tailData.byteLength !== previousTail.byteLength) {
+          throw new Error("Terminal cache tail chunk is invalid.");
+        }
+        stored = mergeChunks([
+          { startCursor: previousTail.startCursor, endCursor: previousTail.endCursor, data: tailData },
+          merged,
+        ]);
+        replacedTail = previousTail;
+      }
+      await putChunk(store, identity, stored);
+      const nextChunks = [
+        ...previous.chunks.slice(0, replacedTail ? -1 : previous.chunks.length),
+        {
+          startCursor: stored.startCursor,
+          endCursor: stored.endCursor,
+          byteLength: stored.data.byteLength,
         },
-      });
-      await store.put(chunkURL(identity, merged.startCursor, merged.endCursor), response);
-      const nextChunks = [...previous.chunks, {
-        startCursor: merged.startCursor,
-        endCursor: merged.endCursor,
-        byteLength: merged.data.byteLength,
-      }];
-      const removed = [];
+      ];
+      const removed = replacedTail ? [replacedTail] : [];
       const normalizedLimit = Math.max(1, Math.floor(Number(limitBytes) || Number.MAX_SAFE_INTEGER));
       let retainedBytes = nextChunks.reduce((total, chunk) => total + chunk.byteLength, 0);
       while (nextChunks.length > 1 && retainedBytes > normalizedLimit) {
@@ -398,6 +431,76 @@ export const createTerminalCacheV2 = ({
     }
     return cursor;
   };
+
+  const compact = (sourceIdentity, {
+    targetBytes = writeBlockBytes,
+    minChunks = defaultCompactionMinChunks,
+  } = {}) => runMutation(async () => {
+    const requestedIdentity = normalizeIdentity(sourceIdentity);
+    const manifest = await loadManifest(requestedIdentity);
+    if (
+      !manifest
+      || (requestedIdentity.historyGeneration && requestedIdentity.historyGeneration !== manifest.historyGeneration)
+      || manifest.chunks.length < Math.max(2, Math.floor(Number(minChunks) || defaultCompactionMinChunks))
+    ) {
+      return manifest;
+    }
+    const identity = normalizeIdentity(manifest, { requireHistory: true });
+    const store = await cache();
+    const safeTargetBytes = Math.max(1, Math.floor(Number(targetBytes) || defaultWriteBlockBytes));
+    const compactedChunks = [];
+    let pending = [];
+    let pendingBytes = 0;
+    const flushPending = async () => {
+      if (pending.length === 0) {
+        return;
+      }
+      if (pending.length === 1) {
+        const [only] = pending;
+        compactedChunks.push({
+          startCursor: only.startCursor,
+          endCursor: only.endCursor,
+          byteLength: only.data.byteLength,
+        });
+      } else {
+        const merged = mergeChunks(pending);
+        await putChunk(store, identity, merged);
+        compactedChunks.push({
+          startCursor: merged.startCursor,
+          endCursor: merged.endCursor,
+          byteLength: merged.data.byteLength,
+        });
+      }
+      pending = [];
+      pendingBytes = 0;
+    };
+    await readChunks(manifest, async ({ startCursor, endCursor, data }) => {
+      if (pending.length > 0 && pendingBytes + data.byteLength > safeTargetBytes) {
+        await flushPending();
+      }
+      pending.push({ startCursor, endCursor, data });
+      pendingBytes += data.byteLength;
+      if (pendingBytes >= safeTargetBytes) {
+        await flushPending();
+      }
+    });
+    await flushPending();
+    if (compactedChunks.length >= manifest.chunks.length) {
+      return manifest;
+    }
+    const compacted = {
+      ...manifest,
+      chunks: compactedChunks,
+      updatedAt: Date.now(),
+    };
+    await putManifest(store, compacted);
+    const retainedURLs = new Set(compactedChunks.map((chunk) => chunkURL(identity, chunk.startCursor, chunk.endCursor)));
+    await Promise.all(manifest.chunks.map((chunk) => {
+      const url = chunkURL(identity, chunk.startCursor, chunk.endCursor);
+      return retainedURLs.has(url) ? Promise.resolve(false) : store.delete(url);
+    }));
+    return { ...compacted, compactedFromChunks: manifest.chunks.length };
+  });
 
   const savePreview = async (sourceIdentity, generation, cursor, blob, metadata = {}) => {
     if (!(blob instanceof Blob) || blob.size <= 0) {
@@ -550,6 +653,7 @@ export const createTerminalCacheV2 = ({
     available,
     append,
     cleanup,
+    compact,
     deletePane,
     identityMatches,
     loadManifest,

@@ -115,7 +115,7 @@ class V {
 const z = class K {
   constructor(A, B, g = 80, E = 24, C) {
     var I;
-    this.viewportBufferPtr = 0, this.viewportBufferSize = 0, this.cellPool = [], this.graphemeBuffer = null, this.graphemeBufferPtr = 0, this.exports = A, this.memory = B, this._cols = g, this._rows = E, this.logicalScrollbackLimit = K.normalizeScrollbackLimit(C == null ? void 0 : C.scrollbackLimit), this.scrollbackByteCapacity = this.estimateScrollbackBytes(g, E);
+    this.viewportBufferPtr = 0, this.viewportBufferSize = 0, this.renderStateCurrent = !1, this.renderDirtyState = O.FULL, this.cellPool = [], this.graphemeBuffer = null, this.graphemeBufferPtr = 0, this.exports = A, this.memory = B, this._cols = g, this._rows = E, this.logicalScrollbackLimit = K.normalizeScrollbackLimit(C == null ? void 0 : C.scrollbackLimit), this.scrollbackByteCapacity = this.estimateScrollbackBytes(g, E);
     const D = this.exports.ghostty_wasm_alloc_u8_array(d);
     if (D === 0)
       throw new Error("Failed to allocate config (out of memory)");
@@ -168,10 +168,10 @@ const z = class K {
   // ==========================================================================
   write(A) {
     const B = typeof A == "string" ? new TextEncoder().encode(A) : A, g = this.exports.ghostty_wasm_alloc_u8_array(B.length);
-    new Uint8Array(this.memory.buffer).set(B, g), this.exports.ghostty_terminal_write(this.handle, g, B.length), this.exports.ghostty_wasm_free_u8_array(g, B.length);
+    new Uint8Array(this.memory.buffer).set(B, g), this.exports.ghostty_terminal_write(this.handle, g, B.length), this.exports.ghostty_wasm_free_u8_array(g, B.length), this.renderStateCurrent = !1;
   }
   resize(A, B) {
-    A === this._cols && B === this._rows || (this.ensureScrollbackCapacity(A, B), this._cols = A, this._rows = B, this.exports.ghostty_terminal_resize(this.handle, A, B), this.invalidateBuffers(), this.initCellPool());
+    A === this._cols && B === this._rows || (this.ensureScrollbackCapacity(A, B), this._cols = A, this._rows = B, this.exports.ghostty_terminal_resize(this.handle, A, B), this.renderStateCurrent = !1, this.invalidateBuffers(), this.initCellPool());
   }
   free() {
     this.viewportBufferPtr && (this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize), this.viewportBufferPtr = 0), this.exports.ghostty_terminal_free(this.handle);
@@ -193,14 +193,18 @@ const z = class K {
    * Safe to call multiple times - dirty state persists until markClean().
    */
   update() {
-    return this.exports.ghostty_render_state_update(this.handle);
+    const A = this.exports.ghostty_render_state_update(this.handle);
+    return this.renderStateCurrent = !0, this.renderDirtyState = A, A;
+  }
+  ensureRenderStateCurrent() {
+    this.renderStateCurrent || this.update();
   }
   /**
    * Get cursor state from render state.
    * Ensures render state is fresh by calling update().
    */
   getCursor() {
-    return this.update(), {
+    return this.ensureRenderStateCurrent(), {
       x: this.exports.ghostty_render_state_get_cursor_x(this.handle),
       y: this.exports.ghostty_render_state_get_cursor_y(this.handle),
       viewportX: this.exports.ghostty_render_state_get_cursor_x(this.handle),
@@ -242,19 +246,20 @@ const z = class K {
    * Mark render state as clean (call after rendering)
    */
   markClean() {
-    this.exports.ghostty_render_state_mark_clean(this.handle);
+    this.exports.ghostty_render_state_mark_clean(this.handle), this.renderDirtyState = O.NONE;
   }
   /**
    * Get ALL viewport cells in ONE WASM call - the key performance optimization!
    * Returns a reusable cell array (zero allocation after warmup).
    */
   getViewport() {
+    this.ensureRenderStateCurrent();
     const A = this._cols * this._rows, B = A * K.CELL_SIZE;
     return (!this.viewportBufferPtr || this.viewportBufferSize < B) && (this.viewportBufferPtr && this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize), this.viewportBufferPtr = this.exports.ghostty_wasm_alloc_u8_array(B), this.viewportBufferSize = B), this.exports.ghostty_render_state_get_viewport(
       this.handle,
       this.viewportBufferPtr,
       A
-    ) < 0 ? this.cellPool : (this.parseCellsIntoPool(this.viewportBufferPtr, A), this.cellPool);
+    ) !== A ? null : (this.parseCellsIntoPool(this.viewportBufferPtr, A), this.cellPool);
   }
   // ==========================================================================
   // Compatibility methods (delegate to render state)
@@ -267,8 +272,11 @@ const z = class K {
   getLine(A) {
     if (A < 0 || A >= this._rows)
       return null;
-    this.update();
-    const B = this.getViewport(), g = A * this._cols;
+    this.ensureRenderStateCurrent();
+    const B = this.getViewport();
+    if (!B)
+      return null;
+    const g = A * this._cols;
     return B.slice(g, g + this._cols).map((E) => ({ ...E }));
   }
   /** For compatibility with old API */
@@ -280,7 +288,7 @@ const z = class K {
    * Note: This calls update() to ensure fresh state. Safe to call multiple times.
    */
   needsFullRedraw() {
-    return this.update() === O.FULL;
+    return this.ensureRenderStateCurrent(), this.renderDirtyState === O.FULL;
   }
   /** Mark render state as clean after rendering */
   clearDirty() {
@@ -322,7 +330,7 @@ const z = class K {
     if (N === null)
       return null;
     const B = this._cols * K.CELL_SIZE;
-    (!this.viewportBufferPtr || this.viewportBufferSize < B) && (this.viewportBufferPtr && this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize), this.viewportBufferPtr = this.exports.ghostty_wasm_alloc_u8_array(B), this.viewportBufferSize = B), this.update(), new Uint8Array(this.memory.buffer, this.viewportBufferPtr, B).fill(0);
+    (!this.viewportBufferPtr || this.viewportBufferSize < B) && (this.viewportBufferPtr && this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize), this.viewportBufferPtr = this.exports.ghostty_wasm_alloc_u8_array(B), this.viewportBufferSize = B), this.ensureRenderStateCurrent(), new Uint8Array(this.memory.buffer, this.viewportBufferPtr, B).fill(0);
     const g = this.exports.ghostty_terminal_get_scrollback_line(
       this.handle,
       N,
@@ -431,7 +439,7 @@ const z = class K {
    * @returns Array of codepoints, or null on error
    */
   getGrapheme(A, B) {
-    this.graphemeBuffer || (this.graphemeBufferPtr = this.exports.ghostty_wasm_alloc_u8_array(16 * 4), this.graphemeBuffer = new Uint32Array(this.memory.buffer, this.graphemeBufferPtr, 16));
+    this.ensureRenderStateCurrent(), this.graphemeBuffer || (this.graphemeBufferPtr = this.exports.ghostty_wasm_alloc_u8_array(16 * 4), this.graphemeBuffer = new Uint32Array(this.memory.buffer, this.graphemeBufferPtr, 16));
     const g = this.exports.ghostty_render_state_get_grapheme(
       this.handle,
       A,
@@ -1463,6 +1471,34 @@ class $ {
     }
     return C;
   }
+  materializeViewportLines(A, B, g, E, C) {
+    const I = Math.max(0, Math.floor(g)), D = Boolean(C?.options?.mobilePixelScroll) && g > I + 1e-3 ? -1 : 0, i = typeof A.getViewport == "function", w = this.snapshotViewport(A, B);
+    if (i && !w)
+      return null;
+    const s = /* @__PURE__ */ new Map();
+    for (let N = D; N < B.rows; N++) {
+      let k = null;
+      if (g > 0 && N < I) {
+        if (!C)
+          return null;
+        const M = E - I + N;
+        k = C.getScrollbackLine(M);
+      } else {
+        const M = N - I;
+        if (M < 0 || M >= B.rows)
+          return null;
+        if (w) {
+          const a = M * B.cols;
+          k = w.slice(a, a + B.cols);
+        } else
+          k = A.getLine(M);
+      }
+      if (!k)
+        return null;
+      s.set(N, k);
+    }
+    return s;
+  }
   // ==========================================================================
   // Main Rendering
   // ==========================================================================
@@ -1473,25 +1509,23 @@ class $ {
     var U;
     this.currentBuffer = A;
     const I = A.getCursor(), D = A.getDimensions(), i = E ? E.getScrollbackLength() : 0;
+    const requestedViewportY = Number(g);
+    g = typeof (E == null ? void 0 : E.normalizeViewportBounds) == "function" ? E.normalizeViewportBounds(requestedViewportY) : Math.max(0, Math.min(i, Number.isFinite(requestedViewportY) ? requestedViewportY : 0));
     const usePixelScroll = Boolean(E?.options?.mobilePixelScroll), viewportLine = Math.max(0, Math.floor(g)), viewportFraction = usePixelScroll ? Math.max(0, Math.min(1, g - viewportLine)) : 0, viewportOffsetY = viewportFraction * this.metrics.height, hasFractionalViewport = viewportFraction > 0.001;
+    const W = this.materializeViewportLines(A, D, g, i, E);
+    if (!W)
+      return !1;
     const S = this.canvasSize(D.cols, D.rows);
     (U = A.needsFullRedraw) != null && U.call(A) && (B = !0), (this.canvas.width !== S.pixelWidth || this.canvas.height !== S.pixelHeight || this.canvas.style.width !== `${S.cssWidth}px` || this.canvas.style.height !== `${S.cssHeight}px`) && (this.resize(D.cols, D.rows), B = !0), g !== this.lastViewportY && (B = !0, this.lastViewportY = g);
     B && (this.ctx.fillStyle = this.theme.background, this.ctx.fillRect(0, 0, this.canvas.width / this.devicePixelRatio, this.canvas.height / this.devicePixelRatio));
-    const W = g <= 0 ? this.snapshotViewport(A, D) : null, R = (t) => {
-      if (W && t >= 0 && t < D.rows) {
-        const c = t * D.cols;
-        return W.slice(c, c + D.cols);
-      }
-      return A.getLine(t);
-    };
     const s = I.x !== this.lastCursorPosition.x || I.y !== this.lastCursorPosition.y;
     if (s || this.cursorBlink) {
       if (!B && !A.isRowDirty(I.y)) {
-        const t = R(I.y);
+        const t = W.get(I.y);
         t && this.renderLine(t, I.y, D.cols);
       }
       if (s && this.lastCursorPosition.y !== I.y && !B && !A.isRowDirty(this.lastCursorPosition.y)) {
-        const t = R(this.lastCursorPosition.y);
+        const t = W.get(this.lastCursorPosition.y);
         t && this.renderLine(t, this.lastCursorPosition.y, D.cols);
       }
     }
@@ -1512,17 +1546,7 @@ class $ {
     const M = /* @__PURE__ */ new Set(), a = this.hoveredHyperlinkId !== this.previousHoveredHyperlinkId, h = JSON.stringify(this.hoveredLinkRange) !== JSON.stringify(this.previousHoveredLinkRange);
     if (a) {
       for (let t = 0; t < D.rows; t++) {
-        let c = null;
-        if (g > 0)
-          if (t < viewportLine && E) {
-            const F = i - viewportLine + t;
-            c = E.getScrollbackLine(F);
-          } else {
-            const F = t - viewportLine;
-            c = A.getLine(F);
-          }
-        else
-          c = R(t);
+        const c = W.get(t);
         if (c) {
           for (const F of c)
             if (F.hyperlink_id === this.hoveredHyperlinkId || F.hyperlink_id === this.previousHoveredHyperlinkId) {
@@ -1549,20 +1573,10 @@ class $ {
     for (let t = hasFractionalViewport && g > 0 ? -1 : 0; t < D.rows; t++) {
       if (!hasFractionalViewport && !G.has(t))
         continue;
-      let c = null;
-      if (g > 0)
-        if (t < viewportLine && E) {
-          const F = i - viewportLine + t;
-          c = E.getScrollbackLine(F);
-        } else {
-          const F = g > 0 ? t - viewportLine : t;
-          c = A.getLine(F);
-        }
-      else
-        c = R(t);
+      const c = W.get(t);
       c && this.renderLine(c, t, D.cols, viewportOffsetY);
     }
-    g === 0 && I.visible && this.cursorVisible && this.renderCursor(I.x, I.y), E && C > 0 && this.renderScrollbar(g, i, D.rows, C), this.lastCursorPosition = { x: I.x, y: I.y }, A.clearDirty();
+    return g === 0 && I.visible && this.cursorVisible && this.renderCursor(I.x, I.y), E && C > 0 && this.renderScrollbar(g, i, D.rows, C), this.lastCursorPosition = { x: I.x, y: I.y }, A.clearDirty(), !0;
   }
   /**
    * Render a single line using two-pass approach:
@@ -2193,7 +2207,7 @@ class IA {
       get activeVersion() {
         return "15.1";
       }
-    }, this.dataEmitter = new J(), this.resizeEmitter = new J(), this.bellEmitter = new J(), this.selectionChangeEmitter = new J(), this.keyEmitter = new J(), this.titleChangeEmitter = new J(), this.scrollEmitter = new J(), this.renderEmitter = new J(), this.cursorMoveEmitter = new J(), this.onData = this.dataEmitter.event, this.onResize = this.resizeEmitter.event, this.onBell = this.bellEmitter.event, this.onSelectionChange = this.selectionChangeEmitter.event, this.onKey = this.keyEmitter.event, this.onTitleChange = this.titleChangeEmitter.event, this.onScroll = this.scrollEmitter.event, this.onRender = this.renderEmitter.event, this.onCursorMove = this.cursorMoveEmitter.event, this.isOpen = !1, this.isDisposed = !1, this.addons = [], this.currentTitle = "", this.viewportY = 0, this.targetViewportY = 0, this.lastCursorY = 0, this.isDraggingScrollbar = !1, this.scrollbarDragStart = null, this.scrollbarDragStartViewportY = 0, this.scrollbarVisible = !1, this.scrollbarOpacity = 0, this.SCROLLBAR_HIDE_DELAY_MS = 1500, this.SCROLLBAR_FADE_DURATION_MS = 200, this.touchScrollActive = !1, this.touchScrollLastY = 0, this.touchScrollStartY = 0, this.touchScrollRemainderY = 0, this.touchScrollMoved = !1, this.touchScrollLastAt = 0, this.touchScrollVelocity = 0, this.touchInertiaFrame = void 0, this.touchInertiaLastAt = 0, this.finishTouchScroll = () => {
+    }, this.dataEmitter = new J(), this.resizeEmitter = new J(), this.bellEmitter = new J(), this.selectionChangeEmitter = new J(), this.keyEmitter = new J(), this.titleChangeEmitter = new J(), this.scrollEmitter = new J(), this.renderEmitter = new J(), this.cursorMoveEmitter = new J(), this.onData = this.dataEmitter.event, this.onResize = this.resizeEmitter.event, this.onBell = this.bellEmitter.event, this.onSelectionChange = this.selectionChangeEmitter.event, this.onKey = this.keyEmitter.event, this.onTitleChange = this.titleChangeEmitter.event, this.onScroll = this.scrollEmitter.event, this.onRender = this.renderEmitter.event, this.onCursorMove = this.cursorMoveEmitter.event, this.isOpen = !1, this.isDisposed = !1, this.renderFullNextFrame = !1, this.renderRetryTimer = void 0, this.renderRetryDelayMs = 16, this.addons = [], this.currentTitle = "", this.viewportY = 0, this.targetViewportY = 0, this.lastCursorY = 0, this.isDraggingScrollbar = !1, this.scrollbarDragStart = null, this.scrollbarDragStartViewportY = 0, this.scrollbarVisible = !1, this.scrollbarOpacity = 0, this.SCROLLBAR_HIDE_DELAY_MS = 1500, this.SCROLLBAR_FADE_DURATION_MS = 200, this.touchScrollActive = !1, this.touchScrollLastY = 0, this.touchScrollStartY = 0, this.touchScrollRemainderY = 0, this.touchScrollMoved = !1, this.touchScrollLastAt = 0, this.touchScrollVelocity = 0, this.touchInertiaFrame = void 0, this.touchInertiaLastAt = 0, this.finishTouchScroll = () => {
       this.touchScrollActive = !1, this.touchScrollLastY = 0, this.touchScrollStartY = 0, this.touchScrollRemainderY = 0, this.touchScrollLastAt = 0;
     }, this.handleTouchStart = (g) => {
       if (!this.canvas || !this.renderer || !this.wasmTerm || g.touches.length !== 1)
@@ -2654,6 +2668,10 @@ class IA {
   getViewportY() {
     return this.viewportY;
   }
+  normalizeViewportBounds(A = this.viewportY) {
+    const B = this.getScrollbackLength(), g = Number(A), E = Number(this.targetViewportY), C = Math.max(0, Math.min(B, Number.isFinite(g) ? g : 0)), I = Math.max(0, Math.min(B, Number.isFinite(E) ? E : C));
+    return (C !== this.viewportY || I !== this.targetViewportY) && (this.viewportY = C, this.targetViewportY = I, this.scrollEmitter.fire(Math.floor(this.viewportY))), this.viewportY;
+  }
   getSelectionPosition() {
     var A;
     return (A = this.selectionManager) == null ? void 0 : A.getSelectionPosition();
@@ -2760,7 +2778,7 @@ class IA {
    */
   dispose() {
     if (!this.isDisposed) {
-      this.isDisposed = !0, this.isOpen = !1, this.animationFrameId && (cancelAnimationFrame(this.animationFrameId), this.animationFrameId = void 0), this.scrollAnimationFrame && (cancelAnimationFrame(this.scrollAnimationFrame), this.scrollAnimationFrame = void 0), this.mouseMoveThrottleTimeout && (clearTimeout(this.mouseMoveThrottleTimeout), this.mouseMoveThrottleTimeout = void 0), this.pendingMouseMove = void 0;
+      this.isDisposed = !0, this.isOpen = !1, this.animationFrameId && (cancelAnimationFrame(this.animationFrameId), this.animationFrameId = void 0), this.renderRetryTimer !== void 0 && (window.clearTimeout(this.renderRetryTimer), this.renderRetryTimer = void 0), this.scrollAnimationFrame && (cancelAnimationFrame(this.scrollAnimationFrame), this.scrollAnimationFrame = void 0), this.mouseMoveThrottleTimeout && (clearTimeout(this.mouseMoveThrottleTimeout), this.mouseMoveThrottleTimeout = void 0), this.pendingMouseMove = void 0;
       for (const A of this.addons)
         A.dispose();
       this.addons = [], this.cleanupComponents(), this.dataEmitter.dispose(), this.resizeEmitter.dispose(), this.bellEmitter.dispose(), this.selectionChangeEmitter.dispose(), this.keyEmitter.dispose(), this.titleChangeEmitter.dispose(), this.scrollEmitter.dispose(), this.renderEmitter.dispose(), this.cursorMoveEmitter.dispose();
@@ -2775,6 +2793,7 @@ class IA {
   requestRender(A = {}) {
     if (this.isDisposed || !this.isOpen)
       return;
+    this.renderRetryTimer !== void 0 && (window.clearTimeout(this.renderRetryTimer), this.renderRetryTimer = void 0);
     this.renderFullNextFrame = this.renderFullNextFrame || A.full === !0;
     if (this.animationFrameId)
       return;
@@ -2785,10 +2804,20 @@ class IA {
   }
   renderNow(A = !1) {
     if (this.isDisposed || !this.isOpen || !this.renderer || !this.wasmTerm)
-      return;
-    this.renderer.render(this.wasmTerm, A, this.viewportY, this, this.scrollbarOpacity), this.renderEmitter.fire();
+      return !1;
+    if (!this.renderer.render(this.wasmTerm, A, this.viewportY, this, this.scrollbarOpacity))
+      return this.renderFullNextFrame = !0, this.scheduleRenderRetry(), !1;
+    this.renderRetryTimer !== void 0 && (window.clearTimeout(this.renderRetryTimer), this.renderRetryTimer = void 0), this.renderRetryDelayMs = 16, this.renderEmitter.fire();
     const B = this.wasmTerm.getCursor();
-    B.y !== this.lastCursorY && (this.lastCursorY = B.y, this.cursorMoveEmitter.fire());
+    return B.y !== this.lastCursorY && (this.lastCursorY = B.y, this.cursorMoveEmitter.fire()), !0;
+  }
+  scheduleRenderRetry() {
+    if (this.isDisposed || !this.isOpen || this.animationFrameId || this.renderRetryTimer !== void 0)
+      return;
+    const A = this.renderRetryDelayMs;
+    this.renderRetryDelayMs = Math.min(250, A * 2), this.renderRetryTimer = window.setTimeout(() => {
+      this.renderRetryTimer = void 0, this.requestRender({ full: !0 });
+    }, A);
   }
   /**
    * Get a line from native WASM scrollback buffer

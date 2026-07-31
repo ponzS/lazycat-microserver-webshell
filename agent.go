@@ -374,7 +374,7 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 	}
 	pane, replayIdentity, err := workspace.paneForAttach(request.PaneID, syncRequest)
 	if err != nil {
-		if strings.Contains(err.Error(), "workspace generation") || strings.Contains(err.Error(), "cache protocol") {
+		if strings.Contains(err.Error(), "workspace generation") || strings.Contains(err.Error(), "cache protocol") || strings.Contains(err.Error(), "pane not found") {
 			_ = writeAgentControlFrame(conn, map[string]any{
 				"type":                   "workspace-refresh-required",
 				"selector":               workspace.selector,
@@ -391,7 +391,13 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 	}
 	history, client, allowGeneratedInputDuringReplay, err := pane.attachClient(syncRequest)
 	if err != nil {
-		_ = writeAgentControlFrame(conn, map[string]any{"type": "process-exit", "message": err.Error(), "exit_code": -1})
+		_ = writeAgentControlFrame(conn, map[string]any{
+			"type":          "process-exit",
+			"message":       err.Error(),
+			"exit_code":     -1,
+			"authoritative": true,
+			"pane_id":       request.PaneID,
+		})
 		return
 	}
 	inputLockOwner := fmt.Sprintf("attach:%p", conn)

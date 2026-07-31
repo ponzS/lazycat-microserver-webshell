@@ -73,15 +73,20 @@ self.addEventListener("fetch", (event) => {
     return;
   }
   event.respondWith((async () => {
+    const cache = await caches.open(appShellCacheName);
+    const cached = await cache.match(request);
+    const currentVersionAsset = url.pathname.startsWith(assetBase);
+    if (currentVersionAsset && cached) {
+      return cached;
+    }
     try {
-      const response = await fetch(request, { cache: "no-cache" });
+      const response = await fetch(request);
       if (response.ok) {
-        const cache = await caches.open(appShellCacheName);
         await cache.put(request, response.clone());
+        return response;
       }
-      return response;
+      return cached || response;
     } catch (error) {
-      const cached = await caches.match(request, { cacheName: appShellCacheName });
       if (cached) {
         return cached;
       }

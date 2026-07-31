@@ -97,10 +97,30 @@ const restoreInitialWorkspaceLocation = () => {
 restoreInitialWorkspaceLocation();
 const isEmbedMode = params.has("embed");
 document.body?.classList.toggle("is-embed-mode", isEmbedMode);
+const webShellStartupNow = () => (
+  typeof globalThis.performance?.now === "function" ? globalThis.performance.now() : Date.now()
+);
+const webShellStartupMetrics = {
+  navigationStartedAt: 0,
+  moduleStartedAt: webShellStartupNow(),
+  ghosttyReadyAt: 0,
+  themeReadyAt: 0,
+  settingsReadyAt: 0,
+  instancesReadyAt: 0,
+  workspaceRequestStartedAt: 0,
+  workspaceReadyAt: 0,
+  workspaceAppliedAt: 0,
+};
+const markWebShellStartupMetric = (key) => {
+  if (Object.prototype.hasOwnProperty.call(webShellStartupMetrics, key) && !webShellStartupMetrics[key]) {
+    webShellStartupMetrics[key] = webShellStartupNow();
+  }
+};
+const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).then(() => {
+  markWebShellStartupMetric("ghosttyReadyAt");
+});
 
 (async () => {
-  await initGhostty(runtimeAssetURL("./ghostty-vt.wasm"));
-
   const tabsEl = document.getElementById("tabs");
   const newTabButton = document.getElementById("newTab");
   const tabOverviewToggle = document.getElementById("tabOverviewToggle");
@@ -350,6 +370,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const terminalReconnectBaseDelayMs = 500;
   const terminalReconnectMaxDelayMs = 10 * 1000;
   const terminalReconnectJitterRatio = 0.2;
+  const workspaceRefreshRetryBaseDelayMs = 500;
+  const workspaceRefreshRetryMaxDelayMs = 15 * 1000;
+  const workspaceRefreshRetryJitterRatio = 0.2;
   const terminalOutputFlushFallbackMs = 32;
   const terminalOutputFlushBudgetBytes = 128 * 1024;
   const terminalResizeSettleMs = 100;
@@ -363,6 +386,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const terminalCacheV2PreviewTimeoutMs = 3000;
   const terminalCacheV2ReplayTimeoutMs = 15 * 1000;
   const terminalCacheV2CommitTimeoutMs = 3000;
+  const terminalCacheV2CompactionMinChunks = 64;
+  const terminalCacheV2CompactionTargetBytes = 128 * 1024;
   const averageTerminalHistoryBytesPerLine = 350;
   const performanceMeterSampleMs = 500;
   const performanceMeterWarmupFrames = 12;
@@ -599,6 +624,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   let applyingWorkspaceState = false;
   let activityRefreshTimer = 0;
   let activityRefreshDelayTimer = 0;
+  let workspaceRefreshRetryTimer = 0;
+  let workspaceRefreshRetryAttempts = 0;
+  let workspaceRefreshRetryInFlight = false;
+  let workspaceRefreshRetryContext = null;
+  let tabOverviewCachePreparationScheduled = false;
   let deployRestartDialogOpen = false;
   let currentServerRevision = "";
   let activeWorkspaceCacheV2Identity = null;
@@ -1024,7 +1054,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
 
   const loadThemeCatalog = async () => {
     try {
-      const response = await fetch(runtimeAssetURL("./themes.json"), { cache: "no-cache" });
+      const response = await fetch(runtimeAssetURL("./themes.json"));
       if (!response.ok) {
         return;
       }
@@ -2483,7 +2513,11 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     return true;
   };
 
-  const applySettingsState = async (state, { syncScrollbackInput = true, syncLineHeightInput = true } = {}) => {
+  const applySettingsState = async (state, {
+    syncScrollbackInput = true,
+    syncLineHeightInput = true,
+    deferFontLoad = false,
+  } = {}) => {
     const fonts = Array.isArray(state?.fonts)
       ? state.fonts.map(normalizeUploadedFont).filter(Boolean)
       : [];
@@ -2512,18 +2546,28 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     syncSettingsDebugOptions();
     resizeActiveTabForCurrentDevice();
     updateMobileActiveTabTitle();
-    await registerTerminalSymbolFont(terminalSymbolFont);
-    await registerUploadedFonts(uploadedFonts);
     renderSettingsFonts();
     applyTerminalFont();
+    const loadFonts = async () => {
+      await registerTerminalSymbolFont(terminalSymbolFont);
+      await registerUploadedFonts(uploadedFonts);
+      applyTerminalFont();
+    };
+    if (deferFontLoad) {
+      loadFonts().catch((error) => {
+        console.warn("Deferred terminal font load failed", error);
+      });
+      return;
+    }
+    await loadFonts();
   };
 
-  const loadSettings = async () => {
+  const loadSettings = async ({ deferFontLoad = false } = {}) => {
     const response = await fetch("./api/settings", { cache: "no-store" });
     if (!response.ok) {
       throw new Error(await readResponseText(response, `设置加载失败 (${response.status})`));
     }
-    await applySettingsState(await response.json());
+    await applySettingsState(await response.json(), { deferFontLoad });
   };
 
   const saveTerminalFontSelection = async (fontID) => measurePerformanceTask("settings save", async () => {
@@ -3606,6 +3650,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     metrics.reported = true;
     const elapsed = (timestamp) => timestamp > 0 ? Math.round(timestamp - metrics.startedAt) : null;
+    const startupElapsed = (timestamp) => timestamp > 0
+      ? Math.round(timestamp - webShellStartupMetrics.navigationStartedAt)
+      : null;
     console.info("[terminal-cache-v2] recovery metrics", {
       historySource: metrics.historySource,
       syncMode: metrics.syncMode,
@@ -3625,6 +3672,15 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       cacheCommitCompleteMs: elapsed(metrics.cacheCommitCompleteAt),
       realCanvasVisibleMs: elapsed(metrics.realCanvasVisibleAt),
       inputReadyMs: elapsed(metrics.inputReadyAt),
+      pageModuleStartedMs: startupElapsed(webShellStartupMetrics.moduleStartedAt),
+      pageGhosttyReadyMs: startupElapsed(webShellStartupMetrics.ghosttyReadyAt),
+      pageThemeReadyMs: startupElapsed(webShellStartupMetrics.themeReadyAt),
+      pageSettingsReadyMs: startupElapsed(webShellStartupMetrics.settingsReadyAt),
+      pageInstancesReadyMs: startupElapsed(webShellStartupMetrics.instancesReadyAt),
+      pageWorkspaceRequestStartMs: startupElapsed(webShellStartupMetrics.workspaceRequestStartedAt),
+      pageWorkspaceReadyMs: startupElapsed(webShellStartupMetrics.workspaceReadyAt),
+      pageWorkspaceAppliedMs: startupElapsed(webShellStartupMetrics.workspaceAppliedAt),
+      pageRealCanvasVisibleMs: startupElapsed(metrics.realCanvasVisibleAt),
       localReplayBytes: metrics.localReplayBytes,
       serverReplayBytes: metrics.serverReplayBytes,
     });
@@ -6083,6 +6139,38 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     prepared?.image?.close?.();
   };
 
+  const holdSessionTerminalFrame = (session) => {
+    const source = session?.term?.canvas || session?.term?.renderer?.getCanvas?.();
+    const hold = session?.terminalFrameHold;
+    if (!(source instanceof HTMLCanvasElement) || !(hold instanceof HTMLCanvasElement) || source.width <= 0 || source.height <= 0) {
+      return false;
+    }
+    const ctx = hold.getContext("2d");
+    if (!ctx) {
+      return false;
+    }
+    hold.width = source.width;
+    hold.height = source.height;
+    hold.style.width = source.style.width;
+    hold.style.height = source.style.height;
+    ctx.clearRect(0, 0, hold.width, hold.height);
+    ctx.drawImage(source, 0, 0);
+    hold.hidden = false;
+    session.terminalFrameHeld = true;
+    return true;
+  };
+
+  const releaseSessionTerminalFrame = (session) => {
+    const hold = session?.terminalFrameHold;
+    if (!(hold instanceof HTMLCanvasElement)) {
+      return;
+    }
+    hold.hidden = true;
+    const ctx = hold.getContext("2d");
+    ctx?.clearRect(0, 0, hold.width, hold.height);
+    session.terminalFrameHeld = false;
+  };
+
   const hideSessionTerminalPreview = (session) => {
     if (!session?.terminalPreview) {
       return;
@@ -6104,7 +6192,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.renderReady = ready === true;
     session.presentationPending = !session.renderReady;
     session.shellEl.dataset.renderReady = session.renderReady ? "true" : "false";
+    session.shellEl.dataset.hasPresentedFrame = session.hasPresentedFrame ? "true" : "false";
     if (session.renderReady) {
+      releaseSessionTerminalFrame(session);
       hideSessionTerminalPreview(session);
       clearSessionCacheV2PreparedPreview(session);
       flushPendingInput(session);
@@ -6152,7 +6242,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     && session.presentedContentGeneration === session.terminalContentGeneration
   );
 
-  const markPaneRenderPending = (session) => {
+  const markPaneSyncPending = (session) => {
     if (!session || session.closed) {
       return;
     }
@@ -6161,6 +6251,16 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.pendingRenderFitGeneration = 0;
     session.pendingRenderReplayGeneration = 0;
     session.pendingRenderContentGeneration = 0;
+  };
+
+  const invalidatePanePresentation = (session) => {
+    if (!session || session.closed) {
+      return;
+    }
+    markPaneSyncPending(session);
+    session.hasPresentedFrame = false;
+    session.shellEl.dataset.hasPresentedFrame = "false";
+    releaseSessionTerminalFrame(session);
     session.term?.renderer?.clear?.();
     clearTerminalCanvasPixels(session);
   };
@@ -6193,6 +6293,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.presentedFitGeneration = session.measuredFitGeneration;
     session.presentedReplayGeneration = session.terminalReplayGeneration;
     session.hasPresentedFrame = true;
+    session.shellEl.dataset.hasPresentedFrame = "true";
     if (!session.renderReady) {
       setPaneRenderReady(session, true);
     }
@@ -6217,6 +6318,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (term.animationFrameId) {
       window.cancelAnimationFrame(term.animationFrameId);
     }
+    if (term.renderRetryTimer !== undefined) {
+      window.clearTimeout(term.renderRetryTimer);
+      term.renderRetryTimer = undefined;
+    }
     term.animationFrameId = undefined;
     term.renderFullNextFrame = fullRenderRequested;
     return fullRenderRequested;
@@ -6234,8 +6339,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.pendingRenderReplayGeneration = session.terminalReplayGeneration;
     session.pendingRenderContentGeneration = session.terminalContentGeneration;
     term.renderFullNextFrame = false;
-    term.renderNow(true);
-    return true;
+    return term.renderNow(true) !== false;
   };
 
   const clearPaneFullRenderValidation = (session) => {
@@ -6694,6 +6798,27 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         preparePaneTabOverviewPreview(pane);
       }
     }
+  };
+
+  const scheduleWorkspaceTabOverviewCachePreviews = () => {
+    if (tabOverviewCachePreparationScheduled || disposed) {
+      return;
+    }
+    tabOverviewCachePreparationScheduled = true;
+    const prepare = () => {
+      tabOverviewCachePreparationScheduled = false;
+      if (disposed) {
+        return;
+      }
+      for (const tab of tabs.values()) {
+        prepareTabOverviewCachePreviews(tab);
+      }
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      window.requestIdleCallback(prepare, { timeout: 1500 });
+      return;
+    }
+    window.setTimeout(prepare, 500);
   };
 
   const drawTabOverviewFallback = (ctx, x, y, width, height, colors) => {
@@ -8794,12 +8919,6 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     for (const pane of tab.panes.values()) {
       connectPendingSession(pane, options);
-    }
-  };
-
-  const connectPendingSessions = (options = {}) => {
-    for (const tab of tabs.values()) {
-      connectPendingSessionsForTab(tab, options);
     }
   };
 
@@ -11046,6 +11165,19 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         const ready = checkSessionConnectionHealth(pane, { connect: true, force: true, allowHidden });
         if (probe && ready) {
           probeOpenSessionSocket(pane, { allowHidden });
+        }
+      }
+    }
+  };
+
+  const reconnectWorkspaceSessions = ({ allowHidden = true } = {}) => {
+    if (disposed || navigator.onLine === false) {
+      return;
+    }
+    for (const tab of tabs.values()) {
+      for (const pane of tab.panes.values()) {
+        if (pane.name === activeName) {
+          checkSessionConnectionHealth(pane, { connect: true, force: true, allowHidden });
         }
       }
     }
@@ -13841,7 +13973,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.cacheV2NetworkQueue = [];
     session.cacheV2NetworkQueueBytes = 0;
     session.resetOnNextReplay = true;
-    markPaneRenderPending(session);
+    markPaneSyncPending(session);
     disableSessionHistoryCache(session, error);
     const socket = session.socket;
     if (socket) {
@@ -13990,6 +14122,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.cacheV2ReplayActive = false;
     session.cacheV2NetworkQueue = [];
     session.cacheV2NetworkQueueBytes = 0;
+    if (session.hasPresentedFrame && !session.terminalFrameHeld) {
+      holdSessionTerminalFrame(session);
+    }
     if (!resetTerminalForHistoryReplay(session)) {
       rejectHistorySync("terminal reset for server snapshot failed");
       return true;
@@ -14164,6 +14299,56 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }, 180);
   };
 
+  const scheduleSessionCacheV2Compaction = (session) => {
+    if (
+      !sessionUsesTerminalCacheV2(session)
+      || session.closed
+      || session.cacheV2CompactionScheduled
+      || !session.historyGeneration
+    ) {
+      return;
+    }
+    const identity = sessionTerminalCacheV2Identity(session, session.historyGeneration);
+    if (!identity) {
+      return;
+    }
+    session.cacheV2CompactionScheduled = true;
+    const compact = () => {
+      session.cacheV2CompactionScheduled = false;
+      if (
+        session.closed
+        || !sessionUsesTerminalCacheV2(session)
+        || session.historyGeneration !== identity.historyGeneration
+      ) {
+        return;
+      }
+      terminalCacheV2.compact(identity, {
+        minChunks: terminalCacheV2CompactionMinChunks,
+        targetBytes: terminalCacheV2CompactionTargetBytes,
+      }).then((manifest) => {
+        if (manifest && Number(manifest.compactedFromChunks || 0) > manifest.chunks.length) {
+          console.info("[terminal-cache-v2] cache compacted", {
+            name: session.name,
+            pane: session.id,
+            previousChunks: manifest.compactedFromChunks,
+            chunks: manifest.chunks.length,
+          });
+        }
+      }).catch((error) => {
+        console.warn("[terminal-cache-v2] cache compaction failed", {
+          name: session.name,
+          pane: session.id,
+          error: error?.message || String(error),
+        });
+      });
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      window.requestIdleCallback(compact, { timeout: 5000 });
+      return;
+    }
+    window.setTimeout(compact, 2000);
+  };
+
   const terminalOutputKind = (data) => {
     if (typeof data === "string") {
       return "text";
@@ -14317,6 +14502,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     setPaneRenderReady(session, false);
     renderPaneFullNow(session);
     schedulePaneFullRenderValidation(session);
+    scheduleSessionCacheV2Compaction(session);
     flushPendingInput(session);
     return true;
   };
@@ -14559,6 +14745,14 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     } catch (error) {
     }
     if (message) {
+      if (session.hasPresentedFrame) {
+        console.warn("[client-terminal] startup error while preserving last frame", {
+          name: session.name,
+          pane: session.id,
+          message,
+        });
+        return;
+      }
       writeSessionWebShellError(session, message);
       return;
     }
@@ -14606,7 +14800,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     return measurePerformanceTask("history replay", () => {
       discardSessionOutputBuffers(session);
-      markPaneRenderPending(session);
+      markPaneSyncPending(session);
       session.replayComplete = false;
       session.replayVerified = false;
       session.replayCompletionPending = false;
@@ -14975,7 +15169,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       session.cacheV2WarmReplayReady = false;
       session.cacheV2WarmReplayPromise = null;
       session.cacheV2WarmReplaySnapshot = null;
-      markPaneRenderPending(session);
+      invalidatePanePresentation(session);
       detachSessionSocket(session, currentSocket, { connection: "error" });
       console.warn("[client-terminal] rejected terminal replay", {
         selector,
@@ -15001,7 +15195,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       session.cacheV2WarmReplayPromise = null;
       session.cacheV2WarmReplaySnapshot = null;
       session.cacheV2ServerSnapshotPending = false;
-      markPaneRenderPending(session);
+      markPaneSyncPending(session);
       deleteSessionHistoryCache(session);
       detachSessionSocket(session, currentSocket, { connection: "error" });
       console.warn("[terminal-history] rejected history sync", {
@@ -15153,7 +15347,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                     && snapshot.historyGeneration === historyGeneration
                     && snapshot.endCursor <= serverEndCursor
                   );
-                  if (keepWarmCanvas) {
+                  const stageServerSnapshot = keepWarmCanvas || session.hasPresentedFrame;
+                  if (stageServerSnapshot) {
                     session.cacheV2ServerSnapshotPending = true;
                     session.cacheV2ServerSnapshotStartCursor = deltaFromCursor;
                     session.cacheV2ReplayActive = true;
@@ -15305,7 +15500,20 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                   currentSocket.close();
                 } catch (error) {
                 }
-                refreshWorkspace({ focus: session.tabId === activeTabId }).catch((error) => showToast(error.message));
+                refreshWorkspaceWithRetry({ focus: session.tabId === activeTabId }).catch((error) => showToast(error.message));
+                return;
+              case "connection-error":
+                console.warn("[client-terminal] retryable connection error", {
+                  name: session.name,
+                  pane: session.id,
+                  message: message.message || "",
+                });
+                detachSessionSocket(session, currentSocket, { connection: "closed" });
+                try {
+                  currentSocket.close();
+                } catch (error) {
+                }
+                scheduleReconnect(session, { immediate: true });
                 return;
               case "pong":
                 return;
@@ -15326,10 +15534,13 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
                 }
                 const shouldFocusAfterExit = session.tabId === activeTabId && currentTab()?.activePaneId === session.id;
                 session.exitExpected = true;
+                session.workspaceExitPending = true;
                 detachSessionSocket(session, currentSocket);
-                destroySessionHistoryCache(session);
-                disposePane(session);
-                refreshWorkspace({ focus: shouldFocusAfterExit }).catch((error) => showToast(error.message));
+                try {
+                  currentSocket.close();
+                } catch (error) {
+                }
+                refreshWorkspaceWithRetry({ focus: shouldFocusAfterExit }).catch((error) => showToast(error.message));
                 return;
             }
           }
@@ -15536,6 +15747,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     shellEl.dataset.paneId = normalizedID;
     shellEl.dataset.connection = connect ? "connecting" : "idle";
     shellEl.dataset.renderReady = "false";
+    shellEl.dataset.hasPresentedFrame = "false";
     shellEl.dataset.previewReady = "false";
     shellEl.setAttribute("tabindex", "-1");
 
@@ -15556,6 +15768,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     terminalPreview.hidden = true;
     terminalPreview.draggable = false;
     terminalHost.appendChild(terminalPreview);
+    const terminalFrameHold = document.createElement("canvas");
+    terminalFrameHold.className = "terminal-frame-hold";
+    terminalFrameHold.hidden = true;
+    terminalHost.appendChild(terminalFrameHold);
     const compositionPreview = document.createElement("span");
     compositionPreview.className = "terminal-composition-preview";
     compositionPreview.hidden = true;
@@ -15567,6 +15783,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       shellEl,
       terminalHost,
       terminalPreview,
+      terminalFrameHold,
+      terminalFrameHeld: false,
       compositionPreview,
       term,
       fitAddon,
@@ -15649,6 +15867,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       cacheV2OverviewPreviewPromise: null,
       cacheV2OverviewPreviewSeq: 0,
       cacheV2LastTouchAt: 0,
+      cacheV2CompactionScheduled: false,
       cacheV2RecoveryMetrics: null,
       localBaseCursor: 0n,
       receivedHistoryCursor: 0n,
@@ -15660,6 +15879,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       inputLocked: false,
       composingIME: false,
       exitExpected: false,
+      workspaceExitPending: false,
       closed: false,
       initialRuntimeResetDone: false,
       measuredFitGeneration: 0,
@@ -16096,27 +16316,6 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     return tab;
   };
 
-  const ensureInitialInteractiveTab = ({ focus = true } = {}) => {
-    if (!activeName || tabs.size > 0) {
-      return null;
-    }
-    const wasApplyingWorkspaceState = applyingWorkspaceState;
-    applyingWorkspaceState = true;
-    try {
-      return createTab({
-        id: "tab-1",
-        label: "Shell 1",
-        focus,
-        connect: true,
-        empty: false,
-        activate: true,
-        paneId: "pane-1",
-      });
-    } finally {
-      applyingWorkspaceState = wasApplyingWorkspaceState;
-    }
-  };
-
   const setActiveTab = (tabId, { focus = true, remember = true, rememberRecent = true } = {}) => {
     const tab = tabs.get(tabId);
     if (!tab) {
@@ -16346,6 +16545,14 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
           if (!tab.panes.has(paneState.id)) {
             createPaneSession(tab, targetName, { id: paneState.id, connect: true, cols: paneState.cols, rows: paneState.rows });
           }
+          const pane = tab.panes.get(paneState.id);
+          if (pane?.workspaceExitPending) {
+            pane.workspaceExitPending = false;
+            pane.exitExpected = false;
+            pane.pendingConnect = true;
+          } else if (pane && !pane.socket) {
+            pane.pendingConnect = true;
+          }
           updatePaneActivity(paneState);
         }
         renderTabLabel(tab);
@@ -16374,12 +16581,20 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       }
       updateEmptyState();
       scheduleTabOverviewRender();
-      for (const tab of tabs.values()) {
-        prepareTabOverviewCachePreviews(tab);
+      const activePane = nextActiveTab?.panes.get(nextActiveTab.activePaneId) || null;
+      if (activePane) {
+        prepareSessionHistoryCache(activePane).catch((error) => {
+          console.warn("[terminal-cache-v2] active manifest preload failed", {
+            name: activePane.name,
+            pane: activePane.id,
+            error: error?.message || String(error),
+          });
+        });
       }
+      scheduleWorkspaceTabOverviewCachePreviews();
       window.requestAnimationFrame(() => {
         resizeActiveTabForCurrentDevice();
-        connectPendingSessions({ allowHidden: true });
+        connectPendingSessionsForTab(nextActiveTab, { allowHidden: true });
       });
       return true;
     } finally {
@@ -16388,7 +16603,85 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
   });
 
-  const refreshWorkspace = async ({ focus = false, instanceName = activeName, generation = activeInstanceGeneration } = {}) => measurePerformanceTask("workspace refresh", async () => {
+  const clearWorkspaceRefreshRetry = () => {
+    if (workspaceRefreshRetryTimer) {
+      window.clearTimeout(workspaceRefreshRetryTimer);
+      workspaceRefreshRetryTimer = 0;
+    }
+    workspaceRefreshRetryAttempts = 0;
+    workspaceRefreshRetryContext = null;
+  };
+
+  const scheduleWorkspaceRefreshRetry = ({
+    focus = false,
+    instanceName = activeName,
+    generation = activeInstanceGeneration,
+    immediate = false,
+  } = {}) => {
+    const requestName = String(instanceName || "").trim();
+    if (disposed || !isCurrentInstanceRequest(requestName, generation)) {
+      return;
+    }
+    if (
+      workspaceRefreshRetryContext?.instanceName === requestName
+      && workspaceRefreshRetryContext?.generation === generation
+    ) {
+      workspaceRefreshRetryContext.focus = Boolean(focus || workspaceRefreshRetryContext.focus);
+    } else {
+      workspaceRefreshRetryContext = {
+        focus: Boolean(focus),
+        instanceName: requestName,
+        generation,
+      };
+    }
+    if (workspaceRefreshRetryTimer || workspaceRefreshRetryInFlight || navigator.onLine === false) {
+      return;
+    }
+    const attempt = Math.max(0, Number(workspaceRefreshRetryAttempts || 0));
+    const baseDelay = immediate ? 0 : Math.min(workspaceRefreshRetryMaxDelayMs, workspaceRefreshRetryBaseDelayMs * (2 ** Math.min(attempt, 8)));
+    const jitter = baseDelay * workspaceRefreshRetryJitterRatio * ((Math.random() * 2) - 1);
+    const delay = Math.max(0, Math.round(baseDelay + jitter));
+    workspaceRefreshRetryTimer = window.setTimeout(async () => {
+      workspaceRefreshRetryTimer = 0;
+      const context = workspaceRefreshRetryContext;
+      if (!context || disposed || !isCurrentInstanceRequest(context.instanceName, context.generation)) {
+        return;
+      }
+      workspaceRefreshRetryInFlight = true;
+      let retryError = null;
+      try {
+        await refreshWorkspace(context);
+        console.info("[workspace-recovery] refresh succeeded", {
+          name: context.instanceName,
+          attempts: workspaceRefreshRetryAttempts,
+        });
+      } catch (error) {
+        retryError = error;
+        workspaceRefreshRetryAttempts = Math.min(20, workspaceRefreshRetryAttempts + 1);
+        console.warn("[workspace-recovery] refresh failed", {
+          name: context.instanceName,
+          attempt: workspaceRefreshRetryAttempts,
+          error: error?.message || String(error),
+        });
+      } finally {
+        workspaceRefreshRetryInFlight = false;
+      }
+      if (retryError && workspaceRefreshRetryContext === context) {
+        scheduleWorkspaceRefreshRetry(context);
+      }
+    }, delay);
+  };
+
+  const refreshWorkspaceWithRetry = async (options = {}) => {
+    try {
+      return await refreshWorkspace(options);
+    } catch (error) {
+      scheduleWorkspaceRefreshRetry(options);
+      throw error;
+    }
+  };
+
+  const requestWorkspaceRefresh = async ({ instanceName = activeName, generation = activeInstanceGeneration } = {}) => {
     const requestName = String(instanceName || "").trim();
     const recoveryMetrics = {
       selector: requestName,
@@ -16399,15 +16692,31 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (isCurrentInstanceRequest(requestName, generation)) {
       latestWorkspaceRecoveryMetrics = recoveryMetrics;
     }
+    markWebShellStartupMetric("workspaceRequestStartedAt");
     const state = await fetchWorkspaceState(requestName);
+    if (!isCurrentInstanceRequest(requestName, generation)) {
+      return { state, requestName, generation };
+    }
+    recoveryMetrics.readyAt = terminalCacheV2MetricNow();
+    markWebShellStartupMetric("workspaceReadyAt");
+    return { state, requestName, generation };
+  };
+
+  const applyWorkspaceRefresh = ({ state, requestName, generation }, { focus = false } = {}) => {
     if (!isCurrentInstanceRequest(requestName, generation)) {
       return state;
     }
-    recoveryMetrics.readyAt = terminalCacheV2MetricNow();
     ensureResponseSelector(state, requestName);
     observeServerRevision(state);
     applyWorkspaceState(state, { focus, instanceName: requestName, generation });
+    markWebShellStartupMetric("workspaceAppliedAt");
+    clearWorkspaceRefreshRetry();
     return state;
+  };
+
+  const refreshWorkspace = async ({ focus = false, instanceName = activeName, generation = activeInstanceGeneration } = {}) => measurePerformanceTask("workspace refresh", async () => {
+    const result = await requestWorkspaceRefresh({ instanceName, generation });
+    return applyWorkspaceRefresh(result, { focus });
   });
 
   const splitLayout = (node, targetPaneId, direction, newPaneId) => {
@@ -16653,6 +16962,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     pane.cacheV2NetworkQueue = [];
     pane.cacheV2NetworkQueueBytes = 0;
     hideSessionTerminalPreview(pane);
+    releaseSessionTerminalFrame(pane);
     clearSessionCacheV2PreparedPreview(pane);
     clearSessionCacheV2OverviewPreview(pane);
     runSessionCleanups(pane);
@@ -18114,6 +18424,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (!normalized || normalized === activeName) {
       return;
     }
+    clearWorkspaceRefreshRetry();
     hideStartupErrorPanel();
     const generation = setActiveInstanceName(normalized);
     if (updateURL) {
@@ -18127,7 +18438,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       refreshServiceForwards().catch((error) => setSettingsFeedback(error.message || "服务转发列表加载失败。", "error"));
     }
     resetTabsForInstance();
-    await refreshWorkspace({ focus: true, instanceName: activeName, generation });
+    await refreshWorkspaceWithRetry({ focus: true, instanceName: activeName, generation });
   };
 
   const refreshInstances = async () => {
@@ -18158,15 +18469,59 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     applyPerformanceMeterVisibility();
     applyPerformanceTaskMeterVisibility();
     startDeviceHeartbeat();
-    await loadThemeCatalog();
+    const themePromise = loadThemeCatalog().finally(() => {
+      markWebShellStartupMetric("themeReadyAt");
+    });
+    const settingsPromise = loadSettings({ deferFontLoad: true })
+      .catch((error) => showToast(error.message || "设置加载失败。"))
+      .finally(() => {
+        markWebShellStartupMetric("settingsReadyAt");
+      });
+    const instancesPromise = refreshInstances().finally(() => {
+      markWebShellStartupMetric("instancesReadyAt");
+    });
+    let bootstrapWorkspaceContext = null;
+    const requestBootstrapWorkspace = () => {
+      bootstrapWorkspaceContext = {
+        instanceName: activeName,
+        generation: activeInstanceGeneration,
+      };
+      return requestWorkspaceRefresh(bootstrapWorkspaceContext);
+    };
+    const workspacePromise = (activeName ? requestBootstrapWorkspace() : instancesPromise.then(requestBootstrapWorkspace))
+      .then((result) => ({ result, error: null }), (error) => ({ result: null, error }));
+    const startupInputUnlockPromise = instancesPromise
+      .then(() => clearStartupServerRevisionInputLock())
+      .catch(() => {});
+    await Promise.all([
+      ghosttyInitPromise,
+      themePromise,
+      settingsPromise,
+      instancesPromise,
+      startupInputUnlockPromise,
+    ]);
     applyThemeDocumentState();
     renderThemePicker();
     renderSettingsThemeList();
-    await loadSettings().catch((error) => showToast(error.message || "设置加载失败。"));
-    await refreshInstances();
-    await clearStartupServerRevisionInputLock().catch(() => {});
-    ensureInitialInteractiveTab({ focus: true });
-    await refreshWorkspace({ focus: true });
+    const workspaceOutcome = await workspacePromise;
+    const workspaceRequestIsCurrent = isCurrentInstanceRequest(
+      bootstrapWorkspaceContext?.instanceName,
+      bootstrapWorkspaceContext?.generation,
+    );
+    if (!workspaceRequestIsCurrent) {
+      await refreshWorkspaceWithRetry({ focus: true }).catch((error) => {
+        showToast(error.message || "Workspace is temporarily unavailable. Retrying.");
+      });
+    } else if (workspaceOutcome.error) {
+      scheduleWorkspaceRefreshRetry({
+        focus: true,
+        instanceName: activeName,
+        generation: activeInstanceGeneration,
+      });
+      showToast(workspaceOutcome.error.message || "Workspace is temporarily unavailable. Retrying.");
+    } else {
+      applyWorkspaceRefresh(workspaceOutcome.result, { focus: true });
+    }
     requestTerminalStoragePersistence().catch(() => {});
     await refreshServerRevision().catch(() => {});
     startServerRevisionRefresh();
@@ -19162,7 +19517,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     setNetworkBanner(false);
     showToast("网络已恢复，正在重连。");
     refreshServerRevision().catch(() => {});
-    reconnectVisibleSessions({ allowHidden: true, probe: true });
+    reconnectWorkspaceSessions({ allowHidden: true });
+    if (workspaceRefreshRetryContext) {
+      scheduleWorkspaceRefreshRetry({ ...workspaceRefreshRetryContext, immediate: true });
+    }
     refreshActivity({ silent: true }).catch(() => {});
   });
   window.addEventListener("offline", () => {
@@ -19218,6 +19576,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return "";
     }
     disposed = true;
+    clearWorkspaceRefreshRetry();
     stopPerformanceMeter();
     sendDeviceOfflineBeacon();
     if (activeTabResizeTimer) {

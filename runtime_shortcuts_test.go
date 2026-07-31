@@ -73,6 +73,15 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`previewPreparedMs`,
 		`previewLayoutMatch`,
 		`previewMissReason`,
+		`pageRealCanvasVisibleMs`,
+		`const ghosttyInitPromise = initGhostty`,
+		`loadSettings({ deferFontLoad: true })`,
+		`const requestBootstrapWorkspace = () => {`,
+		`const workspacePromise = (activeName ? requestBootstrapWorkspace() : instancesPromise.then(requestBootstrapWorkspace))`,
+		`prepareSessionHistoryCache(activePane)`,
+		`scheduleWorkspaceTabOverviewCachePreviews`,
+		`connectPendingSessionsForTab(nextActiveTab, { allowHidden: true })`,
+		`terminalCacheV2.compact(identity`,
 		`navigator.serviceWorker.register("./service-worker.js"`,
 	} {
 		if !strings.Contains(mainSource, want) {
@@ -80,10 +89,16 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		}
 	}
 	cacheSource := string(cacheData)
-	chunkPut := strings.Index(cacheSource, "await store.put(chunkURL(identity, merged.startCursor, merged.endCursor), response);")
-	manifestPut := strings.Index(cacheSource[chunkPut+1:], "await putManifest(store, manifest);")
+	appendBlock := sourceBetween(t, cacheSource,
+		"const append = async (sourceIdentity, generation, chunks, { limitBytes } = {}) => {",
+		"const readChunks = async (manifest, onChunk) => {")
+	chunkPut := strings.Index(appendBlock, "await putChunk(store, identity, stored);")
+	manifestPut := strings.Index(appendBlock, "await putManifest(store, manifest);")
 	if chunkPut < 0 || manifestPut < 0 {
 		t.Fatal("cache-v2 must write immutable bytes before committing its manifest")
+	}
+	if chunkPut > manifestPut {
+		t.Fatal("cache-v2 append must commit its byte block before the manifest")
 	}
 	for _, want := range []string{
 		`cacheScopeID: requiredText`,
@@ -93,8 +108,11 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`historyGeneration: source.historyGeneration`,
 		`checkpointCursor !== endCursor`,
 		`const defaultReadConcurrency = 32;`,
+		`const defaultWriteBlockBytes = 128 * 1024;`,
 		`const loaded = await Promise.all(batch.map(async (chunk) => {`,
 		`batchEnd: batchIndex === loaded.length - 1`,
+		`const compact = (sourceIdentity, {`,
+		`compactedFromChunks: manifest.chunks.length`,
 	} {
 		if !strings.Contains(cacheSource, want) {
 			t.Fatalf("cache-v2 isolation guard missing %q", want)
@@ -109,13 +127,18 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`url.pathname.includes("/assets/")`,
 		`const assetVersion = "__LCMD_ASSET_VERSION__";`,
 		`const assetBase = "__LCMD_ASSET_BASE__";`,
-		`fetch(request, { cache: "no-cache" })`,
+		`credentials: "same-origin"`,
+		`const cached = await cache.match(request);`,
+		`const currentVersionAsset = url.pathname.startsWith(assetBase);`,
+		`if (currentVersionAsset && cached) {`,
+		`const response = await fetch(request);`,
+		`return cached || response;`,
 	} {
 		if !strings.Contains(workerSource, want) {
 			t.Fatalf("service worker network-only guard missing %q", want)
 		}
 	}
-	if !strings.Contains(string(indexData), `rel="manifest" href="__LCMD_ASSET_BASE__manifest.webmanifest"`) {
+	if !strings.Contains(string(indexData), `rel="manifest" href="__LCMD_ASSET_BASE__manifest.webmanifest" crossorigin="use-credentials"`) {
 		t.Fatal("PWA manifest link is missing")
 	}
 	if !strings.Contains(string(indexData), `rel="apple-touch-icon" href="__LCMD_ASSET_BASE__icon-192.png"`) {
@@ -169,6 +192,7 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`sessionCacheV2WarmReplayMatchesSnapshot(session, snapshot)`,
 		`snapshot.historyGeneration === historyGeneration`,
 		`snapshot.endCursor <= serverEndCursor`,
+		`const stageServerSnapshot = keepWarmCanvas || session.hasPresentedFrame;`,
 		`session.cacheV2ServerSnapshotPending = true;`,
 	} {
 		if !strings.Contains(snapshotReplayBlock, want) {
@@ -2032,10 +2056,14 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"clearTerminalCanvasPixels(session);",
 		"const setPaneRenderReady = (session, ready) => {",
 		"session.shellEl.dataset.renderReady = session.renderReady ? \"true\" : \"false\";",
-		"const markPaneRenderPending = (session) => {",
+		"const markPaneSyncPending = (session) => {",
 		"session.fullRenderPending = false;",
+		"const invalidatePanePresentation = (session) => {",
 		"session.term?.renderer?.clear?.();",
 		"clearTerminalCanvasPixels(session);",
+		"const holdSessionTerminalFrame = (session) => {",
+		"const releaseSessionTerminalFrame = (session) => {",
+		"session.shellEl.dataset.hasPresentedFrame = session.hasPresentedFrame ? \"true\" : \"false\";",
 		"const markPaneRenderedIfMeasurable = (session) => {",
 		"!session.fullRenderPending",
 		"|| session.activationFitPending",
@@ -2049,13 +2077,15 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"setPaneRenderReady(session, true);",
 		"const panePresentationIsCurrent = (session) => Boolean(",
 		"const cancelPendingTerminalRender = (term) => {",
+		"if (term.renderRetryTimer !== undefined) {",
+		"window.clearTimeout(term.renderRetryTimer);",
 		"const renderPaneFullNow = (session) => {",
 		"session.pendingRenderFitGeneration = session.measuredFitGeneration;",
 		"session.pendingRenderReplayGeneration = session.terminalReplayGeneration;",
 		"session.pendingRenderContentGeneration = session.terminalContentGeneration;",
 		"const fullRenderRequested = term.renderFullNextFrame === true;",
 		"term.renderFullNextFrame = fullRenderRequested;",
-		"term.renderNow(true);",
+		"return term.renderNow(true) !== false;",
 		"const schedulePaneFullRenderValidation = (session) => {",
 		"!panePresentationIsCurrent(session)",
 		"const installTerminalCanvasRecovery = (session) => {",
@@ -2075,6 +2105,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"fullRenderPending: false,",
 		"fullRenderValidationTimer: 0,",
 		"hasPresentedFrame: false,",
+		"workspaceExitPending: false,",
 		"activationFitPending: false,",
 		"resizeObserverFrame: 0,",
 		"cleanupCallbacks: [],",
@@ -2084,7 +2115,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"clearTerminalCanvasPixels(session);",
 		"term.onRender(() => markPaneRenderedIfMeasurable(session))",
 		"const resetTerminalForHistoryReplay = (session) => {",
-		"markPaneRenderPending(session);",
+		"markPaneSyncPending(session);",
 		"session.resetOnNextReplay = false;",
 		"if (!resetTerminalRuntimeState(session)) {",
 		"const disposePane = (pane) => {",
@@ -2122,8 +2153,9 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	}
 
 	styleSnippets := []string{
-		`.pane-shell[data-render-ready="false"] .terminal-host canvas {`,
+		`.pane-shell[data-render-ready="false"][data-has-presented-frame="false"] .terminal-host > canvas:not(.terminal-frame-hold) {`,
 		"visibility: hidden;",
+		".terminal-frame-hold",
 	}
 	for _, want := range styleSnippets {
 		if !strings.Contains(styleSource, want) {
@@ -2140,13 +2172,26 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"this.ensureScrollbackCapacity(A, B)",
 		"ghostty_terminal_get_scrollback_generation",
 		"getScrollbackGeneration()",
+		"this.renderStateCurrent = !1",
+		"ensureRenderStateCurrent()",
+		"this.renderDirtyState = O.FULL",
+		"this.renderDirtyState = A",
+		"this.renderDirtyState = O.NONE",
 		"N = s - C >>> 0",
 		"this.requestRender({ full: !0 })",
+		"normalizeViewportBounds(A = this.viewportY)",
+		"E.normalizeViewportBounds(requestedViewportY)",
 		"this.ctx.fillRect(0, 0, this.canvas.width / this.devicePixelRatio, this.canvas.height / this.devicePixelRatio)",
 		"this.ctx.fillRect(0, C, this.canvas.width / this.devicePixelRatio, this.metrics.height)",
 		"i.text = D.grapheme_len > 0 && typeof A.getGraphemeString == \"function\" ? A.getGraphemeString(Math.floor(I / B.cols), I % B.cols) : String.fromCodePoint(D.codepoint || 32)",
 		"text: I[w + 14] > 0 && typeof this.getScrollbackGraphemeString == \"function\" ? this.getScrollbackGraphemeString(A, i) : String.fromCodePoint(D.getUint32(w, !0) || 32)",
 		"typeof A.text == \"string\" ? N = A.text",
+		"materializeViewportLines(A, B, g, E, C)",
+		"const W = this.materializeViewportLines(A, D, g, i, E);",
+		"if (!this.renderer.render(this.wasmTerm, A, this.viewportY, this, this.scrollbarOpacity))",
+		"this.scheduleRenderRetry()",
+		"this.renderRetryDelayMs = Math.min(250, A * 2)",
+		"this.renderRetryTimer = window.setTimeout",
 	}
 	for _, want := range rendererSnippets {
 		if !strings.Contains(rendererSource, want) {
@@ -2187,17 +2232,79 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	if strings.Contains(rendererSource, "this.requestRender({ full: s })") {
 		t.Fatal("terminal writes must not depend on scrollback generation alone for full redraws")
 	}
+	renderBlock := sourceBetween(t, rendererSource,
+		"render(A, B = !1, g = 0, E, C = 1) {",
+		"renderLine(A, B, g, E = 0) {")
+	materializeIndex := strings.Index(renderBlock, "const W = this.materializeViewportLines(A, D, g, i, E);")
+	canvasClearIndex := strings.Index(renderBlock, "B && (this.ctx.fillStyle = this.theme.background")
+	if materializeIndex < 0 || canvasClearIndex < 0 || materializeIndex >= canvasClearIndex {
+		t.Fatal("runtime renderer must materialize every visible row before clearing or committing the canvas")
+	}
+	if strings.Contains(renderBlock, "c = E.getScrollbackLine(F)") || strings.Contains(renderBlock, "c = A.getLine(F)") {
+		t.Fatal("runtime renderer must not re-read terminal rows while committing a materialized frame")
+	}
 	if !strings.Contains(string(wasmData), "ghostty_terminal_get_scrollback_generation") {
 		t.Fatal("vendored Ghostty WASM must export scrollback generation")
 	}
-	if !strings.Contains(mainSource, `await initGhostty(runtimeAssetURL("./ghostty-vt.wasm"));`) {
+	if !strings.Contains(mainSource, `const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm"))`) {
 		t.Fatal("runtime must explicitly initialize ghostty-web with the vendored WASM resource")
 	}
 	if !strings.Contains(mainSource, `const revisionChanged = Boolean(currentServerRevision && currentServerRevision !== nextRevision);`) {
 		t.Fatal("runtime must detect an asset revision change even when the target cannot persist reload state")
 	}
-	if !strings.Contains(mainSource, `fetch(runtimeAssetURL("./themes.json"), { cache: "no-cache" })`) {
+	if !strings.Contains(mainSource, `fetch(runtimeAssetURL("./themes.json"))`) {
 		t.Fatal("runtime theme catalog must inherit the LPK-versioned asset path")
+	}
+	markSyncBlock := sourceBetween(t, mainSource,
+		"const markPaneSyncPending = (session) => {",
+		"const invalidatePanePresentation = (session) => {")
+	for _, forbidden := range []string{"renderer?.clear", "clearTerminalCanvasPixels", "resetTerminalRuntimeState"} {
+		if strings.Contains(markSyncBlock, forbidden) {
+			t.Fatalf("transient terminal sync must preserve the last frame; found %q", forbidden)
+		}
+	}
+}
+
+func TestRuntimeOfflineFrameAndWorkspaceRetryGuard(t *testing.T) {
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	mainSource := string(mainData)
+	for _, want := range []string{
+		"const workspaceRefreshRetryBaseDelayMs = 500;",
+		"const workspaceRefreshRetryMaxDelayMs = 15 * 1000;",
+		"const scheduleWorkspaceRefreshRetry = ({",
+		"const refreshWorkspaceWithRetry = async (options = {}) => {",
+		"workspaceRefreshRetryAttempts = Math.min(20, workspaceRefreshRetryAttempts + 1);",
+		"scheduleWorkspaceRefreshRetry(context);",
+		"case \"connection-error\":",
+		"scheduleReconnect(session, { immediate: true });",
+		"session.workspaceExitPending = true;",
+		"refreshWorkspaceWithRetry({ focus: shouldFocusAfterExit })",
+		"const stageServerSnapshot = keepWarmCanvas || session.hasPresentedFrame;",
+		"holdSessionTerminalFrame(session);",
+		"reconnectWorkspaceSessions({ allowHidden: true });",
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("offline terminal recovery guard missing %q", want)
+		}
+	}
+	exitBlock := sourceBetween(t, mainSource,
+		`case "process-exit":`,
+		"        } catch (error) {")
+	for _, forbidden := range []string{"destroySessionHistoryCache(session);", "disposePane(session);"} {
+		if strings.Contains(exitBlock, forbidden) {
+			t.Fatalf("process exit must wait for authoritative workspace refresh before %q", forbidden)
+		}
+	}
+	connectionErrorBlock := sourceBetween(t, mainSource,
+		`case "connection-error":`,
+		`case "pong":`)
+	for _, forbidden := range []string{"resetTerminalForHistoryReplay", "invalidatePanePresentation", "clearTerminalCanvasPixels", "resetOnNextReplay"} {
+		if strings.Contains(connectionErrorBlock, forbidden) {
+			t.Fatalf("retryable connection errors must preserve the last frame; found %q", forbidden)
+		}
 	}
 }
 
@@ -2216,6 +2323,8 @@ func TestRuntimeWebSocketReconnectHealthGuard(t *testing.T) {
 		"const terminalAttachReadyTimeoutMs = 8 * 1000;",
 		"const terminalAgentPrepareTimeoutMs = 45 * 1000;",
 		"const terminalReconnectBaseDelayMs = 500;",
+		"const workspaceRefreshRetryBaseDelayMs = 500;",
+		"const workspaceRefreshRetryMaxDelayMs = 15 * 1000;",
 		"const healthTimeout = session.agentPreparing ? terminalAgentPrepareTimeoutMs : terminalWebSocketHealthTimeoutMs;",
 		"const attachReadyTimeout = Number(session.attachReadyTimeoutMs || 0) || terminalAttachReadyTimeoutMs;",
 		"const isSessionInputReady = (session) => (",
@@ -2236,6 +2345,8 @@ func TestRuntimeWebSocketReconnectHealthGuard(t *testing.T) {
 		"clearSocketResumeProbeTimer(session);",
 		"session.shellEl.dataset.connection = \"open\";",
 		"message.retryable === true",
+		"case \"connection-error\":",
+		"const reconnectWorkspaceSessions = ({ allowHidden = true } = {}) => {",
 		"window.addEventListener(\"pageshow\", () => {",
 		"checkSessionConnectionHealth(pane, { connect: true, force: true, allowHidden });",
 		"document.addEventListener(\"pointerdown\", recoverVisibleSessionsFromUserGesture, { capture: true, passive: true });",
@@ -2932,15 +3043,18 @@ func TestRuntimeMobileDeployRestartUsesBottomSheet(t *testing.T) {
 		`: await openDialog(restartDialogOptions);`,
 		`discardAllTerminalInputBuffers();`,
 		`const clearStartupServerRevisionInputLock = async () => {`,
-		`await clearStartupServerRevisionInputLock().catch(() => {});`,
-		`const ensureInitialInteractiveTab = ({ focus = true } = {}) => {`,
-		`paneId: "pane-1",`,
-		`ensureInitialInteractiveTab({ focus: true });`,
+		`const requestBootstrapWorkspace = () => {`,
+		`const startupInputUnlockPromise = instancesPromise`,
+		`ghosttyInitPromise,`,
+		`applyWorkspaceRefresh(workspaceOutcome.result, { focus: true });`,
 	}
 	for _, want := range wantMainSnippets {
 		if !strings.Contains(mainSource, want) {
 			t.Fatalf("runtime mobile deploy restart guard missing %q", want)
 		}
+	}
+	if strings.Contains(mainSource, `ensureInitialInteractiveTab`) {
+		t.Fatal("startup must not create a disposable terminal before authoritative workspace identity arrives")
 	}
 	if strings.Contains(mainSource, `setAllTerminalInputLocked(false);
         deployRestartDialogOpen = false;
