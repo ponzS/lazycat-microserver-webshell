@@ -188,7 +188,8 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`terminalCacheV2.readChunks(snapshot`,
 		`batchEnd`,
 		`clearSessionOutputFlushSchedule(session);`,
-		`if (batchEnd && !session.cacheV2WarmFrameReady) {`,
+		`if (batchEnd) {`,
+		`const firstVisibleFrame = !session.cacheV2WarmFrameReady && terminalHasVisibleContent(session);`,
 		`terminalHasVisibleContent(session)`,
 		`session.cacheV2WarmFrameReady = true;`,
 		`markSessionCacheV2RecoveryMetric(session, "localFirstFrameAt");`,
@@ -1999,6 +2000,10 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(runtime/static/ghostty-web.js) error = %v", err)
 	}
+	wasmData, err := os.ReadFile("runtime/static/ghostty-vt.wasm")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/ghostty-vt.wasm) error = %v", err)
+	}
 	mainSource := string(mainData)
 	styleSource := string(styleData)
 	rendererSource := string(rendererData)
@@ -2009,6 +2014,8 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"const canvas = term?.canvas || term?.renderer?.getCanvas?.();",
 		"ctx.fillStyle = activeTheme?.background || terminalOptionsBase.theme?.background || \"#000000\";",
 		"ctx.fillRect(0, 0, canvas.width / ratio, canvas.height / ratio);",
+		"const advanceTerminalContentGeneration = (session) => {",
+		"session.terminalContentGeneration = Number(session.terminalContentGeneration || 0) + 1;",
 		"const clearTerminalRuntimeBuffer = (session) => {",
 		"term.wasmTerm.write(terminalRuntimeClearSequence);",
 		"term.viewportY = 0;",
@@ -2030,11 +2037,13 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"session.term?.renderer?.clear?.();",
 		"clearTerminalCanvasPixels(session);",
 		"const markPaneRenderedIfMeasurable = (session) => {",
-		"|| !session.fullRenderPending",
+		"!session.fullRenderPending",
 		"|| session.activationFitPending",
-		"|| !session.replayComplete",
+		"!session.replayComplete",
 		"session.pendingRenderFitGeneration !== session.measuredFitGeneration",
 		"session.pendingRenderReplayGeneration !== session.terminalReplayGeneration",
+		"session.pendingRenderContentGeneration !== session.terminalContentGeneration",
+		"session.presentedContentGeneration === session.terminalContentGeneration",
 		"terminalCanvasMatchesExpectedSize(session)",
 		"session.hasPresentedFrame = true;",
 		"setPaneRenderReady(session, true);",
@@ -2043,6 +2052,9 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"const renderPaneFullNow = (session) => {",
 		"session.pendingRenderFitGeneration = session.measuredFitGeneration;",
 		"session.pendingRenderReplayGeneration = session.terminalReplayGeneration;",
+		"session.pendingRenderContentGeneration = session.terminalContentGeneration;",
+		"const fullRenderRequested = term.renderFullNextFrame === true;",
+		"term.renderFullNextFrame = fullRenderRequested;",
 		"term.renderNow(true);",
 		"const schedulePaneFullRenderValidation = (session) => {",
 		"!panePresentationIsCurrent(session)",
@@ -2055,6 +2067,9 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"initialRuntimeResetDone: false,",
 		"measuredFitGeneration: 0,",
 		"terminalReplayGeneration: 0,",
+		"terminalContentGeneration: 0,",
+		"pendingRenderContentGeneration: 0,",
+		"presentedContentGeneration: 0,",
 		"presentedFitGeneration: 0,",
 		"presentedReplayGeneration: 0,",
 		"fullRenderPending: false,",
@@ -2119,9 +2134,14 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	rendererSnippets := []string{
 		"async function oA(A)",
 		"R || (R = await q.load(A))",
+		"Incompatible Ghostty WASM: missing ghostty_terminal_get_scrollback_generation",
 		"this.scrollbackByteCapacity = this.estimateScrollbackBytes(g, E)",
 		"this.exports.ghostty_terminal_set_scrollback_limit(this.handle, g)",
 		"this.ensureScrollbackCapacity(A, B)",
+		"ghostty_terminal_get_scrollback_generation",
+		"getScrollbackGeneration()",
+		"N = s - C >>> 0",
+		"this.requestRender({ full: !0 })",
 		"this.ctx.fillRect(0, 0, this.canvas.width / this.devicePixelRatio, this.canvas.height / this.devicePixelRatio)",
 		"this.ctx.fillRect(0, C, this.canvas.width / this.devicePixelRatio, this.metrics.height)",
 		"i.text = D.grapheme_len > 0 && typeof A.getGraphemeString == \"function\" ? A.getGraphemeString(Math.floor(I / B.cols), I % B.cols) : String.fromCodePoint(D.codepoint || 32)",
@@ -2133,8 +2153,48 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 			t.Fatalf("runtime terminal canvas residue guard missing renderer snippet %q", want)
 		}
 	}
+	if strings.Contains(rendererSource, "C !== void 0 && s !== void 0 ? s - C >>> 0") {
+		t.Fatal("runtime must not silently fall back to scrollback length when generation ABI is missing")
+	}
+	assertOutputFullRender := func(label, startMarker, endMarker string) {
+		t.Helper()
+		start := strings.Index(mainSource, startMarker)
+		if start < 0 {
+			t.Fatalf("runtime %s output guard missing start marker %q", label, startMarker)
+		}
+		endOffset := strings.Index(mainSource[start:], endMarker)
+		if endOffset < 0 {
+			t.Fatalf("runtime %s output guard missing end marker %q", label, endMarker)
+		}
+		body := mainSource[start : start+endOffset]
+		writeIndex := strings.Index(body, `measurePerformanceTask("terminal render", () => session.term.write(data));`)
+		fullRenderIndex := strings.Index(body, `session.term.requestRender?.({ full: true });`)
+		contentGenerationIndex := strings.Index(body, `advanceTerminalContentGeneration(session);`)
+		if writeIndex < 0 || fullRenderIndex <= writeIndex || contentGenerationIndex <= fullRenderIndex {
+			t.Fatalf("runtime %s output must write, request a full render, then advance content generation", label)
+		}
+	}
+	assertOutputFullRender(
+		"queued PTY",
+		"const writeTerminalOutputBatch =",
+		"const finishSessionHistoryReplayIfReady =",
+	)
+	assertOutputFullRender(
+		"immediate PTY",
+		"const writeSessionImmediateOutput =",
+		"const readAgentStartupError =",
+	)
+	if strings.Contains(rendererSource, "this.requestRender({ full: s })") {
+		t.Fatal("terminal writes must not depend on scrollback generation alone for full redraws")
+	}
+	if !strings.Contains(string(wasmData), "ghostty_terminal_get_scrollback_generation") {
+		t.Fatal("vendored Ghostty WASM must export scrollback generation")
+	}
 	if !strings.Contains(mainSource, `await initGhostty(runtimeAssetURL("./ghostty-vt.wasm"));`) {
 		t.Fatal("runtime must explicitly initialize ghostty-web with the vendored WASM resource")
+	}
+	if !strings.Contains(mainSource, `const revisionChanged = Boolean(currentServerRevision && currentServerRevision !== nextRevision);`) {
+		t.Fatal("runtime must detect an asset revision change even when the target cannot persist reload state")
 	}
 	if !strings.Contains(mainSource, `fetch(runtimeAssetURL("./themes.json"), { cache: "no-cache" })`) {
 		t.Fatal("runtime theme catalog must inherit the LPK-versioned asset path")

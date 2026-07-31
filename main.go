@@ -203,6 +203,17 @@ func computeServerRevision(rootDir string) string {
 }
 
 func computeAssetVersion(rootDir string) string {
+	if version := declaredAssetVersion(rootDir); version != "" {
+		return version
+	}
+	revision := computeContentRevision(rootDir)
+	if len(revision) > 24 {
+		revision = revision[:24]
+	}
+	return "content-" + revision
+}
+
+func declaredAssetVersion(rootDir string) string {
 	if data, err := os.ReadFile(filepath.Join(rootDir, ".lpk-version")); err == nil {
 		if version := strings.TrimSpace(string(data)); isValidAssetVersion(version) {
 			return version
@@ -213,11 +224,7 @@ func computeAssetVersion(rootDir string) string {
 			return version
 		}
 	}
-	revision := computeContentRevision(rootDir)
-	if len(revision) > 24 {
-		revision = revision[:24]
-	}
-	return "content-" + revision
+	return ""
 }
 
 func packageVersion(data []byte) string {
@@ -245,6 +252,24 @@ func isValidAssetVersion(version string) bool {
 		}
 	}
 	return true
+}
+
+func (s *pluginServer) currentAssetVersion() string {
+	if version := declaredAssetVersion(s.rootDir); version != "" {
+		return version
+	}
+	if isValidAssetVersion(s.assetVersion) {
+		return s.assetVersion
+	}
+	return computeAssetVersion(s.rootDir)
+}
+
+func (s *pluginServer) currentServerRevision() string {
+	baseRevision := strings.TrimSpace(s.serverRevision)
+	if baseRevision == "" {
+		baseRevision = "runtime"
+	}
+	return baseRevision + ":assets=" + s.currentAssetVersion()
 }
 
 func (s *pluginServer) run(ctx context.Context) error {
@@ -280,7 +305,7 @@ func (s *pluginServer) run(ctx context.Context) error {
 	mux.HandleFunc("/api/workspace/activity", s.handleWorkspaceActivity)
 	mux.HandleFunc("/api/agent/startup-error", s.handleAgentStartupError)
 	mux.HandleFunc("/ws", s.handleWebSocket)
-	mux.Handle("/assets/", versionedStaticFileServer(filepath.Join(s.rootDir, "runtime", "static"), s.assetVersion))
+	mux.Handle("/assets/", versionedStaticFileServer(filepath.Join(s.rootDir, "runtime", "static"), s.currentAssetVersion))
 	mux.Handle("/static/", http.StripPrefix("/static/", staticFileServer(filepath.Join(s.rootDir, "runtime", "static"))))
 
 	return s.serveHTTP(ctx, listener, mux)
@@ -316,10 +341,14 @@ func staticFileServerWithCachePolicy(root string, immutable bool) http.Handler {
 	})
 }
 
-func versionedStaticFileServer(root, assetVersion string) http.Handler {
-	prefix := "/assets/" + assetVersion + "/"
-	files := http.StripPrefix(prefix, staticFileServerWithCachePolicy(root, true))
+func versionedStaticFileServer(root string, currentAssetVersion func() string) http.Handler {
+	files := staticFileServerWithCachePolicy(root, true)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assetVersion := ""
+		if currentAssetVersion != nil {
+			assetVersion = strings.TrimSpace(currentAssetVersion())
+		}
+		prefix := "/assets/" + assetVersion + "/"
 		if !isValidAssetVersion(assetVersion) || !strings.HasPrefix(r.URL.Path, prefix) {
 			http.NotFound(w, r)
 			return
@@ -329,7 +358,7 @@ func versionedStaticFileServer(root, assetVersion string) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		files.ServeHTTP(w, r)
+		http.StripPrefix(prefix, files).ServeHTTP(w, r)
 	})
 }
 
@@ -343,8 +372,9 @@ func (s *pluginServer) handleServiceWorker(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "service worker is unavailable", http.StatusInternalServerError)
 		return
 	}
-	data = bytes.ReplaceAll(data, []byte(assetVersionPlaceholder), []byte(s.assetVersion))
-	data = bytes.ReplaceAll(data, []byte(assetBasePlaceholder), []byte(s.versionedAssetBase()))
+	assetVersion := s.currentAssetVersion()
+	data = bytes.ReplaceAll(data, []byte(assetVersionPlaceholder), []byte(assetVersion))
+	data = bytes.ReplaceAll(data, []byte(assetBasePlaceholder), []byte(versionedAssetBase(assetVersion)))
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.Header().Set("Service-Worker-Allowed", "/")
@@ -386,7 +416,7 @@ func (s *pluginServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "webshell index is unavailable", http.StatusInternalServerError)
 			return
 		}
-		data = bytes.ReplaceAll(data, []byte(assetBasePlaceholder), []byte("."+s.versionedAssetBase()))
+		data = bytes.ReplaceAll(data, []byte(assetBasePlaceholder), []byte("."+versionedAssetBase(s.currentAssetVersion())))
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if r.Method == http.MethodHead {
@@ -398,8 +428,8 @@ func (s *pluginServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *pluginServer) versionedAssetBase() string {
-	return "/assets/" + s.assetVersion + "/"
+func versionedAssetBase(assetVersion string) string {
+	return "/assets/" + assetVersion + "/"
 }
 
 func (s *pluginServer) handleInstances(w http.ResponseWriter, r *http.Request) {
@@ -503,7 +533,8 @@ func (s *pluginServer) handleServerRevision(w http.ResponseWriter, r *http.Reque
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	info := serverRevisionInfo{ServerRevision: s.serverRevision}
+	serverRevision := s.currentServerRevision()
+	info := serverRevisionInfo{ServerRevision: serverRevision}
 	selector := strings.TrimSpace(r.URL.Query().Get("name"))
 	accountID := currentRequestAccountID(r)
 	clientID := strings.TrimSpace(r.URL.Query().Get("client_id"))
@@ -535,7 +566,7 @@ func (s *pluginServer) handleServerRevision(w http.ResponseWriter, r *http.Reque
 			writeJSON(w, info)
 			return
 		}
-		changed, err := observeServerRevisionState(r.Context(), scope, clientID, s.serverRevision)
+		changed, err := observeServerRevisionState(r.Context(), scope, clientID, serverRevision)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return

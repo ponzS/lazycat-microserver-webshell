@@ -66,7 +66,7 @@ func (s *pluginServer) handleClientWorkspace(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		disableWorkspaceCacheV2(&state)
-		state.ServerRevision = s.serverRevision
+		state.ServerRevision = s.currentServerRevision()
 		log.Printf("client terminal workspace state ready: selector=%s tabs=%d active_tab=%s", selector, len(state.Tabs), state.ActiveTabID)
 		writeJSON(w, state)
 	case http.MethodPost:
@@ -84,7 +84,7 @@ func (s *pluginServer) handleClientWorkspace(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		disableWorkspaceCacheV2(&state)
-		state.ServerRevision = s.serverRevision
+		state.ServerRevision = s.currentServerRevision()
 		log.Printf("client terminal workspace action ready: selector=%s action=%s tabs=%d active_tab=%s", selector, request.Action, len(state.Tabs), state.ActiveTabID)
 		writeJSON(w, state)
 	default:
@@ -115,7 +115,7 @@ func (s *pluginServer) handleClientWorkspaceActivity(w http.ResponseWriter, r *h
 		writeClientTerminalError(w, err)
 		return
 	}
-	state.ServerRevision = s.serverRevision
+	state.ServerRevision = s.currentServerRevision()
 	log.Printf("client terminal activity ready: selector=%s panes=%d", selector, len(state.Panes))
 	writeJSON(w, state)
 }

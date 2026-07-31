@@ -3,7 +3,11 @@ const d = 80;
 var e = /* @__PURE__ */ ((Q) => (Q[Q.BOLD = 1] = "BOLD", Q[Q.ITALIC = 2] = "ITALIC", Q[Q.UNDERLINE = 4] = "UNDERLINE", Q[Q.STRIKETHROUGH = 8] = "STRIKETHROUGH", Q[Q.INVERSE = 16] = "INVERSE", Q[Q.INVISIBLE = 32] = "INVISIBLE", Q[Q.BLINK = 64] = "BLINK", Q[Q.FAINT = 128] = "FAINT", Q))(e || {});
 class q {
   constructor(A) {
-    this.exports = A.exports, this.memory = this.exports.memory;
+    if (this.exports = A.exports, typeof this.exports.ghostty_terminal_get_scrollback_generation != "function")
+      throw new Error(
+        "Incompatible Ghostty WASM: missing ghostty_terminal_get_scrollback_generation; reload after updating cached frontend assets"
+      );
+    this.memory = this.exports.memory;
   }
   createKeyEncoder() {
     return new V(this.exports);
@@ -151,6 +155,9 @@ const z = class K {
   }
   getRawScrollbackLength() {
     return this.exports.ghostty_terminal_get_scrollback_length(this.handle);
+  }
+  getScrollbackGeneration() {
+    return this.exports.ghostty_terminal_get_scrollback_generation(this.handle) >>> 0;
   }
   getRawScrollbackOffset(A) {
     const B = this.getRawScrollbackLength(), g = Math.min(B, this.logicalScrollbackLimit);
@@ -2511,14 +2518,14 @@ class IA {
    */
   writeInternal(A, B) {
     var g;
-    const E = this.getScrollbackLength(), C = this.viewportY || 0, I = this.scrollAnimationFrame ? this.targetViewportY || 0 : C, D = C <= 0.01 && I <= 0.01;
-    if (this.wasmTerm.write(A), this.processTerminalResponses(), typeof A == "string" && A.includes("\x07") ? this.bellEmitter.fire() : A instanceof Uint8Array && A.includes(7) && this.bellEmitter.fire(), (g = this.linkDetector) == null || g.invalidateCache(), D)
+    const C = this.wasmTerm.getScrollbackGeneration(), I = this.viewportY || 0, D = this.scrollAnimationFrame ? this.targetViewportY || 0 : I, i = I <= 0.01 && D <= 0.01;
+    if (this.wasmTerm.write(A), this.processTerminalResponses(), typeof A == "string" && A.includes("\x07") ? this.bellEmitter.fire() : A instanceof Uint8Array && A.includes(7) && this.bellEmitter.fire(), (g = this.linkDetector) == null || g.invalidateCache(), i)
       this.scrollToBottom();
     else {
-      const i = this.getScrollbackLength(), w = Math.max(0, i - E), s = Math.max(0, Math.min(i, C + w)), N = Math.max(0, Math.min(i, I + w));
-      (s !== this.viewportY || N !== this.targetViewportY) && (this.viewportY = s, this.targetViewportY = N, this.scrollEmitter.fire(Math.floor(this.viewportY))), i > 0 && this.showScrollbar();
+      const w = this.getScrollbackLength(), s = this.wasmTerm.getScrollbackGeneration(), N = s - C >>> 0, F = Math.max(0, Math.min(w, I + N)), S = Math.max(0, Math.min(w, D + N));
+      (F !== this.viewportY || S !== this.targetViewportY) && (this.viewportY = F, this.targetViewportY = S, this.scrollEmitter.fire(Math.floor(this.viewportY))), w > 0 && this.showScrollbar();
     }
-    this.requestRender(), typeof A == "string" && A.includes("\x1B]") && this.checkForTitleChange(A), B && requestAnimationFrame(B);
+    this.requestRender({ full: !0 }), typeof A == "string" && A.includes("\x1B]") && this.checkForTitleChange(A), B && requestAnimationFrame(B);
   }
   /**
    * Write data with newline

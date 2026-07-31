@@ -334,7 +334,7 @@ func (s *pluginServer) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		state.ServerRevision = s.serverRevision
+		state.ServerRevision = s.currentServerRevision()
 		state.AgentNotice = consumePersistentAgentNotice(scope)
 		writeJSON(w, state)
 	case http.MethodPost:
@@ -348,7 +348,7 @@ func (s *pluginServer) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		state.ServerRevision = s.serverRevision
+		state.ServerRevision = s.currentServerRevision()
 		state.AgentNotice = consumePersistentAgentNotice(scope)
 		writeJSON(w, state)
 	default:
@@ -387,7 +387,7 @@ func (s *pluginServer) handleWorkspaceActivity(w http.ResponseWriter, r *http.Re
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	state.ServerRevision = s.serverRevision
+	state.ServerRevision = s.currentServerRevision()
 	writeJSON(w, state)
 }
 

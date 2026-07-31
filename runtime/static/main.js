@@ -4443,8 +4443,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (!nextRevision) {
       return;
     }
+    const revisionChanged = Boolean(currentServerRevision && currentServerRevision !== nextRevision);
     currentServerRevision = nextRevision;
-    if (state?.reload_required !== true || serverRevisionReloadPrompted) {
+    if ((!revisionChanged && state?.reload_required !== true) || serverRevisionReloadPrompted) {
       return;
     }
     serverRevisionReloadPrompted = true;
@@ -5986,6 +5987,15 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     return true;
   };
 
+  const advanceTerminalContentGeneration = (session) => {
+    if (!session) {
+      return 0;
+    }
+    session.terminalContentGeneration = Number(session.terminalContentGeneration || 0) + 1;
+    session.pendingRenderContentGeneration = session.terminalContentGeneration;
+    return session.terminalContentGeneration;
+  };
+
   const clearTerminalRuntimeBuffer = (session) => {
     const term = session?.term;
     if (!term || !term.wasmTerm) {
@@ -5993,6 +6003,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     try {
       term.wasmTerm.write(terminalRuntimeClearSequence);
+      advanceTerminalContentGeneration(session);
       term.viewportY = 0;
       term.targetViewportY = 0;
       term.linkDetector?.invalidateCache?.();
@@ -6138,6 +6149,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     && Number(session.measuredFitGeneration || 0) > 0
     && session.presentedFitGeneration === session.measuredFitGeneration
     && session.presentedReplayGeneration === session.terminalReplayGeneration
+    && session.presentedContentGeneration === session.terminalContentGeneration
   );
 
   const markPaneRenderPending = (session) => {
@@ -6148,6 +6160,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.fullRenderPending = false;
     session.pendingRenderFitGeneration = 0;
     session.pendingRenderReplayGeneration = 0;
+    session.pendingRenderContentGeneration = 0;
     session.term?.renderer?.clear?.();
     clearTerminalCanvasPixels(session);
   };
@@ -6156,15 +6169,23 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (
       !session
       || session.closed
-      || !session.fullRenderPending
+      || Number(session.measuredFitGeneration || 0) <= 0
+      || !isPaneMeasurable(session)
+      || !terminalCanvasMatchesExpectedSize(session)
+    ) {
+      return;
+    }
+    if (session.pendingRenderContentGeneration === session.terminalContentGeneration) {
+      session.presentedContentGeneration = session.terminalContentGeneration;
+    }
+    if (
+      !session.fullRenderPending
       || session.activationFitPending
       || (session.replayCompletionPending && !sessionHasCacheV2WarmFrame(session))
       || (!session.replayComplete && !sessionHasCacheV2WarmFrame(session))
-      || Number(session.measuredFitGeneration || 0) <= 0
       || session.pendingRenderFitGeneration !== session.measuredFitGeneration
       || session.pendingRenderReplayGeneration !== session.terminalReplayGeneration
-      || !isPaneMeasurable(session)
-      || !terminalCanvasMatchesExpectedSize(session)
+      || session.pendingRenderContentGeneration !== session.terminalContentGeneration
     ) {
       return;
     }
@@ -6184,16 +6205,21 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.fullRenderPending = true;
     session.pendingRenderFitGeneration = session.measuredFitGeneration;
     session.pendingRenderReplayGeneration = session.terminalReplayGeneration;
+    session.pendingRenderContentGeneration = session.terminalContentGeneration;
     session.term.requestRender?.({ full: true });
   };
 
   const cancelPendingTerminalRender = (term) => {
-    if (!term?.animationFrameId) {
-      return;
+    if (!term) {
+      return false;
     }
-    window.cancelAnimationFrame(term.animationFrameId);
+    const fullRenderRequested = term.renderFullNextFrame === true;
+    if (term.animationFrameId) {
+      window.cancelAnimationFrame(term.animationFrameId);
+    }
     term.animationFrameId = undefined;
-    term.renderFullNextFrame = false;
+    term.renderFullNextFrame = fullRenderRequested;
+    return fullRenderRequested;
   };
 
   const renderPaneFullNow = (session) => {
@@ -6206,6 +6232,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     session.fullRenderPending = true;
     session.pendingRenderFitGeneration = session.measuredFitGeneration;
     session.pendingRenderReplayGeneration = session.terminalReplayGeneration;
+    session.pendingRenderContentGeneration = session.terminalContentGeneration;
+    term.renderFullNextFrame = false;
     term.renderNow(true);
     return true;
   };
@@ -13895,12 +13923,15 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       if (session.cacheV2RecoveryMetrics) {
         session.cacheV2RecoveryMetrics.localReplayBytes += data.byteLength;
       }
-      if (batchEnd && !session.cacheV2WarmFrameReady) {
+      if (batchEnd) {
         flushSessionOutput(session, { force: true });
-        if (terminalHasVisibleContent(session)) {
+        const firstVisibleFrame = !session.cacheV2WarmFrameReady && terminalHasVisibleContent(session);
+        if (firstVisibleFrame) {
           session.cacheV2WarmFrameReady = true;
           markSessionCacheV2RecoveryMetric(session, "localFirstFrameAt");
-          renderPaneFullNow(session);
+        }
+        renderPaneFullNow(session);
+        if (firstVisibleFrame) {
           console.info("[terminal-cache-v2] warm canvas first frame", JSON.stringify({
             cursor: session.appliedHistoryCursor.toString(),
           }));
@@ -14217,6 +14248,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     }
     try {
       measurePerformanceTask("terminal render", () => session.term.write(data));
+      session.term.requestRender?.({ full: true });
+      advanceTerminalContentGeneration(session);
       drainGeneratedTerminalResponses(session);
       if (replayOutput) {
         cancelPendingTerminalRender(session.term);
@@ -14477,6 +14510,8 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return;
     }
     measurePerformanceTask("terminal render", () => session.term.write(data));
+    session.term.requestRender?.({ full: true });
+    advanceTerminalContentGeneration(session);
     drainGeneratedTerminalResponses(session);
     resetTerminalHostViewport(session, { clean: true });
     positionTerminalInput(session);
@@ -15632,6 +15667,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       replayFitGeneration: 0,
       pendingRenderFitGeneration: 0,
       pendingRenderReplayGeneration: 0,
+      terminalContentGeneration: 0,
+      pendingRenderContentGeneration: 0,
+      presentedContentGeneration: 0,
       presentedFitGeneration: 0,
       presentedReplayGeneration: 0,
       renderReady: false,
