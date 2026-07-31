@@ -138,6 +138,7 @@ test("cache-v2 reads immutable chunks concurrently but replays them in cursor or
     cacheStorage,
     baseURL: "https://example.test/",
     readConcurrency: 2,
+    writeBlockBytes: 1,
   });
   await cache.reset(identity(), "history-a", 0n);
   for (let cursor = 0n; cursor < 4n; cursor += 1n) {
@@ -176,6 +177,68 @@ test("cache-v2 reads immutable chunks concurrently but replays them in cursor or
     { chunkIndex: 2, chunkCount: 4, batchEnd: false },
     { chunkIndex: 3, chunkCount: 4, batchEnd: true },
   ]);
+});
+
+test("cache-v2 coalesces small appends into bounded byte blocks", async () => {
+  const cacheStorage = new MemoryCacheStorage();
+  const cache = createTerminalCacheV2({
+    cacheStorage,
+    baseURL: "https://example.test/",
+    writeBlockBytes: 4,
+  });
+  await cache.reset(identity(), "history-a", 0n);
+  for (let cursor = 0n; cursor < 6n; cursor += 1n) {
+    await cache.append(identity(), "history-a", [{
+      startCursor: cursor,
+      endCursor: cursor + 1n,
+      data: new Uint8Array([Number(cursor) + 1]),
+    }]);
+  }
+
+  const manifest = await cache.loadManifest(identity());
+  assert.deepEqual(manifest.chunks.map((chunk) => chunk.byteLength), [4, 2]);
+  const replayed = [];
+  await cache.readChunks(manifest, ({ data }) => replayed.push(...data));
+  assert.deepEqual(replayed, [1, 2, 3, 4, 5, 6]);
+});
+
+test("cache-v2 compacts legacy small blocks after committing replacement blocks", async () => {
+  const cacheStorage = new MemoryCacheStorage();
+  const cache = createTerminalCacheV2({
+    cacheStorage,
+    baseURL: "https://example.test/",
+    writeBlockBytes: 1,
+  });
+  await cache.reset(identity(), "history-a", 0n);
+  for (let cursor = 0n; cursor < 10n; cursor += 1n) {
+    await cache.append(identity(), "history-a", [{
+      startCursor: cursor,
+      endCursor: cursor + 1n,
+      data: new Uint8Array([Number(cursor) + 1]),
+    }]);
+  }
+  await cache.savePreview(identity(), "history-a", 10n, new Blob([new Uint8Array([9])], { type: "image/png" }), {
+    width: 100,
+    height: 100,
+    cols: 10,
+    rows: 10,
+    devicePixelRatio: 1,
+  });
+  const before = await cache.loadManifest(identity());
+  assert.equal(before.chunks.length, 10);
+
+  const compacted = await cache.compact({ ...identity(), historyGeneration: "history-a" }, {
+    targetBytes: 4,
+    minChunks: 2,
+  });
+  assert.equal(compacted.compactedFromChunks, 10);
+  assert.deepEqual(compacted.chunks.map((chunk) => chunk.byteLength), [4, 4, 2]);
+  assert.equal(compacted.preview.checkpointCursor, 10n);
+  const replayed = [];
+  await cache.readChunks(compacted, ({ data }) => replayed.push(...data));
+  assert.deepEqual(replayed, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  const store = await cacheStorage.open("lcmd-webshell-terminal-v2");
+  assert.equal([...store.entries.keys()].filter((key) => key.endsWith(".bin")).length, 3);
 });
 
 test("cache-v2 serializes manifest mutations so stale preview or touch writes cannot roll back bytes", async () => {

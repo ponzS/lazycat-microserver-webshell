@@ -266,6 +266,18 @@ func requestPersistentAgent(ctx context.Context, scope agentScope, request agent
 	return runPersistentAgentRequest(ctx, scope, request)
 }
 
+func agentConnectionErrorPayload(err error) map[string]any {
+	message := "persistent webshell agent connection failed"
+	if err != nil && strings.TrimSpace(err.Error()) != "" {
+		message = strings.TrimSpace(err.Error())
+	}
+	return map[string]any{
+		"type":      "connection-error",
+		"message":   message,
+		"retryable": true,
+	}
+}
+
 func rememberPersistentAgentStartupError(scope agentScope, message string) {
 	scope = normalizeAgentScope(scope.Selector, scope.AccountID)
 	message = strings.TrimSpace(message)
@@ -762,7 +774,7 @@ func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, s
 	_ = writeWebSocketJSONLocked(conn, &writeMu, map[string]any{"type": "agent-preparing"})
 
 	if _, err := ensurePersistentAgent(r.Context(), scope); err != nil {
-		_ = writeWebSocketMessageLocked(conn, &writeMu, websocket.TextMessage, []byte("\r\n[webshell error]\r\n"+err.Error()+"\r\n"))
+		_ = writeWebSocketJSONLocked(conn, &writeMu, agentConnectionErrorPayload(err))
 		return nil
 	}
 	if err := pingPersistentAgentError(r.Context(), scope); err != nil {
@@ -770,7 +782,7 @@ func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, s
 		rememberIncompatiblePersistentAgentNotice(scope, err)
 		markPersistentAgentNotRunning(scope)
 		if _, ensureErr := ensurePersistentAgent(r.Context(), scope); ensureErr != nil {
-			_ = writeWebSocketJSONLocked(conn, &writeMu, map[string]any{"type": "process-exit", "message": ensureErr.Error(), "exit_code": -1, "retryable": true})
+			_ = writeWebSocketJSONLocked(conn, &writeMu, agentConnectionErrorPayload(ensureErr))
 			return nil
 		}
 	}
@@ -784,18 +796,18 @@ func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, s
 	command := exec.CommandContext(attachCtx, lightosctlPath, persistentAgentAttachCommandArgs(scope, paneID, cols, rows, terminalScrollback, syncRequest)...)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
-		_ = writeWebSocketJSONLocked(conn, &writeMu, map[string]any{"type": "process-exit", "message": err.Error(), "exit_code": -1})
+		_ = writeWebSocketJSONLocked(conn, &writeMu, agentConnectionErrorPayload(err))
 		return nil
 	}
 	stdin, err := command.StdinPipe()
 	if err != nil {
-		_ = writeWebSocketJSONLocked(conn, &writeMu, map[string]any{"type": "process-exit", "message": err.Error(), "exit_code": -1})
+		_ = writeWebSocketJSONLocked(conn, &writeMu, agentConnectionErrorPayload(err))
 		return nil
 	}
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
 	if err := command.Start(); err != nil {
-		_ = writeWebSocketJSONLocked(conn, &writeMu, map[string]any{"type": "process-exit", "message": err.Error(), "exit_code": -1})
+		_ = writeWebSocketJSONLocked(conn, &writeMu, agentConnectionErrorPayload(err))
 		return nil
 	}
 	if foreground, background, cursor := terminalThemeFromRequest(r); foreground != "" || background != "" || cursor != "" {
@@ -829,20 +841,20 @@ func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, s
 	writerDone := make(chan struct{})
 	go func() {
 		defer close(writerDone)
-		forwardedFrames := 0
 		for {
 			frameType, payload, err := readAgentFrame(stdout)
 			if err != nil {
 				if text := strings.TrimSpace(stderr.String()); text != "" {
-					response := map[string]any{"type": "process-exit", "message": text, "exit_code": -1}
-					if forwardedFrames == 0 && isRetryableAgentAttachError(text) {
-						response["retryable"] = true
-						markPersistentAgentNotRunning(scope)
-					}
 					if isPaneNotFoundAttachError(text) {
-						response["retryable"] = false
+						_ = writeWebSocketJSONLocked(conn, &writeMu, map[string]any{
+							"type":     "workspace-refresh-required",
+							"selector": scope.Selector,
+							"reason":   text,
+						})
+					} else {
+						markPersistentAgentNotRunning(scope)
+						_ = writeWebSocketJSONLocked(conn, &writeMu, agentConnectionErrorPayload(errors.New(text)))
 					}
-					_ = writeWebSocketJSONLocked(conn, &writeMu, response)
 				}
 				_ = conn.Close()
 				return
@@ -856,7 +868,6 @@ func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, s
 				_ = conn.Close()
 				return
 			}
-			forwardedFrames++
 		}
 	}()
 

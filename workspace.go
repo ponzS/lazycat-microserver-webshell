@@ -2068,8 +2068,11 @@ func (p *terminalPane) markExited(err error) {
 		exitText = err.Error()
 	}
 	payload := map[string]any{
-		"type":      "process-exit",
-		"exit_code": exitCode,
+		"type":          "process-exit",
+		"exit_code":     exitCode,
+		"authoritative": true,
+		"selector":      p.selector,
+		"pane_id":       p.id,
 	}
 	if exitText != "" {
 		payload["message"] = exitText

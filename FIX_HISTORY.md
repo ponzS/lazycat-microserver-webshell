@@ -36,7 +36,7 @@
 - `main.go` 启动仅监听 `127.0.0.1:8080` 的 Provider 服务，注册静态资源、实例、设置、附件、工作区、设备、版本和 WebSocket 路由。
 - LPK 通过 `lzc-manifest.yml` 的 `/=exec://8080` 启动入口，并通过 `lightos.webshell` Resource Export 被 `lightos-admin` 发现。
 - 页面静态资源位于 `runtime/static/`，随二进制一起打包。HTML 禁止缓存并由 Provider 注入当前 LPK 版本资源路径；新页面通过 `/assets/<lpk-version>/` 读取 JS/CSS/JSON/WASM/manifest/图标并使用 immutable 缓存，旧 `/static/` 只保留兼容和可重验证策略。
-- PWA Service Worker 由 Provider 注入当前 LPK 版本与资源基路径，只对版本化静态资源执行 network-first 和离线缓存兜底；页面导航、`/api/*`、`/ws` 和终端虚拟 Cache URL 不进入 app-shell 缓存。
+- PWA Service Worker 由 Provider 注入当前 LPK 版本与资源基路径；当前版本的 immutable 静态资源执行 cache-first，版本 URL 变化负责更新，缓存未命中或旧版本资源才访问网络，非成功响应可以回退已有静态缓存。页面导航、`/api/*`、`/ws` 和终端虚拟 Cache URL 不进入 app-shell 缓存。
 
 ### 管理端、Provider 与目标端边界
 
@@ -59,8 +59,10 @@
 - 历史流使用 `history_generation` 和绝对 byte cursor 表示范围。服务端根据本地范围选择 `snapshot`、`delta` 或 `current`，所有 chunk 必须连续。
 - 容器实例使用 Cache API v2 保存按账号 scope、完整 selector、workspace generation、tab、pane 和 history generation 隔离的不可变 PTY 字节块，并以 commit-last manifest 暴露已持久化 cursor。缓存无效时可以丢弃并从 agent 重建，但不能把不连续缓存拼接到新 generation。
 - 容器页面从网络 workspace 响应取得完整账号 scope、selector、workspace、tab 和 pane 身份后，立即从 Cache API 并发读取该精确身份下的 PTY 字节并直接回放到 Ghostty canvas，不等待 WebSocket open、replay start 或 replay complete。首个包含可见内容的有序读取批次即可显示真实 canvas，剩余 chunk 继续后台回放并在 manifest end 最终 render。canvas 可见与输入就绪是独立状态：本地字节画面可以在连接灰点存在时显示，但输入必须继续锁到服务端 generation/cursor 校验、增量或 snapshot、缓存提交、fit 和最终 render 全部完成。
+- Ghostty renderer 在修改 canvas 前必须一次性物化当前可见活动屏幕和 scrollback 行；活动 viewport 每帧只导出一次。任一可见行缺失时保留上一帧和 dirty 状态，由事件驱动 scheduler 退避重试，失败帧不得触发成功 `onRender` 或 pane presented generation 推进。
 - tab 总览不得只复制已经激活过的 live canvas。未激活 pane 可以按完整 cache-v2 身份读取已提交的图片缩略图，但缩略图只用于总览，不能参与终端启动显示、Ghostty 状态恢复或输入就绪判断。
 - 服务端接受本地 range 时，`delta/current` 必须复用已经恢复的 Ghostty 状态，不得再次清空和重复回放本地 chunk。服务端返回 `snapshot` 时，保持已显示的同身份本地 canvas，先在内存收齐服务端 snapshot，再一次性重置并回放权威字节；本地缓存字节不得参与 snapshot 状态计算。
+- 已经呈现且身份仍有效的终端画面是网络故障期间的 last-known-good 状态。HTTP 502、Agent 不可用、WebSocket close/error、workspace refresh 重试和历史 snapshot 等待不得清空或隐藏该画面；输入继续锁定。只有成功的权威 workspace 响应确认账号/实例/workspace/tab/pane 身份变化、pane 被删除，或收到与当前会话不匹配的数据时才能销毁旧呈现。
 - `client:` PC target 保持其独立的 IndexedDB 和完整历史协议，不读取 Cache API v2，也不启用容器 warm replay；不能未经双方协议升级直接套用实例 agent 的增量假设。
 - pane 只有在尺寸可测量、fit generation 与 replay generation 都是当前值、canvas 尺寸正确，且本地 warm replay 或服务端 replay 已完成当前可展示帧后，才能标记为可展示；输入仍必须等待服务端 replay 完成。
 - 终端渲染使用随包分发的 Ghostty Web 和明确的 `ghostty-vt.wasm` 路径。本项目禁止引入或仿制 `xterm.js`。
@@ -312,6 +314,54 @@ git diff --check
 - Guard：Ghostty `active-screen line edits do not move a history viewport` 同时断言 generation 不变、历史 viewport 不移动且下一帧仍必须 full render；`TestRuntimeTerminalCanvasResidueGuard` 要求定制 bundle 的每次 write 无条件 full render，要求 WebShell 队列和即时输出路径均显式请求 full render，并禁止恢复 generation-only 的 `this.requestRender({ full: s })`。
 - 验证结果：`node --check` 通过 `runtime/static/main.js`、`runtime/static/ghostty-web.js`、`service-worker.js` 和 `terminal_cache_v2.js`；Node cache-v2 行为测试 8/8、完整 `go test ./...`、Ghostty Prettier/Biome/TypeScript 和两个仓库的 `git diff --check` 均通过。`lzc-cli project release` 已生成 `cloud.lazycat.webshell.lcmd-v1.0.8.lpk`，包内 `package.yml` 与 `.lpk-version` 均为 `1.0.8`，Ghostty write、WebShell 队列输出和即时输出的 full-render 路径均已核对；包内 WASM SHA-256 为 `04c1a6f1ae963c4665886073d275d373d1b1f3b81bf71952b4f4ff77c537129a` 且包含 generation 导出，LPK SHA-256 为 `223a2a5ca4e0c08e609667607c7a9484161c2c381ef32da97f23025992d7fa90`。当前环境没有 Bun，Ghostty Bun 单测无法执行；真实浏览器仍需复验多次刷新、长历史缓存回放和 Agent 持续输出期间不再出现黑区。
 - 禁止复现：不得再以 scrollback generation 是否变化作为 PTY 输出需要整帧绘制的唯一条件；不得让 replay 的 rAF 取消路径清除尚未消费的 full-render 意图；不得把修复退化为逐字节同步绘制。resize 只能作为结果对照，不能成为恢复终端历史画面的正常依赖。
+
+### LCMD-20260731-04：越界 viewport 导致终端上半屏被当作不存在的历史行
+
+- 日期：2026-07-31
+- 来源：`1.0.8` 现场稳定复现；续接 `LCMD-20260731-03`，全量 full render 后问题仍存在
+- 影响模块：Ghostty Web viewport/平滑滚动状态、Canvas renderer、定制 WASM RenderState ABI、WebShell 运行时 bundle
+- 错误现象：刷新、缓存回放或 Agent 持续输出时，终端偶发且可稳定复现上半部分纯黑、仅底部显示最新内容；黑区仍可滚动，但高度小于真实历史。继续 full render 无法恢复，调整窗口大小后立即恢复，且无需重新拉取历史字节。
+- 根因：Ghostty Web renderer 信任传入的 `viewportY`，没有在每帧绘制前按当前 `scrollbackLength` 重新约束。当回放、平滑滚动、history trim 或尺寸/状态切换留下 `viewportY`/`targetViewportY` 大于当前历史长度时，顶部行会计算出负的 scrollback offset；取行返回 `null`，而 full render 已先清空 canvas，因此顶部保持纯黑，只在底部绘制活动屏幕。WebShell 的 `resizePane()` 会通过 `restoreTerminalViewport()` clamp 这两个值，所以 resize 看似“重新渲染历史”并立即恢复。另一个一致性风险是定制 `ghostty_render_state_get_viewport` 在 `RenderState.update()` 后仍绕过官方 `row_data`，直接读取 `active.pages`，使页重排时导出帧不再遵循 Ghostty 的 viewport 快照。
+- 实施方案：Canvas renderer 每次绘制前调用 Terminal 的 `normalizeViewportBounds()`，原子地把当前 viewport 和平滑滚动 target 限制到 `[0, scrollbackLength]`，再计算历史 offset、fractional scroll 和 scrollbar；运行时定制 bundle 同步相同逻辑。WASM viewport 与 grapheme 导出改为只读取官方 `RenderState.row_data` 中已复制的 raw cell、style 和 grapheme，不再重新 pin `active.pages`。Ghostty Web 增加 render-state freshness 标记，在 write/resize 后失效、update 后提交；直接调用 `getViewport/getGrapheme` 时只在快照过期时补一次 update，保持旧 API 的即时读取语义且避免每个 grapheme 重复同步。LPK version 提升到 `1.0.9` 并携带新 WASM。
+- Guard：Ghostty `render clamps stale viewport state to retained scrollback bounds` 人为注入越界 viewport/target 并要求一次 render 即同时修正；Zig `render state viewport export follows the official viewport snapshot` 将 Ghostty viewport 固定在 history top，要求导出结果与 `RenderState.row_data` 相同且明确不同于 active area；既有 Grapheme Cluster Support 测试固定 write 后直接读取 viewport/grapheme 仍返回新内容；WebShell `TestRuntimeTerminalCanvasResidueGuard` 固定运行时 bundle 必须在 renderer 入口调用 `normalizeViewportBounds()`，并保留 render-state freshness guard。
+- 验证结果：Ghostty WASM `ReleaseSmall wasm32-freestanding` 重新构建通过；Zig `test-lib-vt -Dtarget=x86_64-linux-musl -Dtest-filter='render state viewport export follows the official viewport snapshot'` 通过；Ghostty Web 全量 Bun 测试 `382/382`、Prettier、Biome、TypeScript 和 Vite production build 通过，包含 ESC reset/滚屏压力测试及越界 viewport 回归。`node --check runtime/static/ghostty-web.js`、完整 `go test ./...` 和两个仓库 `git diff --check` 通过。`lzc-cli project release` 已生成 `cloud.lazycat.webshell.lcmd-v1.0.9.lpk`，包内 `package.yml` 与 `.lpk-version` 均为 `1.0.9`；包内 WASM SHA-256 为 `65a99188312ad92780b3af2fa410b8af395536dfe1e777ec24573d8be1436f16`，运行时 Ghostty bundle SHA-256 为 `1a8cf2df40b252eca546bf0e943cfd1b74990dc77407f8a914e6e9f169ae49e5`，LPK SHA-256 为 `e2004f2a13bc9b06caf8aaaae2ffbc312e6204acc838489e6526a6513def445c`。真实浏览器仍需复验连续刷新、缓存首帧和 Agent 持续输出期间不再出现顶部黑区。
+- 禁止复现：renderer 不得用未经当前 scrollback 长度校验的 viewport 计算历史 offset；修复不得只放在 resize、首次 fit 或 WebShell 外层，因为普通输出和库调用同样会进入该状态；WASM `render_state_get_viewport/get_grapheme` 不得再次绕过 `RenderState.row_data` 直接读取活动 PageList。
+
+### LCMD-20260731-05：502/Agent 故障期间销毁终端最后一帧并中断恢复
+
+- 日期：2026-07-31
+- 来源：现场反馈；终端运行中偶发突然黑屏，控制台同时出现 workspace 502，PWA 无法保留离线终端观感
+- 影响模块：Provider 到 persistent agent 的 HTTP/WebSocket 控制面、浏览器 workspace 重试、PTY 退出协议、Ghostty canvas 呈现和历史增量恢复
+- 错误现象：Agent、`lightosctl`、socket 或 workspace 请求短暂不可用时，部分 attach 基础设施错误被包装为非重试 `process-exit`。浏览器收到后先删除历史缓存并销毁 pane，再只请求一次 workspace；该请求若返回 502，页面永久留下黑屏。历史校验和缓存重放失败还会通过 `markPaneRenderPending()` 主动 clear renderer/canvas，并由 `renderReady=false` CSS 隐藏已经成功呈现的画面。普通 WebSocket 重连虽然支持 `current/delta`，这些破坏性分支却会丢弃本地 cursor 并退化为黑屏 snapshot。
+- 根因：连接、同步、呈现和会话身份共用同一套 ready/reset 状态；基础设施故障与权威 PTY 退出没有稳定协议边界；workspace refresh 没有持续退避重试；pane 销毁发生在权威 workspace 确认之前。
+- 实施方案：Provider attach 的 Agent ensure、pipe、start 和转发错误统一发送可重试 `connection-error`，pane not found 改为请求 workspace refresh；真实 PTY 退出帧标记为 authoritative。浏览器增加独立 workspace 指数退避重试，网络恢复时恢复全部已有 pane；`connection-error` 和普通 close/error 只断开、锁输入并使用现有 history generation/cursor 重连，继续优先选择 `current/delta`。非重试 `process-exit` 只标记 pending exit并保留最终画面，成功 workspace 响应确认 pane 不存在后才执行原有 cache/pane 清理。`markPaneSyncPending()` 不再清 canvas；CSS 只隐藏从未产生过真实帧的 canvas。已有画面需要 snapshot 时先收齐网络字节，并用独立 canvas 冻结旧帧覆盖 reset/replay，成功 render 后再释放；失败继续保留旧帧。身份不匹配仍立即调用独立的 presentation invalidation，维持跨账号、实例和会话隔离。LPK version 提升到 `1.0.10`。
+- Guard：`TestAgentConnectionErrorPayloadIsRetryable`、`TestAgentAttachInfrastructureFailuresDoNotMasqueradeAsPaneExit` 固定基础设施错误协议；`TestRuntimeOfflineFrameAndWorkspaceRetryGuard` 固定 workspace 持续重试、`connection-error` 非破坏处理、process exit 延迟销毁、snapshot 旧帧冻结和网络恢复全 pane 重连；`TestRuntimeTerminalCanvasResidueGuard` 禁止 `markPaneSyncPending()` 重新调用 renderer clear、canvas clear 或 runtime reset，并固定 `hasPresentedFrame` CSS 门禁。既有 history sync 测试继续固定 generation/cursor 合法时选择 `current/delta`，范围失效时才选择 snapshot。
+- 验证结果：`node --check runtime/static/main.js`、完整 `go test ./...` 和 `git diff --check` 通过；`lzc-cli project release` 已生成 `cloud.lazycat.webshell.lcmd-v1.0.10.lpk`。包内 `package.yml` 与 `.lpk-version` 均为 `1.0.10`，`main.js` 包含 workspace 15 秒封顶退避、`connection-error`、pending exit、snapshot frame hold 和 `markPaneSyncPending`，CSS 包含 `hasPresentedFrame` 门禁，Provider 二进制包含 `connection-error` 与 `workspace-refresh-required`。LPK SHA-256 为 `7be6c5aeb799209fce920994ec4bd8823b69b87df89284ca13360e513bb7b40d`。当前环境没有针对实际 Lazycat WebView 的网络/Agent 故障注入能力，仍需现场验证运行中制造 workspace 502、短时停止 Agent 和服务恢复后的 delta 字节数、画面连续性及输入解锁。
+- 禁止复现：不得把 Agent/Provider/网络错误重新编码为权威 pane exit；不得在 workspace 成功确认前删除 pane 或缓存；不得让 502、重连或 snapshot 等待清空/隐藏已有同身份帧；不得为了恢复连接无条件设置 `history_replay_mode=snapshot`。增量数据只能追加到完全匹配的 account scope、selector、workspace generation、tab、pane 和 history generation。
+
+### LCMD-20260731-06：可见历史行非原子读取导致 full render 提交黑区
+
+- 日期：2026-07-31
+- 来源：`1.0.10` 前后现场稳定复现；刷新或 Agent 持续输出时偶发只显示底部最新字节，上半区域为可滚动黑区，resize 后恢复；补充观察到旧版本断流恢复会先黑屏再只绘制新字节
+- 影响模块：Ghostty Web RenderState/Canvas renderer、事件驱动 render scheduler、WebShell 同步 full render 与离线帧保留
+- 错误现象：终端模型和历史 cursor 未丢失，但一次 full render 可以先清空 canvas，再逐行读取活动屏幕或 scrollback；任一可见行临时返回 `null` 时，该行保持黑色，renderer 仍清除 dirty 状态并把帧报告为成功。活动屏幕底部路径虽已有一次 `getViewport()` 快照，滚动历史、fractional viewport、hover 扫描和部分重绘仍会重复跨 WASM 读取；源码还保留常驻 60 FPS loop，与实际发布 bundle 的按需调度不一致。断流清屏属于 `LCMD-20260731-05` 的独立问题，本条继续固定网络故障不得破坏最后一帧。
+- 根因：canvas 提交与终端行读取不是一个事务。full clear 发生在所有可见行确认可用之前；失败行没有 retry 语义，`getViewport()` 导出失败还会返回旧 cell pool。`getLine()` 每行重新导出整个 viewport，full render 接近 `O(rows² × cols)`，放大大量缓存 replay 和持续输出时的时序窗口。fractional viewport 若直接拿浮点值判断历史/活动屏幕边界，还可能请求等于 scrollback length 的越界行。
+- 实施方案：Ghostty renderer 每帧先物化完整可见窗口：活动屏幕只调用一次 `getViewport()` 并复制 grapheme 文本，scrollback 中每个可见行只读取一次，统一使用整数 viewport line 映射；移动端 fractional scroll 额外物化顶部半行。所有行成功后才允许 resize/full clear、逐行绘制、`clearDirty()` 和 `onRender`。任一行缺失时直接返回失败，保持 last-known-good canvas 和 dirty 状态，并由 Terminal 以 16ms 到 250ms 退避强制重试；新输出会立即抢占退避。`getViewport()` 只接受完整 cell 数，RenderState freshness 在 write/resize 后失效并在同帧复用。Ghostty TypeScript 源码同步切换为发布 bundle 已使用的按需 render scheduler；WebShell `renderPaneFullNow()` 只在 `renderNow(true)` 实际成功时返回成功，并在同步渲染前取消旧 retry timer。LPK version 提升到 `1.0.11`。
+- Guard：Ghostty `CanvasRenderer > Atomic viewport materialization` 覆盖单帧只导出一次活动 viewport、历史缺行时零 canvas 提交/不清 dirty、fractional viewport 不请求越界 offset；`failed frame materialization preserves render state and retries` 固定失败不触发 `onRender`、保留 full-render 意图并建立退避，成功后清理 retry。WebShell `TestRuntimeTerminalCanvasResidueGuard` 固定 materialization 必须早于 canvas clear，禁止提交阶段重新读取历史行，并固定 retry、同步 full render 返回值及断流不清屏边界。
+- 验证结果：Ghostty Prettier、Biome、TypeScript、386 项 Bun 全量测试和 Vite production build 通过；WebShell `runtime/static/main.js`/`ghostty-web.js` 语法检查、Node cache-v2 行为测试和完整 `go test ./...` 通过。`lzc-cli project release` 已生成 `cloud.lazycat.webshell.lcmd-v1.0.11.lpk`，包内 `package.yml` 与 `.lpk-version` 均为 `1.0.11`，包含原子 materialization、退避 retry、同步 render 返回值和 `connection-error` 保帧路径。运行时 bundle SHA-256 为 `428c3daf38f1183d3a5eb633a46b3ac6d4894db2a2b303fc29cca534d9362182`，WASM SHA-256 为 `65a99188312ad92780b3af2fa410b8af395536dfe1e777ec24573d8be1436f16`，LPK SHA-256 为 `979bb6999200e653c9254c1ac8d54a757ac3259e17dd94b69c317db3be097d56`。真实浏览器仍需复验连续刷新、断流恢复、长历史滚动和 Agent 持续输出时不再出现部分黑屏。
+- 禁止复现：不得在所有可见行准备完成前清空或部分提交 canvas；行读取失败不得调用 `clearDirty()`、发出成功 `onRender` 或隐藏最后一帧；不得让 full render 按行重复导出活动 viewport；fractional viewport 不得以浮点边界请求 `scrollbackLength` 行。断流、502 和重连仍不得调用 renderer clear 或 presentation invalidation。冷历史按需解析属于后续 Cache v3/row-block 架构，不能用未经 checkpoint 的原始 PTY 字节裁剪替代本条修复。
+
+### LCMD-20260731-07：受保护 PWA manifest 反复 401 且首屏恢复被启动瀑布和碎片缓存拖慢
+
+- 日期：2026-07-31
+- 来源：`1.0.11` 现场反馈；几乎每次刷新都出现 `/assets/1.0.11/manifest.webmanifest` 401，同时首次进入页面明显慢于同页后续 tab
+- 影响模块：LightOS 外层 Cookie 鉴权、PWA manifest、Service Worker 静态资源策略、浏览器 bootstrap、Cache API v2 字节块布局和恢复指标
+- 错误现象：浏览器反复请求版本化 manifest 并收到 401，PWA 安装元数据不可用；同版本刷新仍先等待代理返回 JS/CSS/WASM/JSON。终端缓存恢复要等 Ghostty WASM、主题、设置、自定义字体、实例列表和启动输入锁依次完成后才请求 workspace；workspace 应用前还创建一个随后因权威 cache identity 到达而销毁的临时 pane。历史缓存虽然只有数百 KB，却可能积累上千个小 Cache 条目，放大首次 warm replay 的 `Cache.match()` 开销。
+- 根因：Web App Manifest link 未声明 `crossorigin="use-credentials"`，浏览器按 manifest 的默认 credentials mode 省略同源认证 Cookie，401 由 Provider 之前的 LightOS 代理返回。Service Worker 对已经带 LPK 版本且服务端声明 immutable 的资源仍执行 network-first，并且只在 fetch 抛异常时回退缓存，401/502 会直接返回。bootstrap 在模块顶层先 await WASM，之后串行请求主题、设置和字体、实例、输入锁、workspace；Cache v2 又把每次小输出提交为独立不可变块，没有尾块合并或旧 manifest 压缩。
+- 实施方案：manifest link 增加 `crossorigin="use-credentials"`。Service Worker 对当前 `assetBase` 先查当前版本 app-shell cache，命中立即返回；缓存未命中才联网，网络非 2xx 或异常时回退已有静态响应，导航/API/WebSocket/终端虚拟 URL 仍保持 network-only。Ghostty 初始化改为启动即发起但不阻塞模块定义；主题、设置、实例、启动输入锁并行，URL 已有 selector 时 workspace 与实例列表并行请求；初始设置先应用 scrollback、主题关联和字体族，自定义字体文件后台加载。删除启动时必然被权威 workspace identity 淘汰的临时 pane，workspace 应用后优先预读活动 pane manifest，只连接活动 tab，其他总览图片延后到 idle。Cache v2 后续追加会把连续小块合并到约 128KB 尾块；网络同步和输入就绪完成后在 idle 中按完整身份与 history generation 压缩旧碎片，仍坚持新块先写、manifest 后提交、旧块最后删除。恢复日志补充从 navigation/module、WASM、设置、实例、workspace 到真实 canvas 的页面级时间点。LPK version 提升到 `1.0.12`。
+- Guard：`TestRuntimeContainerCacheV2AndPWAContract` 固定 manifest credentials、当前版本 cache-first、非成功响应回退、启动并行、活动 pane 优先、隐藏 tab 延后和 compaction 调度；`TestRuntimeMobileDeployRestartUsesBottomSheet` 禁止恢复初始临时 pane；`terminal_cache_v2_test.mjs` 新增小 append 自动合并和旧碎片压缩测试，覆盖 cursor 顺序、preview 保留、替换块数量及压缩前后字节一致。
+- 验证结果：`node --check` 通过 `main.js`、`service-worker.js` 和 `terminal_cache_v2.js`；Node cache-v2 行为测试 10/10、完整 `go test ./...` 和 `git diff --check` 通过。`lzc-cli project release` 已生成 `cloud.lazycat.webshell.lcmd-v1.0.12.lpk`，包内 `package.yml` 与 `.lpk-version` 均为 `1.0.12`，并确认包含 manifest credentials、当前版本 cache-first、并行 bootstrap、活动 pane manifest 预读和 Cache v2 compaction。包内 `main.js` SHA-256 为 `1bd8262c7ed55dbba18e3df3abf6f43de8164d9fc6efb8e25410f24d3ae15da4`，Service Worker 为 `63ef55510a15e64f94b53b15a34f8f9ac9a0fdc96400947546a7d41ccfa695ef`，Cache v2 为 `7dd0ca2fd4f09162f56870b7f97cafa8438ebe7865f66e6ccee8ab79392a22a2`，LPK 为 `78fbbe5ad4a8b9f2fb775012c85435691e4a0ef86be251ff9fc8ec7fd26e65c9`。真实 LightOS 域名仍需在安装后确认 manifest 不再 401，并用新增 `pageWorkspaceRequestStartMs`、`pageWorkspaceReadyMs`、`pageRealCanvasVisibleMs` 对比连续刷新时序。
+- 禁止复现：受保护的 manifest 不得恢复为省略 credentials；当前版本 immutable 资源不得重新执行每次刷新 network-first；非 2xx 静态响应不得覆盖可用本地 app shell。不得在 workspace 完整身份到达前读取或显示终端历史，不得让 warm canvas 解锁输入；后台字体、总览和缓存压缩不得进入活动 pane 首帧关键路径。压缩不得改变 cursor、generation、preview checkpoint 或完整账号/workspace/tab/pane 身份，也不得在 manifest 提交前删除旧块。
 
 ## 新增记录模板
 

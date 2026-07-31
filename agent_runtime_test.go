@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,46 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestAgentConnectionErrorPayloadIsRetryable(t *testing.T) {
+	payload := agentConnectionErrorPayload(errors.New("agent unavailable"))
+	if payload["type"] != "connection-error" {
+		t.Fatalf("type = %v, want connection-error", payload["type"])
+	}
+	if payload["retryable"] != true {
+		t.Fatalf("retryable = %v, want true", payload["retryable"])
+	}
+	if payload["message"] != "agent unavailable" {
+		t.Fatalf("message = %v, want agent unavailable", payload["message"])
+	}
+}
+
+func TestAgentAttachInfrastructureFailuresDoNotMasqueradeAsPaneExit(t *testing.T) {
+	data, err := os.ReadFile("agent_runtime.go")
+	if err != nil {
+		t.Fatalf("ReadFile(agent_runtime.go) error = %v", err)
+	}
+	source := string(data)
+	start := strings.Index(source, "func (s *pluginServer) attachAgentPane(")
+	end := strings.Index(source[start:], "func writeWebSocketJSONLocked(")
+	if start < 0 || end < 0 {
+		t.Fatal("attachAgentPane source block not found")
+	}
+	block := source[start : start+end]
+	for _, want := range []string{
+		"agentConnectionErrorPayload(err)",
+		"agentConnectionErrorPayload(ensureErr)",
+		"agentConnectionErrorPayload(errors.New(text))",
+		`"type":     "workspace-refresh-required"`,
+	} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("attach infrastructure recovery guard missing %q", want)
+		}
+	}
+	if strings.Contains(block, `[]byte("\r\n[webshell error]`) {
+		t.Fatal("agent startup failure must use a retryable control frame instead of mutating terminal history")
+	}
+}
 
 func TestCachedAgentRuntimeArchiveReusesSuccessfulBuild(t *testing.T) {
 	agentRuntimeArchiveCache.Lock()
