@@ -14759,6 +14759,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     if (message) {
       if (session.hasPresentedFrame) {
+        showStartupErrorPanel(message);
         console.warn("[client-terminal] startup error while preserving last frame", {
           name: session.name,
           pane: session.id,

@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"lcmd-webshell/internal/pkg/fonts"
 
@@ -34,6 +36,7 @@ const (
 	agentFrameDetach         = byte('D')
 
 	agentMaxFramePayload = 32 << 20
+	agentReconcileMarker = "__LCMD_WEBSHELL_AGENT_RECONCILED__"
 )
 
 type agentRequest struct {
@@ -93,13 +96,14 @@ func runAgentCommand(args []string) error {
 	case "daemon":
 		fs := flag.NewFlagSet("agent daemon", flag.ContinueOnError)
 		socketPath := fs.String("socket", defaultAgentSocketPath, "unix socket path")
+		readyFile := fs.String("ready-file", "", "readiness marker path")
 		username := fs.String("username", "", "instance login username")
 		selector := fs.String("selector", "", "instance selector")
 		accountID := fs.String("account", "", "webshell account id")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		return runAgentDaemon(*socketPath, *selector, *accountID, *username)
+		return runAgentDaemon(*socketPath, *readyFile, *selector, *accountID, *username)
 	case "request":
 		fs := flag.NewFlagSet("agent request", flag.ContinueOnError)
 		socketPath := fs.String("socket", defaultAgentSocketPath, "unix socket path")
@@ -108,6 +112,20 @@ func runAgentCommand(args []string) error {
 			return err
 		}
 		return runAgentRequestClient(*socketPath, *encoded)
+	case "reconcile":
+		fs := flag.NewFlagSet("agent reconcile", flag.ContinueOnError)
+		socketPath := fs.String("socket", defaultAgentSocketPath, "unix socket path")
+		selector := fs.String("selector", "", "instance selector")
+		accountID := fs.String("account", "", "webshell account id")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		count, err := reconcileAgentDaemons(*socketPath, *selector, *accountID)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s\t%d\n", agentReconcileMarker, count)
+		return nil
 	case "attach":
 		fs := flag.NewFlagSet("agent attach", flag.ContinueOnError)
 		socketPath := fs.String("socket", defaultAgentSocketPath, "unix socket path")
@@ -132,7 +150,7 @@ func runAgentCommand(args []string) error {
 	}
 }
 
-func runAgentDaemon(socketPath, selector, accountID, username string) error {
+func runAgentDaemon(socketPath, readyFile, selector, accountID, username string) error {
 	if err := resetAgentDaemonSignalDisposition(); err != nil {
 		return fmt.Errorf("reset agent daemon signal disposition failed: %w", err)
 	}
@@ -146,13 +164,34 @@ func runAgentDaemon(socketPath, selector, accountID, username string) error {
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o755); err != nil {
 		return fmt.Errorf("create agent socket directory failed: %w", err)
 	}
-	_ = os.Remove(socketPath)
+	lock, err := acquireAgentDaemonLock(socketPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		_ = lock.Close()
+	}()
+	if err := removeStaleAgentSocket(socketPath); err != nil {
+		return err
+	}
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		return fmt.Errorf("listen agent unix socket failed: %w", err)
 	}
-	defer listener.Close()
+	socketInfo, err := os.Lstat(socketPath)
+	if err != nil {
+		_ = listener.Close()
+		return fmt.Errorf("stat agent unix socket failed: %w", err)
+	}
+	defer func() {
+		_ = listener.Close()
+		removeAgentSocketIfOwned(socketPath, socketInfo)
+	}()
 	_ = os.Chmod(socketPath, 0o600)
+	if err := writeAgentReadyFile(readyFile); err != nil {
+		return fmt.Errorf("write agent readiness marker failed: %w", err)
+	}
 
 	daemon := &agentDaemon{
 		selector:  strings.TrimSpace(selector),
@@ -166,6 +205,81 @@ func runAgentDaemon(socketPath, selector, accountID, username string) error {
 		}
 		go daemon.handleConn(conn)
 	}
+}
+
+func acquireAgentDaemonLock(socketPath string) (*os.File, error) {
+	lockPath := socketPath + ".lock"
+	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open agent daemon lock failed: %w", err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lock.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, fmt.Errorf("agent daemon already running for socket %s", socketPath)
+		}
+		return nil, fmt.Errorf("lock agent daemon failed: %w", err)
+	}
+	return lock, nil
+}
+
+func removeStaleAgentSocket(socketPath string) error {
+	info, err := os.Lstat(socketPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat existing agent socket failed: %w", err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("agent socket path is occupied by a non-socket file: %s", socketPath)
+	}
+	conn, dialErr := net.DialTimeout("unix", socketPath, 200*time.Millisecond)
+	if dialErr == nil {
+		_ = conn.Close()
+		return fmt.Errorf("agent socket is already accepting connections: %s", socketPath)
+	}
+	if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove stale agent socket failed: %w", err)
+	}
+	return nil
+}
+
+func removeAgentSocketIfOwned(socketPath string, owned os.FileInfo) {
+	current, err := os.Lstat(socketPath)
+	if err != nil || !os.SameFile(owned, current) {
+		return
+	}
+	_ = os.Remove(socketPath)
+}
+
+func writeAgentReadyFile(readyFile string) error {
+	readyFile = strings.TrimSpace(readyFile)
+	if readyFile == "" {
+		return nil
+	}
+	dir := filepath.Dir(readyFile)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(dir, ".lcmd-webshell-agent.ready.*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := io.WriteString(temporary, agentReadyMarker+"\n"); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, readyFile)
 }
 
 func (d *agentDaemon) handleConn(conn net.Conn) {
@@ -486,8 +600,14 @@ func runAgentRequestClient(socketPath, encodedRequest string) error {
 	if _, err := conn.Write(append(requestData, '\n')); err != nil {
 		return err
 	}
-	_, err = io.Copy(os.Stdout, conn)
-	return err
+	written, err := io.Copy(os.Stdout, conn)
+	if err != nil {
+		return err
+	}
+	if written == 0 {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
 }
 
 func runAgentAttachClient(socketPath, selector, accountID, paneID string, cols, rows, terminalScrollback, cacheProtocolVersion int, workspaceGeneration, historyGeneration, localBaseCursor, localEndCursor, historyReplayMode string) error {

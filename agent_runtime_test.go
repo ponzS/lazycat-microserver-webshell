@@ -3,8 +3,12 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +26,43 @@ func TestAgentConnectionErrorPayloadIsRetryable(t *testing.T) {
 	}
 	if payload["message"] != "agent unavailable" {
 		t.Fatalf("message = %v, want agent unavailable", payload["message"])
+	}
+}
+
+func TestRunAgentRequestClientRejectsEmptyResponse(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "agent.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	defer listener.Close()
+
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			serverDone <- acceptErr
+			return
+		}
+		defer conn.Close()
+		buffer := make([]byte, 256)
+		_, readErr := conn.Read(buffer)
+		serverDone <- readErr
+	}()
+
+	request := base64.StdEncoding.EncodeToString([]byte(`{"type":"ping"}`))
+	err = runAgentRequestClient(socketPath, request)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("runAgentRequestClient() error = %v, want io.ErrUnexpectedEOF", err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatalf("fake agent server error = %v", err)
+	}
+}
+
+func TestParsePersistentAgentResponseRejectsEmptyOutput(t *testing.T) {
+	if _, err := parsePersistentAgentResponse([]byte(" \n\t")); err == nil || !strings.Contains(err.Error(), "empty response") {
+		t.Fatalf("parsePersistentAgentResponse(empty) error = %v, want empty response error", err)
 	}
 }
 
@@ -123,12 +164,18 @@ func TestEnsurePersistentAgentPingsBeforeInstalling(t *testing.T) {
 	for _, want := range []string{
 		"if persistentAgentRunningCached(scope) {",
 		`trace.add("pre-install ping succeeded")`,
-		`trace.add("pre-install ping failed: %v", err)`,
-		"rememberIncompatiblePersistentAgentNotice(scope, err)",
+		`trace.add("pre-install ping failed: %v", preInstallPingErr)`,
+		"rememberIncompatiblePersistentAgentNotice(scope, preInstallPingErr)",
 	} {
 		if !strings.Contains(block, want) {
 			t.Fatalf("ensurePersistentAgent reuse guard missing %q", want)
 		}
+	}
+	pingSuccessBlock := sourceBetween(t, block,
+		"if preInstallRunning {",
+		"persistentAgentCache.Lock()")
+	if strings.Contains(pingSuccessBlock, "return username, nil") {
+		t.Fatal("a compatible daemon must not skip binary SHA verification and legacy daemon reconciliation")
 	}
 }
 
@@ -149,6 +196,8 @@ func TestEnsureAgentBinaryInstalledVerifiesCacheHit(t *testing.T) {
 		`trace.add("install cache hit, verifying installed binary")`,
 		`trace.addCommandResult("install check", output, err)`,
 		`trace.add("install cache stale, reinstalling")`,
+		`expected_hash=`,
+		`sha256sum \"$agent\"`,
 	} {
 		if !strings.Contains(block, want) {
 			t.Fatalf("ensureAgentBinaryInstalled cache verification missing %q", want)
@@ -186,10 +235,11 @@ func TestAgentInstallScriptReplacesExistingBinary(t *testing.T) {
 		t.Fatalf("WriteFile(old manifest) error = %v", err)
 	}
 
-	const manifest = "lcmd-webshell-agent-v7\tnew-hash"
+	newAgent := []byte("new-agent")
+	manifest := fmt.Sprintf("%s\t%x", agentProtocolVersion, sha256.Sum256(newAgent))
 	var payload bytes.Buffer
 	writer := tar.NewWriter(&payload)
-	if err := writeAgentTarFile(writer, strings.TrimPrefix(installPath, "/"), []byte("new-agent"), 0o755); err != nil {
+	if err := writeAgentTarFile(writer, strings.TrimPrefix(installPath, "/"), newAgent, 0o755); err != nil {
 		t.Fatalf("writeAgentTarFile(agent) error = %v", err)
 	}
 	if err := writeAgentTarFile(writer, strings.TrimPrefix(manifestPath, "/"), []byte(manifest), 0o644); err != nil {
@@ -227,6 +277,43 @@ func TestAgentInstallScriptReplacesExistingBinary(t *testing.T) {
 	}
 }
 
+func TestAgentInstallScriptRejectsPayloadHashMismatch(t *testing.T) {
+	root := t.TempDir()
+	installPath := filepath.Join(root, "usr", "local", "bin", "lcmd-webshell-agent")
+	manifestPath := filepath.Join(root, "usr", "local", "bin", ".lcmd-webshell-agent.manifest")
+	if err := os.MkdirAll(filepath.Dir(installPath), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(installPath, []byte("original-agent"), 0o755); err != nil {
+		t.Fatalf("WriteFile(original agent) error = %v", err)
+	}
+
+	wantedAgent := []byte("wanted-agent")
+	manifest := fmt.Sprintf("%s\t%x", agentProtocolVersion, sha256.Sum256(wantedAgent))
+	var payload bytes.Buffer
+	writer := tar.NewWriter(&payload)
+	if err := writeAgentTarFile(writer, strings.TrimPrefix(installPath, "/"), []byte("tampered-agent"), 0o755); err != nil {
+		t.Fatalf("writeAgentTarFile(agent) error = %v", err)
+	}
+	if err := writeAgentTarFile(writer, strings.TrimPrefix(manifestPath, "/"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("writeAgentTarFile(manifest) error = %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("tar.Close() error = %v", err)
+	}
+
+	command := exec.Command("/bin/sh", "-lc", buildAgentInstallScript(manifest, installPath, manifestPath))
+	command.Stdin = bytes.NewReader(payload.Bytes())
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "sha256 mismatch") {
+		t.Fatalf("agent install script error = %v, output = %q; want sha256 mismatch", err, output)
+	}
+	data, readErr := os.ReadFile(installPath)
+	if readErr != nil || string(data) != "original-agent" {
+		t.Fatalf("installed agent after rejected payload = %q, %v; want original-agent", data, readErr)
+	}
+}
+
 func TestStartPersistentAgentChecksExecutableBeforeReadyMarker(t *testing.T) {
 	data, err := os.ReadFile("agent_runtime.go")
 	if err != nil {
@@ -250,6 +337,19 @@ func TestStartPersistentAgentChecksExecutableBeforeReadyMarker(t *testing.T) {
 	}
 	if readyIndex < 0 || checkIndex > readyIndex {
 		t.Fatal("startPersistentAgent should check agent executable before printing ready marker")
+	}
+	for _, want := range []string{
+		`--ready-file "$ready"`,
+		`expected_ready=`,
+		`if [ "$(cat "$ready" 2>/dev/null || true)" = "$expected_ready" ] && kill -0 "$pid"`,
+		`agent daemon exited before readiness`,
+	} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("startPersistentAgent readiness guard missing %q", want)
+		}
+	}
+	if strings.Contains(block, `rm -f "$socket"`) {
+		t.Fatal("starter must not unlink a socket owned by a running daemon")
 	}
 }
 

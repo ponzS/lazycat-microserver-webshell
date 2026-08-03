@@ -34,6 +34,7 @@ const (
 	commandOutputSnippetMax = 1024
 	websocketReadTimeout    = 30 * time.Second
 	websocketWriteTimeout   = 5 * time.Second
+	agentEnsureTimeout      = 60 * time.Second
 )
 
 func agentSelectorHash(selector string) string {
@@ -145,6 +146,19 @@ func commandOutputSnippet(output []byte) string {
 	return string(runes[:commandOutputSnippetMax]) + "..."
 }
 
+func agentManifestSHA256(manifest string) (string, error) {
+	parts := strings.SplitN(strings.TrimSpace(manifest), "\t", 2)
+	if len(parts) != 2 || parts[0] != agentProtocolVersion {
+		return "", fmt.Errorf("invalid agent manifest %q", manifest)
+	}
+	hash := strings.TrimSpace(parts[1])
+	decoded, err := hex.DecodeString(hash)
+	if err != nil || len(decoded) != sha256.Size {
+		return "", fmt.Errorf("invalid agent manifest sha256 %q", hash)
+	}
+	return hash, nil
+}
+
 func (t *persistentAgentStartupTrace) String() string {
 	if t == nil {
 		return ""
@@ -193,6 +207,53 @@ var agentRuntimeArchiveCache = struct {
 	payload  []byte
 	manifest string
 }{}
+
+type persistentAgentEnsureFlight struct {
+	done     chan struct{}
+	username string
+	err      error
+	waiters  int
+}
+
+type persistentAgentEnsureCoordinator struct {
+	sync.Mutex
+	flights map[string]*persistentAgentEnsureFlight
+}
+
+var persistentAgentEnsures persistentAgentEnsureCoordinator
+
+func (c *persistentAgentEnsureCoordinator) do(ctx context.Context, key string, ensure func(context.Context) (string, error)) (string, error) {
+	c.Lock()
+	if c.flights == nil {
+		c.flights = make(map[string]*persistentAgentEnsureFlight)
+	}
+	flight := c.flights[key]
+	if flight == nil {
+		flight = &persistentAgentEnsureFlight{done: make(chan struct{})}
+		c.flights[key] = flight
+		go func() {
+			sharedCtx, cancel := context.WithTimeout(context.Background(), agentEnsureTimeout)
+			defer cancel()
+			username, err := ensure(sharedCtx)
+
+			c.Lock()
+			flight.username = username
+			flight.err = err
+			delete(c.flights, key)
+			close(flight.done)
+			c.Unlock()
+		}()
+	}
+	flight.waiters++
+	c.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-flight.done:
+		return flight.username, flight.err
+	}
+}
 
 func requestAgentWorkspaceState(ctx context.Context, scope agentScope, cols, rows, terminalScrollback int) (workspaceState, error) {
 	response, err := requestPersistentAgent(ctx, scope, agentRequest{
@@ -347,8 +408,16 @@ func runPersistentAgentRequest(ctx context.Context, scope agentScope, request ag
 		}
 		return agentResponse{}, fmt.Errorf("%w: %s", err, text)
 	}
+	return parsePersistentAgentResponse(output)
+}
+
+func parsePersistentAgentResponse(output []byte) (agentResponse, error) {
+	trimmed := bytes.TrimSpace(output)
+	if len(trimmed) == 0 {
+		return agentResponse{}, errors.New("agent returned an empty response")
+	}
 	var response agentResponse
-	if err := json.Unmarshal(bytes.TrimSpace(output), &response); err != nil {
+	if err := json.Unmarshal(trimmed, &response); err != nil {
 		return agentResponse{}, fmt.Errorf("invalid agent response: %w: output=%s", err, commandOutputSnippet(output))
 	}
 	if !response.OK {
@@ -365,14 +434,20 @@ func runPersistentAgentRequest(ctx context.Context, scope agentScope, request ag
 
 func ensurePersistentAgent(ctx context.Context, scope agentScope) (string, error) {
 	scope = normalizeAgentScope(scope.Selector, scope.AccountID)
-	trace := newPersistentAgentStartupTrace(scope)
-	trace.add("ensure started")
 	if err := validateInstanceSelector(scope.Selector); err != nil {
 		return "", err
 	}
 	if scope.AccountID == "" {
 		return "", errors.New("account id is required")
 	}
+	return persistentAgentEnsures.do(ctx, scope.cacheKey(), func(sharedCtx context.Context) (string, error) {
+		return ensurePersistentAgentOnce(sharedCtx, scope)
+	})
+}
+
+func ensurePersistentAgentOnce(ctx context.Context, scope agentScope) (string, error) {
+	trace := newPersistentAgentStartupTrace(scope)
+	trace.add("ensure started")
 	cacheKey := scope.cacheKey()
 	username, err := cachedInstanceUsername(ctx, scope.Selector)
 	if err != nil {
@@ -387,14 +462,13 @@ func ensurePersistentAgent(ctx context.Context, scope agentScope) (string, error
 		return username, nil
 	}
 
-	if err := pingPersistentAgentError(ctx, scope); err == nil {
+	preInstallPingErr := pingPersistentAgentError(ctx, scope)
+	preInstallRunning := preInstallPingErr == nil
+	if preInstallRunning {
 		trace.add("pre-install ping succeeded")
-		markPersistentAgentRunning(scope)
-		clearPersistentAgentStartupError(scope)
-		return username, nil
 	} else {
-		trace.add("pre-install ping failed: %v", err)
-		rememberIncompatiblePersistentAgentNotice(scope, err)
+		trace.add("pre-install ping failed: %v", preInstallPingErr)
+		rememberIncompatiblePersistentAgentNotice(scope, preInstallPingErr)
 	}
 
 	persistentAgentCache.Lock()
@@ -402,11 +476,26 @@ func ensurePersistentAgent(ctx context.Context, scope agentScope) (string, error
 	persistentAgentCache.Unlock()
 	manifest, err := ensureAgentBinaryInstalled(ctx, scope, trace)
 	if err != nil {
+		if preInstallRunning {
+			trace.add("agent install failed while compatible daemon is running; reusing daemon: %v", err)
+			markPersistentAgentRunning(scope)
+			clearPersistentAgentStartupError(scope)
+			return username, nil
+		}
 		return "", trace.errorf("persistent webshell agent install failed: %v", err)
 	}
 	if previousManifest != "" && previousManifest != manifest {
 		trace.add("installed manifest changed, marking agent not running")
 		markPersistentAgentNotRunning(scope)
+	}
+	if err := reconcilePersistentAgentDaemons(ctx, scope, trace); err != nil {
+		if preInstallRunning {
+			trace.add("daemon reconciliation failed while compatible daemon is running; reusing daemon: %v", err)
+			markPersistentAgentRunning(scope)
+			clearPersistentAgentStartupError(scope)
+			return username, nil
+		}
+		return "", trace.errorf("persistent webshell agent daemon reconciliation failed: %v", err)
 	}
 
 	if err := pingPersistentAgentError(ctx, scope); err == nil {
@@ -419,6 +508,15 @@ func ensurePersistentAgent(ctx context.Context, scope agentScope) (string, error
 		rememberIncompatiblePersistentAgentNotice(scope, err)
 	}
 	if err := startPersistentAgent(ctx, scope, username, trace); err != nil {
+		trace.add("start command failed: %v", err)
+		if pingErr := pingPersistentAgentError(ctx, scope); pingErr == nil {
+			trace.add("post-start-failure ping succeeded; reusing concurrent daemon")
+			markPersistentAgentRunning(scope)
+			clearPersistentAgentStartupError(scope)
+			return username, nil
+		} else {
+			trace.add("post-start-failure ping failed: %v", pingErr)
+		}
 		return "", trace.errorf("persistent webshell agent start failed: %v", err)
 	}
 	deadline := time.Now().Add(3 * time.Second)
@@ -433,7 +531,11 @@ func ensurePersistentAgent(ctx context.Context, scope agentScope) (string, error
 		} else {
 			trace.add("ready ping attempt %d failed: %v", attempt, err)
 		}
-		time.Sleep(120 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return "", trace.errorf("persistent webshell agent readiness wait canceled: %v", ctx.Err())
+		case <-time.After(120 * time.Millisecond):
+		}
 	}
 	return "", persistentAgentStartupTimeoutError(ctx, scope, trace)
 }
@@ -486,6 +588,10 @@ func ensureAgentBinaryInstalled(ctx context.Context, scope agentScope, trace *pe
 	if err != nil {
 		return "", err
 	}
+	expectedHash, err := agentManifestSHA256(manifest)
+	if err != nil {
+		return "", err
+	}
 	trace.add("agent archive ready: manifest=%s payload_bytes=%d", manifest, len(payload))
 	cacheKey := scope.cacheKey()
 	persistentAgentCache.Lock()
@@ -499,9 +605,21 @@ func ensureAgentBinaryInstalled(ctx context.Context, scope agentScope, trace *pe
 	defer cancel()
 	checkScript := strings.Join([]string{
 		"set -eu",
+		"agent=" + shellScriptQuote(agentInstallPath),
 		"manifest_path=" + shellScriptQuote(agentManifestPath),
 		"expected=" + shellScriptQuote(manifest),
-		"if [ -x " + shellScriptQuote(agentInstallPath) + " ] && [ \"$(cat \"$manifest_path\" 2>/dev/null || true)\" = \"$expected\" ]; then",
+		"expected_hash=" + shellScriptQuote(expectedHash),
+		"if [ -x \"$agent\" ] && [ \"$(cat \"$manifest_path\" 2>/dev/null || true)\" = \"$expected\" ]; then",
+		"  if command -v sha256sum >/dev/null 2>&1; then",
+		"    set -- $(sha256sum \"$agent\")",
+		"  elif command -v busybox >/dev/null 2>&1; then",
+		"    set -- $(busybox sha256sum \"$agent\")",
+		"  else",
+		"    printf 'sha256sum is unavailable\\n' >&2",
+		"    exit 127",
+		"  fi",
+		"  actual_hash=$1",
+		"  [ \"$actual_hash\" = \"$expected_hash\" ] || exit 0",
 		"  printf '%s\\n' " + shellScriptQuote(agentReadyMarker),
 		"fi",
 	}, "\n")
@@ -548,11 +666,16 @@ func buildAgentInstallScript(manifest, installPath, manifestPath string) string 
 	manifestDir := filepath.Dir(manifestPath)
 	agentArchivePath := strings.TrimPrefix(installPath, string(filepath.Separator))
 	manifestArchivePath := strings.TrimPrefix(manifestPath, string(filepath.Separator))
+	expectedHash, err := agentManifestSHA256(manifest)
+	if err != nil {
+		return "printf '%s\\n' " + shellScriptQuote(err.Error()) + " >&2; exit 1"
+	}
 	return strings.Join([]string{
 		"set -eu",
 		"agent=" + shellScriptQuote(installPath),
 		"manifest_path=" + shellScriptQuote(manifestPath),
 		"expected=" + shellScriptQuote(manifest),
+		"expected_hash=" + shellScriptQuote(expectedHash),
 		"stage_parent=" + shellScriptQuote(installDir),
 		"agent_archive_path=" + shellScriptQuote(filepath.ToSlash(agentArchivePath)),
 		"manifest_archive_path=" + shellScriptQuote(filepath.ToSlash(manifestArchivePath)),
@@ -571,6 +694,19 @@ func buildAgentInstallScript(manifest, installPath, manifestPath string) string 
 		"fi",
 		"if [ \"$(cat \"$new_manifest\")\" != \"$expected\" ]; then",
 		"  printf 'agent archive manifest mismatch\\n' >&2",
+		"  exit 1",
+		"fi",
+		"if command -v sha256sum >/dev/null 2>&1; then",
+		"  set -- $(sha256sum \"$new_agent\")",
+		"elif command -v busybox >/dev/null 2>&1; then",
+		"  set -- $(busybox sha256sum \"$new_agent\")",
+		"else",
+		"  printf 'sha256sum is unavailable\\n' >&2",
+		"  exit 127",
+		"fi",
+		"actual_hash=$1",
+		"if [ \"$actual_hash\" != \"$expected_hash\" ]; then",
+		"  printf 'agent archive sha256 mismatch\\n' >&2",
 		"  exit 1",
 		"fi",
 		"chmod 755 \"$new_agent\"",
@@ -651,6 +787,44 @@ func pingPersistentAgentError(ctx context.Context, scope agentScope) error {
 	return err
 }
 
+func reconcilePersistentAgentDaemons(ctx context.Context, scope agentScope, trace *persistentAgentStartupTrace) error {
+	reconcileCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(
+		reconcileCtx,
+		lightosctlPath,
+		"exec",
+		scope.Selector,
+		agentInstallPath,
+		"agent",
+		"reconcile",
+		"--socket",
+		scopedAgentSocketPath(scope),
+		"--selector",
+		scope.Selector,
+		"--account",
+		scope.AccountID,
+	).CombinedOutput()
+	trace.addCommandResult("daemon reconcile", output, err)
+	if err != nil {
+		text := strings.TrimSpace(string(output))
+		if text == "" {
+			return err
+		}
+		return fmt.Errorf("%w: %s", err, text)
+	}
+	fields := strings.Fields(strings.TrimSpace(string(output)))
+	if len(fields) != 2 || fields[0] != agentReconcileMarker {
+		return fmt.Errorf("agent daemon reconciliation did not complete: output=%q", strings.TrimSpace(string(output)))
+	}
+	count, err := strconv.Atoi(fields[1])
+	if err != nil || count < 0 {
+		return fmt.Errorf("invalid agent daemon reconciliation count: output=%q", strings.TrimSpace(string(output)))
+	}
+	trace.add("daemon reconciliation removed %d duplicate process(es)", count)
+	return nil
+}
+
 func startPersistentAgent(ctx context.Context, scope agentScope, username string, trace *persistentAgentStartupTrace) error {
 	scope = normalizeAgentScope(scope.Selector, scope.AccountID)
 	startCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -662,22 +836,38 @@ func startPersistentAgent(ctx context.Context, scope agentScope, username string
 agent=%s
 socket=%s
 log=%s
-legacy_socket=%s
+ready="$socket.ready.$$"
+expected_ready=%s
 if [ ! -x "$agent" ]; then
   printf 'agent executable is missing: %%s\n' "$agent" >&2
   exit 127
 fi
-rm -f "$socket"
-if [ "$legacy_socket" != "$socket" ]; then
-  rm -f "$legacy_socket" 2>/dev/null || true
-fi
+rm -f "$ready"
+trap 'rm -f "$ready"' 0 1 2 15
 if command -v setsid >/dev/null 2>&1; then
-  setsid "$agent" agent daemon --socket "$socket" --selector %s --account %s --username %s </dev/null >>"$log" 2>&1 &
+  setsid "$agent" agent daemon --socket "$socket" --ready-file "$ready" --selector %s --account %s --username %s </dev/null >>"$log" 2>&1 &
 else
-  nohup "$agent" agent daemon --socket "$socket" --selector %s --account %s --username %s </dev/null >>"$log" 2>&1 &
+  nohup "$agent" agent daemon --socket "$socket" --ready-file "$ready" --selector %s --account %s --username %s </dev/null >>"$log" 2>&1 &
 fi
-printf '%%s\n' %s
-`, shellScriptQuote(agentInstallPath), shellScriptQuote(socketPath), shellScriptQuote(logPath), shellScriptQuote(defaultAgentSocketPath), shellScriptQuote(scope.Selector), shellScriptQuote(scope.AccountID), shellScriptQuote(username), shellScriptQuote(scope.Selector), shellScriptQuote(scope.AccountID), shellScriptQuote(username), shellScriptQuote(agentReadyMarker))
+pid=$!
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+  if [ "$(cat "$ready" 2>/dev/null || true)" = "$expected_ready" ] && kill -0 "$pid" 2>/dev/null; then
+    printf '%%s\n' %s
+    exit 0
+  fi
+  if ! kill -0 "$pid" 2>/dev/null; then
+    status=0
+    wait "$pid" || status=$?
+    printf 'agent daemon exited before readiness: status=%%s\n' "$status" >&2
+    exit "$status"
+  fi
+  attempt=$((attempt + 1))
+  sleep 0.05
+done
+printf 'agent daemon readiness timed out\n' >&2
+exit 1
+`, shellScriptQuote(agentInstallPath), shellScriptQuote(socketPath), shellScriptQuote(logPath), shellScriptQuote(agentReadyMarker), shellScriptQuote(scope.Selector), shellScriptQuote(scope.AccountID), shellScriptQuote(username), shellScriptQuote(scope.Selector), shellScriptQuote(scope.AccountID), shellScriptQuote(username), shellScriptQuote(agentReadyMarker))
 	output, err := exec.CommandContext(startCtx, lightosctlPath, "exec", scope.Selector, "/bin/sh", "-lc", script).CombinedOutput()
 	trace.addCommandResult("start", output, err)
 	if err != nil {
