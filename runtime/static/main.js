@@ -20,6 +20,9 @@ import {
 const runtimeAssetURL = (path) => new URL(path, import.meta.url).toString();
 const params = new URLSearchParams(window.location.search);
 const workspaceRestoreStorageKey = "webshell.workspaceRestore";
+const workspaceRestoreDisabled = (searchParams) => (
+  String(searchParams?.get("last") || "").trim().toLowerCase() === "false"
+);
 
 const readWorkspaceRestoreState = () => {
   try {
@@ -27,6 +30,11 @@ const readWorkspaceRestoreState = () => {
     const state = raw ? JSON.parse(raw) : null;
     const name = String(state?.name || "").trim();
     const tabId = String(state?.tabId || "").trim();
+    const restoreURL = String(state?.url || "").trim();
+    if (restoreURL && workspaceRestoreDisabled(new URL(restoreURL, window.location.origin).searchParams)) {
+      window.localStorage.removeItem(workspaceRestoreStorageKey);
+      return null;
+    }
     if (!name) {
       window.localStorage.removeItem(workspaceRestoreStorageKey);
       return null;
@@ -44,7 +52,12 @@ const persistWorkspaceRestoreState = (name, tabId) => {
   }
   try {
     const targetURL = new URL(window.location.href);
+    if (workspaceRestoreDisabled(targetURL.searchParams)) {
+      return;
+    }
     targetURL.searchParams.delete("view");
+    targetURL.searchParams.delete("embed");
+    targetURL.searchParams.delete("last");
     targetURL.searchParams.set("name", targetName);
     const targetTabId = String(tabId || "").trim();
     if (targetTabId) {

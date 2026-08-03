@@ -1824,10 +1824,15 @@ func TestRuntimePersistsWorkspaceForLightOSHomeReload(t *testing.T) {
 	mainSource := string(mainData)
 	for _, want := range []string{
 		`const workspaceRestoreStorageKey = "webshell.workspaceRestore";`,
+		`String(searchParams?.get("last") || "").trim().toLowerCase() === "false"`,
+		`workspaceRestoreDisabled(new URL(restoreURL, window.location.origin).searchParams)`,
 		`restoreInitialWorkspaceLocation();`,
 		`params.delete("view");`,
 		`const rememberWorkspaceRestoreState = () => {`,
 		`persistWorkspaceRestoreState(activeName, activeTabId);`,
+		`workspaceRestoreDisabled(targetURL.searchParams)`,
+		`targetURL.searchParams.delete("embed");`,
+		`targetURL.searchParams.delete("last");`,
 		`version: 1,`,
 		"url: `${targetURL.pathname}${targetURL.search}${targetURL.hash}`",
 		`updatedAt: Date.now(),`,

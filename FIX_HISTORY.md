@@ -363,6 +363,18 @@ git diff --check
 - 验证结果：`node --check` 通过 `main.js`、`service-worker.js` 和 `terminal_cache_v2.js`；Node cache-v2 行为测试 10/10、完整 `go test ./...` 和 `git diff --check` 通过。`lzc-cli project release` 已生成 `cloud.lazycat.webshell.lcmd-v1.0.12.lpk`，包内 `package.yml` 与 `.lpk-version` 均为 `1.0.12`，并确认包含 manifest credentials、当前版本 cache-first、并行 bootstrap、活动 pane manifest 预读和 Cache v2 compaction。包内 `main.js` SHA-256 为 `1bd8262c7ed55dbba18e3df3abf6f43de8164d9fc6efb8e25410f24d3ae15da4`，Service Worker 为 `63ef55510a15e64f94b53b15a34f8f9ac9a0fdc96400947546a7d41ccfa695ef`，Cache v2 为 `7dd0ca2fd4f09162f56870b7f97cafa8438ebe7865f66e6ccee8ab79392a22a2`，LPK 为 `78fbbe5ad4a8b9f2fb775012c85435691e4a0ef86be251ff9fc8ec7fd26e65c9`。真实 LightOS 域名仍需在安装后确认 manifest 不再 401，并用新增 `pageWorkspaceRequestStartMs`、`pageWorkspaceReadyMs`、`pageRealCanvasVisibleMs` 对比连续刷新时序。
 - 禁止复现：受保护的 manifest 不得恢复为省略 credentials；当前版本 immutable 资源不得重新执行每次刷新 network-first；非 2xx 静态响应不得覆盖可用本地 app shell。不得在 workspace 完整身份到达前读取或显示终端历史，不得让 warm canvas 解锁输入；后台字体、总览和缓存压缩不得进入活动 pane 首帧关键路径。压缩不得改变 cursor、generation、preview checkpoint 或完整账号/workspace/tab/pane 身份，也不得在 manifest 提交前删除旧块。
 
+### LCMD-20260803-01：嵌入终端覆盖最后工作区并持久化嵌入模式
+
+- 日期：2026-08-03
+- 来源：Safari 客户现场反馈；第三方应用终端使用 `embed=1`，关闭应用后 LightOS 恢复到第三方实例且右上角选项栏不显示
+- 影响模块：`runtime/static/main.js` 工作区恢复状态、页面生命周期写入和 5 秒恢复心跳
+- 错误现象：第三方应用打开 `abc` 实例的嵌入终端后，WebShell 的 `pageshow`、`pagehide`、`beforeunload`、`visibilitychange` 或定时心跳可能把它写成最后工作区；随后从 LightOS 根页面恢复时直接进入该实例，并因保存 URL 含 `embed=1` 持续隐藏右上角选项栏。
+- 根因：所有生命周期写入最终都会调用 `persistWorkspaceRestoreState`，但该函数没有区分临时终端，也原样保存当前 URL 的 `embed` 参数。共享 localStorage 单槽因此采用“最后写入者获胜”，Safari 的页面挂起和恢复时序只提高了第三方页面最后写入的概率。
+- 实施方案：在最底层 `persistWorkspaceRestoreState` 对 `last` 去除首尾空白并忽略大小写，值等于 `false` 时直接跳过写入且保留原有恢复状态；其他页面保存前统一删除 `view`、`embed` 和 `last`，只持久化可独立打开的普通 WebShell URL。读取旧状态时拒绝并清除 URL 中含 `last=false` 的无效记录，避免直接打开 `/webshell/` 时继续恢复已被旧版本污染的临时实例。
+- Guard：`TestRuntimePersistsWorkspaceForLightOSHomeReload` 固定 `last=false` 的底层写入门禁、旧状态清理以及 `embed`/`last` 参数删除；所有生命周期和定时写入继续只经 `persistWorkspaceRestoreState` 更新共享恢复槽。
+- 验证结果：`go test ./...`、`node --check runtime/static/main.js`、Node 隔离状态模拟（`last=false` 不写入、普通 embed 去参数保存、旧 `last=false` 清除）、`git diff --check` 通过。
+- 禁止复现：不得在各生命周期事件中绕过统一持久化入口；`last=false` 页面不得写入或清空已有最后工作区；允许保存的恢复 URL 不得包含 `embed`、`last` 或 `view`。
+
 ## 新增记录模板
 
 ```md
