@@ -2311,6 +2311,18 @@ func TestRuntimeOfflineFrameAndWorkspaceRetryGuard(t *testing.T) {
 			t.Fatalf("retryable connection errors must preserve the last frame; found %q", forbidden)
 		}
 	}
+	startupErrorBlock := sourceBetween(t, mainSource,
+		"const showSessionStartupError = async (session, fallback = \"\") => {",
+		"const detachSessionSocket =")
+	warmFrameBlock := sourceBetween(t, startupErrorBlock,
+		"if (session.hasPresentedFrame) {",
+		"writeSessionWebShellError(session, message);")
+	if !strings.Contains(warmFrameBlock, "showStartupErrorPanel(message);") {
+		t.Fatal("warm-frame startup failures must remain visible in the startup error panel")
+	}
+	if strings.Contains(warmFrameBlock, "writeSessionImmediateOutput") {
+		t.Fatal("warm-frame startup failures must not overwrite the preserved terminal frame")
+	}
 }
 
 func TestRuntimeWebSocketReconnectHealthGuard(t *testing.T) {
