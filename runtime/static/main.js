@@ -16,6 +16,10 @@ import {
   shouldSendTerminalSize,
   terminalSizeDiffersFromServer,
 } from "./terminal_size_sync.js";
+import {
+  isIndependentClient,
+  openConfigurationPage,
+} from "./vendor/lzc-mobile-bridge-0.0.2.js";
 
 const runtimeAssetURL = (path) => new URL(path, import.meta.url).toString();
 const params = new URLSearchParams(window.location.search);
@@ -159,6 +163,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const instanceSwitcherFeedback = document.getElementById("instanceSwitcherFeedback");
   const homeMenuButton = document.getElementById("homeMenuButton");
   const settingsMenuButton = document.getElementById("settingsMenuButton");
+  const clientSettingsMenuButton = document.getElementById("clientSettingsMenuButton");
   const themePickerBackdrop = document.getElementById("themePickerBackdrop");
   const themePickerClose = document.getElementById("themePickerClose");
   const themePickerList = document.getElementById("themePickerList");
@@ -3476,6 +3481,20 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       }, 0);
     }
     loadSettings().catch((error) => setSettingsFeedback(error.message || "设置加载失败。", "error"));
+  };
+
+  const initializeClientSettingsEntry = async () => {
+    if (!clientSettingsMenuButton) {
+      return;
+    }
+    try {
+      if (!await isIndependentClient()) {
+        return;
+      }
+    } catch (error) {
+      return;
+    }
+    clientSettingsMenuButton.hidden = false;
   };
 
   const openThemeSettings = () => {
@@ -18627,6 +18646,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     navigateHome().catch((error) => showToast(error.message || "无法返回首页"));
   });
   settingsMenuButton?.addEventListener("click", () => openSettings());
+  clientSettingsMenuButton?.addEventListener("click", () => {
+    closeInstanceSwitcher();
+    openConfigurationPage().catch((error) => showToast(error.message || "无法打开客户端设置"));
+  });
+  void initializeClientSettingsEntry();
   themePickerClose?.addEventListener("click", closeThemePicker);
   themePickerBackdrop?.addEventListener("click", (event) => {
     if (event.target === themePickerBackdrop) {

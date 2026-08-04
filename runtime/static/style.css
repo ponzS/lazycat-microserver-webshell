@@ -508,6 +508,10 @@ button {
   text-align: left;
 }
 
+.instance-switcher-action[hidden] {
+  display: none;
+}
+
 .instance-switcher-action:hover,
 .instance-switcher-action:focus-visible {
   background: var(--panel-hover-bg);

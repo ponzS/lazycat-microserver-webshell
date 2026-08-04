@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
@@ -345,6 +347,85 @@ func TestRuntimeHomeNavigationUsesResolvedAdminURL(t *testing.T) {
 		if strings.Contains(source, forbidden) {
 			t.Fatalf("runtime home navigation must not use %q", forbidden)
 		}
+	}
+}
+
+func TestRuntimeShowsClientSettingsOnlyInIndependentClient(t *testing.T) {
+	indexData, err := os.ReadFile("runtime/static/index.html")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
+	}
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	styleData, err := os.ReadFile("runtime/static/style.css")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/style.css) error = %v", err)
+	}
+	workerData, err := os.ReadFile("runtime/static/service-worker.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/service-worker.js) error = %v", err)
+	}
+	bridgeData, err := os.ReadFile("runtime/static/vendor/lzc-mobile-bridge-0.0.2.js")
+	if err != nil {
+		t.Fatalf("ReadFile(lzc-mobile-bridge) error = %v", err)
+	}
+
+	indexSource := string(indexData)
+	for _, want := range []string{
+		`id="settingsMenuButton"`,
+		`id="clientSettingsMenuButton" type="button" hidden`,
+		`<span class="instance-switcher-item-name">客户端设置</span>`,
+		`<span class="instance-switcher-item-meta">打开客户端设置</span>`,
+	} {
+		if !strings.Contains(indexSource, want) {
+			t.Fatalf("runtime client settings entry missing %q", want)
+		}
+	}
+	if strings.Index(indexSource, `id="clientSettingsMenuButton"`) < strings.Index(indexSource, `id="settingsMenuButton"`) {
+		t.Fatal("client settings entry must stay directly below WebShell settings")
+	}
+
+	mainSource := string(mainData)
+	for _, want := range []string{
+		`from "./vendor/lzc-mobile-bridge-0.0.2.js";`,
+		`if (!await isIndependentClient())`,
+		`clientSettingsMenuButton.hidden = false;`,
+		`openConfigurationPage().catch`,
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime client settings behavior missing %q", want)
+		}
+	}
+	if !strings.Contains(string(styleData), `.instance-switcher-action[hidden]`) {
+		t.Fatal("hidden client settings entry must stay out of the switcher layout")
+	}
+	if !strings.Contains(string(workerData), `${assetBase}vendor/lzc-mobile-bridge-0.0.2.js`) {
+		t.Fatal("service worker must cache the mobile bridge module with the app shell")
+	}
+	if !strings.Contains(string(bridgeData), `isIndependentClient: "IsIndependentClient"`) ||
+		!strings.Contains(string(bridgeData), `openConfigurationPage: "OpenConfigurationPage"`) {
+		t.Fatal("vendored lzc-mobile-bridge must expose client configuration methods")
+	}
+
+	packageData, err := os.ReadFile("package.yml")
+	if err != nil {
+		t.Fatalf("ReadFile(package.yml) error = %v", err)
+	}
+	assetVersion := packageVersion(packageData)
+	handler := versionedStaticFileServer("runtime/static", func() string { return assetVersion })
+	recorder := httptest.NewRecorder()
+	requestPath := "/assets/" + assetVersion + "/vendor/lzc-mobile-bridge-0.0.2.js"
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, requestPath, nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("versioned mobile bridge status = %d, want 200", recorder.Code)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "text/javascript; charset=utf-8" {
+		t.Fatalf("versioned mobile bridge Content-Type = %q", got)
+	}
+	if got := recorder.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		t.Fatalf("versioned mobile bridge Cache-Control = %q", got)
 	}
 }
 
