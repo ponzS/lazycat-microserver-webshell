@@ -21,6 +21,7 @@ const appShellAssets = [
   `${assetBase}claude_fullscreen_desktop_selection_adapter.js`,
   `${assetBase}claude_fullscreen_touch.js`,
   `${assetBase}claude_fullscreen_touch_adapter.js`,
+  `${assetBase}vendor/lzc-mobile-bridge-0.0.2.js`,
   `${assetBase}__vite-browser-external-2447137e.js`,
 ];
 
