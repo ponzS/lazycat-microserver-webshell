@@ -387,6 +387,18 @@ git diff --check
 - 验证结果：`node --check runtime/static/main.js`、完整 `go test -race ./...` 和 `git diff --check` 通过。本机真实进程验收中，一个 daemon 完成 ready 后 32 路并发 ping 全部成功，32 个同 socket 重复 daemon 全部被锁拒绝，主 daemon 最终 ping 继续成功。测试机从 17 字节故障脚本、3 个同 scope 孤儿 daemon 且 socket 缺失的状态原地升级后恢复：agent SHA-256 为 `6747abf65066867ff3cd3187a36dd7c8c4020bf685a4c331c09100fe7f068360`，reconcile 清理旧孤儿后同 scope 仅 1 个 daemon，socket 与 lock 存在，32 路并发请求零失败；用户确认截图复现链和 WebShell 修复验收通过。`lzc-cli project release` 生成 `cloud.lazycat.webshell.lcmd-v1.0.13.lpk`，包内版本为 `1.0.13`，LPK SHA-256 为 `895053f508e20d7d5524cfd7c4d34c52b7afd91241a1b7b3c6b78e309b4dbe0f`。
 - 禁止复现：不得把零字节 agent stdout 当作成功或继续交给 JSON 解码；不得仅凭 manifest 文本跳过实际二进制 SHA 校验；同 scope 启动不得绑定任一请求的取消生命周期或并发执行 install/start；starter 不得删除 daemon socket或在 listen 前打印 ready；daemon 不得在未持有 scope 锁时清理 socket，退出时不得删除其他进程替换后的 socket；不得因为已有 warm frame 就隐藏真实启动错误。远端退出码在 exec-stream 协议正式定义前不得伪造，关键脚本必须继续用可验证的精确成功 marker。
 
+### LCMD-20260804-01：实例重启残留 agent socket 阻断 WebShell 自愈
+
+- 日期：2026-08-04
+- 来源：安装桌面的 LightOS 实例进入 WebShell 现场截图；续接 `LCMD-20260803-02`
+- 影响模块：`agent_reconcile_linux.go`、persistent agent reconcile/start 链路、实例重启后的 `/tmp/lcmd-webshell-agent-*.sock`
+- 错误现象：实例重启后 `/tmp` 中保留旧 agent Unix socket，但原 daemon 已退出；WebShell reconcile 连接该路径得到 `connect: connection refused` 后直接失败，后续重复进程清理、stale socket 删除和新 daemon 启动均不会执行，页面持续显示启动错误。
+- 根因：`activeAgentSocketPID` 把所有 Unix socket connect 错误都视为致命错误，没有区分仍有活跃 listener 的 socket 与 inode 存在但已无 listener 的 `ECONNREFUSED` stale socket；LightOS 的 `/tmp` 不随实例重启清空，使该状态可以稳定跨重启保留。
+- 实施方案：Linux reconcile 在 socket 类型校验通过后，只把 `ECONNREFUSED` 以及 `Lstat` 与 connect 之间路径消失的 `ENOENT` 解释为当前没有活跃 socket owner，继续按 scope 清理孤儿 daemon并进入既有启动流程；权限错误、非 socket 文件和其他未知连接错误继续显式失败。daemon 启动仍由已有 `removeStaleAgentSocket` 在持有 scope lock 后删除 stale inode，不在 reconcile 中绕过锁抢先删除。LPK version 提升到 `1.0.16`。
+- Guard：`TestReconcileAgentDaemonsAcceptsRefusedStaleSocket` 创建关闭 listener 后仍保留 inode 的确定性 `ECONNREFUSED` 状态，固定 reconcile 成功且后续 daemon stale 清理可以继续；既有 `TestReconcileAgentDaemonsPreservesSocketOwnerAndStopsDuplicates` 继续固定活跃 owner 不被终止。
+- 验证结果：`go test ./... -run 'Test(ReconcileAgentDaemons|RemoveStaleAgentSocket)' -count=1`、新增 stale socket 测试连续 10 次运行、`go test -race ./...`、`git diff --check` 和工作区根目录 `./lightos-build.sh` 通过。构建产物 `local-lcmd-webshell.lpk` 版本为 `1.0.16`，LPK SHA-256 为 `f38482f47fb3a5ddf4db8ee5d245603b052180867c80a9a8e673c730bdff02d3`，内嵌二进制 SHA-256 为 `91361264d8bb1dd6b86a326dd8c819a9b1e63fa0f766f6a3b8fda1a5ee6c38ab`。实际 LightOS 实例仍需在保留 `/tmp/lcmd-webshell-agent-*.sock` 后重启并复验 WebShell 自动恢复。
+- 禁止复现：不得把 `ECONNREFUSED` stale socket 再次作为 reconcile 的终止条件；不得吞掉权限、路径类型或未知连接错误；不得在未持有 daemon scope lock 时删除 socket。
+
 ## 新增记录模板
 
 ```md

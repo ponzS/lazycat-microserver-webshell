@@ -74,6 +74,9 @@ func activeAgentSocketPID(socketPath string) (int, error) {
 	}
 	conn, err := net.DialTimeout("unix", socketPath, 500*time.Millisecond)
 	if err != nil {
+		if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
 		return 0, fmt.Errorf("connect agent socket for reconciliation failed: %w", err)
 	}
 	defer conn.Close()
