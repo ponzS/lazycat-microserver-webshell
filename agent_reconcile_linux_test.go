@@ -86,6 +86,34 @@ func TestReconcileAgentDaemonsStopsAllOrphansWhenSocketIsMissing(t *testing.T) {
 	waitForProcessExit(t, orphanTwo)
 }
 
+func TestReconcileAgentDaemonsAcceptsRefusedStaleSocket(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "stale.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen stale socket failed: %v", err)
+	}
+	unixListener, ok := listener.(*net.UnixListener)
+	if !ok {
+		_ = listener.Close()
+		t.Fatal("unix listener has unexpected type")
+	}
+	unixListener.SetUnlinkOnClose(false)
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close stale socket listener failed: %v", err)
+	}
+
+	count, err := reconcileAgentDaemons(socketPath, "demo@owner", "account-a")
+	if err != nil {
+		t.Fatalf("reconcile refused stale socket failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("reconciled daemon count = %d, want 0", count)
+	}
+	if err := removeStaleAgentSocket(socketPath); err != nil {
+		t.Fatalf("daemon startup could not remove reconciled stale socket: %v", err)
+	}
+}
+
 func TestAgentDaemonArgsMatchRequiresExactScope(t *testing.T) {
 	args := []string{
 		"/usr/local/bin/lcmd-webshell-agent",
