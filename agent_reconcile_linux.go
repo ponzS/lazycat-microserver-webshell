@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,7 +18,7 @@ import (
 	"time"
 )
 
-func reconcileAgentDaemons(socketPath, selector, accountID string) (int, error) {
+func reconcileAgentDaemons(socketPath, selector, accountID string, replaceActive bool) (int, error) {
 	socketPath = strings.TrimSpace(socketPath)
 	selector = strings.TrimSpace(selector)
 	accountID = strings.TrimSpace(accountID)
@@ -32,16 +33,41 @@ func reconcileAgentDaemons(socketPath, selector, accountID string) (int, error) 
 	if err != nil {
 		return 0, err
 	}
-	victims := make([]int, 0, len(pids))
+	activeMatchesScope := activePID == 0
 	for _, pid := range pids {
-		if pid == activePID || pid == os.Getpid() {
-			continue
+		if pid == activePID {
+			activeMatchesScope = true
+			break
 		}
-		victims = append(victims, pid)
+	}
+	if replaceActive && !activeMatchesScope {
+		return 0, fmt.Errorf("active agent socket owner pid %d does not match selector/account scope", activePID)
+	}
+	if replaceActive && activePID != 0 {
+		version, err := activeAgentSocketProtocolVersion(socketPath, selector, accountID)
+		if err != nil {
+			return 0, err
+		}
+		if version == agentProtocolVersion {
+			return 0, nil
+		}
+	}
+	victims := make([]int, 0, len(pids))
+	if replaceActive {
+		if activePID != 0 {
+			victims = append(victims, activePID)
+		}
+	} else {
+		for _, pid := range pids {
+			if pid == os.Getpid() || pid == activePID {
+				continue
+			}
+			victims = append(victims, pid)
+		}
 	}
 	for _, pid := range victims {
 		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-			return 0, fmt.Errorf("terminate duplicate agent daemon %d failed: %w", pid, err)
+			return 0, fmt.Errorf("terminate agent daemon %d failed: %w", pid, err)
 		}
 	}
 	if err := waitForAgentDaemonExit(victims, socketPath, selector, accountID, 750*time.Millisecond); err == nil {
@@ -52,13 +78,39 @@ func reconcileAgentDaemons(socketPath, selector, accountID string) (int, error) 
 			continue
 		}
 		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-			return 0, fmt.Errorf("kill duplicate agent daemon %d failed: %w", pid, err)
+			return 0, fmt.Errorf("kill agent daemon %d failed: %w", pid, err)
 		}
 	}
 	if err := waitForAgentDaemonExit(victims, socketPath, selector, accountID, 750*time.Millisecond); err != nil {
 		return 0, err
 	}
 	return len(victims), nil
+}
+
+func activeAgentSocketProtocolVersion(socketPath, selector, accountID string) (string, error) {
+	conn, err := net.DialTimeout("unix", socketPath, 500*time.Millisecond)
+	if err != nil {
+		return "", fmt.Errorf("connect active agent for protocol verification failed: %w", err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		return "", err
+	}
+	if err := json.NewEncoder(conn).Encode(agentRequest{Type: "ping", Selector: selector, AccountID: accountID}); err != nil {
+		return "", fmt.Errorf("write active agent protocol verification failed: %w", err)
+	}
+	var response agentResponse
+	if err := json.NewDecoder(conn).Decode(&response); err != nil {
+		return "", fmt.Errorf("read active agent protocol verification failed: %w", err)
+	}
+	if !response.OK {
+		return "", fmt.Errorf("active agent protocol verification failed: %s", strings.TrimSpace(response.Error))
+	}
+	version := strings.TrimSpace(response.Version)
+	if version == "" {
+		return "", errors.New("active agent protocol verification returned an empty version")
+	}
+	return version, nil
 }
 
 func activeAgentSocketPID(socketPath string) (int, error) {
@@ -171,7 +223,7 @@ func waitForAgentDaemonExit(pids []int, socketPath, selector, accountID string, 
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("%d duplicate agent daemon process(es) did not exit", remaining)
+			return fmt.Errorf("%d agent daemon process(es) did not exit", remaining)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}

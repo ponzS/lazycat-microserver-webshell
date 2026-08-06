@@ -117,10 +117,11 @@ func runAgentCommand(args []string) error {
 		socketPath := fs.String("socket", defaultAgentSocketPath, "unix socket path")
 		selector := fs.String("selector", "", "instance selector")
 		accountID := fs.String("account", "", "webshell account id")
+		replaceActive := fs.Bool("replace-active", false, "replace the active daemon after a confirmed protocol mismatch")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		count, err := reconcileAgentDaemons(*socketPath, *selector, *accountID)
+		count, err := reconcileAgentDaemons(*socketPath, *selector, *accountID, *replaceActive)
 		if err != nil {
 			return err
 		}
