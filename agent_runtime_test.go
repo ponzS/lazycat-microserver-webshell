@@ -66,6 +66,16 @@ func TestParsePersistentAgentResponseRejectsEmptyOutput(t *testing.T) {
 	}
 }
 
+func TestParsePersistentAgentResponseClassifiesProtocolMismatch(t *testing.T) {
+	_, err := parsePersistentAgentResponse([]byte(`{"ok":true,"version":"lcmd-webshell-agent-v6"}`))
+	if !isUnsupportedAgentProtocolError(err) {
+		t.Fatalf("protocol mismatch error = %v, want typed unsupported protocol error", err)
+	}
+	if isUnsupportedAgentProtocolError(errors.New("agent request timed out")) {
+		t.Fatal("ordinary agent failure must not authorize active daemon replacement")
+	}
+}
+
 func TestAgentAttachInfrastructureFailuresDoNotMasqueradeAsPaneExit(t *testing.T) {
 	data, err := os.ReadFile("agent_runtime.go")
 	if err != nil {
@@ -166,6 +176,8 @@ func TestEnsurePersistentAgentPingsBeforeInstalling(t *testing.T) {
 		`trace.add("pre-install ping succeeded")`,
 		`trace.add("pre-install ping failed: %v", preInstallPingErr)`,
 		"rememberIncompatiblePersistentAgentNotice(scope, preInstallPingErr)",
+		"if isUnsupportedAgentProtocolError(preStartPingErr) {",
+		"reconcilePersistentAgentDaemons(ctx, scope, true, trace)",
 	} {
 		if !strings.Contains(block, want) {
 			t.Fatalf("ensurePersistentAgent reuse guard missing %q", want)
@@ -383,7 +395,7 @@ func TestPersistentAgentNoticeIsConsumedOnce(t *testing.T) {
 		persistentAgentCache.Unlock()
 	})
 
-	rememberIncompatiblePersistentAgentNotice(scope, fmt.Errorf("unsupported agent protocol %q", "old"))
+	rememberIncompatiblePersistentAgentNotice(scope, &unsupportedAgentProtocolError{version: "old"})
 
 	if got := consumePersistentAgentNotice(scope); !strings.Contains(got, "旧终端会话无法复用") {
 		t.Fatalf("consumePersistentAgentNotice() = %q, want protocol notice", got)

@@ -399,6 +399,18 @@ git diff --check
 - 验证结果：`go test ./... -run 'Test(ReconcileAgentDaemons|RemoveStaleAgentSocket)' -count=1`、新增 stale socket 测试连续 10 次运行、`go test -race ./...`、`git diff --check` 和工作区根目录 `./lightos-build.sh` 通过。构建产物 `local-lcmd-webshell.lpk` 版本为 `1.0.16`，LPK SHA-256 为 `f38482f47fb3a5ddf4db8ee5d245603b052180867c80a9a8e673c730bdff02d3`，内嵌二进制 SHA-256 为 `91361264d8bb1dd6b86a326dd8c819a9b1e63fa0f766f6a3b8fda1a5ee6c38ab`。实际 LightOS 实例仍需在保留 `/tmp/lcmd-webshell-agent-*.sock` 后重启并复验 WebShell 自动恢复。
 - 禁止复现：不得把 `ECONNREFUSED` stale socket 再次作为 reconcile 的终止条件；不得吞掉权限、路径类型或未知连接错误；不得在未持有 daemon scope lock 时删除 socket。
 
+### LCMD-20260806-01：v6 活跃 agent 被保留导致 v7 无法接管 socket
+
+- 日期：2026-08-06
+- 来源：旧版本升级到 `1.0.16` 后的现场截图 `微信图片_20260806153141_166_8.png`；续接 `LCMD-20260730-03`、`LCMD-20260803-02` 和 `LCMD-20260804-01`
+- 影响模块：Provider agent 协议识别、安装后 reconcile、目标实例活跃 daemon/socket 和 v6 -> v7 原地升级
+- 错误现象：旧版本已有 `lcmd-webshell-agent-v6` daemon 时，Provider 能识别协议不兼容并成功原子安装 v7 二进制，但普通 reconcile 输出清理 0 个进程；随后 v7 daemon 在 readiness 前以状态 1 退出，WebShell 稳定显示启动错误。重启 LightOS 后旧 v6 进程消失，新 v7 才能启动，因此表现为所有旧版本升级用户必现、重启后恢复。
+- 根因：安装只替换 `/usr/local/bin/lcmd-webshell-agent` 路径，已经运行的 v6 进程继续执行旧 inode 并持有 Unix socket。reconcile 无条件保留 socket 的活跃 owner，没有区分该 owner 是否仍使用兼容协议；新 v7 daemon 获得自身锁后发现旧 socket 仍可连接，按既有安全守卫返回 `agent socket is already accepting connections` 并退出。安装前协议结果也不能直接授权稍后终止进程，因为跨 Provider 竞争期间该 socket 可能已经被兼容 v7 owner 接管。
+- 实施方案：协议不兼容改为可通过 `errors.As` 识别的结构化错误，普通超时、EOF、权限或 JSON 错误不再通过字符串命中升级分支。安装和普通 reconcile 后重新 ping 当前 socket；只有这次最新 ping 仍明确返回不兼容协议时，Provider 才调用新 `agent reconcile --replace-active`。替换模式要求 socket peer PID 必须同时出现在相同 socket、selector 和 account 的精确 daemon 进程集合中，否则显式拒绝；目标端在发信号前还会直接 ping socket 复核协议，若并发 Provider 已完成 v7 接管则返回并保留该 owner。确认仍为旧协议后只结束当前活跃 PID，先 SIGTERM、超时再 SIGKILL 并等待退出；同 scope 孤儿由此前的普通 reconcile 清理，随后由现有 daemon 锁和 stale socket 清理接管启动。默认 reconcile 继续保留活跃兼容 owner，跨账号 owner、普通连接故障和并发期间已经启动的 v7 都不会被替换。LPK version 提升到 `1.0.17`。
+- Guard：`TestParsePersistentAgentResponseClassifiesProtocolMismatch` 固定只有结构化协议错误可以授权替换；`TestReconcileAgentDaemonsReplacesActiveOwnerAfterProtocolMismatch` 固定先由普通模式清理同 scope 孤儿、再由显式模式结束旧协议活跃 owner；`TestReconcileAgentDaemonsPreservesCompatibleOwnerDuringReplacementRace` 固定目标端复核发现 v7 后不再执行过期的替换意图；`TestReconcileAgentDaemonsRejectsReplacingDifferentScopeOwner` 固定跨账号 socket owner 不被终止；`TestReconcileAgentDaemonsPreservesSocketOwnerAndStopsDuplicates` 继续固定默认模式保留兼容 owner；`TestEnsurePersistentAgentPingsBeforeInstalling` 固定替换入口位于安装后最新 ping 的协议类型守卫内。
+- 验证结果：协议、notice、启动和 reconcile 定向测试通过；活跃旧 owner 替换、并发 v7 owner 保留、跨 scope 拒绝和默认保留测试连续 20 次通过；完整 `go test -race ./...` 与 `git diff --check` 通过。使用 `843f2bf~1` 构建真实 v6 agent、当前源码构建 v7 agent 的临时升级验证中，v7 request 先收到 `lcmd-webshell-agent-v6`，`reconcile --replace-active` 精确移除 1 个旧 owner，随后新 daemon ping 返回 `lcmd-webshell-agent-v7`。工作区根目录 `./lightos-build.sh` 通过，`local-lcmd-webshell.lpk` 内版本为 `1.0.17`，LPK SHA-256 为 `89fd162e6cce87291970ac561acc4b911659e2d1fed25f1c266b82de64e2be55`，内嵌二进制 SHA-256 为 `b3d08dde789faf7eac6d406e6bc68ca4d97559f0e144643630f24e265d426ea5`；Admin LPK SHA-256 为 `b32ec6b269909aa57683b92a832a7b4114aed464898237b1f3bc66e041ac6212`。
+- 禁止复现：不得仅凭安装前的旧协议结果或错误字符串终止活跃 daemon；不得让超时、EOF、权限、空响应或未知协议解析错误进入 `--replace-active`；替换前不得省略 socket peer PID 与完整 selector/account scope 的一致性校验；普通 reconcile 不得重新杀死兼容的活跃 owner。
+
 ## 新增记录模板
 
 ```md

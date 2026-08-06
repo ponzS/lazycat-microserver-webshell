@@ -4,12 +4,15 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -22,6 +25,15 @@ func TestMain(m *testing.M) {
 			os.Exit(2)
 		}
 		if err := runAgentCommand(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	case "legacy-daemon":
+		if len(os.Args) < 4 {
+			os.Exit(2)
+		}
+		if err := runLegacyAgentReconcileHelper(os.Args[3:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -49,7 +61,7 @@ func TestReconcileAgentDaemonsPreservesSocketOwnerAndStopsDuplicates(t *testing.
 	waitForAgentDaemonMatch(t, orphanOne.Process.Pid, socketPath, selector, accountID)
 	waitForAgentDaemonMatch(t, orphanTwo.Process.Pid, socketPath, selector, accountID)
 
-	count, err := reconcileAgentDaemons(socketPath, selector, accountID)
+	count, err := reconcileAgentDaemons(socketPath, selector, accountID, false)
 	if err != nil {
 		t.Fatalf("reconcileAgentDaemons() error = %v", err)
 	}
@@ -64,6 +76,29 @@ func TestReconcileAgentDaemonsPreservesSocketOwnerAndStopsDuplicates(t *testing.
 	waitForProcessExit(t, orphanTwo)
 }
 
+func TestReconcileAgentDaemonsPreservesCompatibleOwnerDuringReplacementRace(t *testing.T) {
+	root := t.TempDir()
+	socketPath := filepath.Join(root, "agent.sock")
+	readyFile := filepath.Join(root, "agent.ready")
+	const selector = "demo@owner"
+	const accountID = "account-a"
+
+	active := startAgentReconcileHelper(t, "daemon", socketPath, readyFile, selector, accountID)
+	waitForAgentReadyFile(t, readyFile)
+
+	count, err := reconcileAgentDaemons(socketPath, selector, accountID, true)
+	if err != nil {
+		t.Fatalf("compatible replacement-race reconcile error = %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("compatible replacement-race count = %d, want 0", count)
+	}
+	if err := syscall.Kill(active.Process.Pid, 0); err != nil {
+		t.Fatalf("compatible socket owner was terminated: %v", err)
+	}
+	assertAgentPing(t, socketPath, selector, accountID)
+}
+
 func TestReconcileAgentDaemonsStopsAllOrphansWhenSocketIsMissing(t *testing.T) {
 	root := t.TempDir()
 	socketPath := filepath.Join(root, "missing.sock")
@@ -75,7 +110,7 @@ func TestReconcileAgentDaemonsStopsAllOrphansWhenSocketIsMissing(t *testing.T) {
 	waitForAgentDaemonMatch(t, orphanOne.Process.Pid, socketPath, selector, accountID)
 	waitForAgentDaemonMatch(t, orphanTwo.Process.Pid, socketPath, selector, accountID)
 
-	count, err := reconcileAgentDaemons(socketPath, selector, accountID)
+	count, err := reconcileAgentDaemons(socketPath, selector, accountID, false)
 	if err != nil {
 		t.Fatalf("reconcileAgentDaemons() error = %v", err)
 	}
@@ -102,7 +137,7 @@ func TestReconcileAgentDaemonsAcceptsRefusedStaleSocket(t *testing.T) {
 		t.Fatalf("close stale socket listener failed: %v", err)
 	}
 
-	count, err := reconcileAgentDaemons(socketPath, "demo@owner", "account-a")
+	count, err := reconcileAgentDaemons(socketPath, "demo@owner", "account-a", false)
 	if err != nil {
 		t.Fatalf("reconcile refused stale socket failed: %v", err)
 	}
@@ -112,6 +147,58 @@ func TestReconcileAgentDaemonsAcceptsRefusedStaleSocket(t *testing.T) {
 	if err := removeStaleAgentSocket(socketPath); err != nil {
 		t.Fatalf("daemon startup could not remove reconciled stale socket: %v", err)
 	}
+}
+
+func TestReconcileAgentDaemonsReplacesActiveOwnerAfterProtocolMismatch(t *testing.T) {
+	root := t.TempDir()
+	socketPath := filepath.Join(root, "agent.sock")
+	readyFile := filepath.Join(root, "agent.ready")
+	const selector = "demo@owner"
+	const accountID = "account-a"
+
+	active := startAgentReconcileHelper(t, "legacy-daemon", socketPath, readyFile, selector, accountID)
+	waitForAgentReadyFile(t, readyFile)
+	orphan := startAgentReconcileHelper(t, "orphan", socketPath, "", selector, accountID)
+	waitForAgentDaemonMatch(t, orphan.Process.Pid, socketPath, selector, accountID)
+
+	count, err := reconcileAgentDaemons(socketPath, selector, accountID, false)
+	if err != nil {
+		t.Fatalf("pre-replacement reconcile error = %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("pre-replacement orphan count = %d, want 1", count)
+	}
+	waitForProcessExit(t, orphan)
+
+	count, err = reconcileAgentDaemons(socketPath, selector, accountID, true)
+	if err != nil {
+		t.Fatalf("replace active reconcile error = %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("replaced active daemon count = %d, want 1", count)
+	}
+	waitForProcessExit(t, active)
+	if pid, err := activeAgentSocketPID(socketPath); err != nil || pid != 0 {
+		t.Fatalf("active socket owner after replacement = %d, err=%v", pid, err)
+	}
+}
+
+func TestReconcileAgentDaemonsRejectsReplacingDifferentScopeOwner(t *testing.T) {
+	root := t.TempDir()
+	socketPath := filepath.Join(root, "agent.sock")
+	readyFile := filepath.Join(root, "agent.ready")
+	const selector = "demo@owner"
+
+	active := startAgentReconcileHelper(t, "daemon", socketPath, readyFile, selector, "account-a")
+	waitForAgentReadyFile(t, readyFile)
+
+	if _, err := reconcileAgentDaemons(socketPath, selector, "account-b", true); err == nil || !strings.Contains(err.Error(), "does not match selector/account scope") {
+		t.Fatalf("cross-scope replacement error = %v", err)
+	}
+	if err := syscall.Kill(active.Process.Pid, 0); err != nil {
+		t.Fatalf("different-scope socket owner was terminated: %v", err)
+	}
+	assertAgentPing(t, socketPath, selector, "account-a")
 }
 
 func TestAgentDaemonArgsMatchRequiresExactScope(t *testing.T) {
@@ -175,6 +262,49 @@ func startAgentReconcileHelper(t *testing.T, mode, socketPath, readyFile, select
 		}
 	})
 	return command
+}
+
+func runLegacyAgentReconcileHelper(args []string) error {
+	fs := flag.NewFlagSet("legacy agent daemon", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	socketPath := fs.String("socket", "", "")
+	readyFile := fs.String("ready-file", "", "")
+	selector := fs.String("selector", "", "")
+	accountID := fs.String("account", "", "")
+	_ = fs.String("username", "", "")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*socketPath) == "" {
+		return errors.New("legacy helper socket is required")
+	}
+	listener, err := net.Listen("unix", *socketPath)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+	if err := writeAgentReadyFile(*readyFile); err != nil {
+		return err
+	}
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+		go func() {
+			defer conn.Close()
+			var request agentRequest
+			if err := json.NewDecoder(conn).Decode(&request); err != nil {
+				return
+			}
+			response := agentResponse{OK: true, Version: "lcmd-webshell-agent-v6"}
+			if request.Selector != strings.TrimSpace(*selector) || request.AccountID != strings.TrimSpace(*accountID) {
+				response.OK = false
+				response.Error = "agent scope mismatch"
+			}
+			_ = json.NewEncoder(conn).Encode(response)
+		}()
+	}
 }
 
 func waitForAgentReadyFile(t *testing.T, readyFile string) {

@@ -54,6 +54,19 @@ type persistentAgentStartupTrace struct {
 	entries    []string
 }
 
+type unsupportedAgentProtocolError struct {
+	version string
+}
+
+func (e *unsupportedAgentProtocolError) Error() string {
+	return fmt.Sprintf("unsupported agent protocol %q", e.version)
+}
+
+func isUnsupportedAgentProtocolError(err error) bool {
+	var protocolErr *unsupportedAgentProtocolError
+	return errors.As(err, &protocolErr)
+}
+
 func normalizeAgentScope(selector, accountID string) agentScope {
 	return agentScope{
 		Selector:  strings.TrimSpace(selector),
@@ -427,7 +440,7 @@ func parsePersistentAgentResponse(output []byte) (agentResponse, error) {
 		return response, errors.New(response.Error)
 	}
 	if response.Version != "" && response.Version != agentProtocolVersion {
-		return agentResponse{}, fmt.Errorf("unsupported agent protocol %q", response.Version)
+		return agentResponse{}, &unsupportedAgentProtocolError{version: response.Version}
 	}
 	return response, nil
 }
@@ -488,7 +501,7 @@ func ensurePersistentAgentOnce(ctx context.Context, scope agentScope) (string, e
 		trace.add("installed manifest changed, marking agent not running")
 		markPersistentAgentNotRunning(scope)
 	}
-	if err := reconcilePersistentAgentDaemons(ctx, scope, trace); err != nil {
+	if err := reconcilePersistentAgentDaemons(ctx, scope, false, trace); err != nil {
 		if preInstallRunning {
 			trace.add("daemon reconciliation failed while compatible daemon is running; reusing daemon: %v", err)
 			markPersistentAgentRunning(scope)
@@ -498,14 +511,20 @@ func ensurePersistentAgentOnce(ctx context.Context, scope agentScope) (string, e
 		return "", trace.errorf("persistent webshell agent daemon reconciliation failed: %v", err)
 	}
 
-	if err := pingPersistentAgentError(ctx, scope); err == nil {
+	preStartPingErr := pingPersistentAgentError(ctx, scope)
+	if preStartPingErr == nil {
 		trace.add("pre-start ping succeeded")
 		markPersistentAgentRunning(scope)
 		clearPersistentAgentStartupError(scope)
 		return username, nil
-	} else {
-		trace.add("pre-start ping failed: %v", err)
-		rememberIncompatiblePersistentAgentNotice(scope, err)
+	}
+	trace.add("pre-start ping failed: %v", preStartPingErr)
+	rememberIncompatiblePersistentAgentNotice(scope, preStartPingErr)
+	if isUnsupportedAgentProtocolError(preStartPingErr) {
+		trace.add("confirmed incompatible active daemon; replacing socket owner")
+		if err := reconcilePersistentAgentDaemons(ctx, scope, true, trace); err != nil {
+			return "", trace.errorf("persistent webshell agent protocol replacement failed: %v", err)
+		}
 	}
 	if err := startPersistentAgent(ctx, scope, username, trace); err != nil {
 		trace.add("start command failed: %v", err)
@@ -577,7 +596,7 @@ func persistentAgentRunningCached(scope agentScope) bool {
 }
 
 func rememberIncompatiblePersistentAgentNotice(scope agentScope, err error) {
-	if err == nil || !strings.Contains(err.Error(), "unsupported agent protocol") {
+	if !isUnsupportedAgentProtocolError(err) {
 		return
 	}
 	rememberPersistentAgentNotice(scope, "WebShell agent 协议已更新，旧终端会话无法复用，已创建新的终端会话。")
@@ -787,12 +806,10 @@ func pingPersistentAgentError(ctx context.Context, scope agentScope) error {
 	return err
 }
 
-func reconcilePersistentAgentDaemons(ctx context.Context, scope agentScope, trace *persistentAgentStartupTrace) error {
+func reconcilePersistentAgentDaemons(ctx context.Context, scope agentScope, replaceActive bool, trace *persistentAgentStartupTrace) error {
 	reconcileCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(
-		reconcileCtx,
-		lightosctlPath,
+	args := []string{
 		"exec",
 		scope.Selector,
 		agentInstallPath,
@@ -804,8 +821,14 @@ func reconcilePersistentAgentDaemons(ctx context.Context, scope agentScope, trac
 		scope.Selector,
 		"--account",
 		scope.AccountID,
-	).CombinedOutput()
-	trace.addCommandResult("daemon reconcile", output, err)
+	}
+	stage := "daemon reconcile"
+	if replaceActive {
+		args = append(args, "--replace-active")
+		stage = "incompatible daemon reconcile"
+	}
+	output, err := exec.CommandContext(reconcileCtx, lightosctlPath, args...).CombinedOutput()
+	trace.addCommandResult(stage, output, err)
 	if err != nil {
 		text := strings.TrimSpace(string(output))
 		if text == "" {
@@ -821,7 +844,7 @@ func reconcilePersistentAgentDaemons(ctx context.Context, scope agentScope, trac
 	if err != nil || count < 0 {
 		return fmt.Errorf("invalid agent daemon reconciliation count: output=%q", strings.TrimSpace(string(output)))
 	}
-	trace.add("daemon reconciliation removed %d duplicate process(es)", count)
+	trace.add("%s removed %d process(es)", stage, count)
 	return nil
 }
 
