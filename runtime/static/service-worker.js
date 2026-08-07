@@ -15,6 +15,7 @@ const appShellAssets = [
   `${assetBase}terminal_cache_v2.js`,
   `${assetBase}terminal_history_cache.js`,
   `${assetBase}terminal_size_sync.js`,
+  `${assetBase}terminal_resize_scheduler.js`,
   `${assetBase}themes.json`,
   `${assetBase}ios_terminal_host.js`,
   `${assetBase}claude_fullscreen_context_menu_adapter.js`,

@@ -411,6 +411,54 @@ git diff --check
 - 验证结果：协议、notice、启动和 reconcile 定向测试通过；活跃旧 owner 替换、并发 v7 owner 保留、跨 scope 拒绝和默认保留测试连续 20 次通过；完整 `go test -race ./...` 与 `git diff --check` 通过。使用 `843f2bf~1` 构建真实 v6 agent、当前源码构建 v7 agent 的临时升级验证中，v7 request 先收到 `lcmd-webshell-agent-v6`，`reconcile --replace-active` 精确移除 1 个旧 owner，随后新 daemon ping 返回 `lcmd-webshell-agent-v7`。工作区根目录 `./lightos-build.sh` 通过，`local-lcmd-webshell.lpk` 内版本为 `1.0.17`，LPK SHA-256 为 `89fd162e6cce87291970ac561acc4b911659e2d1fed25f1c266b82de64e2be55`，内嵌二进制 SHA-256 为 `b3d08dde789faf7eac6d406e6bc68ca4d97559f0e144643630f24e265d426ea5`；Admin LPK SHA-256 为 `b32ec6b269909aa57683b92a832a7b4114aed464898237b1f3bc66e041ac6212`。
 - 禁止复现：不得仅凭安装前的旧协议结果或错误字符串终止活跃 daemon；不得让超时、EOF、权限、空响应或未知协议解析错误进入 `--replace-active`；替换前不得省略 socket peer PID 与完整 selector/account scope 的一致性校验；普通 reconcile 不得重新杀死兼容的活跃 owner。
 
+### LCMD-20260806-02：频繁 resize 切换 tab 产生 Canvas 残影并偶发卡顿
+
+- 日期：2026-08-06
+- 来源：用户现场截图 `截图_2026-08-06_13-45-35.png`、Electron 日志与用户对 resize 行为的补充观察
+- 影响模块：WebShell `ResizeObserver`、分屏拖动、窗口/tab 激活布局、Ghostty Web Canvas 渲染和 WASM resize/write 时序
+- 错误现象：连续调整 WebShell 窗口或 pane 宽高后切换到下一个 tab，上一个 tab 的部分画面会以不规则形状残留到当前 tab；再次调整窗口或重开窗口后恢复，少数情况下 renderer 主线程高负载导致窗口卡死。用户观察到每次 resize 都会让终端内容从顶部重新滚到底部，说明 resize 期间重复 full-render/reflow 正在争用主线程。
+- 根因：ResizeObserver、分屏拖动、tab 激活和 window settle 路径可以在同一 pane 上重复提交 resize；每次提交都会触发 Ghostty WASM reflow 和整帧绘制，旧的 Canvas 帧可能在新尺寸提交前被清空，tab 切换又可能在下一帧才完成 fit/render，形成跨 tab 合成残影。resize 与 PTY write 没有明确的原子边界时，WASM 重分配 buffer 期间的写入会与 renderer 读取交错；隐藏 tab 仍持续调度 Canvas RAF，进一步放大主线程负载和 XSync timeout 概率。
+- 实施方案：新增按 pane 合并 resize 请求的 `terminal_resize_scheduler.js`，以约 80ms throttle 和 120ms settle 保留最后一次尺寸，`immediate` 只应用最新请求。resize 前复制最后一帧到 frame-hold Canvas，并在尺寸或 Canvas 变化期间保持旧帧可见，成功的 full-render 通过现有 presentation generation 校验后才释放；失败时保留旧帧并进入既有 validation/retry。tab 激活先同步切换 DOM active 状态，再在同一任务中对目标 tab 做最终 fit/full-render；隐藏 pane 继续解析 PTY 数据但取消待执行 Canvas RAF，激活时再做整帧绘制。Ghostty bundle 在 resize 前取消待执行 render，resize 期间把输入写入队列，完成后通过正常 `writeInternal` 路径 flush，dispose 时清空队列；Canvas 尺寸变化但列行数不变时也调用 renderer resize，避免物理尺寸不同步。
+- Guard：新增 `terminal_resize_scheduler_test.mjs` 覆盖快速 resize 合并、trailing settle、immediate 覆盖旧请求和 cancel；`TestTerminalResizeSchedulerBehavior` 接入 Go 测试；`TestRuntimeTerminalCanvasResidueGuard` 与 `TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs` 固定 frame-hold、Canvas 尺寸 resize、隐藏 pane RAF 取消、tab 同步激活和 Ghostty resize/write 队列保护；Service Worker precache guard 固定新模块随 runtime 发布。
+- 验证结果：`node --check` 通过 `main.js`、`ghostty-web.js` 和 `service-worker.js`；Node resize scheduler 与 terminal cache-v2 行为测试 13/13 通过；`TestRuntimeTerminalCanvasResidueGuard`、`TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs`、`TestTerminalResizeSchedulerBehavior` 及完整 `go test ./...` 通过；`git diff --check` 通过。当前尚未完成真实 Electron 连续拖拽 resize/tab 切换压力截图，因此实机残影和卡死概率仍需在目标 LightOS 环境复验。
+- 禁止复现：不得恢复每个 ResizeObserver 回调直接调用 `term.resize()`；不得在 resize 尚未完成时清空或隐藏唯一可见旧帧；不得让隐藏 tab 持续运行 Canvas render loop；不得在 Ghostty buffer 可能重分配时直接写 WASM；不得把列行数不变误认为 Canvas 物理尺寸已经同步。
+
+### LCMD-20260807-01：resize 中间 full-render 暴露终端从顶部滚到底部的重排过程
+
+- 日期：2026-08-07
+- 来源：LCMD-20260806-02 修复后的用户复验；残影不再复现，但连续 resize 仍能看到终端内容从顶部逐步滚到下方
+- 影响模块：`terminal_resize_scheduler.js` settle 调度、WebShell Canvas frame-hold、PTY 输出期间的 render 请求
+- 错误现象：调整窗口尺寸时，终端模型最终位置正确，但用户能看到每个中间尺寸的重排/full-render 过程；页面首帧使用缓存时没有同样的可见滚动，因此问题集中在 resize 的展示提交策略，而不是终端 viewport 最终值错误。
+- 根因：原 scheduler 虽然合并请求，但 throttle frame 也会立即调用 `resizePane()`、同步 full-render 并释放 frame-hold。连续拖拽期间每个中间尺寸都被提交给用户；resize 同时到达的 PTY 输出又会请求新的 Canvas RAF，使中间帧更容易暴露。该行为不是 FlashList 能解决的列表排序问题，而是“模型更新”和“可见帧提交”没有分成两个阶段。
+- 实施方案：scheduler 增加 `settled` 上下文。throttle frame 只更新 Ghostty/WASM 尺寸并保留旧 raster frame，settle timer 始终执行最后一次提交；单次 resize 也保证有 trailing settled commit。pane 增加 `resizePresentationHold`，full-render 回调在 hold 期间只更新已呈现 generation，不释放旧帧。resize hold 期间到达的输出仍写入终端模型，但取消其待执行 Canvas RAF，并标记最新 content generation 必须在最终提交时 full-render；最终 render 成功后才释放 hold。
+- Guard：resize scheduler Node 测试新增中间 `{ settled: false }`、最终 `{ settled: true }` 以及单次 resize trailing commit；`TestRuntimeTerminalCanvasResidueGuard` 固定 `resizePresentationHold`、settled scheduler apply、resize 期间延后 render 和最终 full-render 条件。
+- 验证结果：`node --check` 通过；resize scheduler 与 terminal cache-v2 Node 测试 14/14 通过，其中 scheduler 4/4；目标 Go 静态 guard、完整 `go test ./...`、`go test -race ./...` 和 `git diff --check` 通过；真实 Electron 连续拖拽压力截图仍需在目标 LightOS 环境复验。
+- 禁止复现：不得在 resize burst 的 throttle frame 释放用户可见旧帧；不得让 resize 期间的 PTY 输出抢占中间 Canvas 提交；settle timer 不得被中间 frame 取消；最终提交必须覆盖 resize 期间积累的最新终端内容。
+
+### LCMD-20260807-02：resize hold 快照被拉伸并暴露底层中间重排
+
+- 日期：2026-08-07
+- 来源：LCMD-20260807-01 修复后的用户复验；残影已消失，但仍能看到短距离快速滚动和闪烁
+- 影响模块：WebShell frame-hold Canvas、pane resize scheduler、window resize 与 ResizeObserver 提交路径
+- 错误现象：resize 时旧终端内容没有稳定停留在原位置，而是出现一小段快速位移；底部缓存快照看似存在但视觉上不起作用。不同尺寸事件结束后偶尔还会出现一次额外的最终帧闪烁。
+- 根因：hold Canvas 原先使用 `width: 100%`、`height: 100%` 和 `object-fit: contain`，窗口尺寸变化时浏览器会缩放旧位图，终端行高和底部锚点随容器连续变化。与此同时 throttle 回调仍实际执行 `term.resize()`、full-render 和 PTY resize，快照只是遮盖了这些中间重排；`window.resize` 自己的 settle timer 又和 ResizeObserver scheduler 形成第二个最终提交来源。根因是展示快照、终端模型更新和 PTY 尺寸通知没有形成单一的 settled 提交边界，不是普通列表虚拟化问题。
+- 实施方案：hold 快照先按当前 Canvas 的 CSS 逻辑尺寸重采样，保持全容器盒子但使用 `object-fit: none`、`object-position: left bottom`，避免随新窗口缩放；scheduler 的非 settled 回调只保留 hold，不执行终端 resize/render，`resizePane` 自身也拒绝 hold 期间的非 settled 旁路调用，最终 settle 才一次性应用尺寸、恢复 viewport、通知 PTY 并提交 full-render；最终选项合并整个 burst，避免早期强制渲染标志丢失；window resize 改为直接进入同一个 pane scheduler，移除独立 settle timer。
+- Guard：scheduler 测试固定最终提交合并早期选项；`TestRuntimeTerminalCanvasResidueGuard` 固定逻辑像素快照、非 settled 路径和 hold 几何；`TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs` 固定不存在第二个 `activeTabResizeTimer`。
+- 验证结果：Node terminal cache-v2 与 resize scheduler 测试 14/14 通过；完整 `go test ./...`、`go test -race ./...`、JS `node --check` 和 `git diff --check` 通过。真实 Electron 连续拖拽和 tab 切换压力截图仍需在目标 LightOS 环境复验。
+- 禁止复现：不得在 resize burst 的非 settled 回调执行 `term.resize()`、full-render 或 PTY resize；不得用 `contain` 拉伸 hold 位图；不得恢复独立 window settle timer；最终可见帧只能由 scheduler 的 settled 提交释放旧帧。
+
+### LCMD-20260807-03：移动端键盘输入被 resize presentation hold 长时间阻塞
+
+- 日期：2026-08-07
+- 来源：LCMD-20260807-02 修复后的用户复验；PC 输入正常，多台移动设备出现输入无响应、延迟数分钟或不显示
+- 影响模块：移动端 visual viewport/IME resize、输入 pending/queue、pane `renderReady` 与 resize presentation hold
+- 错误现象：移动端键盘弹出或收起后，输入事件有时已经进入本地 pending 队列，但迟迟没有通过 WebSocket 发送；即使连接正常，也可能因为 `renderReady=false` 无法 flush。PC 不触发移动键盘 viewport 链路，因此不受影响。
+- 根因：`isSessionInputReady` 同时要求网络连接已 ready 和终端画面 `renderReady=true`。移动键盘调整 viewport 时 window resize 会先把 pane 置为 presentation hold；此前 hold 在键盘抑制期间可能无法进入 settled resize，键盘收起后的直接 resize 又被非 settled 门禁拒绝，导致 `renderReady` 长时间保持 false。输入传输状态与画面展示状态被错误绑定。
+- 实施方案：输入 readiness 只依赖 replay 已完成、preview 未显示和 WebSocket OPEN，不再依赖 `renderReady`；移动 IME viewport 抑制期间不创建 terminal resize hold；移动设备恢复尺寸统一通过 scheduler 的 immediate settled 路径提交，确保旧 hold 能释放。键盘 viewport 的滚动/平移继续由专用 inset/pan 逻辑处理。
+- Guard：容器契约测试固定 input readiness 不包含 `session.renderReady`；`TestRuntimeTerminalCanvasResidueGuard` 固定 IME 抑制期间跳过 resize hold；`TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs` 固定移动设备恢复调用 scheduler immediate。
+- 验证结果：Node 14/14、完整 `go test ./...`、`go test -race ./...`、JS `node --check` 和 `git diff --check` 通过；真实移动设备输入和键盘收放压力仍需在目标 LightOS 环境复验。
+- 禁止复现：不得用 Canvas 展示状态阻塞已连接终端的用户输入；IME viewport 变化期间不得创建或永久保留 terminal resize hold；移动端尺寸恢复必须经过 settled 提交释放 hold。
+
 ## 新增记录模板
 
 ```md

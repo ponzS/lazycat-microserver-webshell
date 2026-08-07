@@ -491,7 +491,7 @@ const z = class K {
     return !g || g.length === 0 ? " " : String.fromCodePoint(...g);
   }
   invalidateBuffers() {
-    this.viewportBufferPtr && (this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize), this.viewportBufferPtr = 0, this.viewportBufferSize = 0);
+    this.viewportBufferPtr && (this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize), this.viewportBufferPtr = 0, this.viewportBufferSize = 0), this.graphemeBufferPtr && (this.exports.ghostty_wasm_free_u8_array(this.graphemeBufferPtr, 16 * 4), this.graphemeBufferPtr = 0), this.graphemeBuffer = null;
   }
 };
 z.CELL_SIZE = 16;
@@ -2531,6 +2531,10 @@ class IA {
    * Internal write implementation (extracted from write())
    */
   writeInternal(A, B) {
+    if (this.isResizing) {
+      this.writeQueue || (this.writeQueue = []), this.writeQueue.push(A);
+      return;
+    }
     var g;
     const C = this.wasmTerm.getScrollbackGeneration(), I = this.viewportY || 0, D = this.scrollAnimationFrame ? this.targetViewportY || 0 : I, i = I <= 0.01 && D <= 0.01;
     if (this.wasmTerm.write(A), this.processTerminalResponses(), typeof A == "string" && A.includes("\x07") ? this.bellEmitter.fire() : A instanceof Uint8Array && A.includes(7) && this.bellEmitter.fire(), (g = this.linkDetector) == null || g.invalidateCache(), i)
@@ -2574,7 +2578,15 @@ class IA {
   resize(A, B) {
     if (this.assertOpen(), A === this.cols && B === this.rows)
       return this.renderer.resize(A, B) && this.requestRender({ full: !0 });
-    this.cols = A, this.rows = B, this.wasmTerm.resize(A, B), this.renderer.resize(A, B), this.resizeEmitter.fire({ cols: A, rows: B }), this.requestRender({ full: !0 });
+    this.cancelRenderLoop(), this.isResizing = !0;
+    try {
+      this.cols = A, this.rows = B, this.wasmTerm.resize(A, B), this.renderer.resize(A, B), this.resizeEmitter.fire({ cols: A, rows: B }), this.requestRender({ full: !0 });
+    } catch (g) {
+      console.error("Terminal resize failed:", g);
+    } finally {
+      this.isResizing = !1;
+      this.flushWriteQueue();
+    }
   }
   /**
    * Clear terminal screen
@@ -2778,7 +2790,7 @@ class IA {
    */
   dispose() {
     if (!this.isDisposed) {
-      this.isDisposed = !0, this.isOpen = !1, this.animationFrameId && (cancelAnimationFrame(this.animationFrameId), this.animationFrameId = void 0), this.renderRetryTimer !== void 0 && (window.clearTimeout(this.renderRetryTimer), this.renderRetryTimer = void 0), this.scrollAnimationFrame && (cancelAnimationFrame(this.scrollAnimationFrame), this.scrollAnimationFrame = void 0), this.mouseMoveThrottleTimeout && (clearTimeout(this.mouseMoveThrottleTimeout), this.mouseMoveThrottleTimeout = void 0), this.pendingMouseMove = void 0;
+      this.isDisposed = !0, this.isOpen = !1, this.cancelRenderLoop(), this.writeQueue && (this.writeQueue.length = 0), this.renderRetryTimer !== void 0 && (window.clearTimeout(this.renderRetryTimer), this.renderRetryTimer = void 0), this.scrollAnimationFrame && (cancelAnimationFrame(this.scrollAnimationFrame), this.scrollAnimationFrame = void 0), this.mouseMoveThrottleTimeout && (clearTimeout(this.mouseMoveThrottleTimeout), this.mouseMoveThrottleTimeout = void 0), this.pendingMouseMove = void 0;
       for (const A of this.addons)
         A.dispose();
       this.addons = [], this.cleanupComponents(), this.dataEmitter.dispose(), this.resizeEmitter.dispose(), this.bellEmitter.dispose(), this.selectionChangeEmitter.dispose(), this.keyEmitter.dispose(), this.titleChangeEmitter.dispose(), this.scrollEmitter.dispose(), this.renderEmitter.dispose(), this.cursorMoveEmitter.dispose();
@@ -2790,6 +2802,18 @@ class IA {
   /**
    * Schedule one render frame.
    */
+  cancelRenderLoop() {
+    this.animationFrameId && (cancelAnimationFrame(this.animationFrameId), this.animationFrameId = void 0);
+  }
+  flushWriteQueue() {
+    if (!this.writeQueue) {
+      return;
+    }
+    for (; this.writeQueue.length > 0; ) {
+      const A = this.writeQueue.shift();
+      this.writeInternal(A);
+    }
+  }
   requestRender(A = {}) {
     if (this.isDisposed || !this.isOpen)
       return;
