@@ -21,6 +21,18 @@ func TestTerminalCacheV2Behavior(t *testing.T) {
 	}
 }
 
+func TestTerminalResizeSchedulerBehavior(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is unavailable")
+	}
+	command := exec.Command(node, "--test", "terminal_resize_scheduler_test.mjs")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("terminal resize scheduler tests failed: %v\n%s", err, output)
+	}
+}
+
 func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 	mainData, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {
@@ -45,6 +57,7 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 	mainSource := string(mainData)
 	for _, want := range []string{
 		`import { createTerminalCacheV2 } from "./terminal_cache_v2.js";`,
+		`import { createTerminalResizeScheduler } from "./terminal_resize_scheduler.js";`,
 		`isClientInstanceName(session.name)`,
 		`sessionHasTerminalCacheV2Protocol`,
 		`sessionUsesLegacyHistoryCache = (session) => Boolean(session && isClientInstanceName(session.name))`,
@@ -121,6 +134,9 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		}
 	}
 	workerSource := string(workerData)
+	if !strings.Contains(workerSource, "${assetBase}terminal_resize_scheduler.js") {
+		t.Fatal("service worker must precache the terminal resize scheduler")
+	}
 	for _, want := range []string{
 		`url.pathname.includes("/api/")`,
 		`url.pathname.endsWith("/ws")`,
@@ -244,9 +260,10 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		"const isSessionInputReady = (session) => (",
 		"const sendSessionInputChunk = (session, data, { generated = false } = {}) => {")
 	if !strings.Contains(inputReadyBlock, `session?.replayComplete`) ||
+		strings.Contains(inputReadyBlock, `session.renderReady`) ||
 		strings.Contains(inputReadyBlock, `cacheV2WarmReplayReady`) ||
 		strings.Contains(inputReadyBlock, `cacheV2WarmFrameReady`) {
-		t.Fatal("warm canvas must not unlock terminal input before network replay completes")
+		t.Fatal("terminal input readiness must not depend on the presentation frame")
 	}
 	prepareCacheBlock := sourceBetween(t, mainSource,
 		"const prepareSessionHistoryCache = async (session) => {",
@@ -2160,6 +2177,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"session.presentedContentGeneration === session.terminalContentGeneration",
 		"terminalCanvasMatchesExpectedSize(session)",
 		"session.hasPresentedFrame = true;",
+		"!session.renderReady && !session.resizePresentationHold",
 		"setPaneRenderReady(session, true);",
 		"const panePresentationIsCurrent = (session) => Boolean(",
 		"const cancelPendingTerminalRender = (term) => {",
@@ -2193,7 +2211,27 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"hasPresentedFrame: false,",
 		"workspaceExitPending: false,",
 		"activationFitPending: false,",
-		"resizeObserverFrame: 0,",
+		"resizePresentationHold: false,",
+		"import { createTerminalResizeScheduler } from \"./terminal_resize_scheduler.js\";",
+		"const terminalResizeThrottleMs = 80;",
+		"const paneResizeScheduler = createTerminalResizeScheduler({",
+		"const schedulePaneResize = (pane, options = {}, scheduleOptions = {}) => {",
+		"if (isMobileKeyboardResizeSuppressed()) {",
+		"Skip terminal resize holds while the mobile IME changes the viewport.",
+		"const deferHiddenPaneRender = (session) => {",
+		"const deferPaneRenderDuringResize = (session) => {",
+		"holdSessionTerminalFrame(pane);",
+		"const ratio = Math.max(",
+		"ctx.drawImage(source, 0, 0, hold.width, hold.height);",
+		"const dimensionsWillChange = !dimensionsEqualTerminalSize(pane, fittedDimensions) || canvasNeedsResize;",
+		"settlePresentation,",
+		"const shouldSettlePresentation = settlePresentation === true",
+		"if (!shouldSettlePresentation && pane.resizePresentationHold) {",
+		"apply: (pane, options, { settled = true } = {}) => {",
+		"if (!settled) {",
+		"settlePresentation: true,",
+		"settlePresentation: !session.resizePresentationHold,",
+		"cancelScheduledPaneResize(session);",
 		"cleanupCallbacks: [],",
 		"installTerminalCanvasRecovery(session);",
 		"installTerminalResizeObserver(session);",
@@ -2208,6 +2246,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"clearTerminalCanvasPixels(pane);",
 		"requestPaneFullRender(session);",
 		"renderPaneFullNow(session);",
+		"deferPaneRenderDuringResize(session)",
 		"cancelPendingTerminalRender(session.term);",
 		"schedulePaneFullRenderValidation(session);",
 	}
@@ -2242,6 +2281,8 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		`.pane-shell[data-render-ready="false"][data-has-presented-frame="false"] .terminal-host > canvas:not(.terminal-frame-hold) {`,
 		"visibility: hidden;",
 		".terminal-frame-hold",
+		"object-fit: none;",
+		"object-position: left bottom;",
 	}
 	for _, want := range styleSnippets {
 		if !strings.Contains(styleSource, want) {
@@ -2278,6 +2319,14 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"this.scheduleRenderRetry()",
 		"this.renderRetryDelayMs = Math.min(250, A * 2)",
 		"this.renderRetryTimer = window.setTimeout",
+		"this.cancelRenderLoop(), this.isResizing = !0;",
+		"if (this.isResizing)",
+		"this.writeQueue || (this.writeQueue = []), this.writeQueue.push(A)",
+		"this.flushWriteQueue();",
+		"this.writeQueue && (this.writeQueue.length = 0)",
+		"this.writeInternal(A);",
+		"Terminal resize failed:",
+		"this.graphemeBuffer = null",
 	}
 	for _, want := range rendererSnippets {
 		if !strings.Contains(rendererSource, want) {
@@ -2973,7 +3022,7 @@ func TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs(t *testing.T) {
 		"pane.fitAddon?.proposeDimensions?.();",
 		"const viewport = captureTerminalViewport(pane.term);",
 		"const canvasNeedsResize = !terminalCanvasMatchesExpectedSize(pane, fittedDimensions);",
-		"if (!dimensionsEqualTerminalSize(pane, fittedDimensions)) {",
+		"if (dimensionsWillChange) {",
 		"pane.term.resize(fittedDimensions.cols, fittedDimensions.rows);",
 		"restoreTerminalViewport(pane.term, viewport);",
 		"pane.measuredFitGeneration = Number(pane.measuredFitGeneration || 0) + 1;",
@@ -2982,23 +3031,27 @@ func TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs(t *testing.T) {
 		"const installTerminalResizeObserver = (session) => {",
 		"const observer = new ResizeObserver(() => {",
 		"observer.observe(session.terminalHost);",
-		"const fit = resizePane(session);",
-		"if (!fit.ok || Number(session.measuredFitGeneration || 0) <= 0) {",
+		"schedulePaneResize(session, {",
+		"const scheduleTabResize = (tab, options = {}, scheduleOptions = {}) => {",
+		"const paneResizeScheduler = createTerminalResizeScheduler({",
 		"if (allowHidden && Number(session.measuredFitGeneration || 0) > 0) {",
 		"Number(session.measuredFitGeneration || 0) <= 0 ||",
-		"const scheduleVisibleTabResize = (tab) => {",
+		"const scheduleVisibleTabResize = (tab, { immediate = false } = {}) => {",
+		"scheduleTabResize(tab, options, { immediate: true });",
 		"tab.resizeFrame = window.requestAnimationFrame(() => {",
 		"const scheduleActiveTabWindowResize = () => {",
-		"activeTabResizeTimer = window.setTimeout(() => {",
-		"resizeActiveTabForCurrentDevice({ forceFullRender: true, hideUntilRender: true });",
+		"scheduleTabResize(currentTab(), {",
 		"const shouldResizeTerminal = supportsViewportInsets && isTouchShortcutLayout();",
 		"if (shouldResizeTerminal && (heightChanged || insetChanged || safeOffsetChanged)) {",
-		"scheduleVisibleTabResize(tab);",
+		"scheduleVisibleTabResize(tab, { immediate: true });",
 	}
 	for _, want := range wantSnippets {
 		if !strings.Contains(source, want) {
 			t.Fatalf("runtime tab resize guard missing %q", want)
 		}
+	}
+	if strings.Contains(source, "activeTabResizeTimer") {
+		t.Fatal("window resize must not maintain a second terminal settle timer")
 	}
 
 	visibilityIndex := strings.Index(source, "const isPaneVisibleForSizing = (pane) => {")
@@ -3012,7 +3065,7 @@ func TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs(t *testing.T) {
 	if activeTabIndex < 0 {
 		t.Fatalf("runtime setActiveTab is missing")
 	}
-	scheduleIndex := strings.Index(source[activeTabIndex:], "scheduleVisibleTabResize(tab);")
+	scheduleIndex := strings.Index(source[activeTabIndex:], "scheduleVisibleTabResize(tab, { immediate: true });")
 	if scheduleIndex < 0 {
 		t.Fatalf("runtime setActiveTab does not schedule visible tab resize")
 	}

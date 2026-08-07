@@ -769,6 +769,8 @@ body.split-resize-active * {
 
 .terminal-frame-hold {
   image-rendering: auto;
+  object-fit: none;
+  object-position: left bottom;
 }
 
 .terminal-cache-preview[hidden],
