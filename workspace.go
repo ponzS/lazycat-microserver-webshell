@@ -99,6 +99,8 @@ type terminalPane struct {
 	historyLimitBytes          int
 	cols                       int
 	rows                       int
+	pixelWidth                 int
+	pixelHeight                int
 	tty                        string
 	busy                       bool
 	command                    string
@@ -190,6 +192,8 @@ type paneSummary struct {
 	ID                string `json:"id"`
 	Cols              int    `json:"cols"`
 	Rows              int    `json:"rows"`
+	PixelWidth        int    `json:"pixel_width,omitempty"`
+	PixelHeight       int    `json:"pixel_height,omitempty"`
 	TTY               string `json:"tty,omitempty"`
 	Busy              bool   `json:"busy"`
 	Command           string `json:"command,omitempty"`
@@ -222,15 +226,17 @@ type workspaceActivityState struct {
 }
 
 type terminalControlMessage struct {
-	Type       string `json:"type"`
-	Cols       int    `json:"cols"`
-	Rows       int    `json:"rows"`
-	Data       string `json:"data"`
-	Blocked    bool   `json:"blocked,omitempty"`
-	Generated  bool   `json:"generated,omitempty"`
-	Foreground string `json:"foreground,omitempty"`
-	Background string `json:"background,omitempty"`
-	Cursor     string `json:"cursor,omitempty"`
+	Type        string `json:"type"`
+	Cols        int    `json:"cols"`
+	Rows        int    `json:"rows"`
+	PixelWidth  int    `json:"pixel_width,omitempty"`
+	PixelHeight int    `json:"pixel_height,omitempty"`
+	Data        string `json:"data"`
+	Blocked     bool   `json:"blocked,omitempty"`
+	Generated   bool   `json:"generated,omitempty"`
+	Foreground  string `json:"foreground,omitempty"`
+	Background  string `json:"background,omitempty"`
+	Cursor      string `json:"cursor,omitempty"`
 }
 
 func newWorkspaceManager(rootDir string) *workspaceManager {
@@ -488,12 +494,18 @@ func handleTerminalControlMessage(pane *terminalPane, payload []byte, client *pa
 			if message.Generated {
 				_ = pane.writeGeneratedInput([]byte(message.Data))
 			} else {
-				_ = pane.writeInputWithSize([]byte(message.Data), message.Cols, message.Rows)
+				_ = pane.writeInputWithDimensions(
+					[]byte(message.Data),
+					message.Cols,
+					message.Rows,
+					message.PixelWidth,
+					message.PixelHeight,
+				)
 			}
 		}
 	case "resize":
 		if message.Cols > 0 && message.Rows > 0 {
-			_ = pane.resize(message.Cols, message.Rows)
+			_ = pane.resizeWithPixels(message.Cols, message.Rows, message.PixelWidth, message.PixelHeight)
 		}
 	case "theme":
 		pane.updateTerminalThemeColors(message.Foreground, message.Background, message.Cursor)
@@ -1549,6 +1561,7 @@ func (s paneHistorySnapshot) bytes() []byte {
 
 const (
 	maxPendingTerminalQuery           = 64
+	maxPendingKittyGraphicsQuery      = 4096
 	primaryDeviceAttributesResponse   = "\x1b[?1;2c"
 	secondaryDeviceAttributesResponse = "\x1b[>0;0;0c"
 	defaultTerminalForegroundColor    = "#00cd00"
@@ -1812,6 +1825,48 @@ func (p *terminalPane) filterTerminalQueryOutput(data []byte) []byte {
 			return output
 		}
 		switch buffer[1] {
+		case '_':
+			if len(buffer) < len("\x1b_G;") {
+				p.setTerminalQueryPending(buffer)
+				return output
+			}
+			if buffer[2] != 'G' {
+				output = append(output, buffer[0])
+				buffer = buffer[1:]
+				continue
+			}
+			separator := bytes.IndexByte(buffer, ';')
+			if separator < 0 {
+				if len(buffer) <= maxPendingTerminalQuery {
+					p.setTerminalQueryPending(buffer)
+					return output
+				}
+				output = append(output, buffer...)
+				return output
+			}
+			if !kittyGraphicsQueryControl(buffer[3:separator]) {
+				output = append(output, buffer...)
+				return output
+			}
+			end, ok := findAPCTerminator(buffer)
+			if !ok {
+				if len(buffer) <= maxPendingKittyGraphicsQuery {
+					p.setTerminalQueryPending(buffer)
+					return output
+				}
+				output = append(output, buffer...)
+				return output
+			}
+			sequence := buffer[:end]
+			if response, ok := kittyGraphicsQueryResponse(sequence); ok {
+				responseData := []byte(response)
+				p.expectGeneratedInput(responseData, 1)
+				_ = p.writeGeneratedInput(responseData)
+				buffer = buffer[end:]
+				continue
+			}
+			output = append(output, sequence...)
+			buffer = buffer[end:]
 		case '[':
 			if len(buffer) == 2 {
 				p.setTerminalQueryPending(buffer)
@@ -1908,6 +1963,18 @@ func findOSCTerminator(sequence []byte) (int, bool) {
 	return -1, false
 }
 
+func findAPCTerminator(sequence []byte) (int, bool) {
+	if len(sequence) < 3 || sequence[0] != '\x1b' || sequence[1] != '_' {
+		return -1, false
+	}
+	for index := 2; index < len(sequence); index++ {
+		if sequence[index] == '\x1b' && index+1 < len(sequence) && sequence[index+1] == '\\' {
+			return index + 2, true
+		}
+	}
+	return -1, false
+}
+
 func terminalQueryResponse(sequence []byte) (string, bool) {
 	if len(sequence) < 3 || sequence[0] != '\x1b' || sequence[1] != '[' || sequence[len(sequence)-1] != 'c' {
 		return "", false
@@ -1979,6 +2046,54 @@ func terminalClientGeneratedResponse(sequence []byte) (string, bool) {
 		return "\x1b[0n", true
 	}
 	return "", false
+}
+
+func kittyGraphicsQueryResponse(sequence []byte) (string, bool) {
+	if len(sequence) < len("\x1b_Ga=q;i=1\x1b\\") || sequence[0] != '\x1b' || sequence[1] != '_' {
+		return "", false
+	}
+	if sequence[len(sequence)-2] != '\x1b' || sequence[len(sequence)-1] != '\\' {
+		return "", false
+	}
+	body := sequence[3 : len(sequence)-2]
+	control, _, _ := bytes.Cut(body, []byte(";"))
+	attributes := make(map[string]string)
+	for _, part := range bytes.Split(control, []byte(",")) {
+		key, value, ok := bytes.Cut(part, []byte("="))
+		if ok {
+			attributes[string(key)] = string(value)
+		}
+	}
+	if attributes["a"] != "q" {
+		return "", false
+	}
+	imageID := attributes["i"]
+	if imageID == "" {
+		return "", false
+	}
+	for _, char := range imageID {
+		if char < '0' || char > '9' {
+			return "", false
+		}
+	}
+	message := "OK"
+	if transmission := attributes["t"]; transmission != "" && transmission != "d" {
+		message = "EINVAL: only direct transmission is supported"
+	} else if format := attributes["f"]; format != "" && format != "24" && format != "32" && format != "100" {
+		message = "EINVAL: image format is unsupported"
+	} else if compression := attributes["o"]; compression != "" && compression != "z" {
+		message = "EINVAL: compression is unsupported"
+	}
+	return fmt.Sprintf("\x1b_Gi=%s;%s\x1b\\", imageID, message), true
+}
+
+func kittyGraphicsQueryControl(control []byte) bool {
+	for _, part := range bytes.Split(control, []byte(",")) {
+		if bytes.Equal(part, []byte("a=q")) {
+			return true
+		}
+	}
+	return false
 }
 
 func isCursorPositionQuery(sequence []byte) bool {
@@ -2160,11 +2275,15 @@ func (p *terminalPane) writeInput(data []byte) error {
 }
 
 func (p *terminalPane) writeInputWithSize(data []byte, cols, rows int) error {
+	return p.writeInputWithDimensions(data, cols, rows, 0, 0)
+}
+
+func (p *terminalPane) writeInputWithDimensions(data []byte, cols, rows, pixelWidth, pixelHeight int) error {
 	if len(data) == 0 {
 		return nil
 	}
 	if cols > 0 && rows > 0 {
-		_ = p.resize(cols, rows)
+		_ = p.resizeWithPixels(cols, rows, pixelWidth, pixelHeight)
 	}
 	dropInput, generatedInput := p.consumeGeneratedCursorReportInput(data)
 	if dropInput {
@@ -2277,22 +2396,41 @@ func (p *terminalPane) setInputBlockedBy(owner string, blocked bool) {
 }
 
 func (p *terminalPane) resize(cols, rows int) error {
+	return p.resizeWithPixels(cols, rows, 0, 0)
+}
+
+func (p *terminalPane) resizeWithPixels(cols, rows, pixelWidth, pixelHeight int) error {
 	cols = normalizeCols(cols)
 	rows = normalizeRows(rows)
+	pixelWidth = normalizeTerminalPixelDimension(pixelWidth)
+	pixelHeight = normalizeTerminalPixelDimension(pixelHeight)
 	p.mu.Lock()
-	if p.cols == cols && p.rows == rows {
+	if pixelWidth == 0 {
+		pixelWidth = p.pixelWidth
+	}
+	if pixelHeight == 0 {
+		pixelHeight = p.pixelHeight
+	}
+	if p.cols == cols && p.rows == rows && p.pixelWidth == pixelWidth && p.pixelHeight == pixelHeight {
 		p.mu.Unlock()
 		return nil
 	}
 	p.cols = cols
 	p.rows = rows
+	p.pixelWidth = pixelWidth
+	p.pixelHeight = pixelHeight
 	ptyFile := p.ptyFile
 	exited := p.exited
 	p.mu.Unlock()
 	if exited || ptyFile == nil {
 		return nil
 	}
-	return pty.Setsize(ptyFile, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	return pty.Setsize(ptyFile, &pty.Winsize{
+		Cols: uint16(cols),
+		Rows: uint16(rows),
+		X:    uint16(pixelWidth),
+		Y:    uint16(pixelHeight),
+	})
 }
 
 func (p *terminalPane) close() {
@@ -2320,6 +2458,8 @@ func (p *terminalPane) summary() paneSummary {
 		ID:                p.id,
 		Cols:              p.cols,
 		Rows:              p.rows,
+		PixelWidth:        p.pixelWidth,
+		PixelHeight:       p.pixelHeight,
 		TTY:               p.tty,
 		Busy:              p.busy,
 		Command:           p.command,
@@ -2956,6 +3096,13 @@ func normalizeRows(rows int) int {
 		return defaultTerminalRows
 	}
 	return min(rows, 300)
+}
+
+func normalizeTerminalPixelDimension(value int) int {
+	if value <= 0 {
+		return 0
+	}
+	return min(value, int(^uint16(0)))
 }
 
 func normalizeTerminalHexColor(value, fallback string) string {

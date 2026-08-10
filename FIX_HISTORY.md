@@ -459,6 +459,49 @@ git diff --check
 - 验证结果：Node 14/14、完整 `go test ./...`、`go test -race ./...`、JS `node --check` 和 `git diff --check` 通过；真实移动设备输入和键盘收放压力仍需在目标 LightOS 环境复验。
 - 禁止复现：不得用 Canvas 展示状态阻塞已连接终端的用户输入；IME viewport 变化期间不得创建或永久保留 terminal resize hold；移动端尺寸恢复必须经过 settled 提交释放 hold。
 
+### LCMD-20260810-01：Ghostty-Web 终端忽略 Kitty Graphics 原始图片序列
+
+- 日期：2026-08-10
+- 来源：用户要求在当前 Ghostty-Web WebShell 终端中直接渲染项目根目录 `image.png`，而不是字符画或外部图片查看器
+- 发布：LPK version `1.0.21`（`1.0.18` 初版未正确隔离 Kitty generated input，`1.0.19` 仍依赖浏览器经 WebSocket 回传探测回复，`1.0.20` 未同步 ANSI 整屏清除到图片图层；版本化静态资源 immutable，因此每次现场协议修正均提升版本）
+- 影响模块：WebShell `runtime/static/kitty_graphics.js`、`main.js`、resize 消息与 Go PTY/Agent 尺寸链路，以及 Service Worker 静态资源预缓存；Ghostty Web/WASM 仅作为能力边界背景
+- 错误现象：PTY 输出中的 Kitty Graphics APC（`ESC _ G ... ESC \`）被 Ghostty-Web WASM 构建忽略，`kitty icat` 无法在终端 Canvas 中显示原始 PNG；使用 `xdg-open` 只能启动外部程序，不能满足终端内渲染要求。初版接入后，Kitty 探测回复若未标记为内部 generated input，还会被 shell 回显为 `Gi=1;OK`。图片显示成功后，shell 的 `Ctrl+L`/`clear` 只让 Ghostty 清除字符网格，独立绘制的 Kitty 图片仍残留在 Canvas 上。
+- 根因：原生 Ghostty 虽支持 Kitty Graphics，但当前 ghostty-web WASM 构建把 `oniguruma` 设为 false，连带禁用 Kitty Graphics；其 Canvas 层也没有图片放置绘制接口。WebShell 还维护了包含历史回放和 resize/write 队列修复的定制 Ghostty bundle，直接替换 bundle 会覆盖这些定制。另一个独立问题是 Kitty 0.48.2 的 `icat` 直接读取 Linux PTY `TIOCGWINSZ.ws_xpixel/ws_ypixel`，而原链路只设置了行列，像素字段为 0。图片适配器最初只挂接 JavaScript `Terminal.clear()`/`reset()`，但 shell 的 `Ctrl+L` 是由 PTY 输出 `CSI 2 J` 等 ANSI 序列驱动，不会调用这些方法。
+- 实施方案：不修改 Ghostty WASM 和 `ghostty-web` 源码仓库，在 WebShell 运行时新增独立 `kitty_graphics.js` 适配器，以 Terminal 原型包装方式接入现有定制 bundle，按顺序把普通文本交给 WASM、把图片 APC 交给图片管理器，并通过异步 `createImageBitmap` 解码后在同一 Canvas 上按终端光标单元格绘制。支持 `a=T`/`a=t`/`a=p`/`a=d`、`f=100` PNG、Kitty 0.48 `icat` 实际输出的 `f=24`/`f=32` 原始像素与 `o=z` 压缩、`m=1/0` 分块、图片/placement 生命周期和单元格尺寸。Go PTY 输出过滤器直接消费 `a=q` 探测 APC，在同一 PTY 内同步回复：只声明浏览器可读取的直接传输，不误报服务器临时文件或共享内存；回复不再经过浏览器 `Terminal.input`、WebSocket 输入队列或 shell。浏览器将 Canvas CSS 像素尺寸随 resize/input 发送，Go PTY/持久 Agent 写入 `Winsize.X/Y`，使 Kitty 能获取窗口像素大小；同时兼容拦截 `CSI 14 t` 并回复 `CSI 4;height;width t`。图片适配器持续观察交给终端的普通输出，跨分块识别 `CSI 2 J`、`CSI 3 J` 和 RIS 全复位并清除图片 placement，局部 `CSI J` 不误删图片。Service Worker 将新模块加入 app-shell 预缓存。
+- Guard：`kitty_graphics_test.mjs` 覆盖 APC 不泄漏到 WASM、图片查询响应与传输方式筛选、完整及跨输出分块的终端像素尺寸查询、真实 PNG base64 分块、Kitty `icat` zlib RGB 分块、光标坐标和 `drawImage` 尺寸，以及跨输出分块的整屏擦除和局部擦除保留；`TestKittyGraphicsBehavior` 接入 Go 测试；`TestTerminalPaneTracksKittyGraphicsQueryResponses` 固定 Go 后端消费完整/分块 Kitty 查询、直接传输返回 `OK`、临时文件返回 `EINVAL`，并禁止任何探测 APC 或回复进入浏览器/shell；`TestTerminalPaneResizeAppliesPixelSizeToPTY` 固定 `Winsize.X/Y`；`TestTerminalSizeSyncBehavior` 固定像素尺寸变化不能被行列去重；`TestRuntimeTerminalCanvasResidueGuard` 固定运行时模块、安装入口和 Kitty Graphics 关键能力字符串；Service Worker guard 固定新模块进入预缓存。
+- 验证结果：运行时 `node --test kitty_graphics_test.mjs` 7/7 通过；相关 Go guard、完整 `go test ./...`、`node --check` 和 `git diff --check` 通过；实测 Kitty 0.48.2 的 stream 输出为 `f=24,o=z`，已用真实项目根目录 PNG 做解码回放，确认图片放置为光标 `(2,3)`、`20x10` 单元格；`ghostty-web` 仓库保持零改动。当前仍需在目标 WebShell 页面重启后刷新静态资源，执行真实 `kitty +kitten icat ./image.png` 后按 `Ctrl+L` 做最终复验。
+- 禁止复现：不得用字符画代替 Kitty Graphics；不得直接覆盖 WebShell 定制 `ghostty-web.js` bundle；不得绕过 PNG 分块状态机把 APC 发送给 WASM；图片存在时不得仅做局部 Canvas 重绘导致透明 PNG 重复合成或残留；新增静态模块必须同步 Service Worker 预缓存和版本化资源发布。
+
+### LCMD-20260810-02：Kitty Graphics 图片未跟随终端回滚视口
+
+- 日期：2026-08-10
+- 来源：用户现场复验：图片显示后拖动终端滚动条，图片位置固定，未与字符内容同步移动
+- 影响模块：`runtime/static/kitty_graphics.js` 图片 placement 绘制与 Ghostty-Web renderer viewport
+- 根因：placement 只保存活动屏幕 `cellY`，绘制时没有使用终端 scrollback 长度和 `viewportY` 换算；滚动渲染也只在底部视口绘制图片。
+- 实施方案：记录 placement 的绝对缓冲行号；每次 renderer 绘制按 `absoluteRow - scrollbackLength + viewportY` 计算屏幕行，并在任意 viewport 强制完整重绘后绘制图片。
+- Guard：`kitty_graphics_test.mjs` 新增 scroll viewport 测试，验证回滚 2 行后图片从第 3 行移动到第 5 行；原有整屏清除、局部清除、PNG 和 Kitty `icat` 压缩流测试继续通过。
+- 验证结果：Node Kitty 测试 8/8 通过，JavaScript 语法检查和 `git diff --check` 通过；待安装 `1.0.22` 后在目标 WebShell 实机滚动复验。
+
+### LCMD-20260810-03：Kitty 图片未占用字符网格导致后续提示符被遮挡
+
+- 日期：2026-08-10
+- 来源：用户安装 `1.0.22` 后复验：图片已随滚动条移动，但回车后的下一行出现在图片下层
+- 影响模块：`runtime/static/kitty_graphics.js` Kitty placement 光标移动语义
+- 根因：Kitty 0.48.2 `icat` 在图片 APC 后只输出一个尾随 CRLF，依赖 Graphics Protocol 默认 `C=0` 先把终端光标移动到图片网格之后；运行时适配器此前忽略 `C`，Canvas 图片没有在字符网格中占用对应行。
+- 实施方案：对齐 Ghostty 原生 Kitty Graphics 行为。`C=0` 时根据 `r`，或根据 `s/v`、PNG IHDR 与终端单元格尺寸计算图片网格行列，按图片行数注入 IND 以正确处理屏幕底部和 scrollback，再定位到图片右侧；`C=1` 和虚拟 placement 不移动光标。移动序列在 APC 与后续普通文本之间同步交给 VT parser，避免异步图片解码打乱顺序。
+- Guard：新增默认光标移动和 `C=1` 测试，固定图片 APC 后的 VT 字节顺序；Kitty Graphics Node 测试共 10/10 通过。
+- 验证结果：抓取 Kitty 0.48.2 `icat --transfer-mode=stream` 的真实 PTY 输出，确认传输为 `a=T,f=24,o=z,s=800,v=551` 且 APC 后仅有 CRLF；完整 Go 测试、竞态测试、JavaScript 语法检查和 `git diff --check` 通过。待安装 `1.0.23` 后实机复验提示符位置。
+
+### LCMD-20260810-04：Kitty 图片左侧出现额外空白
+
+- 日期：2026-08-10
+- 来源：用户安装 `1.0.23` 后现场复验：图片可随终端滚动且后续文字位于图片下方，但图片左侧仍出现额外空白，未贴合终端左边缘
+- 影响模块：`runtime/static/kitty_graphics.js` Kitty placement 坐标和源图裁剪绘制
+- 根因：Kitty Graphics 协议的大写 `X/Y` 表示当前字符格内的像素偏移，小写 `x/y/w/h` 表示源图裁剪矩形；运行时适配器错误地把 `X/Y` 加到字符列/行，把 `x/y` 当作目标像素偏移并把 `w/h` 当作目标尺寸。`icat` 为单元格对齐发送 `X=2` 时，2 像素会被放大成 2 个字符格，形成明显的左侧空白。
+- 实施方案：placement 固定以 Ghostty 当前光标字符格为原点，大写 `X/Y` 仅作为 Canvas 目标像素偏移；小写 `x/y/w/h` 按协议裁剪源图，`c/r` 单独决定目标字符格尺寸，只指定一个维度时按源图比例推导另一个维度。保留 `icat` 在 APC 前发送 `CR` 后从第 0 列放置全宽图片的顺序语义。
+- Guard：`kitty_graphics_test.mjs` 将 `X=3,Y=4` 固定为 3/4 像素目标偏移，新增小写源图裁剪九参数 `drawImage` 测试，并模拟真实 `icat` 的 `CR + APC` 顺序，要求全宽图片最终绘制坐标严格为 `x=0`；Kitty Graphics Node 测试共 12/12 通过。
+- 验证结果：`node --test kitty_graphics_test.mjs` 12/12、相关 JavaScript 语法检查、完整 `go test ./...`、`go test -race ./...` 和 `git diff --check` 通过。`lzc-cli project release` 已生成 `cloud.lazycat.webshell.lcmd-v1.0.24.lpk`，包内 `.lpk-version` 与 `package.yml` 均为 `1.0.24`，包含修正后的 Kitty placement 坐标和源图裁剪代码且不包含 Node 测试文件；LPK SHA-256 为 `3f9448dee59caa0090100c3da399c66f13d1b357dba454e75a9f21393bdac4aa`。
+
 ## 新增记录模板
 
 ```md

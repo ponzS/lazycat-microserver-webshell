@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/creack/pty"
 	"lcmd-webshell/internal/pkg/fonts"
 )
 
@@ -2006,6 +2007,29 @@ func TestTerminalPaneRespondsToSplitOSCColorQuery(t *testing.T) {
 	assertTerminalQueryResponse(t, reader, terminalOSCColorResponse("11", defaultTerminalBackgroundColor))
 }
 
+func TestTerminalPaneTracksKittyGraphicsQueryResponses(t *testing.T) {
+	pane, reader, cleanup := newTerminalQueryTestPane(t)
+	defer cleanup()
+	query := "before\x1b_Ga=q,f=24,i=1;MTIz\x1b\\after"
+	split := strings.Index(query, "\x1b\\") + 1
+	filtered := pane.filterTerminalQueryOutput([]byte(query[:split]))
+	if string(filtered) != "before" {
+		t.Fatalf("unexpected first Kitty Graphics filter output: %q", string(filtered))
+	}
+	filtered = pane.filterTerminalQueryOutput([]byte(query[split:]))
+	if string(filtered) != "after" {
+		t.Fatalf("unexpected second Kitty Graphics filter output: %q", string(filtered))
+	}
+	response := []byte("\x1b_Gi=1;OK\x1b\\")
+	assertTerminalQueryResponse(t, reader, string(response))
+
+	filtered = pane.filterTerminalQueryOutput([]byte("\x1b_Ga=q,f=24,t=t,i=2;L3RtcC9pbWFnZQ==\x1b\\"))
+	if len(filtered) != 0 {
+		t.Fatalf("unexpected unsupported Kitty Graphics query output: %q", string(filtered))
+	}
+	assertTerminalQueryResponse(t, reader, "\x1b_Gi=2;EINVAL: only direct transmission is supported\x1b\\")
+}
+
 func TestTerminalPaneRespondsToOSCColorFromTheme(t *testing.T) {
 	pane, reader, cleanup := newTerminalQueryTestPane(t)
 	defer cleanup()
@@ -2077,20 +2101,41 @@ func TestTerminalPaneInputAppliesClientSize(t *testing.T) {
 	assertTerminalQueryOutput(t, pane, reader, "pc")
 }
 
+func TestTerminalPaneResizeAppliesPixelSizeToPTY(t *testing.T) {
+	ptyFile, ttyFile, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open returned error: %v", err)
+	}
+	defer ptyFile.Close()
+	defer ttyFile.Close()
+	pane := &terminalPane{ptyFile: ptyFile, cols: 80, rows: 24}
+
+	if err := pane.resizeWithPixels(111, 57, 888, 912); err != nil {
+		t.Fatalf("resizeWithPixels returned error: %v", err)
+	}
+	size, err := pty.GetsizeFull(ptyFile)
+	if err != nil {
+		t.Fatalf("pty.GetsizeFull returned error: %v", err)
+	}
+	if size.Cols != 111 || size.Rows != 57 || size.X != 888 || size.Y != 912 {
+		t.Fatalf("PTY size = %+v, want 111x57 cells and 888x912 pixels", size)
+	}
+}
+
 func TestTerminalControlInputAppliesClientSize(t *testing.T) {
 	pane, reader, cleanup := newTerminalQueryTestPane(t)
 	defer cleanup()
 	pane.cols = 80
 	pane.rows = 24
 
-	if !handleTerminalControlMessage(pane, []byte(`{"type":"input","data":"mobile","cols":41,"rows":18}`), nil) {
+	if !handleTerminalControlMessage(pane, []byte(`{"type":"input","data":"mobile","cols":41,"rows":18,"pixel_width":328,"pixel_height":288}`), nil) {
 		t.Fatal("input control message should keep the connection open")
 	}
 	pane.mu.Lock()
 	cols := pane.cols
 	rows := pane.rows
 	pane.mu.Unlock()
-	if cols != 41 || rows != 18 {
+	if cols != 41 || rows != 18 || pane.pixelWidth != 328 || pane.pixelHeight != 288 {
 		t.Fatalf("pane size = %dx%d, want 41x18", cols, rows)
 	}
 	assertTerminalQueryOutput(t, pane, reader, "mobile")
@@ -2694,7 +2739,7 @@ func TestHandleAgentAttachControlMessageDropsInputWhenServerLocked(t *testing.T)
 	}
 
 	var sized bytes.Buffer
-	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &sized, []byte(`{"type":"input","data":"pc","cols":132,"rows":43}`), false, nil) {
+	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &sized, []byte(`{"type":"input","data":"pc","cols":132,"rows":43,"pixel_width":1056,"pixel_height":688}`), false, nil) {
 		t.Fatal("sized input message should keep the connection open")
 	}
 	frameType, payload, err = readAgentFrame(&sized)
@@ -2708,7 +2753,7 @@ func TestHandleAgentAttachControlMessageDropsInputWhenServerLocked(t *testing.T)
 	if err := json.Unmarshal(payload, &resizeMessage); err != nil {
 		t.Fatalf("unmarshal sized resize frame returned error: %v", err)
 	}
-	if resizeMessage.Type != "resize" || resizeMessage.Cols != 132 || resizeMessage.Rows != 43 {
+	if resizeMessage.Type != "resize" || resizeMessage.Cols != 132 || resizeMessage.Rows != 43 || resizeMessage.PixelWidth != 1056 || resizeMessage.PixelHeight != 688 {
 		t.Fatalf("unexpected sized resize frame payload: %+v", resizeMessage)
 	}
 	frameType, payload, err = readAgentFrame(&sized)

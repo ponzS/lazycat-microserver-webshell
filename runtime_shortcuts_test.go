@@ -33,6 +33,18 @@ func TestTerminalResizeSchedulerBehavior(t *testing.T) {
 	}
 }
 
+func TestKittyGraphicsBehavior(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is unavailable")
+	}
+	command := exec.Command(node, "--test", "kitty_graphics_test.mjs")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Kitty Graphics tests failed: %v\n%s", err, output)
+	}
+}
+
 func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 	mainData, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {
@@ -136,6 +148,9 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 	workerSource := string(workerData)
 	if !strings.Contains(workerSource, "${assetBase}terminal_resize_scheduler.js") {
 		t.Fatal("service worker must precache the terminal resize scheduler")
+	}
+	if !strings.Contains(workerSource, "${assetBase}kitty_graphics.js") {
+		t.Fatal("service worker must precache Kitty Graphics support")
 	}
 	for _, want := range []string{
 		`url.pathname.includes("/api/")`,
@@ -2131,9 +2146,14 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(runtime/static/ghostty-vt.wasm) error = %v", err)
 	}
+	kittyData, err := os.ReadFile("runtime/static/kitty_graphics.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/kitty_graphics.js) error = %v", err)
+	}
 	mainSource := string(mainData)
 	styleSource := string(styleData)
 	rendererSource := string(rendererData)
+	kittySource := string(kittyData)
 
 	mainSnippets := []string{
 		"const terminalRuntimeClearSequence = \"\\x1b[2J\\x1b[3J\\x1b[H\";",
@@ -2214,6 +2234,8 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"resizePresentationHold: false,",
 		"import { createTerminalResizeScheduler } from \"./terminal_resize_scheduler.js\";",
 		"const terminalResizeThrottleMs = 80;",
+		`import { isKittyGraphicsResponse, installKittyGraphicsSupport, terminalPixelSize } from "./kitty_graphics.js";`,
+		"installKittyGraphicsSupport(Terminal);",
 		"const paneResizeScheduler = createTerminalResizeScheduler({",
 		"const schedulePaneResize = (pane, options = {}, scheduleOptions = {}) => {",
 		"if (isMobileKeyboardResizeSuppressed()) {",
@@ -2327,6 +2349,20 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"this.writeInternal(A);",
 		"Terminal resize failed:",
 		"this.graphemeBuffer = null",
+	}
+	for _, want := range []string{
+		"function installKittyGraphicsSupport",
+		"createImageBitmap",
+		`type: "image/png"`,
+		"graphics.consume(",
+		"graphics.getPlacements()",
+		"ctx.drawImage(",
+		"terminal.requestRender({ full: true })",
+		"terminal.input(response, true)",
+	} {
+		if !strings.Contains(kittySource, want) {
+			t.Fatalf("runtime Kitty Graphics guard missing %q", want)
+		}
 	}
 	for _, want := range rendererSnippets {
 		if !strings.Contains(rendererSource, want) {
@@ -2741,6 +2777,8 @@ func TestRuntimeTerminalSizeClaimSurvivesCrossClientResize(t *testing.T) {
 		`sendTerminalSize(pane, { force: true });`,
 		`pane.serverCols = Math.max(0, Math.floor(Number(paneState.cols) || 0));`,
 		`pane.serverRows = Math.max(0, Math.floor(Number(paneState.rows) || 0));`,
+		`pane.serverPixelWidth = Math.max(0, Math.floor(Number(paneState.pixel_width) || 0));`,
+		`pane.serverPixelHeight = Math.max(0, Math.floor(Number(paneState.pixel_height) || 0));`,
 		`pane.sizeClaimRequired = terminalSizeDiffersFromServer({`,
 		`resizePane(session, { forceSizeSync: true });`,
 		`prepareMouseInput: () => claimTerminalSize(session),`,
@@ -2983,6 +3021,9 @@ func TestRuntimeGeneratedTerminalResponsesAreMarked(t *testing.T) {
 		"payload.generated = true;",
 		"payload.cols = cols;",
 		"payload.rows = rows;",
+		"payload.pixel_width = pixelWidth;",
+		"payload.pixel_height = pixelHeight;",
+		"if (isKittyGraphicsResponse(data)) {",
 		"session.socket.send(JSON.stringify(payload));",
 		"socketUrl.searchParams.set(\"fg\", themePayload.foreground);",
 		"socketUrl.searchParams.set(\"bg\", themePayload.background);",

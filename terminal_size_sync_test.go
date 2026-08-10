@@ -28,27 +28,50 @@ const {
   terminalSizeDiffersFromServer,
 } = await import(pathToFileURL(modulePath).href);
 
-const mobileSize = { cols: 52, rows: 24 };
+const mobileSize = { cols: 52, rows: 24, pixelWidth: 416, pixelHeight: 384 };
 assert.equal(shouldSendTerminalSize({
   ...mobileSize,
   lastSentCols: 52,
   lastSentRows: 24,
+  lastSentPixelWidth: 416,
+  lastSentPixelHeight: 384,
 }), false, "unchanged size should stay deduplicated within one client");
 assert.equal(shouldSendTerminalSize({
   ...mobileSize,
+  pixelWidth: 468,
   lastSentCols: 52,
   lastSentRows: 24,
+  lastSentPixelWidth: 416,
+  lastSentPixelHeight: 384,
+}), true, "changed terminal pixels must be sent even when rows and columns are unchanged");
+assert.equal(shouldSendTerminalSize({
+  ...mobileSize,
+  lastSentCols: 52,
+  lastSentRows: 24,
+  lastSentPixelWidth: 416,
+  lastSentPixelHeight: 384,
   force: true,
 }), true, "mobile must reclaim a PTY resized by another client");
 assert.equal(terminalSizeDiffersFromServer({
   ...mobileSize,
   serverCols: 160,
   serverRows: 48,
+  serverPixelWidth: 1280,
+  serverPixelHeight: 768,
 }), true, "PC-sized shared PTY must be observable from mobile");
 assert.equal(terminalSizeDiffersFromServer({
   ...mobileSize,
   serverCols: 52,
   serverRows: 24,
+  serverPixelWidth: 468,
+  serverPixelHeight: 384,
+}), true, "pixel geometry from another client must be observable");
+assert.equal(terminalSizeDiffersFromServer({
+  ...mobileSize,
+  serverCols: 52,
+  serverRows: 24,
+  serverPixelWidth: 416,
+  serverPixelHeight: 384,
 }), false);
 assert.equal(shouldSendTerminalSize({
   cols: 0,

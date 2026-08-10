@@ -1,4 +1,5 @@
 import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
+import { isKittyGraphicsResponse, installKittyGraphicsSupport, terminalPixelSize } from "./kitty_graphics.js";
 import {
   installClaudeFullscreenContextMenuAdapter,
   isClaudeFullscreenContextMenuCandidate,
@@ -21,6 +22,8 @@ import {
   isIndependentClient,
   openConfigurationPage,
 } from "./vendor/lzc-mobile-bridge-0.0.2.js";
+
+installKittyGraphicsSupport(Terminal);
 
 const runtimeAssetURL = (path) => new URL(path, import.meta.url).toString();
 const params = new URLSearchParams(window.location.search);
@@ -8740,7 +8743,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const terminalSize = (pane) => {
     const cols = Math.max(0, Math.floor(Number(pane?.term?.cols) || 0));
     const rows = Math.max(0, Math.floor(Number(pane?.term?.rows) || 0));
-    return { cols, rows };
+    const pixels = terminalPixelSize(pane?.term);
+    const pixelWidth = Math.max(0, Math.round(Number(pixels?.width) || 0));
+    const pixelHeight = Math.max(0, Math.round(Number(pixels?.height) || 0));
+    return { cols, rows, pixelWidth, pixelHeight };
   };
 
   const terminalThemePayload = () => ({
@@ -8761,22 +8767,36 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (pane?.socket?.readyState !== WebSocket.OPEN) {
       return false;
     }
-    const { cols, rows } = terminalSize(pane);
+    const { cols, rows, pixelWidth, pixelHeight } = terminalSize(pane);
     if (!shouldSendTerminalSize({
       cols,
       rows,
+      pixelWidth,
+      pixelHeight,
       lastSentCols: pane.lastSentCols,
       lastSentRows: pane.lastSentRows,
+      lastSentPixelWidth: pane.lastSentPixelWidth,
+      lastSentPixelHeight: pane.lastSentPixelHeight,
       force,
     })) {
       return false;
     }
     pane.lastSentCols = cols;
     pane.lastSentRows = rows;
+    pane.lastSentPixelWidth = pixelWidth;
+    pane.lastSentPixelHeight = pixelHeight;
     pane.serverCols = cols;
     pane.serverRows = rows;
+    pane.serverPixelWidth = pixelWidth;
+    pane.serverPixelHeight = pixelHeight;
     pane.sizeClaimRequired = false;
-    pane.socket.send(JSON.stringify({ type: "resize", cols, rows }));
+    pane.socket.send(JSON.stringify({
+      type: "resize",
+      cols,
+      rows,
+      pixel_width: pixelWidth,
+      pixel_height: pixelHeight,
+    }));
     return true;
   };
 
@@ -11104,12 +11124,18 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       pane.activityCheckedAt = Number(paneState.activity_checked_at || 0);
       pane.serverCols = Math.max(0, Math.floor(Number(paneState.cols) || 0));
       pane.serverRows = Math.max(0, Math.floor(Number(paneState.rows) || 0));
+      pane.serverPixelWidth = Math.max(0, Math.floor(Number(paneState.pixel_width) || 0));
+      pane.serverPixelHeight = Math.max(0, Math.floor(Number(paneState.pixel_height) || 0));
       const localSize = terminalSize(pane);
       pane.sizeClaimRequired = terminalSizeDiffersFromServer({
         cols: localSize.cols,
         rows: localSize.rows,
+        pixelWidth: localSize.pixelWidth,
+        pixelHeight: localSize.pixelHeight,
         serverCols: pane.serverCols,
         serverRows: pane.serverRows,
+        serverPixelWidth: pane.serverPixelWidth,
+        serverPixelHeight: pane.serverPixelHeight,
       });
       pane.shellEl.dataset.busy = pane.busy ? "true" : "false";
       markSessionActivityNotification(pane, wasBusy, isBusy);
@@ -11486,6 +11512,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const isGeneratedTerminalResponse = (data) => {
     if (typeof data !== "string" || data === "") {
       return false;
+    }
+    if (isKittyGraphicsResponse(data)) {
+      return true;
     }
     let remaining = data;
     while (remaining) {
@@ -13244,13 +13273,15 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!data || !isSessionInputReady(session)) {
       return false;
     }
-    const { cols, rows } = terminalSize(session);
+    const { cols, rows, pixelWidth, pixelHeight } = terminalSize(session);
     const payload = { type: "input", data, ...terminalThemePayload() };
     if (generated) {
       payload.generated = true;
     } else if (cols > 0 && rows > 0) {
       payload.cols = cols;
       payload.rows = rows;
+      payload.pixel_width = pixelWidth;
+      payload.pixel_height = pixelHeight;
     }
     try {
       session.socket.send(JSON.stringify(payload));
@@ -16065,6 +16096,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       lastSizeClaimAt: 0,
       serverCols: 0,
       serverRows: 0,
+      serverPixelWidth: 0,
+      serverPixelHeight: 0,
+      lastSentPixelWidth: 0,
+      lastSentPixelHeight: 0,
       sizeClaimRequired: false,
       cleanupCallbacks: [],
     };

@@ -7,6 +7,7 @@ const appShellAssets = [
   `${assetBase}style.css`,
   `${assetBase}main.js`,
   `${assetBase}ghostty-web.js`,
+  `${assetBase}kitty_graphics.js`,
   `${assetBase}ghostty-vt.wasm`,
   `${assetBase}icon-192.png`,
   `${assetBase}icon-512.png`,

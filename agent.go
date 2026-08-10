@@ -566,7 +566,7 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 				switch message.Type {
 				case "resize":
 					if message.Cols > 0 && message.Rows > 0 {
-						_ = pane.resize(message.Cols, message.Rows)
+						_ = pane.resizeWithPixels(message.Cols, message.Rows, message.PixelWidth, message.PixelHeight)
 					}
 				case "theme":
 					pane.updateTerminalThemeColors(message.Foreground, message.Background, message.Cursor)
