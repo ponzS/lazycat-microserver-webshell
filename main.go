@@ -105,6 +105,8 @@ const serverRevisionInputLockTTL = 60 * time.Second
 const webshellDeviceTTL = 1500 * time.Millisecond
 const assetBasePlaceholder = "__LCMD_ASSET_BASE__"
 const assetVersionPlaceholder = "__LCMD_ASSET_VERSION__"
+const contentRevisionFileName = ".lpk-content-revision"
+const assetRevisionLength = 24
 
 var errInstanceForbidden = errors.New("instance is not accessible by current account")
 var errInvalidPublishCreatePayload = errors.New("invalid publish create payload")
@@ -203,14 +205,38 @@ func computeServerRevision(rootDir string) string {
 }
 
 func computeAssetVersion(rootDir string) string {
-	if version := declaredAssetVersion(rootDir); version != "" {
-		return version
+	revision := declaredContentRevision(rootDir)
+	if revision == "" {
+		revision = computeContentRevision(rootDir)
 	}
-	revision := computeContentRevision(rootDir)
-	if len(revision) > 24 {
-		revision = revision[:24]
+	return composeAssetVersion(declaredAssetVersion(rootDir), revision)
+}
+
+func composeAssetVersion(version string, revision string) string {
+	version = strings.TrimSpace(version)
+	revision = strings.TrimSpace(revision)
+	if len(revision) > assetRevisionLength {
+		revision = revision[:assetRevisionLength]
 	}
-	return "content-" + revision
+	if version == "" {
+		return "content-" + revision
+	}
+	return version + "-" + revision
+}
+
+func declaredContentRevision(rootDir string) string {
+	data, err := os.ReadFile(filepath.Join(rootDir, contentRevisionFileName))
+	if err != nil {
+		return ""
+	}
+	revision := strings.TrimSpace(string(data))
+	if len(revision) != sha256.Size*2 {
+		return ""
+	}
+	if _, err := hex.DecodeString(revision); err != nil {
+		return ""
+	}
+	return strings.ToLower(revision)
 }
 
 func declaredAssetVersion(rootDir string) string {
@@ -255,10 +281,14 @@ func isValidAssetVersion(version string) bool {
 }
 
 func (s *pluginServer) currentAssetVersion() string {
-	if version := declaredAssetVersion(s.rootDir); version != "" {
-		return version
+	declaredVersion := declaredAssetVersion(s.rootDir)
+	if revision := declaredContentRevision(s.rootDir); revision != "" {
+		return composeAssetVersion(declaredVersion, revision)
 	}
-	if isValidAssetVersion(s.assetVersion) {
+	if declaredVersion == "" && isValidAssetVersion(s.assetVersion) {
+		return s.assetVersion
+	}
+	if declaredVersion != "" && isValidAssetVersion(s.assetVersion) && strings.HasPrefix(s.assetVersion, declaredVersion+"-") {
 		return s.assetVersion
 	}
 	return computeAssetVersion(s.rootDir)

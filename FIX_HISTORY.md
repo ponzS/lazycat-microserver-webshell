@@ -35,7 +35,7 @@
 
 - `main.go` 启动仅监听 `127.0.0.1:8080` 的 Provider 服务，注册静态资源、实例、设置、附件、工作区、设备、版本和 WebSocket 路由。
 - LPK 通过 `lzc-manifest.yml` 的 `/=exec://8080` 启动入口，并通过 `lightos.webshell` Resource Export 被 `lightos-admin` 发现。
-- 页面静态资源位于 `runtime/static/`，随二进制一起打包。HTML 禁止缓存并由 Provider 注入当前 LPK 版本资源路径；新页面通过 `/assets/<lpk-version>/` 读取 JS/CSS/JSON/WASM/manifest/图标并使用 immutable 缓存，旧 `/static/` 只保留兼容和可重验证策略。
+- 页面静态资源位于 `runtime/static/`，随二进制一起打包。HTML 禁止缓存并由 Provider 注入当前资源版本路径；独立 LPK 使用 `<lpk-version>-<content-revision>`，缺少构建元数据的内嵌/开发环境使用内容哈希。新页面通过该内容寻址的 `/assets/<asset-version>/` 读取 JS/CSS/JSON/WASM/manifest/图标并使用 immutable 缓存，旧 `/static/` 只保留兼容和可重验证策略。
 - PWA Service Worker 由 Provider 注入当前 LPK 版本与资源基路径；当前版本的 immutable 静态资源执行 cache-first，版本 URL 变化负责更新，缓存未命中或旧版本资源才访问网络，非成功响应可以回退已有静态缓存。页面导航、`/api/*`、`/ws` 和终端虚拟 Cache URL 不进入 app-shell 缓存。
 
 ### 管理端、Provider 与目标端边界
@@ -501,6 +501,18 @@ git diff --check
 - 实施方案：placement 固定以 Ghostty 当前光标字符格为原点，大写 `X/Y` 仅作为 Canvas 目标像素偏移；小写 `x/y/w/h` 按协议裁剪源图，`c/r` 单独决定目标字符格尺寸，只指定一个维度时按源图比例推导另一个维度。保留 `icat` 在 APC 前发送 `CR` 后从第 0 列放置全宽图片的顺序语义。
 - Guard：`kitty_graphics_test.mjs` 将 `X=3,Y=4` 固定为 3/4 像素目标偏移，新增小写源图裁剪九参数 `drawImage` 测试，并模拟真实 `icat` 的 `CR + APC` 顺序，要求全宽图片最终绘制坐标严格为 `x=0`；Kitty Graphics Node 测试共 12/12 通过。
 - 验证结果：`node --test kitty_graphics_test.mjs` 12/12、相关 JavaScript 语法检查、完整 `go test ./...`、`go test -race ./...` 和 `git diff --check` 通过。`lzc-cli project release` 已生成 `cloud.lazycat.webshell.lcmd-v1.0.24.lpk`，包内 `.lpk-version` 与 `package.yml` 均为 `1.0.24`，包含修正后的 Kitty placement 坐标和源图裁剪代码且不包含 Node 测试文件；LPK SHA-256 为 `3f9448dee59caa0090100c3da399c66f13d1b357dba454e75a9f21393bdac4aa`。
+
+### LCMD-20260810-05：同版本 WebShell 更新继续命中旧 WASM
+
+- 日期：2026-08-10
+- 来源：用户怀疑 WebShell 更新后前端通常不会更新 `ghostty-vt.wasm`，对构建、LPK 内容、静态响应与 Service Worker 缓存链进行核查
+- 影响模块：LPK 静态资源版本、Service Worker app-shell cache、Ghostty WASM 构建与 WebShell runtime 同步
+- 错误现象：独立 WebShell LPK 如果在内容变化后复用相同 `package.yml` 版本，页面刷新和部署重启提示仍请求相同 `/assets/<version>/ghostty-vt.wasm`。该响应被声明为一年 immutable，Service Worker 又对当前版本资源 cache-first，因此浏览器会持续返回旧 WASM。另一个独立风险是 WebShell 发布脚本只复制现有 `runtime/`，不会构建或校验 `ghostty-web/ghostty-vt.wasm`，源码 WASM 与随包 WASM 可能依赖人工同步。
+- 根因：静态资源身份只包含声明版本，没有包含实际内容摘要；同 URL 与 immutable/cache-first 合同要求内容永不变化，但构建脚本没有强制版本唯一性。Ghostty Web 和 WebShell 是两个独立源码目录，根构建入口此前没有任何跨目录哈希 guard。
+- 实施方案：LPK 构建在二进制和 runtime 复制完成后生成 `.lpk-content-revision`，Provider 将资源版本统一组成 `<lpk-version>-<24位内容摘要>`；声明版本或内容摘要任一变化都会使旧 URL 立即 404，并生成新的 Service Worker cache。缺少构建元数据的 Admin 内嵌和开发环境继续使用现有内容哈希回退。WebShell 仓库新增 `tools/sync-ghostty-web-assets.sh` 并由 `lzc-build.yml` 直接执行 `--check`：相邻 Ghostty 源码可用时比较源 WASM 与随包 WASM，独立检出时至少验证随包 WASM 文件头；`--sync` 只构建 JavaScript 并同步现有 WASM/许可证，`--rebuild-wasm` 仅用于 Ghostty 子模块、patch 或 ABI 变化。LPK version 提升到 `1.0.25`。
+- Guard：`TestComputeAssetVersionUsesLPKVersionAndContentRevision` 固定声明版本与内容摘要组合；`TestVersionedStaticFileServerTracksSameVersionContentWithoutRestart` 固定同版本摘要变化后旧 URL 404、新 URL 200；`TestBuildWritesPackageVersionForRuntimeAssets` 固定 LPK 执行仓库内 WASM 校验并同时生成版本与内容摘要元数据。
+- 验证结果：定向及完整 `go test ./...`、`go test -race ./...`、Kitty Graphics Node 测试 12/12、相关 JavaScript 语法检查、shell 语法检查和 `git diff --check` 通过；`tools/sync-ghostty-web-assets.sh --check` 确认两份 WASM SHA-256 均为 `65a99188312ad92780b3af2fa410b8af395536dfe1e777ec24573d8be1436f16`，并验证 Ghostty 源码目录缺失时仍能检查随包 WASM 文件头。`lzc-cli project release` 生成 `dist/cloud.lazycat.webshell.lcmd-v1.0.25.lpk`，LPK SHA-256 为 `ec71e36d8151d667802e71735021410ae5f6448cabfaba00128e8dc2b3cd9dcb`；包内 `.lpk-version` 为 `1.0.25`，`.lpk-content-revision` 为 `ee3bd1377d40d1890b8a9167f340712ef8a55b50f9d041cca32ab4b8046980b8`。运行包内 Provider 后，首页和 Service Worker 均注入 `1.0.25-ee3bd1377d40d1890b8a9167`，对应 WASM 返回 `application/wasm` 与 `public, max-age=31536000, immutable`。
+- 禁止复现：不得让 immutable 资源 URL 只依赖可复用的人工版本号；不得把同 URL 指向不同 JS/WASM 内容；不得让 LPK 构建跳过仓库内 Ghostty WASM 校验；纯 TypeScript 修改不得无条件触发昂贵的 WASM 重建。
 
 ## 新增记录模板
 

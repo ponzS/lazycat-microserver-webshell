@@ -79,6 +79,14 @@ LightOS WebShell 的目标是为懒猫微服提供一个开箱即用的网页终
 lzc-cli project release
 ```
 
+需要同步 Ghostty 运行时资产时，在本仓库目录执行：
+
+```sh
+./tools/sync-ghostty-web-assets.sh --sync
+```
+
+只有 Ghostty 子模块、WASM patch 或 ABI 发生变化时才使用 `--rebuild-wasm`；普通 TypeScript 渲染层修改不需要重建 WASM。
+
 安装到目标设备：
 
 ```sh
@@ -98,7 +106,7 @@ lzc-cli project deploy
 - 后端使用 Go 实现，Web UI 通过 `/=exec://8080` 由 LPK 启动。
 - 终端会话通过实例内 persistent agent 管理，并通过 WebSocket 转发到浏览器。
 - 实例端终端历史由 persistent agent 作为可信数据源维护。容器浏览器使用 Cache API v2 字节 warm replay 提前显示真实 canvas，期间保持输入锁定；`client:` PC target 继续使用 IndexedDB 与原完整历史回放协议，暂不启用容器 cache-v2 warm replay。
-- HTML 入口由当前 LPK 版本生成 `/assets/<version>/` 静态资源路径，LPK 升级后旧 Service Worker 无法继续命中旧 JS/CSS/module/WASM；版本化资源可长期缓存，旧 `/static/` 仅保留兼容。
+- HTML 入口使用 `/assets/<lpk-version>-<content-revision>/` 静态资源路径。即使误用相同 LPK 版本重新发布，只要二进制或 runtime 内容变化，JS/CSS/module/WASM URL 和 Service Worker cache 名称也会变化；内容寻址资源可长期缓存，旧 `/static/` 仅保留兼容。
 - PWA Service Worker 对当前 LPK 版本的 immutable 静态 app shell 使用 cache-first，版本 URL 变化负责主动更新；缓存未命中才联网，终端 API、WebSocket 和 Cache API 虚拟记录始终绕过 Service Worker。
 - 终端渲染使用项目内随包分发的 Ghostty Web 运行时资源。
 - 本项目不使用 `tmux`，也不使用 `xterm.js`。

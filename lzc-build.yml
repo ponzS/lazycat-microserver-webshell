@@ -18,8 +18,34 @@ buildscript: |
       printf 'LIGHTOS_ADMIN_INTERNAL_BASE_URL=%s\n' "${LIGHTOS_ADMIN_INTERNAL_BASE_URL}"
     fi
   } > "$CONTENT_DIR/.env"
+  if [ -x ./tools/sync-ghostty-web-assets.sh ]; then
+    ./tools/sync-ghostty-web-assets.sh --check
+  fi
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -o "$CONTENT_DIR/lcmd-webshell" .
   cp -R ./runtime/. "$CONTENT_DIR/runtime/"
+  hash_content_file() {
+    content_file="$1"
+    content_relative="${content_file#"$CONTENT_DIR"/}"
+    content_hash="$(sha256sum "$content_file" | awk '{ print $1; exit }')"
+    printf '%s  %s\n' "$content_hash" "$content_relative"
+  }
+  CONTENT_REVISION="$({
+    hash_content_file "$CONTENT_DIR/lcmd-webshell"
+    find "$CONTENT_DIR/runtime" -type f -print | LC_ALL=C sort | while IFS= read -r content_file; do
+      hash_content_file "$content_file"
+    done
+  } | sha256sum | awk '{ print $1; exit }')"
+  case "$CONTENT_REVISION" in
+    ""|*[!0-9a-f]*)
+      printf 'invalid WebShell content revision: %s\n' "$CONTENT_REVISION" >&2
+      exit 1
+      ;;
+  esac
+  if [ "${#CONTENT_REVISION}" -ne 64 ]; then
+    printf 'invalid WebShell content revision length: %s\n' "$CONTENT_REVISION" >&2
+    exit 1
+  fi
+  printf '%s\n' "$CONTENT_REVISION" > "$CONTENT_DIR/.lpk-content-revision"
 contentdir: ./dist/content
 resource_exports:
   - kind: lightos.webshell
