@@ -14097,6 +14097,55 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return true;
   };
 
+  const showSessionCacheV2LocalPreview = async (session, snapshot) => {
+    if (
+      !session
+      || session.closed
+      || session.name !== activeName
+      || session.renderReady
+      || session.replayComplete
+      || !sessionUsesTerminalCacheV2(session)
+      || !snapshot?.preview
+      || session.historyCacheSnapshot !== snapshot
+    ) {
+      return false;
+    }
+    let prepared = sessionCacheV2PreviewMatchesSnapshot(session.cacheV2PreparedPreview, snapshot)
+      ? session.cacheV2PreparedPreview
+      : null;
+    if (!prepared) {
+      const pending = session.cacheV2PreviewPreparePromise || prepareSessionCacheV2Preview(session, snapshot);
+      prepared = await pending;
+    }
+    if (
+      session.closed
+      || session.name !== activeName
+      || session.renderReady
+      || session.replayComplete
+      || !sessionUsesTerminalCacheV2(session)
+      || session.historyCacheSnapshot !== snapshot
+      || !sessionCacheV2PreviewMatchesSnapshot(prepared, snapshot)
+    ) {
+      return false;
+    }
+    hideSessionTerminalPreview(session);
+    session.cacheV2PreparedPreview = null;
+    session.cacheV2PreviewURL = prepared.objectURL;
+    session.cacheV2PreviewAuthorizedSnapshot = snapshot;
+    session.terminalPreview.src = prepared.objectURL;
+    session.terminalPreview.hidden = false;
+    session.shellEl.dataset.previewReady = "true";
+    const metrics = session.cacheV2RecoveryMetrics;
+    if (metrics && !metrics.previewVisibleAt) {
+      metrics.previewHit = true;
+      metrics.previewLayoutMatch = true;
+      metrics.previewMissReason = "";
+      markSessionCacheV2RecoveryMetric(session, "previewVisibleAt");
+    }
+    console.info("[terminal-cache-v2] local preview visible");
+    return true;
+  };
+
   const revealSessionCacheV2Preview = (
     session,
     message,
@@ -15415,10 +15464,22 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       session.cacheV2NetworkQueue = [];
       session.cacheV2NetworkQueueBytes = 0;
     }
-    hideSessionTerminalPreview(session);
+    if (!cacheV2WarmReplayStarted) {
+      hideSessionTerminalPreview(session);
+    }
     session.startupErrorShown = false;
     session.shellEl.dataset.connection = "connecting";
     currentSocket.binaryType = "arraybuffer";
+
+    if (cacheV2WarmSnapshot) {
+      showSessionCacheV2LocalPreview(session, cacheV2WarmSnapshot).catch((error) => {
+        console.warn("[terminal-cache-v2] local preview load failed", {
+          name: session.name,
+          pane: session.id,
+          error: error?.message || String(error),
+        });
+      });
+    }
 
     const replayMessageHasIdentity = (message) => {
       const selector = String(message?.selector || "").trim();
