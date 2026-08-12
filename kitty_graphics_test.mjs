@@ -109,6 +109,40 @@ test("terminal pixel-size queries are consumed and answered across output chunks
   ]);
 });
 
+test("Kitty Graphics resumes the ordinary text fast path after control sequences", () => {
+  const terminal = new FakeTerminal();
+  terminal.open();
+
+  terminal.write("first");
+  terminal.write("\x1b[2J");
+  assert.equal(terminal.__kittyGraphics.terminalControlBuffer, "");
+  terminal.write("second");
+
+  assert.equal(terminal.writes.join(""), "first\x1b[2Jsecond");
+});
+
+test("Kitty Graphics preserves UTF-8 characters split across binary chunks", () => {
+  const terminal = new FakeTerminal();
+  terminal.open();
+
+  terminal.write(new Uint8Array([0xE4, 0xB8]));
+  terminal.write(new Uint8Array([0xAD]));
+
+  assert.equal(terminal.writes.join(""), "中");
+});
+
+test("Kitty Graphics retains only incomplete CSI control suffixes", () => {
+  const terminal = new FakeTerminal();
+  terminal.open();
+
+  terminal.write("before\x1b[");
+  assert.equal(terminal.__kittyGraphics.terminalControlBuffer, "\x1b[");
+  terminal.write("2Jafter");
+
+  assert.equal(terminal.__kittyGraphics.terminalControlBuffer, "");
+  assert.equal(terminal.writes.join(""), "before\x1b[2Jafter");
+});
+
 test("Kitty Graphics decodes chunked PNG data and draws at the cursor cell", async () => {
   const terminal = new FakeTerminal();
   terminal.open();

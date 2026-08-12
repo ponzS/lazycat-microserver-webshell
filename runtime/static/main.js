@@ -400,6 +400,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const terminalResizeThrottleMs = 80;
   const terminalResizeSettleMs = 120;
   const terminalFullRenderValidationMs = 80;
+  const terminalOutputQueueSoftLimitBytes = 1 * 1024 * 1024;
+  const terminalOutputMeasureChunkChars = 32 * 1024;
+  const terminalOutputMeasureBuffer = new Uint8Array(terminalOutputMeasureChunkChars * 4);
   const terminalHistoryCacheFlushBytes = 256 * 1024;
   const terminalHistoryCacheFlushDelayMs = 50;
   const terminalCacheV2FlushDelayMs = 1000;
@@ -433,6 +436,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const terminalPixelScrollOffsetEpsilon = 0.001;
   const terminalMouseLegacyCoordinateLimit = 95;
   const maxQueuedTerminalOutputBytes = 4 * 1024 * 1024;
+  const maxTerminalOutputMessageBytes = maxQueuedTerminalOutputBytes;
   const terminalHistoryCache = createTerminalHistoryCache({ orphanTTL: terminalHistoryCacheOrphanTTL });
   const activityPollIntervalMs = 4000;
   const maxAttachmentUploadBytes = 2 * 1024 * 1024 * 1024;
@@ -973,6 +977,22 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   );
   const recordPerformanceTask = (name, ms) => performanceTaskMonitor.record(name, ms);
   const measurePerformanceTask = (name, fn) => performanceTaskMonitor.measure(name, fn);
+  const recordTerminalRuntimeMetric = (name, value = 1) => {
+    const metrics = globalThis.__webshellTerminalPerformance;
+    if (metrics && typeof metrics.record === "function") {
+      metrics.record(name, value);
+    }
+  };
+  const recordTerminalRuntimeMaxMetric = (name, value = 0) => {
+    const metrics = globalThis.__webshellTerminalPerformance;
+    if (metrics && typeof metrics.max === "function") {
+      metrics.max(name, value);
+      return;
+    }
+    if (metrics?.counters && typeof metrics.counters === "object") {
+      metrics.counters[name] = Math.max(Number(metrics.counters[name]) || 0, Number(value) || 0);
+    }
+  };
 
   const mountPerformanceMeter = () => {
     if (performanceMeter?.isConnected) {
@@ -6378,6 +6398,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (term.renderRetryTimer !== undefined) {
       window.clearTimeout(term.renderRetryTimer);
       term.renderRetryTimer = undefined;
+    }
+    if (term.renderThrottleTimer !== undefined) {
+      window.clearTimeout(term.renderThrottleTimer);
+      term.renderThrottleTimer = undefined;
     }
     term.animationFrameId = undefined;
     term.renderFullNextFrame = fullRenderRequested;
@@ -13707,9 +13731,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     ) {
       return;
     }
-    const copy = new Uint8Array(data);
-    session.historyCacheWriteQueue.push({ startCursor, endCursor, data: copy });
-    session.historyCacheWriteBytes += copy.byteLength;
+    session.historyCacheWriteQueue.push({ startCursor, endCursor, data });
+    session.historyCacheWriteBytes += data.byteLength;
     if (session.historyCacheWriteBytes >= terminalHistoryCacheFlushBytes) {
       flushSessionHistoryCacheWrites(session);
     } else {
@@ -14539,13 +14562,39 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
 
   const terminalOutputByteLength = (data) => {
     if (typeof data === "string") {
-      return textEncoder.encode(data).length;
+      if (data.length === 0) {
+        return 0;
+      }
+      let total = 0;
+      for (let offset = 0; offset < data.length;) {
+        let end = Math.min(data.length, offset + terminalOutputMeasureChunkChars);
+        if (end < data.length) {
+          const code = data.charCodeAt(end - 1);
+          if (code >= 0xD800 && code <= 0xDBFF) {
+            end -= 1;
+          }
+        }
+        if (end <= offset) {
+          end = Math.min(data.length, offset + 1);
+        }
+        const result = textEncoder.encodeInto(data.slice(offset, end), terminalOutputMeasureBuffer);
+        total += result.written;
+        offset = end;
+      }
+      return total;
     }
     if (data instanceof Uint8Array) {
       return data.byteLength;
     }
     return 0;
   };
+
+  const utf8ByteLengthForCodePoint = (codepoint) => (
+    codepoint <= 0x7f ? 1
+      : codepoint <= 0x7ff ? 2
+        : codepoint <= 0xffff ? 3
+          : 4
+  );
 
   const terminalOutputByteChunkEnd = (data, start, maxBytes) => {
     const hardEnd = Math.min(data.byteLength, start + maxBytes);
@@ -14566,7 +14615,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     for (let index = 0; index < data.length;) {
       const codepoint = data.codePointAt(index);
       const text = String.fromCodePoint(codepoint);
-      const byteLength = textEncoder.encode(text).length;
+      const byteLength = utf8ByteLengthForCodePoint(codepoint);
       if (chunk && chunkBytes + byteLength > maxBytes) {
         chunks.push(chunk);
         chunk = "";
@@ -14598,6 +14647,22 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return output;
   };
 
+  const handleTerminalOutputOverload = (session, reason) => {
+    if (!session || session.closed || session.outputOverloadPending) {
+      return false;
+    }
+    session.outputOverloadPending = true;
+    recordTerminalRuntimeMetric("outputOverloads");
+    console.warn("[terminal-output] queue overload; requesting cursor resync", {
+      name: session.name,
+      pane: session.id,
+      queuedBytes: session.outputQueueSize,
+      reason,
+    });
+    requestSessionHistoryReplay(session);
+    return true;
+  };
+
   const writeTerminalOutputBatch = (session, data, replayOutput, allowGeneratedInput) => {
     const kind = terminalOutputKind(data);
     if (!kind || (kind === "text" ? data.length === 0 : data.byteLength === 0)) {
@@ -14610,8 +14675,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       session.replayOutputDepth += 1;
     }
     try {
+      recordTerminalRuntimeMetric("terminalOutputBatches");
+      recordTerminalRuntimeMetric("terminalOutputBytes", terminalOutputByteLength(data));
       measurePerformanceTask("terminal render", () => session.term.write(data));
-      session.term.requestRender?.({ full: true });
+      session.term.requestRender?.({ throttle: true });
       advanceTerminalContentGeneration(session);
       drainGeneratedTerminalResponses(session);
       if (replayOutput || deferHiddenPaneRender(session) || deferPaneRenderDuringResize(session)) {
@@ -14672,6 +14739,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.cacheV2ServerSnapshotPending = false;
     session.cacheV2ServerSnapshotStartCursor = 0n;
     session.agentPreparing = false;
+    session.outputOverloadPending = false;
     session.allowGeneratedInputDuringReplay = false;
     markSessionCacheV2RecoveryMetric(session, "cacheCommitCompleteAt");
     clearAttachReadyTimer(session);
@@ -14773,6 +14841,19 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
             historyEndCursor: entry.historyEndCursor,
           };
         }
+        if (batch.chunks.length > 0 && batch.byteLength + entry.byteLength > terminalOutputFlushBudgetBytes) {
+          flushBatch();
+          batch = {
+            kind: entry.kind,
+            replayOutput: entry.replayOutput,
+            allowGeneratedInput: entry.allowGeneratedInput,
+            chunks: [],
+            byteLength: 0,
+            historyCacheable: entry.historyCacheable,
+            historyStartCursor: entry.historyStartCursor,
+            historyEndCursor: entry.historyEndCursor,
+          };
+        }
         batch.chunks.push(entry.data);
         batch.byteLength += entry.byteLength;
         if (entry.historyEndCursor !== null) {
@@ -14812,6 +14893,15 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!kind) {
       return;
     }
+    const outputByteLength = terminalOutputByteLength(outputData);
+    if (outputByteLength > maxTerminalOutputMessageBytes) {
+      handleTerminalOutputOverload(session, `message exceeds ${maxTerminalOutputMessageBytes} bytes`);
+      return;
+    }
+    if (session.outputQueueSize + outputByteLength >= maxQueuedTerminalOutputBytes) {
+      handleTerminalOutputOverload(session, "queued output would exceed hard limit");
+      return;
+    }
     // Output chunks carry replay state because the replay-complete control frame can arrive before the next paint.
     const replayOutput = !session.replayComplete;
     const allowGeneratedInput = replayOutput && session.allowGeneratedInputDuringReplay === true;
@@ -14841,6 +14931,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         historyEndCursor,
       });
       session.outputQueueSize += byteLength;
+      recordTerminalRuntimeMetric("outputQueuedBytes", byteLength);
+      recordTerminalRuntimeMaxMetric("outputQueuePeakBytes", session.outputQueueSize);
     };
     if (kind === "bytes" && outputData.byteLength > terminalOutputFlushBudgetBytes) {
       for (let offset = 0; offset < outputData.byteLength;) {
@@ -14859,6 +14951,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       throw new Error("Terminal history output range does not match payload length.");
     }
     if (session.outputQueueSize >= maxQueuedTerminalOutputBytes) {
+      handleTerminalOutputOverload(session, "queued output exceeded hard limit");
+    } else if (session.outputQueueSize >= terminalOutputQueueSoftLimitBytes) {
       flushSessionOutput(session);
     } else {
       scheduleSessionOutputFlush(session);
@@ -14874,7 +14968,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return;
     }
     measurePerformanceTask("terminal render", () => session.term.write(data));
-    session.term.requestRender?.({ full: true });
+    session.term.requestRender?.({ throttle: true });
     advanceTerminalContentGeneration(session);
     drainGeneratedTerminalResponses(session);
     deferHiddenPaneRender(session);
@@ -15997,6 +16091,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       inputPumpActive: false,
       outputQueue: [],
       outputQueueSize: 0,
+      outputOverloadPending: false,
       outputFlushFrame: 0,
       outputFlushTimer: 0,
       replayOutputDepth: 0,

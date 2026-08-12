@@ -2044,9 +2044,16 @@ func TestRuntimeTerminalOutputBatchingGuard(t *testing.T) {
 	wantSnippets := []string{
 		"const terminalOutputFlushFallbackMs = 32;",
 		"const terminalOutputFlushBudgetBytes = 128 * 1024;",
+		"const terminalOutputQueueSoftLimitBytes = 1 * 1024 * 1024;",
+		"const terminalOutputMeasureChunkChars = 32 * 1024;",
+		"const terminalOutputMeasureBuffer = new Uint8Array(terminalOutputMeasureChunkChars * 4);",
+		"const maxTerminalOutputMessageBytes = maxQueuedTerminalOutputBytes;",
 		"const maxQueuedTerminalOutputBytes = 4 * 1024 * 1024;",
 		"const clearSessionOutputFlushSchedule = (session) => {",
 		"const terminalOutputByteChunkEnd = (data, start, maxBytes) => {",
+		"textEncoder.encodeInto(data.slice(offset, end), terminalOutputMeasureBuffer)",
+		"const utf8ByteLengthForCodePoint = (codepoint) => (",
+		"const byteLength = utf8ByteLengthForCodePoint(codepoint);",
 		"const finishSessionHistoryReplayIfReady = (session) => {",
 		"const flushSessionOutput = (session, { force = false } = {}) => {",
 		"window.requestAnimationFrame(flush);",
@@ -2054,6 +2061,8 @@ func TestRuntimeTerminalOutputBatchingGuard(t *testing.T) {
 		"outputData.byteLength > terminalOutputFlushBudgetBytes",
 		"finishSessionHistoryReplayIfReady(session) || flushSessionOutput(session);",
 		"flushSessionOutput(session, { force: true });",
+		"const handleTerminalOutputOverload = (session, reason) => {",
+		"requestSessionHistoryReplay(session);",
 		"const genericWebSocketStartupFallbacks = new Set([",
 		"const isGenericWebSocketStartupFallback = (message) =>",
 		"if (isGenericWebSocketStartupFallback(fallback)) {",
@@ -2109,6 +2118,25 @@ func TestRuntimeTerminalHistoryRangeSyncAndCache(t *testing.T) {
 		if !strings.Contains(mainSource, want) {
 			t.Fatalf("runtime terminal history sync guard missing %q", want)
 		}
+	}
+	for _, want := range []string{
+		"const recordTerminalRuntimeMetric = (name, value = 1) => {",
+		"const recordTerminalRuntimeMaxMetric = (name, value = 0) => {",
+		"outputOverloads",
+		"terminalOutputBatches",
+		"terminalOutputBytes",
+		"outputQueuedBytes",
+		"outputQueuePeakBytes",
+		"recordTerminalRuntimeMaxMetric(\"outputQueuePeakBytes\", session.outputQueueSize);",
+		"session.outputQueueSize + outputByteLength >= maxQueuedTerminalOutputBytes",
+		"session.historyCacheWriteQueue.push({ startCursor, endCursor, data });",
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime terminal performance guard missing %q", want)
+		}
+	}
+	if strings.Contains(mainSource, "const copy = new Uint8Array(data);") {
+		t.Fatal("terminal history cache queue must not copy already-owned output views")
 	}
 
 	cacheSnippets := []string{
@@ -2313,6 +2341,15 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	}
 
 	rendererSnippets := []string{
+		"const GHOSTTY_WASM_WRITE_CHUNK_BYTES = 128 * 1024;",
+		"const GHOSTTY_WASM_WRITE_STRING_CHARS = 32 * 1024;",
+		"const GHOSTTY_OUTPUT_RENDER_INTERVAL_MS = 33;",
+		"const GHOSTTY_TEXT_ENCODER = new TextEncoder();",
+		"Failed to allocate terminal input buffer",
+		"this.writeBytes(A);",
+		"this.requestRender({ throttle: !0 })",
+		"this.renderThrottleTimer = void 0",
+		"this.lastRenderAt = performance.now()",
 		"async function oA(A)",
 		"R || (R = await q.load(A))",
 		"Incompatible Ghostty WASM: missing ghostty_terminal_get_scrollback_generation",
@@ -2334,7 +2371,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"this.ctx.fillRect(0, C, this.canvas.width / this.devicePixelRatio, this.metrics.height)",
 		"i.text = D.grapheme_len > 0 && typeof A.getGraphemeString == \"function\" ? A.getGraphemeString(Math.floor(I / B.cols), I % B.cols) : String.fromCodePoint(D.codepoint || 32)",
 		"text: I[w + 14] > 0 && typeof this.getScrollbackGraphemeString == \"function\" ? this.getScrollbackGraphemeString(A, i) : String.fromCodePoint(D.getUint32(w, !0) || 32)",
-		"typeof A.text == \"string\" ? N = A.text",
+		"const text = typeof A.text == \"string\" ? A.text",
 		"materializeViewportLines(A, B, g, E, C)",
 		"const W = this.materializeViewportLines(A, D, g, i, E);",
 		"if (!this.renderer.render(this.wasmTerm, A, this.viewportY, this, this.scrollbarOpacity))",
@@ -2349,9 +2386,28 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"this.writeInternal(A);",
 		"Terminal resize failed:",
 		"this.graphemeBuffer = null",
+		"const recordTerminalPerformance = (name, value = 1) => {",
+		"max(counter, value = 0) {",
+		"const recordTerminalTiming = (name, duration) => {",
+		"wasmInputBytes",
+		"wasmWriteCalls",
+		"wasmWrite",
+		"renderFrames",
+		"fullRenderFrames",
+		"incrementalRenderFrames",
+		"canvasRender",
+		"this.lastRenderFont = \"\"",
+		"this.fontSize = A, this.lastRenderFont = \"\", this.metrics = this.measureFont();",
+		"this.fontFamily = A, this.lastRenderFont = \"\", this.metrics = this.measureFont();",
+		"this.rgbCache = new Map()",
+		"this.rgbCache.size >= 512",
+		"text === \" \" && !(A.flags & (e.UNDERLINE | e.STRIKETHROUGH)) && A.hyperlink_id !== this.hoveredHyperlinkId",
 	}
 	for _, want := range []string{
 		"function installKittyGraphicsSupport",
+		"var KITTY_TEXT_DECODE_CHUNK_BYTES = 128 * 1024;",
+		"this.decoder = new TextDecoder();",
+		"this.decoder.decode(data.subarray(offset, end), { stream: true })",
 		"createImageBitmap",
 		`type: "image/png"`,
 		"graphics.consume(",
@@ -2359,6 +2415,10 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"ctx.drawImage(",
 		"terminal.requestRender({ full: true })",
 		"terminal.input(response, true)",
+		"const prefixLength = this.terminalControlBuffer.length;",
+		"this.terminalControlBuffer = this.incompleteTerminalControlSuffix(combined);",
+		"incompleteTerminalControlSuffix(data)",
+		"this.decoder.decode()",
 	} {
 		if !strings.Contains(kittySource, want) {
 			t.Fatalf("runtime Kitty Graphics guard missing %q", want)
@@ -2372,7 +2432,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	if strings.Contains(rendererSource, "C !== void 0 && s !== void 0 ? s - C >>> 0") {
 		t.Fatal("runtime must not silently fall back to scrollback length when generation ABI is missing")
 	}
-	assertOutputFullRender := func(label, startMarker, endMarker string) {
+	assertOutputRender := func(label, startMarker, endMarker string) {
 		t.Helper()
 		start := strings.Index(mainSource, startMarker)
 		if start < 0 {
@@ -2384,18 +2444,18 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		}
 		body := mainSource[start : start+endOffset]
 		writeIndex := strings.Index(body, `measurePerformanceTask("terminal render", () => session.term.write(data));`)
-		fullRenderIndex := strings.Index(body, `session.term.requestRender?.({ full: true });`)
+		renderIndex := strings.Index(body, `session.term.requestRender?.({ throttle: true });`)
 		contentGenerationIndex := strings.Index(body, `advanceTerminalContentGeneration(session);`)
-		if writeIndex < 0 || fullRenderIndex <= writeIndex || contentGenerationIndex <= fullRenderIndex {
-			t.Fatalf("runtime %s output must write, request a full render, then advance content generation", label)
+		if writeIndex < 0 || renderIndex <= writeIndex || contentGenerationIndex <= renderIndex {
+			t.Fatalf("runtime %s output must write, request a throttled render, then advance content generation", label)
 		}
 	}
-	assertOutputFullRender(
+	assertOutputRender(
 		"queued PTY",
 		"const writeTerminalOutputBatch =",
 		"const finishSessionHistoryReplayIfReady =",
 	)
-	assertOutputFullRender(
+	assertOutputRender(
 		"immediate PTY",
 		"const writeSessionImmediateOutput =",
 		"const readAgentStartupError =",

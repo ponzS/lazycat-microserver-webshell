@@ -514,6 +514,19 @@ git diff --check
 - 验证结果：定向及完整 `go test ./...`、`go test -race ./...`、Kitty Graphics Node 测试 12/12、相关 JavaScript 语法检查、shell 语法检查和 `git diff --check` 通过；`tools/sync-ghostty-web-assets.sh --check` 确认两份 WASM SHA-256 均为 `65a99188312ad92780b3af2fa410b8af395536dfe1e777ec24573d8be1436f16`，并验证 Ghostty 源码目录缺失时仍能检查随包 WASM 文件头。`lzc-cli project release` 生成 `dist/cloud.lazycat.webshell.lcmd-v1.0.25.lpk`，LPK SHA-256 为 `ec71e36d8151d667802e71735021410ae5f6448cabfaba00128e8dc2b3cd9dcb`；包内 `.lpk-version` 为 `1.0.25`，`.lpk-content-revision` 为 `ee3bd1377d40d1890b8a9167f340712ef8a55b50f9d041cca32ab4b8046980b8`。运行包内 Provider 后，首页和 Service Worker 均注入 `1.0.25-ee3bd1377d40d1890b8a9167`，对应 WASM 返回 `application/wasm` 与 `public, max-age=31536000, immutable`。
 - 禁止复现：不得让 immutable 资源 URL 只依赖可复用的人工版本号；不得把同 URL 指向不同 JS/WASM 内容；不得让 LPK 构建跳过仓库内 Ghostty WASM 校验；纯 TypeScript 修改不得无条件触发昂贵的 WASM 重建。
 
+### LCMD-20260812-01：高频终端输出导致主线程高 CPU 和超大批次内存风险
+
+- 日期：2026-08-12
+- 来源：Codex/Agent WebShell 高频实时输出 CPU 现场问题
+- 影响模块：`runtime/static/main.js`、`runtime/static/ghostty-web.js`、`runtime/static/kitty_graphics.js`、运行时静态 guard
+- 错误现象：终端持续输出时 CPU 从个位数升至 50%～70%；异常大输出可能形成超大前端队列、一次性 WASM 分配和主线程长任务。
+- 根因：每个输出批次都请求整屏 Canvas 渲染；`force flush` 可以无上限合并队列；Ghostty WASM 写入入口没有单次输入边界和分配失败检查；Kitty 适配器为每个二进制块创建完整字符串并扫描控制序列。
+- 实施方案：WASM 写入按 128 KiB/32 KiB 字符块处理并检查分配失败；所有 flush 批次保持 128 KiB 上限；输出消息和队列设置 4 MiB 硬边界，过载通过历史游标重同步恢复；普通输出改为 33ms 合并渲染请求，结构性事件继续 full render；普通输出交由 Ghostty dirty 状态决定脏行/整屏；Kitty 使用复用 `TextDecoder` 的 128 KiB 流式解码。
+- Guard：`TestRuntimeTerminalOutputBatchingGuard` 固定输出软/硬限制、force flush 分片和过载重同步；`TestRuntimeTerminalCanvasResidueGuard` 固定 WASM 分片、分配失败保护、渲染限频和 dirty/full 渲染边界；`kitty_graphics_test.mjs` 继续覆盖跨 chunk 控制序列与图片行为。
+- 验证结果：核心改造阶段的 `go test ./...`、`go test -race ./...`、Kitty Graphics Node 测试、相关运行时 JS `node --check` 和 `git diff --check` 已通过。本轮控制边界、指标、零拷贝与 Canvas 热路径收尾尚待统一回归；真实浏览器 CPU、内存峰值和长任务时长仍需在目标 WebShell 页面使用纯文本、ANSI/TUI 和 Kitty 输出分别录制 Performance profile。
+- 禁止复现：不得恢复无上限 `force flush` 合并；不得绕过统一 WASM 分片入口；输出过载不得静默丢弃且必须能够通过历史游标恢复；普通高频输出不得重新强制每批 full Canvas render；Kitty 不得每 chunk 新建完整解码器或把大块二进制一次性转成字符串。
+- 后续收尾：Kitty 控制扫描只保留未完成的 `ESC`/`CSI` 尾巴，普通文本在控制序列后恢复快速路径，并复用流式 `TextDecoder` 保证跨二进制分片 UTF-8 不损坏；输出队列在入队前执行 4 MiB 硬阈值，性能指标增加峰值语义且所有指标访问带兼容 guard；历史缓存队列复用已有不可变 `Uint8Array` 视图，持久化边界仍由 Cache API/IndexedDB 完成复制；大文本字节数测量改为固定缓冲分片编码，避免为整条字符串分配等长临时字节数组；Canvas 空格快速路径保留悬停超链接装饰例外。
+
 ## 新增记录模板
 
 ```md

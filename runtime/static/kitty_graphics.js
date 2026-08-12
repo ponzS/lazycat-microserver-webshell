@@ -6,6 +6,7 @@ var INTERCEPTED_STARTS = [KITTY_START, WINDOW_PIXEL_SIZE_QUERY];
 var KITTY_RESPONSE_PATTERN = /^(?:\x1B_Gi=\d+(?:,p=\d+)?;(?:OK|EINVAL: [^\x1B]*)\x1B\\)+$/;
 var TERMINAL_CLEAR_PATTERN = /\x1Bc|(?:\x1B\[|\x9B)([0-9:;<=>?]*)(?:[ -\/]*)J/g;
 var TERMINAL_CONTROL_SUFFIX_LENGTH = 64;
+var KITTY_TEXT_DECODE_CHUNK_BYTES = 128 * 1024;
 function isKittyGraphicsResponse(data) {
   return typeof data === "string" && KITTY_RESPONSE_PATTERN.test(data);
 }
@@ -155,6 +156,7 @@ var KittyGraphics = class {
     this.onResponse = onResponse;
     this.getPixelSize = getPixelSize;
     this.inputBuffer = "";
+    this.decoder = new TextDecoder();
     this.terminalControlBuffer = "";
     this.transfers = /* @__PURE__ */ new Map();
     this.images = /* @__PURE__ */ new Map();
@@ -169,7 +171,25 @@ var KittyGraphics = class {
    */
   consume(data, cursor, writeText) {
     if (data instanceof Uint8Array) {
-      data = new TextDecoder().decode(data);
+      for (let offset = 0; offset < data.byteLength; offset += KITTY_TEXT_DECODE_CHUNK_BYTES) {
+        const end = Math.min(data.byteLength, offset + KITTY_TEXT_DECODE_CHUNK_BYTES);
+        this.consumeText(this.decoder.decode(data.subarray(offset, end), { stream: true }), cursor, writeText);
+      }
+      return;
+    }
+    const pending = this.decoder.decode();
+    this.consumeText(pending + data, cursor, writeText);
+  }
+  consumeText(data, cursor, writeText) {
+    if (
+      this.inputBuffer.length === 0
+      && this.terminalControlBuffer.length === 0
+      && data.length > 0
+      && data.indexOf("\x1B") === -1
+      && data.indexOf("\x9B") === -1
+    ) {
+      writeText(data);
+      return;
     }
     this.observeTerminalControls(data);
     this.inputBuffer += data;
@@ -204,6 +224,7 @@ var KittyGraphics = class {
   }
   clear() {
     this.inputBuffer = "";
+    this.decoder.decode();
     this.terminalControlBuffer = "";
     this.transfers.clear();
     this.images.clear();
@@ -231,7 +252,30 @@ var KittyGraphics = class {
         break;
       }
     }
-    this.terminalControlBuffer = combined.slice(-TERMINAL_CONTROL_SUFFIX_LENGTH);
+    this.terminalControlBuffer = this.incompleteTerminalControlSuffix(combined);
+  }
+  incompleteTerminalControlSuffix(data) {
+    const escapeIndex = Math.max(data.lastIndexOf("\x1B"), data.lastIndexOf("\x9B"));
+    if (escapeIndex === -1) {
+      return "";
+    }
+    const suffix = data.slice(escapeIndex);
+    if (suffix === "\x1B" || suffix === "\x9B") {
+      return suffix;
+    }
+    if (suffix.startsWith("\x1B[")) {
+      if (/^\x1B\[[0-?]*[ -\/]*[@-~]/.test(suffix)) {
+        return "";
+      }
+      return suffix.length <= TERMINAL_CONTROL_SUFFIX_LENGTH ? suffix : "";
+    }
+    if (suffix.startsWith("\x9B")) {
+      if (/^\x9B[0-?]*[ -\/]*[@-~]/.test(suffix)) {
+        return "";
+      }
+      return suffix.length <= TERMINAL_CONTROL_SUFFIX_LENGTH ? suffix : "";
+    }
+    return "";
   }
   nextInterceptedSequence() {
     let next;

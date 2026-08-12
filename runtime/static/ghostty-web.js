@@ -1,5 +1,42 @@
 var H = /* @__PURE__ */ ((Q) => (Q[Q.CURSOR_KEY_APPLICATION = 0] = "CURSOR_KEY_APPLICATION", Q[Q.KEYPAD_KEY_APPLICATION = 1] = "KEYPAD_KEY_APPLICATION", Q[Q.IGNORE_KEYPAD_WITH_NUMLOCK = 2] = "IGNORE_KEYPAD_WITH_NUMLOCK", Q[Q.ALT_ESC_PREFIX = 3] = "ALT_ESC_PREFIX", Q[Q.MODIFY_OTHER_KEYS_STATE_2 = 4] = "MODIFY_OTHER_KEYS_STATE_2", Q[Q.KITTY_KEYBOARD_FLAGS = 5] = "KITTY_KEYBOARD_FLAGS", Q))(H || {}), b = /* @__PURE__ */ ((Q) => (Q[Q.RELEASE = 0] = "RELEASE", Q[Q.PRESS = 1] = "PRESS", Q[Q.REPEAT = 2] = "REPEAT", Q))(b || {}), o = /* @__PURE__ */ ((Q) => (Q[Q.UNIDENTIFIED = 0] = "UNIDENTIFIED", Q[Q.GRAVE = 1] = "GRAVE", Q[Q.BACKSLASH = 2] = "BACKSLASH", Q[Q.BRACKET_LEFT = 3] = "BRACKET_LEFT", Q[Q.BRACKET_RIGHT = 4] = "BRACKET_RIGHT", Q[Q.COMMA = 5] = "COMMA", Q[Q.ZERO = 6] = "ZERO", Q[Q.ONE = 7] = "ONE", Q[Q.TWO = 8] = "TWO", Q[Q.THREE = 9] = "THREE", Q[Q.FOUR = 10] = "FOUR", Q[Q.FIVE = 11] = "FIVE", Q[Q.SIX = 12] = "SIX", Q[Q.SEVEN = 13] = "SEVEN", Q[Q.EIGHT = 14] = "EIGHT", Q[Q.NINE = 15] = "NINE", Q[Q.EQUAL = 16] = "EQUAL", Q[Q.INTL_BACKSLASH = 17] = "INTL_BACKSLASH", Q[Q.INTL_RO = 18] = "INTL_RO", Q[Q.INTL_YEN = 19] = "INTL_YEN", Q[Q.A = 20] = "A", Q[Q.B = 21] = "B", Q[Q.C = 22] = "C", Q[Q.D = 23] = "D", Q[Q.E = 24] = "E", Q[Q.F = 25] = "F", Q[Q.G = 26] = "G", Q[Q.H = 27] = "H", Q[Q.I = 28] = "I", Q[Q.J = 29] = "J", Q[Q.K = 30] = "K", Q[Q.L = 31] = "L", Q[Q.M = 32] = "M", Q[Q.N = 33] = "N", Q[Q.O = 34] = "O", Q[Q.P = 35] = "P", Q[Q.Q = 36] = "Q", Q[Q.R = 37] = "R", Q[Q.S = 38] = "S", Q[Q.T = 39] = "T", Q[Q.U = 40] = "U", Q[Q.V = 41] = "V", Q[Q.W = 42] = "W", Q[Q.X = 43] = "X", Q[Q.Y = 44] = "Y", Q[Q.Z = 45] = "Z", Q[Q.MINUS = 46] = "MINUS", Q[Q.PERIOD = 47] = "PERIOD", Q[Q.QUOTE = 48] = "QUOTE", Q[Q.SEMICOLON = 49] = "SEMICOLON", Q[Q.SLASH = 50] = "SLASH", Q[Q.ALT_LEFT = 51] = "ALT_LEFT", Q[Q.ALT_RIGHT = 52] = "ALT_RIGHT", Q[Q.BACKSPACE = 53] = "BACKSPACE", Q[Q.CAPS_LOCK = 54] = "CAPS_LOCK", Q[Q.CONTEXT_MENU = 55] = "CONTEXT_MENU", Q[Q.CONTROL_LEFT = 56] = "CONTROL_LEFT", Q[Q.CONTROL_RIGHT = 57] = "CONTROL_RIGHT", Q[Q.ENTER = 58] = "ENTER", Q[Q.META_LEFT = 59] = "META_LEFT", Q[Q.META_RIGHT = 60] = "META_RIGHT", Q[Q.SHIFT_LEFT = 61] = "SHIFT_LEFT", Q[Q.SHIFT_RIGHT = 62] = "SHIFT_RIGHT", Q[Q.SPACE = 63] = "SPACE", Q[Q.TAB = 64] = "TAB", Q[Q.CONVERT = 65] = "CONVERT", Q[Q.KANA_MODE = 66] = "KANA_MODE", Q[Q.NON_CONVERT = 67] = "NON_CONVERT", Q[Q.DELETE = 68] = "DELETE", Q[Q.END = 69] = "END", Q[Q.HELP = 70] = "HELP", Q[Q.HOME = 71] = "HOME", Q[Q.INSERT = 72] = "INSERT", Q[Q.PAGE_DOWN = 73] = "PAGE_DOWN", Q[Q.PAGE_UP = 74] = "PAGE_UP", Q[Q.DOWN = 75] = "DOWN", Q[Q.LEFT = 76] = "LEFT", Q[Q.RIGHT = 77] = "RIGHT", Q[Q.UP = 78] = "UP", Q[Q.NUM_LOCK = 79] = "NUM_LOCK", Q[Q.KP_0 = 80] = "KP_0", Q[Q.KP_1 = 81] = "KP_1", Q[Q.KP_2 = 82] = "KP_2", Q[Q.KP_3 = 83] = "KP_3", Q[Q.KP_4 = 84] = "KP_4", Q[Q.KP_5 = 85] = "KP_5", Q[Q.KP_6 = 86] = "KP_6", Q[Q.KP_7 = 87] = "KP_7", Q[Q.KP_8 = 88] = "KP_8", Q[Q.KP_9 = 89] = "KP_9", Q[Q.KP_PLUS = 90] = "KP_PLUS", Q[Q.KP_BACKSPACE = 91] = "KP_BACKSPACE", Q[Q.KP_CLEAR = 92] = "KP_CLEAR", Q[Q.KP_CLEAR_ENTRY = 93] = "KP_CLEAR_ENTRY", Q[Q.KP_COMMA = 94] = "KP_COMMA", Q[Q.KP_PERIOD = 95] = "KP_PERIOD", Q[Q.KP_DIVIDE = 96] = "KP_DIVIDE", Q[Q.KP_ENTER = 97] = "KP_ENTER", Q[Q.KP_EQUAL = 98] = "KP_EQUAL", Q[Q.KP_MEMORY_ADD = 99] = "KP_MEMORY_ADD", Q[Q.KP_MEMORY_CLEAR = 100] = "KP_MEMORY_CLEAR", Q[Q.KP_MEMORY_RECALL = 101] = "KP_MEMORY_RECALL", Q[Q.KP_MEMORY_STORE = 102] = "KP_MEMORY_STORE", Q[Q.KP_MEMORY_SUBTRACT = 103] = "KP_MEMORY_SUBTRACT", Q[Q.KP_MULTIPLY = 104] = "KP_MULTIPLY", Q[Q.KP_PAREN_LEFT = 105] = "KP_PAREN_LEFT", Q[Q.KP_PAREN_RIGHT = 106] = "KP_PAREN_RIGHT", Q[Q.KP_MINUS = 107] = "KP_MINUS", Q[Q.KP_SEPARATOR = 108] = "KP_SEPARATOR", Q[Q.NUMPAD_UP = 109] = "NUMPAD_UP", Q[Q.NUMPAD_DOWN = 110] = "NUMPAD_DOWN", Q[Q.NUMPAD_RIGHT = 111] = "NUMPAD_RIGHT", Q[Q.NUMPAD_LEFT = 112] = "NUMPAD_LEFT", Q[Q.NUMPAD_BEGIN = 113] = "NUMPAD_BEGIN", Q[Q.NUMPAD_HOME = 114] = "NUMPAD_HOME", Q[Q.NUMPAD_END = 115] = "NUMPAD_END", Q[Q.NUMPAD_INSERT = 116] = "NUMPAD_INSERT", Q[Q.NUMPAD_DELETE = 117] = "NUMPAD_DELETE", Q[Q.NUMPAD_PAGE_UP = 118] = "NUMPAD_PAGE_UP", Q[Q.NUMPAD_PAGE_DOWN = 119] = "NUMPAD_PAGE_DOWN", Q[Q.ESCAPE = 120] = "ESCAPE", Q[Q.F1 = 121] = "F1", Q[Q.F2 = 122] = "F2", Q[Q.F3 = 123] = "F3", Q[Q.F4 = 124] = "F4", Q[Q.F5 = 125] = "F5", Q[Q.F6 = 126] = "F6", Q[Q.F7 = 127] = "F7", Q[Q.F8 = 128] = "F8", Q[Q.F9 = 129] = "F9", Q[Q.F10 = 130] = "F10", Q[Q.F11 = 131] = "F11", Q[Q.F12 = 132] = "F12", Q[Q.F13 = 133] = "F13", Q[Q.F14 = 134] = "F14", Q[Q.F15 = 135] = "F15", Q[Q.F16 = 136] = "F16", Q[Q.F17 = 137] = "F17", Q[Q.F18 = 138] = "F18", Q[Q.F19 = 139] = "F19", Q[Q.F20 = 140] = "F20", Q[Q.F21 = 141] = "F21", Q[Q.F22 = 142] = "F22", Q[Q.F23 = 143] = "F23", Q[Q.F24 = 144] = "F24", Q[Q.F25 = 145] = "F25", Q[Q.FN_LOCK = 146] = "FN_LOCK", Q[Q.PRINT_SCREEN = 147] = "PRINT_SCREEN", Q[Q.SCROLL_LOCK = 148] = "SCROLL_LOCK", Q[Q.PAUSE = 149] = "PAUSE", Q[Q.BROWSER_BACK = 150] = "BROWSER_BACK", Q[Q.BROWSER_FAVORITES = 151] = "BROWSER_FAVORITES", Q[Q.BROWSER_FORWARD = 152] = "BROWSER_FORWARD", Q[Q.BROWSER_HOME = 153] = "BROWSER_HOME", Q[Q.BROWSER_REFRESH = 154] = "BROWSER_REFRESH", Q[Q.BROWSER_SEARCH = 155] = "BROWSER_SEARCH", Q[Q.BROWSER_STOP = 156] = "BROWSER_STOP", Q[Q.EJECT = 157] = "EJECT", Q[Q.LAUNCH_APP_1 = 158] = "LAUNCH_APP_1", Q[Q.LAUNCH_APP_2 = 159] = "LAUNCH_APP_2", Q[Q.LAUNCH_MAIL = 160] = "LAUNCH_MAIL", Q[Q.MEDIA_PLAY_PAUSE = 161] = "MEDIA_PLAY_PAUSE", Q[Q.MEDIA_SELECT = 162] = "MEDIA_SELECT", Q[Q.MEDIA_STOP = 163] = "MEDIA_STOP", Q[Q.MEDIA_TRACK_NEXT = 164] = "MEDIA_TRACK_NEXT", Q[Q.MEDIA_TRACK_PREVIOUS = 165] = "MEDIA_TRACK_PREVIOUS", Q[Q.POWER = 166] = "POWER", Q[Q.SLEEP = 167] = "SLEEP", Q[Q.AUDIO_VOLUME_DOWN = 168] = "AUDIO_VOLUME_DOWN", Q[Q.AUDIO_VOLUME_MUTE = 169] = "AUDIO_VOLUME_MUTE", Q[Q.AUDIO_VOLUME_UP = 170] = "AUDIO_VOLUME_UP", Q[Q.WAKE_UP = 171] = "WAKE_UP", Q[Q.COPY = 172] = "COPY", Q[Q.CUT = 173] = "CUT", Q[Q.PASTE = 174] = "PASTE", Q))(o || {}), y = /* @__PURE__ */ ((Q) => (Q[Q.NONE = 0] = "NONE", Q[Q.SHIFT = 1] = "SHIFT", Q[Q.CTRL = 2] = "CTRL", Q[Q.ALT = 4] = "ALT", Q[Q.SUPER = 8] = "SUPER", Q[Q.CAPSLOCK = 16] = "CAPSLOCK", Q[Q.NUMLOCK = 32] = "NUMLOCK", Q))(y || {}), O = /* @__PURE__ */ ((Q) => (Q[Q.NONE = 0] = "NONE", Q[Q.PARTIAL = 1] = "PARTIAL", Q[Q.FULL = 2] = "FULL", Q))(O || {});
 const d = 80;
+const GHOSTTY_WASM_WRITE_CHUNK_BYTES = 128 * 1024;
+const GHOSTTY_WASM_WRITE_STRING_CHARS = 32 * 1024;
+const GHOSTTY_OUTPUT_RENDER_INTERVAL_MS = 33;
+const GHOSTTY_TEXT_ENCODER = new TextEncoder();
+const recordTerminalPerformance = (name, value = 1) => {
+  const root = globalThis.__webshellTerminalPerformance || (globalThis.__webshellTerminalPerformance = {
+    counters: Object.create(null),
+    timings: Object.create(null),
+    record(counter, amount = 1) {
+      this.counters[counter] = (this.counters[counter] || 0) + amount;
+      this.updatedAt = Date.now();
+    },
+    max(counter, value = 0) {
+      this.counters[counter] = Math.max(this.counters[counter] || 0, Number(value) || 0);
+      this.updatedAt = Date.now();
+    },
+    time(name, duration) {
+      const item = this.timings[name] || (this.timings[name] = { count: 0, totalMs: 0, maxMs: 0 });
+      item.count += 1;
+      item.totalMs += Math.max(0, Number(duration) || 0);
+      item.maxMs = Math.max(item.maxMs, Math.max(0, Number(duration) || 0));
+      this.updatedAt = Date.now();
+    },
+    snapshot() {
+      return JSON.parse(JSON.stringify({ counters: this.counters, timings: this.timings, updatedAt: this.updatedAt || 0 }));
+    },
+  });
+  if (typeof root.record === "function") {
+    root.record(name, value);
+  }
+};
+const recordTerminalTiming = (name, duration) => {
+  const root = globalThis.__webshellTerminalPerformance;
+  if (root && typeof root.time === "function") {
+    root.time(name, duration);
+  }
+};
 var e = /* @__PURE__ */ ((Q) => (Q[Q.BOLD = 1] = "BOLD", Q[Q.ITALIC = 2] = "ITALIC", Q[Q.UNDERLINE = 4] = "UNDERLINE", Q[Q.STRIKETHROUGH = 8] = "STRIKETHROUGH", Q[Q.INVERSE = 16] = "INVERSE", Q[Q.INVISIBLE = 32] = "INVISIBLE", Q[Q.BLINK = 64] = "BLINK", Q[Q.FAINT = 128] = "FAINT", Q))(e || {});
 class q {
   constructor(A) {
@@ -167,8 +204,52 @@ const z = class K {
   // Lifecycle
   // ==========================================================================
   write(A) {
-    const B = typeof A == "string" ? new TextEncoder().encode(A) : A, g = this.exports.ghostty_wasm_alloc_u8_array(B.length);
-    new Uint8Array(this.memory.buffer).set(B, g), this.exports.ghostty_terminal_write(this.handle, g, B.length), this.exports.ghostty_wasm_free_u8_array(g, B.length), this.renderStateCurrent = !1;
+    if (typeof A == "string") {
+      for (let B = 0; B < A.length;) {
+        let g = Math.min(A.length, B + GHOSTTY_WASM_WRITE_STRING_CHARS);
+        if (g < A.length) {
+          const E = A.charCodeAt(g - 1);
+          if (E >= 55296 && E <= 56319) {
+            g -= 1;
+          }
+        }
+        if (g <= B) {
+          g = Math.min(A.length, B + 1);
+        }
+        this.writeBytes(GHOSTTY_TEXT_ENCODER.encode(A.slice(B, g)));
+        B = g;
+      }
+      return;
+    }
+    this.writeBytes(A);
+  }
+  writeBytes(A) {
+    if (!(A instanceof Uint8Array) || A.byteLength === 0) {
+      return;
+    }
+    recordTerminalPerformance("wasmInputBytes", A.byteLength);
+    const startedAt = performance.now();
+    try {
+      for (let B = 0; B < A.byteLength;) {
+        const g = Math.min(A.byteLength, B + GHOSTTY_WASM_WRITE_CHUNK_BYTES);
+        const E = A.subarray(B, g);
+        const C = this.exports.ghostty_wasm_alloc_u8_array(E.byteLength);
+        if (!C) {
+          throw new Error(`Failed to allocate terminal input buffer (${E.byteLength} bytes)`);
+        }
+        try {
+          new Uint8Array(this.memory.buffer).set(E, C);
+          this.renderStateCurrent = !1;
+          recordTerminalPerformance("wasmWriteCalls");
+          this.exports.ghostty_terminal_write(this.handle, C, E.byteLength);
+        } finally {
+          this.exports.ghostty_wasm_free_u8_array(C, E.byteLength);
+        }
+        B = g;
+      }
+    } finally {
+      recordTerminalTiming("wasmWrite", performance.now() - startedAt);
+    }
   }
   resize(A, B) {
     A === this._cols && B === this._rows || (this.ensureScrollbackCapacity(A, B), this._cols = A, this._rows = B, this.exports.ghostty_terminal_resize(this.handle, A, B), this.renderStateCurrent = !1, this.invalidateBuffers(), this.initCellPool());
@@ -1381,7 +1462,7 @@ class $ {
     const g = A.getContext("2d", { alpha: !0 });
     if (!g)
       throw new Error("Failed to get 2D rendering context");
-    this.ctx = g, this.fontSize = B.fontSize ?? 15, this.fontFamily = B.fontFamily ?? "monospace", this.cursorStyle = B.cursorStyle ?? "block", this.cursorBlink = B.cursorBlink ?? !1, this.theme = { ...f, ...B.theme }, this.devicePixelRatio = B.devicePixelRatio ?? window.devicePixelRatio ?? 1, this.palette = [
+    this.ctx = g, this.lastRenderFont = "", this.rgbCache = new Map(), this.fontSize = B.fontSize ?? 15, this.fontFamily = B.fontFamily ?? "monospace", this.cursorStyle = B.cursorStyle ?? "block", this.cursorBlink = B.cursorBlink ?? !1, this.theme = { ...f, ...B.theme }, this.devicePixelRatio = B.devicePixelRatio ?? window.devicePixelRatio ?? 1, this.palette = [
       this.theme.black,
       this.theme.red,
       this.theme.green,
@@ -1419,7 +1500,17 @@ class $ {
   // Color Conversion
   // ==========================================================================
   rgbToCSS(A, B, g) {
-    return `rgb(${A}, ${B}, ${g})`;
+    const key = (A << 16) | (B << 8) | g;
+    const cached = this.rgbCache.get(key);
+    if (cached) {
+      return cached;
+    }
+    const value = `rgb(${A}, ${B}, ${g})`;
+    if (this.rgbCache.size >= 512) {
+      this.rgbCache.clear();
+    }
+    this.rgbCache.set(key, value);
+    return value;
   }
   // ==========================================================================
   // Canvas Sizing
@@ -1441,7 +1532,7 @@ class $ {
     const C = this.canvasSize(A, B), I = `${C.cssWidth}px`, D = `${C.cssHeight}px`;
     if (this.canvas.width === C.pixelWidth && this.canvas.height === C.pixelHeight && this.canvas.style.width === I && this.canvas.style.height === D)
       return !1;
-    return this.canvas.style.width = I, this.canvas.style.height = D, this.canvas.width = C.pixelWidth, this.canvas.height = C.pixelHeight, this.ctx.setTransform(this.devicePixelRatio, 0, 0, this.devicePixelRatio, 0, 0), this.ctx.textBaseline = "alphabetic", this.ctx.textAlign = "left", this.ctx.fillStyle = this.theme.background, this.ctx.fillRect(0, 0, C.cssWidth, C.cssHeight), !0;
+    return this.canvas.style.width = I, this.canvas.style.height = D, this.canvas.width = C.pixelWidth, this.canvas.height = C.pixelHeight, this.ctx.setTransform(this.devicePixelRatio, 0, 0, this.devicePixelRatio, 0, 0), this.ctx.textBaseline = "alphabetic", this.ctx.textAlign = "left", this.lastRenderFont = "", this.ctx.fillStyle = this.theme.background, this.ctx.fillRect(0, 0, C.cssWidth, C.cssHeight), !0;
   }
   snapshotViewport(A, B) {
     if (!A || typeof A.getViewport != "function")
@@ -1515,8 +1606,11 @@ class $ {
     const W = this.materializeViewportLines(A, D, g, i, E);
     if (!W)
       return !1;
+    const renderStartedAt = performance.now();
     const S = this.canvasSize(D.cols, D.rows);
     (U = A.needsFullRedraw) != null && U.call(A) && (B = !0), (this.canvas.width !== S.pixelWidth || this.canvas.height !== S.pixelHeight || this.canvas.style.width !== `${S.cssWidth}px` || this.canvas.style.height !== `${S.cssHeight}px`) && (this.resize(D.cols, D.rows), B = !0), g !== this.lastViewportY && (B = !0, this.lastViewportY = g);
+    recordTerminalPerformance("renderFrames");
+    recordTerminalPerformance(B ? "fullRenderFrames" : "incrementalRenderFrames");
     B && (this.ctx.fillStyle = this.theme.background, this.ctx.fillRect(0, 0, this.canvas.width / this.devicePixelRatio, this.canvas.height / this.devicePixelRatio));
     const s = I.x !== this.lastCursorPosition.x || I.y !== this.lastCursorPosition.y;
     if (s || this.cursorBlink) {
@@ -1576,7 +1670,8 @@ class $ {
       const c = W.get(t);
       c && this.renderLine(c, t, D.cols, viewportOffsetY);
     }
-    return g === 0 && I.visible && this.cursorVisible && this.renderCursor(I.x, I.y), E && C > 0 && this.renderScrollbar(g, i, D.rows, C), this.lastCursorPosition = { x: I.x, y: I.y }, A.clearDirty(), !0;
+    g === 0 && I.visible && this.cursorVisible && this.renderCursor(I.x, I.y), E && C > 0 && this.renderScrollbar(g, i, D.rows, C), this.lastCursorPosition = { x: I.x, y: I.y }, A.clearDirty(), recordTerminalTiming("canvasRender", performance.now() - renderStartedAt);
+    return !0;
   }
   /**
    * Render a single line using two-pass approach:
@@ -1624,9 +1719,12 @@ class $ {
     const C = B * this.metrics.width, I = g * this.metrics.height + E, F = this.metrics.width * A.width;
     if (A.flags & e.INVISIBLE)
       return;
+    const text = typeof A.text == "string" ? A.text : A.grapheme_len > 0 && ((k = this.currentBuffer) != null && k.getGraphemeString) ? this.currentBuffer.getGraphemeString(g, B) : String.fromCodePoint(A.codepoint || 32);
+    if (text === " " && !(A.flags & (e.UNDERLINE | e.STRIKETHROUGH)) && A.hyperlink_id !== this.hoveredHyperlinkId)
+      return;
     const D = this.isInSelection(B, g);
     let i = "";
-    if (A.flags & e.ITALIC && (i += "italic "), A.flags & e.BOLD && (i += "bold "), this.ctx.font = `${i}${this.fontSize}px ${this.fontFamily}`, D)
+    if (A.flags & e.ITALIC && (i += "italic "), A.flags & e.BOLD && (i += "bold "), this.lastRenderFont !== `${i}${this.fontSize}px ${this.fontFamily}` && (this.lastRenderFont = `${i}${this.fontSize}px ${this.fontFamily}`, this.ctx.font = this.lastRenderFont), D)
       this.ctx.fillStyle = this.theme.selectionForeground;
     else {
       let M = A.fg_r, a = A.fg_g, h = A.fg_b;
@@ -1634,8 +1732,8 @@ class $ {
     }
     A.flags & e.FAINT && (this.ctx.globalAlpha = 0.5);
     const w = C, s = I + this.metrics.baseline;
-    let N;
-    if (typeof A.text == "string" ? N = A.text : A.grapheme_len > 0 && ((k = this.currentBuffer) != null && k.getGraphemeString) ? N = this.currentBuffer.getGraphemeString(g, B) : N = String.fromCodePoint(A.codepoint || 32), this.ctx.fillText(N, w, s), A.flags & e.FAINT && (this.ctx.globalAlpha = 1), A.flags & e.UNDERLINE) {
+    let N = text;
+    if (this.ctx.fillText(N, w, s), A.flags & e.FAINT && (this.ctx.globalAlpha = 1), A.flags & e.UNDERLINE) {
       const M = I + this.metrics.baseline + 2;
       this.ctx.strokeStyle = this.ctx.fillStyle, this.ctx.lineWidth = 1, this.ctx.beginPath(), this.ctx.moveTo(C, M), this.ctx.lineTo(C + F, M), this.ctx.stroke();
     }
@@ -1720,13 +1818,13 @@ class $ {
    * Update font size
    */
   setFontSize(A) {
-    this.fontSize = A, this.metrics = this.measureFont();
+    this.fontSize = A, this.lastRenderFont = "", this.metrics = this.measureFont();
   }
   /**
    * Update font family
    */
   setFontFamily(A) {
-    this.fontFamily = A, this.metrics = this.measureFont();
+    this.fontFamily = A, this.lastRenderFont = "", this.metrics = this.measureFont();
   }
   /**
    * Update cursor style
@@ -2207,7 +2305,7 @@ class IA {
       get activeVersion() {
         return "15.1";
       }
-    }, this.dataEmitter = new J(), this.resizeEmitter = new J(), this.bellEmitter = new J(), this.selectionChangeEmitter = new J(), this.keyEmitter = new J(), this.titleChangeEmitter = new J(), this.scrollEmitter = new J(), this.renderEmitter = new J(), this.cursorMoveEmitter = new J(), this.onData = this.dataEmitter.event, this.onResize = this.resizeEmitter.event, this.onBell = this.bellEmitter.event, this.onSelectionChange = this.selectionChangeEmitter.event, this.onKey = this.keyEmitter.event, this.onTitleChange = this.titleChangeEmitter.event, this.onScroll = this.scrollEmitter.event, this.onRender = this.renderEmitter.event, this.onCursorMove = this.cursorMoveEmitter.event, this.isOpen = !1, this.isDisposed = !1, this.renderFullNextFrame = !1, this.renderRetryTimer = void 0, this.renderRetryDelayMs = 16, this.addons = [], this.currentTitle = "", this.viewportY = 0, this.targetViewportY = 0, this.lastCursorY = 0, this.isDraggingScrollbar = !1, this.scrollbarDragStart = null, this.scrollbarDragStartViewportY = 0, this.scrollbarVisible = !1, this.scrollbarOpacity = 0, this.SCROLLBAR_HIDE_DELAY_MS = 1500, this.SCROLLBAR_FADE_DURATION_MS = 200, this.touchScrollActive = !1, this.touchScrollLastY = 0, this.touchScrollStartY = 0, this.touchScrollRemainderY = 0, this.touchScrollMoved = !1, this.touchScrollLastAt = 0, this.touchScrollVelocity = 0, this.touchInertiaFrame = void 0, this.touchInertiaLastAt = 0, this.finishTouchScroll = () => {
+    }, this.dataEmitter = new J(), this.resizeEmitter = new J(), this.bellEmitter = new J(), this.selectionChangeEmitter = new J(), this.keyEmitter = new J(), this.titleChangeEmitter = new J(), this.scrollEmitter = new J(), this.renderEmitter = new J(), this.cursorMoveEmitter = new J(), this.onData = this.dataEmitter.event, this.onResize = this.resizeEmitter.event, this.onBell = this.bellEmitter.event, this.onSelectionChange = this.selectionChangeEmitter.event, this.onKey = this.keyEmitter.event, this.onTitleChange = this.titleChangeEmitter.event, this.onScroll = this.scrollEmitter.event, this.onRender = this.renderEmitter.event, this.onCursorMove = this.cursorMoveEmitter.event, this.isOpen = !1, this.isDisposed = !1, this.renderFullNextFrame = !1, this.renderRetryTimer = void 0, this.renderThrottleTimer = void 0, this.lastRenderAt = 0, this.renderRetryDelayMs = 16, this.addons = [], this.currentTitle = "", this.viewportY = 0, this.targetViewportY = 0, this.lastCursorY = 0, this.isDraggingScrollbar = !1, this.scrollbarDragStart = null, this.scrollbarDragStartViewportY = 0, this.scrollbarVisible = !1, this.scrollbarOpacity = 0, this.SCROLLBAR_HIDE_DELAY_MS = 1500, this.SCROLLBAR_FADE_DURATION_MS = 200, this.touchScrollActive = !1, this.touchScrollLastY = 0, this.touchScrollStartY = 0, this.touchScrollRemainderY = 0, this.touchScrollMoved = !1, this.touchScrollLastAt = 0, this.touchScrollVelocity = 0, this.touchInertiaFrame = void 0, this.touchInertiaLastAt = 0, this.finishTouchScroll = () => {
       this.touchScrollActive = !1, this.touchScrollLastY = 0, this.touchScrollStartY = 0, this.touchScrollRemainderY = 0, this.touchScrollLastAt = 0;
     }, this.handleTouchStart = (g) => {
       if (!this.canvas || !this.renderer || !this.wasmTerm || g.touches.length !== 1)
@@ -2543,7 +2641,7 @@ class IA {
       const w = this.getScrollbackLength(), s = this.wasmTerm.getScrollbackGeneration(), N = s - C >>> 0, F = Math.max(0, Math.min(w, I + N)), S = Math.max(0, Math.min(w, D + N));
       (F !== this.viewportY || S !== this.targetViewportY) && (this.viewportY = F, this.targetViewportY = S, this.scrollEmitter.fire(Math.floor(this.viewportY))), w > 0 && this.showScrollbar();
     }
-    this.requestRender({ full: !0 }), typeof A == "string" && A.includes("\x1B]") && this.checkForTitleChange(A), B && requestAnimationFrame(B);
+    this.requestRender({ throttle: !0 }), typeof A == "string" && A.includes("\x1B]") && this.checkForTitleChange(A), B && requestAnimationFrame(B);
   }
   /**
    * Write data with newline
@@ -2803,7 +2901,7 @@ class IA {
    * Schedule one render frame.
    */
   cancelRenderLoop() {
-    this.animationFrameId && (cancelAnimationFrame(this.animationFrameId), this.animationFrameId = void 0);
+    this.animationFrameId && (cancelAnimationFrame(this.animationFrameId), this.animationFrameId = void 0), this.renderThrottleTimer !== void 0 && (window.clearTimeout(this.renderThrottleTimer), this.renderThrottleTimer = void 0);
   }
   flushWriteQueue() {
     if (!this.writeQueue) {
@@ -2819,6 +2917,20 @@ class IA {
       return;
     this.renderRetryTimer !== void 0 && (window.clearTimeout(this.renderRetryTimer), this.renderRetryTimer = void 0);
     this.renderFullNextFrame = this.renderFullNextFrame || A.full === !0;
+    if (A.throttle === !0) {
+      const B = performance.now(), g = Math.max(0, GHOSTTY_OUTPUT_RENDER_INTERVAL_MS - (B - this.lastRenderAt));
+      if (this.lastRenderAt > 0 && g > 0) {
+        if (this.renderThrottleTimer === void 0) {
+          this.renderThrottleTimer = window.setTimeout(() => {
+            this.renderThrottleTimer = void 0;
+            this.requestRender({ throttle: !0 });
+          }, g);
+        }
+        return;
+      }
+    } else if (this.renderThrottleTimer !== void 0) {
+      window.clearTimeout(this.renderThrottleTimer), this.renderThrottleTimer = void 0;
+    }
     if (this.animationFrameId)
       return;
     this.animationFrameId = requestAnimationFrame(() => {
@@ -2831,7 +2943,7 @@ class IA {
       return !1;
     if (!this.renderer.render(this.wasmTerm, A, this.viewportY, this, this.scrollbarOpacity))
       return this.renderFullNextFrame = !0, this.scheduleRenderRetry(), !1;
-    this.renderRetryTimer !== void 0 && (window.clearTimeout(this.renderRetryTimer), this.renderRetryTimer = void 0), this.renderRetryDelayMs = 16, this.renderEmitter.fire();
+    this.renderRetryTimer !== void 0 && (window.clearTimeout(this.renderRetryTimer), this.renderRetryTimer = void 0), this.renderRetryDelayMs = 16, this.lastRenderAt = performance.now(), this.renderEmitter.fire();
     const B = this.wasmTerm.getCursor();
     return B.y !== this.lastCursorY && (this.lastCursorY = B.y, this.cursorMoveEmitter.fire()), !0;
   }
