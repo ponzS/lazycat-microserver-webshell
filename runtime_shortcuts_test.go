@@ -362,7 +362,9 @@ func TestRuntimeHomeNavigationUsesResolvedAdminURL(t *testing.T) {
 		`const targetURL = new URL(homeURL, window.location.href);`,
 		`fetch("./api/lightos-admin-info", { cache: "no-store" })`,
 		"lightOSHomeURL = normalizeLightOSHomeURL(info?.home_url);",
-		"const targetURL = await loadLightOSHomeURL();",
+		"const lightOSHomeURLWithMobileRemoteDesktopPreference = (value) => {",
+		`targetURL.searchParams.set("mobile_remote_desktop", mobileRemoteDesktopEnabled ? "1" : "0");`,
+		"const targetURL = lightOSHomeURLWithMobileRemoteDesktopPreference(await loadLightOSHomeURL());",
 	}
 	for _, want := range wantSnippets {
 		if !strings.Contains(source, want) {
@@ -623,6 +625,29 @@ func TestRuntimeInstanceSwitcherListScrollsWhenManyInstances(t *testing.T) {
 }
 
 func TestRuntimeDebugModeOnlyTogglesOptionsList(t *testing.T) {
+	indexData, err := os.ReadFile("runtime/static/index.html")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
+	}
+	index := string(indexData)
+	for _, want := range []string{
+		`id="settingsMobileRemoteDesktopToggle"`,
+		"允许移动端启用远程桌面",
+		"允许在 LightOS 移动端首页显示远程桌面入口，默认关闭",
+	} {
+		if !strings.Contains(index, want) {
+			t.Fatalf("runtime mobile remote desktop debug option missing %q", want)
+		}
+	}
+	debugStart := strings.Index(index, `id="settingsDebugOptions" hidden`)
+	remoteDesktopToggle := strings.Index(index, `id="settingsMobileRemoteDesktopToggle"`)
+	debugEnd := -1
+	if debugStart >= 0 {
+		debugEnd = strings.Index(index[debugStart:], `id="settingsPanelTheme"`)
+	}
+	if debugStart < 0 || debugEnd < 0 || remoteDesktopToggle < debugStart || remoteDesktopToggle > debugStart+debugEnd {
+		t.Fatal("mobile remote desktop toggle must remain inside the debug options panel")
+	}
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {
 		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
@@ -639,6 +664,11 @@ func TestRuntimeDebugModeOnlyTogglesOptionsList(t *testing.T) {
 		"performanceTaskMonitor.setEnabled(performanceTasksEnabled);",
 		"performanceMeterEnabled = settingsPerformanceMeterToggle.checked;",
 		"performanceTasksEnabled = settingsPerformanceTasksToggle.checked;",
+		`const mobileRemoteDesktopStorageKey = "lightos-mobile-remote-desktop-enabled";`,
+		`let mobileRemoteDesktopEnabled = window.localStorage.getItem(mobileRemoteDesktopStorageKey) === "true";`,
+		"syncSettingsMobileRemoteDesktopToggle();",
+		`settingsMobileRemoteDesktopToggle?.addEventListener("change", () => {`,
+		`window.localStorage.setItem(mobileRemoteDesktopStorageKey, mobileRemoteDesktopEnabled ? "true" : "false");`,
 	} {
 		if !strings.Contains(source, want) {
 			t.Fatalf("runtime debug mode guard missing %q", want)

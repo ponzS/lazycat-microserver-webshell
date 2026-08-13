@@ -527,6 +527,18 @@ git diff --check
 - 禁止复现：不得恢复无上限 `force flush` 合并；不得绕过统一 WASM 分片入口；输出过载不得静默丢弃且必须能够通过历史游标恢复；普通高频输出不得重新强制每批 full Canvas render；Kitty 不得每 chunk 新建完整解码器或把大块二进制一次性转成字符串。
 - 后续收尾：Kitty 控制扫描只保留未完成的 `ESC`/`CSI` 尾巴，普通文本在控制序列后恢复快速路径，并复用流式 `TextDecoder` 保证跨二进制分片 UTF-8 不损坏；输出队列在入队前执行 4 MiB 硬阈值，性能指标增加峰值语义且所有指标访问带兼容 guard；历史缓存队列复用已有不可变 `Uint8Array` 视图，持久化边界仍由 Cache API/IndexedDB 完成复制；大文本字节数测量改为固定缓冲分片编码，避免为整条字符串分配等长临时字节数组；Canvas 空格快速路径保留悬停超链接装饰例外。
 
+### LCMD-20260813-01：调试模式增加移动端远程桌面入口开关
+
+- 日期：2026-08-13
+- 来源：用户需求
+- 影响模块：`runtime/static/index.html`、`runtime/static/main.js`、LightOS 首页返回链路
+- 错误现象：移动端远程桌面入口默认隐藏，缺少调试模式下可控的恢复入口。
+- 根因：WebShell 只有调试模式总开关，没有独立保存并传递移动端远程桌面授权的设置。
+- 实施方案：在调试选项中增加默认关闭的“允许移动端启用远程桌面”开关；设置值保存在本地，返回 LightOS 首页时通过一次性查询参数同步，首页消费后立即清理参数。
+- Guard：`TestRuntimeDebugModeOnlyTogglesOptionsList` 固定开关位于调试选项、默认读取关闭并持久化；`TestRuntimeHomeNavigationUsesResolvedAdminURL` 固定返回首页携带开关值。
+- 验证结果：运行时包版本提升至 `1.0.27`；`node --check runtime/static/main.js`、`go test ./... -run 'TestRuntime(DebugModeOnlyTogglesOptionsList|HomeNavigationUsesResolvedAdminURL)' -count=1` 和完整 `go test ./... -count=1` 通过；LightOS 首页定向测试另行通过。
+- 禁止复现：不得默认开启移动端远程桌面；不得把开关状态混入性能监视器或调试模式总开关；不得长期把设置值暴露在首页 URL 中。
+
 ## 新增记录模板
 
 ```md

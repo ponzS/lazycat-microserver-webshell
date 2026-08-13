@@ -195,6 +195,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const settingsOnlineDevicesButton = document.getElementById("settingsOnlineDevicesButton");
   const settingsPerformanceMeterToggle = document.getElementById("settingsPerformanceMeterToggle");
   const settingsPerformanceTasksToggle = document.getElementById("settingsPerformanceTasksToggle");
+  const settingsMobileRemoteDesktopToggle = document.getElementById("settingsMobileRemoteDesktopToggle");
   const settingsDesktopMouseClipboardToggle = document.getElementById("settingsDesktopMouseClipboardToggle");
   const settingsMobilePixelScrollToggle = document.getElementById("settingsMobilePixelScrollToggle");
   const settingsMobileDoubleTapReminderToggle = document.getElementById("settingsMobileDoubleTapReminderToggle");
@@ -338,6 +339,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const debugModeStorageKey = `${storagePrefix}.debugMode`;
   const performanceMeterStorageKey = `${storagePrefix}.performanceMeter`;
   const performanceTasksStorageKey = `${storagePrefix}.performanceTasks`;
+  const mobileRemoteDesktopStorageKey = "lightos-mobile-remote-desktop-enabled";
   const defaultFontSize = 16;
   const minFontSize = 10;
   const maxFontSize = 32;
@@ -644,6 +646,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   let debugModeEnabled = window.localStorage.getItem(debugModeStorageKey) === "true";
   let performanceMeterEnabled = window.localStorage.getItem(performanceMeterStorageKey) === "true";
   let performanceTasksEnabled = window.localStorage.getItem(performanceTasksStorageKey) === "true";
+  let mobileRemoteDesktopEnabled = window.localStorage.getItem(mobileRemoteDesktopStorageKey) === "true";
   let fontEditMode = false;
   const selectedFontDeleteIDs = new Set();
   const registeredFontFaces = new Map();
@@ -1455,10 +1458,17 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
   };
 
+  const syncSettingsMobileRemoteDesktopToggle = () => {
+    if (settingsMobileRemoteDesktopToggle) {
+      settingsMobileRemoteDesktopToggle.checked = mobileRemoteDesktopEnabled;
+    }
+  };
+
   const syncSettingsDebugOptions = () => {
     syncSettingsDebugModeControls();
     syncSettingsPerformanceMeterToggle();
     syncSettingsPerformanceTasksToggle();
+    syncSettingsMobileRemoteDesktopToggle();
   };
 
   const syncDebugModeState = () => {
@@ -4438,6 +4448,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return lightOSHomeURLPromise;
   };
 
+  const lightOSHomeURLWithMobileRemoteDesktopPreference = (value) => {
+    const targetURL = new URL(value, window.location.href);
+    targetURL.searchParams.set("mobile_remote_desktop", mobileRemoteDesktopEnabled ? "1" : "0");
+    return targetURL.toString();
+  };
+
   const terminalEstimatedSizeForElement = (element) => {
     if (!(element instanceof HTMLElement)) {
       return null;
@@ -4797,7 +4813,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       homeMenuButton.disabled = true;
     }
     try {
-      const targetURL = await loadLightOSHomeURL();
+      const targetURL = lightOSHomeURLWithMobileRemoteDesktopPreference(await loadLightOSHomeURL());
       suppressWorkspaceRestoreOnce = true;
       clearWorkspaceRestoreState();
       suppressBeforeUnloadForNavigation();
@@ -19269,6 +19285,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     window.localStorage.setItem(performanceTasksStorageKey, performanceTasksEnabled ? "true" : "false");
     applyPerformanceTaskMeterVisibility();
     syncSettingsPerformanceTasksToggle();
+  });
+  settingsMobileRemoteDesktopToggle?.addEventListener("change", () => {
+    mobileRemoteDesktopEnabled = settingsMobileRemoteDesktopToggle.checked;
+    window.localStorage.setItem(mobileRemoteDesktopStorageKey, mobileRemoteDesktopEnabled ? "true" : "false");
+    syncSettingsMobileRemoteDesktopToggle();
   });
   settingsMobilePixelScrollToggle?.addEventListener("change", () => {
     const previous = mobilePixelScrollEnabled;
