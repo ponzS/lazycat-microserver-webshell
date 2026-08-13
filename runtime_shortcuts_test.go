@@ -153,6 +153,18 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		t.Fatal("service worker must precache Kitty Graphics support")
 	}
 	for _, want := range []string{
+		`${assetBase}fullscreen_tui_touch.js`,
+		`${assetBase}fullscreen_tui_touch_adapter.js`,
+		`${assetBase}opencode_fullscreen_touch.js`,
+		`${assetBase}opencode_fullscreen_touch_adapter.js`,
+		`${assetBase}herdr_fullscreen_touch.js`,
+		`${assetBase}herdr_fullscreen_touch_adapter.js`,
+	} {
+		if !strings.Contains(workerSource, want) {
+			t.Fatalf("service worker must precache fullscreen TUI asset %q", want)
+		}
+	}
+	for _, want := range []string{
 		`url.pathname.includes("/api/")`,
 		`url.pathname.endsWith("/ws")`,
 		`url.pathname.includes("/__terminal_cache__/")`,
@@ -2757,6 +2769,47 @@ func TestRuntimeClaudeFullscreenTouchAdapterIsolation(t *testing.T) {
 		if !strings.Contains(adapterSource, want) {
 			t.Fatalf("Claude fullscreen touch adapter isolation missing %q", want)
 		}
+	}
+}
+
+func TestRuntimeOpencodeHerdrFullscreenTouchAdapterIsolation(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+	for _, want := range []string{
+		`import { isOpencodeFullscreenTouchCandidate } from "./opencode_fullscreen_touch.js";`,
+		`import { installOpencodeFullscreenTouchAdapter } from "./opencode_fullscreen_touch_adapter.js";`,
+		`import { isHerdrFullscreenTouchCandidate } from "./herdr_fullscreen_touch.js";`,
+		`import { installHerdrFullscreenTouchAdapter } from "./herdr_fullscreen_touch_adapter.js";`,
+		`const installOpencodeTerminalTouchAdapter = (session) => {`,
+		`const installHerdrTerminalTouchAdapter = (session) => {`,
+		`installOpencodeTerminalTouchAdapter(session);`,
+		`installHerdrTerminalTouchAdapter(session);`,
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime opencode/herdr adapter guard missing %q", want)
+		}
+	}
+	claudeSource := sourceBetween(t, source, `  const installClaudeTerminalTouchAdapter = (session) => {`, `  const installFullscreenTuiTerminalTouchAdapter = (session, candidate, installer) => {`)
+	if strings.Contains(claudeSource, "Opencode") || strings.Contains(claudeSource, "Herdr") {
+		t.Fatal("Claude touch adapter must not contain opencode/herdr branches")
+	}
+	genericSource := sourceBetween(t, source, `  const installTerminalMouseTracking = (session) => {`, `  const compareSelectionCells = (left, right) => {`)
+	if strings.Contains(strings.ToLower(genericSource), "opencode") || strings.Contains(strings.ToLower(genericSource), "herdr") {
+		t.Fatal("generic mouse tracking must not contain opencode/herdr-specific branches")
+	}
+	installSelection := strings.Index(source, `installMobileTouchSelection(session);`)
+	installClaude := strings.Index(source, `installClaudeTerminalTouchAdapter(session);`)
+	installOpencode := strings.Index(source, `installOpencodeTerminalTouchAdapter(session);`)
+	installHerdr := strings.Index(source, `installHerdrTerminalTouchAdapter(session);`)
+	installMouse := strings.Index(source, `installTerminalMouseTracking(session);`)
+	if installSelection < 0 || installClaude < 0 || installOpencode < 0 || installHerdr < 0 || installMouse < 0 {
+		t.Fatal("fullscreen TUI touch installation order is incomplete")
+	}
+	if !(installSelection < installClaude && installClaude < installOpencode && installOpencode < installHerdr && installHerdr < installMouse) {
+		t.Fatal("tool-specific fullscreen TUI adapters must precede generic mouse tracking")
 	}
 }
 

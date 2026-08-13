@@ -539,6 +539,18 @@ git diff --check
 - 验证结果：运行时包版本提升至 `1.0.27`；`node --check runtime/static/main.js`、`go test ./... -run 'TestRuntime(DebugModeOnlyTogglesOptionsList|HomeNavigationUsesResolvedAdminURL)' -count=1` 和完整 `go test ./... -count=1` 通过；LightOS 首页定向测试另行通过。
 - 禁止复现：不得默认开启移动端远程桌面；不得把开关状态混入性能监视器或调试模式总开关；不得长期把设置值暴露在首页 URL 中。
 
+### LCMD-20260813-02：opencode 与 herdr fullscreen TUI 在移动端无法滚动
+
+- 日期：2026-08-13
+- 来源：用户现场问题
+- 影响模块：`runtime/static/main.js`、fullscreen TUI 触摸适配、移动端终端 mouse tracking
+- 错误现象：opencode、herdr 等 fullscreen TUI 在手机上上下滑动时，列表不滚动，历史对话无法查看；单指手势被通用终端 mouse tracking 当成按下/拖动。
+- 根因：现有 Claude fullscreen 触摸适配只识别 Claude，其他开启终端鼠标跟踪的 TUI 继续进入通用 touch mouse 路径，发送 press/move/release 而不是把位移转换为终端 wheel 事件。
+- 实施方案：保留 Claude 现有专用适配和 Grok 既有行为；新增独立的 `opencode_fullscreen_touch.*` 与 `herdr_fullscreen_touch.*` 模块，分别负责各自命令/标题识别和安装入口。二者只共享不含工具身份判断的底层触摸手势机械模块：单指移动超过阈值后按终端行高累积并发送 wheel，tap 发送 click，长按复用 WebShell 本地选择；适配器按“默认选择 -> Claude -> opencode -> herdr -> 通用 mouse tracking”顺序安装，未匹配会话保持原路径。
+- Guard：`TestOpencodeAndHerdrFullscreenTouchAdapters` 覆盖两种工具的命令、路径、Node launcher、标题识别、互斥匹配和 wheel 手势；`TestRuntimeOpencodeHerdrFullscreenTouchAdapterIsolation` 固定独立模块、安装顺序，并禁止 Claude 和通用 mouse tracking 出现 opencode/herdr 分支。
+- 验证结果：定向 Go/Node 行为测试、完整 `go test ./... -count=1`、`node --check`（新增模块、`main.js`、Service Worker）和 `git diff --check` 均通过；真实 iOS Safari、Lazycat WKWebView 与 Android WebView 仍需按设备矩阵复验 opencode/herdr 的滑动、点击、长按选择、双击键盘以及 Claude/Grok 回归。
+- 禁止复现：不得把 opencode/herdr 身份判断并入 Claude、Grok 或通用 mouse tracking；不得在通用路径中增加针对工具名称的分支；不得在未确认工具身份和 mouse tracking 的情况下抢占所有 TUI 触摸事件；工具行为变化时只修改对应工具适配层。
+
 ## 新增记录模板
 
 ```md

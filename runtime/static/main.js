@@ -10,6 +10,10 @@ import {
 } from "./claude_fullscreen_desktop_selection_adapter.js";
 import { isClaudeFullscreenTouchCandidate } from "./claude_fullscreen_touch.js";
 import { installClaudeFullscreenTouchAdapter } from "./claude_fullscreen_touch_adapter.js";
+import { isOpencodeFullscreenTouchCandidate } from "./opencode_fullscreen_touch.js";
+import { installOpencodeFullscreenTouchAdapter } from "./opencode_fullscreen_touch_adapter.js";
+import { isHerdrFullscreenTouchCandidate } from "./herdr_fullscreen_touch.js";
+import { installHerdrFullscreenTouchAdapter } from "./herdr_fullscreen_touch_adapter.js";
 import { createPerformanceTaskMonitor } from "./performance_tasks.js";
 import { createTerminalCacheV2 } from "./terminal_cache_v2.js";
 import { createTerminalHistoryCache } from "./terminal_history_cache.js";
@@ -13160,6 +13164,117 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     });
   };
 
+  const installFullscreenTuiTerminalTouchAdapter = (session, candidate, installer) => {
+    const shell = session?.shellEl;
+    const host = session?.terminalHost;
+    if (!shell || !host || !session?.term) {
+      return;
+    }
+
+    const activateSessionPane = () => {
+      const current = tabs.get(session.tabId);
+      setActivePane(current, session.id, { focus: false });
+    };
+    const terminalMouseEventFromTouch = (event, touch, extra = {}) => ({
+      clientX: Number(touch?.clientX) || 0,
+      clientY: Number(touch?.clientY) || 0,
+      shiftKey: Boolean(event?.shiftKey),
+      altKey: Boolean(event?.altKey),
+      ctrlKey: Boolean(event?.ctrlKey),
+      ...extra,
+    });
+    const sendWheel = (steps, event, touch) => {
+      const count = Math.abs(Math.trunc(Number(steps) || 0));
+      if (!count) {
+        return false;
+      }
+      const wheelEvent = terminalMouseEventFromTouch(event, touch, {
+        deltaX: 0,
+        deltaY: Math.sign(steps),
+      });
+      const sequence = encodeTerminalMouseSequence(session, wheelEvent, "wheel");
+      if (!sequence) {
+        return false;
+      }
+      sendOrQueueInput(session, sequence.repeat(count));
+      return true;
+    };
+    const sendClick = (event, touch) => {
+      const mouseEvent = terminalMouseEventFromTouch(event, touch);
+      const press = encodeTerminalMouseSequence(session, mouseEvent, "press", 0);
+      if (!press) {
+        return false;
+      }
+      const release = encodeTerminalMouseSequence(session, mouseEvent, "release", 0);
+      sendOrQueueInput(session, press + release);
+      return true;
+    };
+
+    installer({
+      shell,
+      shouldStart: (event) => {
+        if (
+          !isTouchShortcutLayout()
+          || event.touches.length !== 1
+          || !candidate(session, { mouseTracking: Boolean(terminalMouseTrackingState(session)) })
+          || (mobileActionSheet && !mobileActionSheet.hidden)
+        ) {
+          return false;
+        }
+        const target = event.target;
+        return (
+          target instanceof Element
+          && !target.closest(".mobile-selection-handle")
+          && target.closest(".terminal-host") === host
+        );
+      },
+      cellFromPoint: (clientX, clientY) => terminalCellFromPoint(session, clientX, clientY),
+      activatePane: activateSessionPane,
+      markContextMenuCandidate: markTerminalTouchContextMenuCandidate,
+      blurInput: () => blurTerminalInput(session),
+      suppressTouchScroll: () => suppressTerminalTouchScroll(session),
+      applySelection: (start, end) => {
+        session.selectAllBufferActive = false;
+        applyTerminalSelection(session, start, end);
+      },
+      updateSelectionHandles: () => updateMobileSelectionHandles(session),
+      updateSelectionAutoScroll: (state, applyPoint) => updateMobileSelectionAutoScroll(session, state, applyPoint),
+      stopSelectionAutoScroll: stopMobileSelectionAutoScroll,
+      clearSelectionIfTapOutside: (touch) => clearMobileSelectionIfTapOutside(session, touch),
+      hasSelection: () => Boolean(session.term?.hasSelection?.() || session.selectAllBufferActive),
+      consumeKeyboardClaim: (event) => mobileKeyboardClaimedTouchEnds.delete(event),
+      prepareMouseInput: () => claimTerminalSize(session),
+      rowHeight: () => {
+        const renderer = session.term?.renderer;
+        return Math.max(
+          touchShortcutMoveThresholdPx,
+          Number(renderer?.getMetrics?.().height) || Number(renderer?.charHeight) || 18,
+        );
+      },
+      sendWheel,
+      sendClick,
+      registerCleanup: (callback) => addSessionCleanup(session, callback),
+      moveThresholdPx: touchShortcutMoveThresholdPx,
+      longPressDelayMs: touchSelectionLongPressDelayMs,
+    });
+  };
+
+  const installOpencodeTerminalTouchAdapter = (session) => {
+    installFullscreenTuiTerminalTouchAdapter(
+      session,
+      (currentSession, state) => isOpencodeFullscreenTouchCandidate(currentSession, state),
+      installOpencodeFullscreenTouchAdapter,
+    );
+  };
+
+  const installHerdrTerminalTouchAdapter = (session) => {
+    installFullscreenTuiTerminalTouchAdapter(
+      session,
+      (currentSession, state) => isHerdrFullscreenTouchCandidate(currentSession, state),
+      installHerdrFullscreenTouchAdapter,
+    );
+  };
+
   const installClaudeTerminalContextMenuAdapter = (session) => {
     const shell = session?.shellEl;
     const host = session?.terminalHost;
@@ -16289,6 +16404,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     installRendererCellSeamPatch(session);
     installMobileTouchSelection(session);
     installClaudeTerminalTouchAdapter(session);
+    installOpencodeTerminalTouchAdapter(session);
+    installHerdrTerminalTouchAdapter(session);
     installClaudeTerminalContextMenuAdapter(session);
     installClaudeTerminalDesktopSelectionAdapter(session);
     installTerminalMouseTracking(session);
