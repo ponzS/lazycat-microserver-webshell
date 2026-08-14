@@ -575,6 +575,57 @@ git diff --check
 - 验证结果：本轮定向 Go IME/resize 测试、完整 `go test ./... -count=1`、`go test -race ./... -count=1`、`node --check runtime/static/main.js`、Service Worker JavaScript 语法检查和 `git diff --check` 均通过。真实 iOS Safari、Lazycat WKWebView、Android WebView 与 Windows WebView 仍需复验连续中文、行尾换行、候选切换、删除、语音输入、键盘收起和旋转。
 - 禁止复现：textarea 不得再次跟随终端光标列缩小或跟随光标行移动；不得在每个 `compositionend` 释放并重建 viewport 基线；不得让候选预览承担原生 IME 输入载体职责；不得通过阻止 composition 默认事件修复几何问题。
 
+### LCMD-20260814-03：Android 首次进入首帧预览覆盖输入框导致双击不弹键盘
+
+- 日期：2026-08-14
+- 来源：用户现场问题；首帧缓存优化后的 Android WebView 首次进入终端页面
+- 影响模块：`runtime/static/main.js`、`runtime/static/style.css`、Ghostty helper textarea 与缓存首帧预览层
+- 错误现象：Android 首次进入 WebShell 终端时，双击事件和顶部提示均有反应，但软键盘不展开；新建 tab 或等待并返回原 tab 后恢复。问题集中在缓存首帧仍显示、真实 canvas 尚未 ready 的时间窗口。
+- 根因：Ghostty 先将 canvas 和 helper textarea 添加到 `terminal-host`，WebShell 再追加缓存预览图。预览图与 textarea 原先同为 `z-index: 1`，后置预览因此覆盖原生编辑控件。`pointer-events:none` 允许双击穿透并触发同步 `focus()`，但部分 Android WebView 不会为被覆盖的 textarea 拉起输入法。首帧优化提前显示预览，扩大了该窗口。
+- 实施方案：helper textarea 固定为绝对定位并提升到 `z-index: 3`，高于缓存预览/frame-hold (`z-index: 1`) 和 composition 预览 (`z-index: 2`)；保留预览层不可交互属性与双击 capture 同步 focus 路径。
+- Guard：新增 `TestRuntimeAndroidKeyboardFocusStaysAboveCachedFrame`，固定 textarea 层级、预览层层级及 Ghostty canvas/textarea 结构；原有 `TestRuntimeTouchKeyboardRequiresDoubleTapOnWideTouchScreens`、`TestRuntimeTouchKeyboardFocusPrecedesTouchConsumers` 继续覆盖手势授权和同步 focus。
+- 验证结果：定向触摸键盘 Go 测试、完整 `go test ./... -count=1`、`go test -race ./... -count=1`、`node --check`（`main.js`、`ghostty-web.js`、Service Worker、Cache API runtime）和 `git diff --check` 通过；`lzc-cli project release` 已生成 `cloud.lazycat.webshell.lcmd-v1.0.27.lpk`。真实 Android WebView 首次进入缓存命中场景仍需实机复验。
+- 禁止复现：缓存首帧、frame-hold 或 composition 预览不得覆盖 helper textarea；不得通过移除同步 focus 或放开预览 pointer events 来修复键盘；输入控件层级调整不能破坏终端触摸事件穿透。
+
+### LCMD-20260814-04：键盘态首次自动换行后最新终端行被底部栏遮挡
+
+- 日期：2026-08-14
+- 来源：中文 IME 几何稳定修复后的用户现场复验；首次输入超过键盘态可见终端底线时出现
+- 发布：LPK version `1.0.28`
+- 影响模块：`runtime/static/main.js` 移动端 terminal viewport pan、Ghostty `onRender` 与 PTY 输出回显
+- 错误现象：键盘首次展开后，输入内容在底部发生自动换行时，终端最新一行继续落到移动快捷栏下方；收起键盘、手动滚到底部并重新展开后，后续换行和输出又能持续显示在底部栏上方。
+- 根因：Ghostty 的逻辑 viewport 始终保持在底部，问题不在 `viewportY` 或 scrollback。键盘态通过 `terminalViewportPanY` 对 Canvas、textarea 和 composition preview 应用额外 `translateY`，但该平移只在 visual viewport、pane resize 和输入锁同步时计算。PTY 回显、自动换行或整屏滚动更新光标后，成功 render 没有重新计算平移，因此首次键盘会话继续使用键盘刚展开时的旧光标基线；手动滚动和重新展开键盘会触发几何同步，所以看似恢复。
+- 实施方案：在 Ghostty 成功 `onRender` 回调完成 pane presentation generation 提交后同步 `syncTerminalViewportPan(session)`，让 PTY 回显、换行、滚屏和渲染重试都以已经提交的最新光标重新计算键盘避让。保持现有用户输入时回到底部的语义，不对普通后台输出全局强制 `scrollToBottom()`，避免破坏用户主动查看历史。
+- Guard：新增 `TestRuntimeMobileKeyboardPanTracksRenderedTerminal`，固定成功 render 必须在 presentation 提交后同步键盘平移；`TestRuntimeTerminalCanvasResidueGuard` 同时固定该回调继续保留 pane 呈现代际提交。
+- 验证结果：定向键盘、IME 与 Canvas guard、完整 `go test ./... -count=1`、`go test -race ./... -count=1`、运行时 JavaScript `node --check` 和 `git diff --check` 均通过；`lzc-cli project release` 已生成 `cloud.lazycat.webshell.lcmd-v1.0.28.lpk`，包内 `package.yml` 与 `.lpk-version` 均为 `1.0.28`，LPK SHA-256 为 `a0441a3e70b49805ec04e4f485d78d344840e5373c866529138dec3cf4654790`。真实 Android WebView 仍需复验“键盘首次展开 -> 输入到自动换行 -> 连续输出”的底部可见性。
+- 禁止复现：不得只在 viewport resize 时计算键盘平移；不得以每次输出强制滚到底部代替视觉避让同步；不得让平移更新早于 Ghostty 成功提交最新光标的 render。
+
+### LCMD-20260814-05：Android helper textarea 获得焦点但首次双击仍不启动输入法
+
+- 日期：2026-08-14
+- 来源：LCMD-20260814-03 层级修复后的 Android 实机复验；顶部双击提示有状态反应但软键盘仍不展开
+- 发布：LPK version `1.0.28`
+- 影响模块：`runtime/static/main.js` 双击 capture、helper textarea focus transaction 与 Android Virtual Keyboard 激活
+- 错误现象：Android 首次进入终端后双击事件能够被页面识别，textarea 甚至可能成为 `document.activeElement`，但 WebView 没有启动软键盘；新建 tab 造成输入控件焦点切换后，原 tab 也可能恢复。
+- 根因：提高 textarea 层级只解决了首帧预览覆盖，仍不足以满足部分 Android WebView 的输入法激活条件。双击路径原先先取消 `touchend` 默认行为，再对长期保持 `pointer-events:none` 的透明 textarea 调用 `focus()`；当 WebView 只提交 DOM 焦点却没有启动 IME 时，后续对同一 active element 重复 `focus()` 也不会形成新的输入连接。
+- 实施方案：为明确的移动键盘请求增加独立 focus transaction。Android 双击在同步用户手势内先临时开放 textarea pointer hit-test，必要时对已经 active 但未组成输入的控件执行真实 blur/focus 过渡，完成 focus 后调用可用的 `navigator.virtualKeyboard.show()`，最后恢复不可交互样式并取消 touch 默认行为。普通程序化 terminal focus 不进入该路径；移动快捷键只请求键盘、不强制 blur/refocus，避免已展开键盘闪动。缓存预览、frame-hold 和 composition preview 的既有层级保持不变。
+- Guard：扩展 `TestRuntimeTouchKeyboardFocusPrecedesTouchConsumers`，固定键盘 focus 发生在 `touchend.preventDefault()` 之前且保持同步；扩展 `TestRuntimeAndroidKeyboardFocusStaysAboveCachedFrame`，固定 Android focus transaction、临时 pointer 激活、blur/focus 恢复和 Virtual Keyboard 可选调用。
+- 验证结果：定向触摸键盘、IME 与缓存层级 guard、完整 `go test ./... -count=1`、`go test -race ./... -count=1`、运行时 JavaScript `node --check` 和 `git diff --check` 均通过；`lzc-cli project release` 已生成 `cloud.lazycat.webshell.lcmd-v1.0.28.lpk`，包内 `package.yml` 与 `.lpk-version` 均为 `1.0.28`，LPK SHA-256 为 `a0441a3e70b49805ec04e4f485d78d344840e5373c866529138dec3cf4654790`。真实 Android WebView 仍需在首次进入、缓存命中和无缓存三个场景复验第一次双击，并回归单击、拖动、长按选择、Claude/Grok/opencode/herdr 触摸路径。
+- 禁止复现：不得把异步 retry 作为首次键盘 focus 的主路径；不得在 `preventDefault()` 后才请求 Android 输入法；不得让普通 tab 激活或移动快捷键无条件执行 blur/refocus；不得恢复 textarea 被首帧层覆盖的层级。
+
+### LCMD-20260814-06：首次交互被晚到初始化焦点和错误 IME pan 锁覆盖
+
+- 日期：2026-08-14
+- 来源：`LCMD-20260814-04`、`LCMD-20260814-05` 实机复验；两个问题首次进入仍存在，但切换 tab 并重新聚焦一到两次后同时恢复
+- 发布：LPK version `1.0.29`
+- 影响模块：`runtime/static/main.js` workspace/tab 初始化、WebSocket open、移动端 helper textarea focus、IME viewport 锁和 terminal viewport pan
+- 错误现象：缓存首帧显示后立即双击，顶部提示能识别手势但 Android 键盘仍可能不展开；键盘成功展开后第一次输入到自动换行，最新一行仍可能落到底部快捷栏下方。切换 tab 或重复失焦/聚焦会释放旧状态，连接和尺寸初始化稳定后两个问题消失。
+- 根因：首帧优化把视觉可见时间提前到 workspace、首次 fit、warm replay 和 WebSocket open 尚未全部结束的窗口，但初始化回调仍拥有输入焦点副作用。`setActivePane()` 的 rAF 和 WebSocket `open` 会晚到调用通用 `term.focus()`；在触摸布局中，调用落在 600ms 授权窗口内会在非用户手势中建立只有 DOM focus 的输入状态，落在窗口外又会主动执行 blur，均可覆盖刚完成的双击键盘事务。另一个独立状态错误是焦点会话级 `inputViewportLock` 同时保存了 `panY`，所以成功 render 后虽然重新同步，自动换行后的光标仍只能得到旧平移；锁若在 Android 键盘 viewport 收缩前建立，还会保存 `keyboardActive=false` 并忽略随后真实的键盘展开几何。
+- 实施方案：给 terminal focus 增加明确来源，双击和移动快捷键保持同步 `user` 请求；workspace、tab 激活和 WebSocket open 统一经 `system` focus，触摸布局中的 system 路径只在 textarea 已经 active 时维护位置，不再 focus 或 blur，桌面焦点行为保持不变。IME 锁只保存 viewport height、reference height、inset、安全偏移和 keyboard active，不再保存光标驱动的 `panY`；render 后始终按锁定几何与最新 Ghostty 光标动态计算 pan。锁在键盘尚未展开时建立且随后检测到真实 viewport 收缩，会一次性升级为键盘态基线，再继续屏蔽候选窗抖动。
+- Guard：新增 `TestRuntimeInitializationFocusCannotOverrideMobileKeyboard`，固定初始化/连接焦点使用 system 来源且不得进入移动端 blur；扩展 `TestRuntimeMobileKeyboardPanTracksRenderedTerminal`，禁止 viewport 锁保存 `panY` 并固定延迟键盘展开时的锁升级；更新 `TestRuntimeMobileIMECompositionPreviewVisible`，移除错误的固定 pan guard。既有双击同步 focus、Android 缓存层级、中文 composition、tab resize 和 fullscreen TUI 触摸 guard 继续回归。
+- 验证结果：定向初始化焦点、Android 键盘、IME 与 terminal pan guard、完整 `go test ./... -count=1`、`go test -race ./... -count=1`、运行时 JavaScript `node --check` 和 `git diff --check` 均通过；`lzc-cli project release` 已生成 `cloud.lazycat.webshell.lcmd-v1.0.29.lpk`，包内 `package.yml` 与 `.lpk-version` 均为 `1.0.29`，运行时包含 system/user focus 隔离、延迟键盘锁升级和 render 后动态 pan，且不再包含固定 `panY` 锁。LPK SHA-256 为 `1e504ad558edbdc08b919716eefaddabb5c541fcc35e282a610bb48ac54140ae`。真实 Android WebView 仍需复验首次进入缓存命中/无缓存、第一次双击、立即输入到自动换行及初始化期间连接完成的交错时序。
+- 禁止复现：移动端初始化、连接、replay、resize 或 tab 激活任务不得取得用户键盘焦点所有权；无用户手势的 system focus 不得 blur 已有输入；IME viewport 锁不得包含随光标变化的 pan；键盘打开前捕获的非键盘基线不得屏蔽随后真实的键盘收缩事件。
+
 ## 新增记录模板
 
 ```md

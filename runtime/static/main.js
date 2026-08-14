@@ -7833,10 +7833,6 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   );
 
   const terminalViewportPanY = (session) => {
-    const lockedPanY = Number(session?.inputViewportLock?.panY);
-    if (session?.inputViewportLock && Number.isFinite(lockedPanY)) {
-      return Math.max(0, lockedPanY);
-    }
     if (!isMobileKeyboardResizeSuppressed()) {
       return 0;
     }
@@ -7919,7 +7915,6 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       keyboardInsetBottom: mobileKeyboardInsetBottom,
       clientBottomSafeOffset: mobileClientBottomSafeOffset,
       keyboardActive: mobileKeyboardViewportActive,
-      panY: terminalViewportPanY(session),
     };
     terminalInputViewportLockSession = session;
   };
@@ -8190,7 +8185,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     textarea.style.background = "transparent";
     textarea.style.caretColor = "transparent";
     textarea.style.pointerEvents = "none";
-    textarea.style.zIndex = "1";
+    // Keep the native editor visible to Android WebView even while a cached frame is on top of the canvas.
+    textarea.style.zIndex = "3";
     if (textarea.scrollTop !== 0) {
       textarea.scrollTop = 0;
     }
@@ -8204,27 +8200,81 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     });
   };
 
-  const focusTerminalInput = (session) => {
+  const requestAndroidSoftKeyboard = (textarea) => {
+    if (!isAndroidPlatform() || document.activeElement !== textarea) {
+      return false;
+    }
+    const keyboard = navigator.virtualKeyboard;
+    if (!keyboard || typeof keyboard.show !== "function") {
+      return false;
+    }
+    try {
+      const result = keyboard.show();
+      result?.catch?.(() => {});
+      return true;
+    } catch (error) {
+      return false;
+    }
+  };
+
+  const focusTerminalInput = (session, {
+    requestMobileKeyboard = false,
+    forceMobileFocusTransition = false,
+    focusSource = "user",
+  } = {}) => {
     const textarea = session?.term?.textarea;
     if (!textarea) {
-      return;
+      return false;
+    }
+    // Initialization and connection callbacks must not steal or blur a mobile user gesture.
+    if (requiresTouchKeyboardDoubleTap() && focusSource === "system") {
+      if (document.activeElement !== textarea) {
+        return false;
+      }
+      positionTerminalInput(session);
+      resetTerminalHostViewport(session, { clean: true });
+      updateMobileActiveTabTitle();
+      return true;
     }
     if (requiresTouchKeyboardDoubleTap() && performance.now() > Number(session?.allowMobileKeyboardFocusUntil || 0)) {
       blurTerminalInput(session);
-      return;
+      return false;
+    }
+    const activateAndroidKeyboard = requestMobileKeyboard && isAndroidPlatform();
+    if (
+      activateAndroidKeyboard
+      && forceMobileFocusTransition
+      && document.activeElement === textarea
+      && !session.composingIME
+    ) {
+      textarea.blur();
     }
     if (document.activeElement !== textarea) {
       session.terminalInputAnchor = null;
     }
     positionTerminalInput(session);
-    try {
-      textarea.focus({ preventScroll: true });
-    } catch (error) {
-      textarea.focus();
+    const previousPointerEvents = textarea.style.pointerEvents;
+    if (activateAndroidKeyboard) {
+      textarea.style.pointerEvents = "auto";
     }
-    prepareTerminalTextareaForInput(session);
+    try {
+      try {
+        textarea.focus({ preventScroll: true });
+      } catch (error) {
+        textarea.focus();
+      }
+      prepareTerminalTextareaForInput(session);
+      if (requestMobileKeyboard) {
+        requestAndroidSoftKeyboard(textarea);
+      }
+    } finally {
+      if (activateAndroidKeyboard) {
+        textarea.style.pointerEvents = previousPointerEvents || "none";
+      }
+    }
     resetTerminalHostViewport(session, { clean: true });
     updateMobileActiveTabTitle();
+    return document.activeElement === textarea;
   };
 
   const blurTerminalInput = (session) => {
@@ -8267,7 +8317,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return;
     }
     targetSession.allowMobileKeyboardFocusUntil = performance.now() + mobileKeyboardFocusAllowWindowMs;
-    focusTerminalInput(targetSession);
+    focusTerminalInput(targetSession, { requestMobileKeyboard: true });
   };
 
   const shouldPreserveMobileKeyboardForShortcut = (shortcut) => String(shortcut?.action || "") !== "open_mobile_menu";
@@ -8287,7 +8337,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (requiresTouchKeyboardDoubleTap()) {
       session.allowMobileKeyboardFocusUntil = performance.now() + mobileKeyboardFocusAllowWindowMs;
     }
-    focusTerminalInput(session);
+    focusTerminalInput(session, { requestMobileKeyboard: true });
   };
 
   const setTerminalInputComposing = (session, composing) => {
@@ -8683,7 +8733,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     textarea.setAttribute("enterkeyhint", "enter");
     textarea.setAttribute("rows", "1");
     textarea.setAttribute("wrap", "off");
-    term.focus = () => focusTerminalInput(session);
+    term.focus = () => focusTerminalInput(session, { focusSource: "system" });
     textarea.addEventListener("focus", () => {
       positionTerminalInput(session);
       updateMobileActiveTabTitle();
@@ -8842,10 +8892,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       }
       session.allowMobileKeyboardFocusUntil = now + mobileKeyboardFocusAllowWindowMs;
       mobileKeyboardClaimedTouchEnds.add(event);
+      focusTerminalInput(session, {
+        requestMobileKeyboard: true,
+        forceMobileFocusTransition: true,
+      });
       if (event.cancelable) {
         event.preventDefault();
       }
-      focusTerminalInput(session);
     };
     const settleMobileTap = (event) => {
       const finishState = mobileTapFinishState;
@@ -9588,10 +9641,36 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       releaseTerminalInputViewportLock(terminalInputViewportLockSession, { resync: false });
     }
     let inputLock = ignoreTerminalInputLock ? null : activeTerminalInputViewportLock();
+    const lockedViewportBottomInset = inputLock ? measureMobileViewportBottomInset() : 0;
+    const keyboardOpenedAfterLock = Boolean(
+      inputLock
+      && !inputLock.keyboardActive
+      && document.activeElement === inputLock.session?.term?.textarea
+      && (
+        Number(inputLock.viewportHeight || 0) - nextHeight > mobileKeyboardInsetThresholdPx
+        || lockedViewportBottomInset > mobileKeyboardInsetThresholdPx
+      )
+    );
+    if (keyboardOpenedAfterLock) {
+      const promotedKeyboardInset = useKeyboardInset ? lockedViewportBottomInset : 0;
+      const promotedSafeOffset = promotedKeyboardInset === 0
+        && lockedViewportBottomInset > 0
+        && lockedViewportBottomInset <= mobileKeyboardInsetThresholdPx
+        ? lockedViewportBottomInset
+        : 0;
+      inputLock.session.inputViewportLock = {
+        ...inputLock.session.inputViewportLock,
+        viewportHeight: nextHeight,
+        keyboardInsetBottom: promotedKeyboardInset,
+        clientBottomSafeOffset: promotedSafeOffset,
+        keyboardActive: true,
+      };
+      inputLock = { session: inputLock.session, ...inputLock.session.inputViewportLock };
+    }
     if (
       inputLock?.keyboardActive
       && nextHeight - inputLock.viewportHeight > mobileKeyboardInsetThresholdPx
-      && measureMobileViewportBottomInset() <= mobileKeyboardInsetThresholdPx
+      && lockedViewportBottomInset <= mobileKeyboardInsetThresholdPx
     ) {
       releaseTerminalInputViewportLock(inputLock.session, { resync: false });
       inputLock = null;
@@ -10834,7 +10913,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       }
       resetGrokTouchKeyboardState(true);
       session.allowMobileKeyboardFocusUntil = now + mobileKeyboardFocusAllowWindowMs;
-      focusTerminalInput(session);
+      focusTerminalInput(session, {
+        requestMobileKeyboard: true,
+        forceMobileFocusTransition: true,
+      });
     };
 
     const handleMouseDown = (event) => {
@@ -16548,7 +16630,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     installTerminalMouseTracking(session);
     installDesktopMouseClipboard(session);
     installTerminalResizeObserver(session);
-    const renderDisposable = typeof term.onRender === "function" ? term.onRender(() => markPaneRenderedIfMeasurable(session)) : null;
+    const renderDisposable = typeof term.onRender === "function" ? term.onRender(() => {
+      markPaneRenderedIfMeasurable(session);
+      syncTerminalViewportPan(session);
+    }) : null;
     if (renderDisposable && typeof renderDisposable.dispose === "function") {
       session.cleanupCallbacks.push(() => renderDisposable.dispose());
     }

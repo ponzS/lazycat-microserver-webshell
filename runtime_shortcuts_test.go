@@ -828,7 +828,7 @@ func TestRuntimePasteShortcutUsesNativePasteEvent(t *testing.T) {
 		`return (event.metaKey && !event.ctrlKey) || ctrlShiftPaste;`,
 		`return event.ctrlKey && !event.metaKey;`,
 		`const focusTerminalForNativePasteShortcut = (session = activeSession()) => {`,
-		`focusTerminalInput(session);`,
+		`focusTerminalInput(session, { requestMobileKeyboard: true });`,
 		`case "paste_terminal":`,
 		`focusTerminalForNativePasteShortcut();`,
 		`if (action === "paste_terminal") {`,
@@ -1175,7 +1175,7 @@ func TestRuntimeTouchKeyboardFocusPrecedesTouchConsumers(t *testing.T) {
 	}
 
 	finishMobileTap := sourceBetween(t, inputFocus, `    const finishMobileTap = (event) => {`, `    const cancelMobileTap = () => {`)
-	if !strings.Contains(finishMobileTap, `focusTerminalInput(session);`) {
+	if !strings.Contains(finishMobileTap, `forceMobileFocusTransition: true,`) {
 		t.Fatal("runtime touch keyboard focus must run directly from touchend")
 	}
 	for _, forbidden := range []string{"requestAnimationFrame", "setTimeout", "Promise"} {
@@ -1188,6 +1188,145 @@ func TestRuntimeTouchKeyboardFocusPrecedesTouchConsumers(t *testing.T) {
 	installMouseTracking := strings.Index(source, `installTerminalMouseTracking(session);`)
 	if installInputFocus < 0 || installMouseTracking < 0 || installInputFocus > installMouseTracking {
 		t.Fatal("runtime touch keyboard capture listener must be installed before terminal mouse tracking")
+	}
+	focusPosition := strings.Index(finishMobileTap, `focusTerminalInput(session, {`)
+	preventPosition := strings.Index(finishMobileTap, `event.preventDefault();`)
+	if focusPosition < 0 || preventPosition < 0 || focusPosition > preventPosition {
+		t.Fatal("runtime touch keyboard focus must run before cancelling the Android touchend default action")
+	}
+}
+
+func TestRuntimeAndroidKeyboardFocusStaysAboveCachedFrame(t *testing.T) {
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(main.js) error = %v", err)
+	}
+	styleData, err := os.ReadFile("runtime/static/style.css")
+	if err != nil {
+		t.Fatalf("ReadFile(style.css) error = %v", err)
+	}
+	rendererData, err := os.ReadFile("runtime/static/ghostty-web.js")
+	if err != nil {
+		t.Fatalf("ReadFile(ghostty-web.js) error = %v", err)
+	}
+	mainSource := string(mainData)
+	styleSource := string(styleData)
+	rendererSource := string(rendererData)
+
+	inputPosition := strings.Index(mainSource, `textarea.style.zIndex = "3";`)
+	if inputPosition < 0 {
+		t.Fatal("terminal helper textarea must stay above cached frame layers")
+	}
+	if !strings.Contains(mainSource, `terminalPreview.className = "terminal-cache-preview"`) {
+		t.Fatal("terminal cache preview element is missing")
+	}
+	for _, want := range []string{
+		`.terminal-host textarea {`,
+		`position: absolute;`,
+		`z-index: 3;`,
+		`.terminal-cache-preview,`,
+		`z-index: 1;`,
+		`.terminal-composition-preview {`,
+		`z-index: 2;`,
+	} {
+		if !strings.Contains(styleSource, want) {
+			t.Fatalf("runtime Android keyboard layer guard missing %q", want)
+		}
+	}
+	if !strings.Contains(rendererSource, `this.canvas = document.createElement("canvas")`) ||
+		!strings.Contains(rendererSource, `this.textarea = document.createElement("textarea")`) {
+		t.Fatal("Ghostty terminal must keep canvas and helper textarea creation visible to the layer guard")
+	}
+	if strings.Index(rendererSource, `this.canvas = document.createElement("canvas")`) > strings.Index(rendererSource, `this.textarea = document.createElement("textarea")`) {
+		t.Fatal("Ghostty helper textarea must remain associated with the canvas layer")
+	}
+	inputFocus := sourceBetween(t, mainSource, `  const requestAndroidSoftKeyboard = (textarea) => {`, `  const blurTerminalInput = (session) => {`)
+	for _, want := range []string{
+		`const keyboard = navigator.virtualKeyboard;`,
+		`forceMobileFocusTransition = false,`,
+		`const activateAndroidKeyboard = requestMobileKeyboard && isAndroidPlatform();`,
+		`&& forceMobileFocusTransition`,
+		`&& document.activeElement === textarea`,
+		`textarea.blur();`,
+		`textarea.style.pointerEvents = "auto";`,
+		`textarea.focus({ preventScroll: true });`,
+		`requestAndroidSoftKeyboard(textarea);`,
+	} {
+		if !strings.Contains(inputFocus, want) {
+			t.Fatalf("runtime Android keyboard activation guard missing %q", want)
+		}
+	}
+}
+
+func TestRuntimeMobileKeyboardPanTracksRenderedTerminal(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(main.js) error = %v", err)
+	}
+	source := string(data)
+	renderListener := sourceBetween(t, source,
+		`const renderDisposable = typeof term.onRender === "function" ? term.onRender(() => {`,
+		`    if (renderDisposable && typeof renderDisposable.dispose === "function") {`,
+	)
+	markPosition := strings.Index(renderListener, `markPaneRenderedIfMeasurable(session);`)
+	panPosition := strings.Index(renderListener, `syncTerminalViewportPan(session);`)
+	if markPosition < 0 || panPosition < 0 || panPosition < markPosition {
+		t.Fatal("terminal render completion must refresh the mobile keyboard pan after committing the rendered cursor")
+	}
+	lockBranch := sourceBetween(t, source,
+		`const captureTerminalInputViewportLock = (session) => {`,
+		`const isKeyboardLikeViewportHeightChange = (previousHeight, nextHeight, { orientationChanged = false } = {}) => {`,
+	)
+	if strings.Contains(lockBranch, `panY:`) {
+		t.Fatal("IME viewport lock must not freeze the cursor-driven terminal pan")
+	}
+	for _, want := range []string{
+		`const keyboardOpenedAfterLock = Boolean(`,
+		`inputLock.session.inputViewportLock = {`,
+		`keyboardActive: true,`,
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("IME viewport lock must rebase after a delayed keyboard open, missing %q", want)
+		}
+	}
+}
+
+func TestRuntimeInitializationFocusCannotOverrideMobileKeyboard(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(main.js) error = %v", err)
+	}
+	source := string(data)
+	inputFocus := sourceBetween(t, source,
+		`  const focusTerminalInput = (session, {`,
+		`  const blurTerminalInput = (session) => {`,
+	)
+	for _, want := range []string{
+		`focusSource = "user",`,
+		`focusSource === "system"`,
+		`if (document.activeElement !== textarea) {`,
+		`return false;`,
+		`positionTerminalInput(session);`,
+	} {
+		if !strings.Contains(inputFocus, want) {
+			t.Fatalf("mobile system focus isolation missing %q", want)
+		}
+	}
+	if strings.Contains(sourceBetween(t, inputFocus,
+		`// Initialization and connection callbacks must not steal or blur a mobile user gesture.`,
+		`if (requiresTouchKeyboardDoubleTap() && performance.now() > Number(session?.allowMobileKeyboardFocusUntil || 0)) {`,
+	), `blurTerminalInput(session);`) {
+		t.Fatal("mobile system focus path must not blur the active user input")
+	}
+	if !strings.Contains(source, `term.focus = () => focusTerminalInput(session, { focusSource: "system" });`) {
+		t.Fatal("terminal system focus calls must use the non-stealing focus source")
+	}
+	openBranch := sourceBetween(t, source,
+		`currentSocket.addEventListener("open", () => {`,
+		`currentSocket.addEventListener("message", (event) => {`,
+	)
+	if !strings.Contains(openBranch, `session.term.focus();`) {
+		t.Fatal("socket open should retain desktop focus behavior through the guarded terminal focus wrapper")
 	}
 }
 
@@ -1515,7 +1654,7 @@ func TestRuntimeMobileStickyModifiersApplyToTextInput(t *testing.T) {
 		`codePoint >= 0x20 && codePoint <= 0x7e;`,
 		`const focusMobileKeyboardFromShortcut = (session = activeSession()) => {`,
 		`targetSession.allowMobileKeyboardFocusUntil = performance.now() + mobileKeyboardFocusAllowWindowMs;`,
-		`focusTerminalInput(targetSession);`,
+		`focusTerminalInput(targetSession, { requestMobileKeyboard: true });`,
 		`const inputData = applySticky ? consumeMobileStickyTextInput(rawData) : rawData;`,
 		`last?.data === rawData || last?.rawData === rawData`,
 		`applySticky: shouldApplyMobileStickyTextInput(data, type),`,
@@ -1597,7 +1736,6 @@ func TestRuntimeMobileIMECompositionPreviewVisible(t *testing.T) {
 		`const captureTerminalInputViewportLock = (session) => {`,
 		`syncMobileVisualViewport({ detectOrientation: false, ignoreTerminalInputLock: true });`,
 		`session.inputViewportLock = {`,
-		`panY: terminalViewportPanY(session),`,
 		`const releaseTerminalInputViewportLock = (session, { resync = true } = {}) => {`,
 		`const activeTerminalInputViewportLock = () => {`,
 		`if (!session?.inputViewportLock || document.activeElement !== textarea) {`,
@@ -2381,7 +2519,9 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"installTerminalResizeObserver(session);",
 		"clearTerminalRuntimeBuffer(session);",
 		"clearTerminalCanvasPixels(session);",
-		"term.onRender(() => markPaneRenderedIfMeasurable(session))",
+		`const renderDisposable = typeof term.onRender === "function" ? term.onRender(() => {`,
+		"markPaneRenderedIfMeasurable(session);",
+		"syncTerminalViewportPan(session);",
 		"const resetTerminalForHistoryReplay = (session) => {",
 		"markPaneSyncPending(session);",
 		"session.resetOnNextReplay = false;",
@@ -3058,7 +3198,8 @@ func TestRuntimeGrokMouseTrackingPreservesMobileDoubleTapKeyboard(t *testing.T) 
 		`sendMouseSequence(mouseEvent, "release", 0);`,
 		`resetGrokTouchKeyboardState(true);`,
 		`session.allowMobileKeyboardFocusUntil = now + mobileKeyboardFocusAllowWindowMs;`,
-		`focusTerminalInput(session);`,
+		`requestMobileKeyboard: true,`,
+		`forceMobileFocusTransition: true,`,
 	} {
 		if !strings.Contains(focusBranch, want) {
 			t.Fatalf("runtime Grok touch keyboard focus missing %q", want)
