@@ -1553,19 +1553,37 @@ func TestRuntimeMobileIMECompositionPreviewVisible(t *testing.T) {
 		`const setTerminalTextareaCompositionText = (session, text) => {`,
 		`session.compositionText = normalized;`,
 		`const setTerminalCompositionPreviewVisible = (session, visible) => {`,
-		`const syncTerminalCompositionPreview = (session, { x = 0, y = 0, width = 1, height = 16 } = {}) => {`,
+		`const syncTerminalCompositionPreview = (session, {`,
+		`maxWidth = width,`,
 		`if (session.terminalHost && preview.parentElement !== session.terminalHost) {`,
 		`session.terminalHost.appendChild(preview);`,
 		`const text = session.composingIME ? terminalTextareaCompositionText(session) : "";`,
 		`preview.textContent = text;`,
 		"preview.style.left = `${x}px`;",
+		"preview.style.maxWidth = `${Math.max(maxWidth, width, 2)}px`;",
 		`preview.style.color = activeTheme.foreground;`,
 		`preview.style.background = activeTheme.background;`,
+		`const hostWidth = Math.max(width, Number(session.terminalHost?.clientWidth) || (Number(term.cols) || 1) * width);`,
+		`const hostHeight = Math.max(height, Number(session.terminalHost?.clientHeight) || (Number(term.rows) || 1) * height);`,
+		`const preserveAnchor = document.activeElement === textarea;`,
+		`const previousAnchor = preserveAnchor ? session.terminalInputAnchor : null;`,
+		`session.terminalInputAnchor = { top: anchorTop, indent: anchorIndent };`,
+		`textarea.setAttribute("rows", "1");`,
+		`textarea.setAttribute("wrap", "off");`,
+		`textarea.style.left = "0px";`,
+		"textarea.style.width = `${Math.max(hostWidth, 2)}px`;",
+		"textarea.style.minHeight = `${height}px`;",
+		"textarea.style.maxHeight = `${height}px`;",
 		`textarea.style.opacity = "0.01";`,
 		`textarea.style.outline = "0";`,
 		`textarea.style.boxShadow = "none";`,
 		`textarea.style.webkitAppearance = "none";`,
-		`syncTerminalCompositionPreview(session, { x: left, y: top, width, height });`,
+		`textarea.style.overflowY = "hidden";`,
+		`textarea.style.overflowWrap = "normal";`,
+		`textarea.style.wordBreak = "normal";`,
+		"textarea.style.textIndent = `${anchorIndent}px`;",
+		`textarea.scrollTop = 0;`,
+		`maxWidth: Math.max(width, hostWidth - previewLeft),`,
 		`const detachTerminalHostCompositionListeners = (session) => {`,
 		`["compositionstart", "compositionStartListener"],`,
 		`host.removeEventListener(type, listener);`,
@@ -1576,6 +1594,22 @@ func TestRuntimeMobileIMECompositionPreviewVisible(t *testing.T) {
 		`const blockedHostInputEvents = ["beforeinput", "input", "compositionstart", "compositionupdate", "compositionend"];`,
 		`event.stopImmediatePropagation();`,
 		`installTerminalHostInputIsolation(session);`,
+		`const captureTerminalInputViewportLock = (session) => {`,
+		`syncMobileVisualViewport({ detectOrientation: false, ignoreTerminalInputLock: true });`,
+		`session.inputViewportLock = {`,
+		`panY: terminalViewportPanY(session),`,
+		`const releaseTerminalInputViewportLock = (session, { resync = true } = {}) => {`,
+		`const activeTerminalInputViewportLock = () => {`,
+		`if (!session?.inputViewportLock || document.activeElement !== textarea) {`,
+		`if (composing && !session.inputViewportLock) {`,
+		`captureTerminalInputViewportLock(session);`,
+		`releaseTerminalInputViewportLock(session);`,
+		`const syncMobileVisualViewport = ({ detectOrientation = true, ignoreTerminalInputLock = false } = {}) => {`,
+		`let inputLock = ignoreTerminalInputLock ? null : activeTerminalInputViewportLock();`,
+		`nextHeight - inputLock.viewportHeight > mobileKeyboardInsetThresholdPx`,
+		`releaseTerminalInputViewportLock(inputLock.session, { resync: false });`,
+		`const appliedHeight = inputLock?.viewportHeight || nextHeight;`,
+		`syncTerminalViewportPan(inputLock.session);`,
 		`const compositionPreview = document.createElement("span");`,
 		`compositionPreview.className = "terminal-composition-preview";`,
 		`terminalHost.appendChild(compositionPreview);`,
@@ -1632,11 +1666,27 @@ func TestRuntimeMobileIMECompositionPreviewVisible(t *testing.T) {
 	if strings.Contains(source, `textarea.value = event.data;`) {
 		t.Fatalf("runtime mobile IME preview should not mirror composition text into textarea.value")
 	}
+	for _, forbidden := range []string{
+		`const inputWidth = Math.max(width, hostWidth - left);`,
+		"textarea.style.width = `${Math.max(inputWidth, 2)}px`;",
+		"textarea.style.width = `${Math.max(width, 2)}px`;",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("runtime mobile IME helper textarea must not shrink to the remaining terminal row: %q", forbidden)
+		}
+	}
 	if strings.Contains(source, `host.addEventListener("compositionupdate", () => scheduleTerminalHostViewportReset(session`) {
 		t.Fatalf("runtime mobile IME preview should not keep host composition listeners active")
 	}
 	if strings.Contains(source, `const committedText = event.data || terminalTextareaCompositionText(session);`) {
 		t.Fatalf("runtime mobile IME compositionend must not send preedit text when event.data is empty")
+	}
+	setComposingBranch := sourceBetween(t, source,
+		`const setTerminalInputComposing = (session, composing) => {`,
+		`  const clearTerminalPostCompositionInput = (session) => {`,
+	)
+	if strings.Contains(setComposingBranch, `releaseTerminalInputViewportLock(session);`) {
+		t.Fatalf("runtime mobile IME viewport lock must survive compositionend until keyboard focus ends")
 	}
 	compositionBeforeInputBranch := sourceBetween(t, source,
 		`if (type === "insertCompositionText" || type === "deleteCompositionText" || event.isComposing) {`,
@@ -1671,7 +1721,9 @@ func TestRuntimeMobileIMECompositionPreviewVisible(t *testing.T) {
 	styleSource := string(styleData)
 	for _, want := range []string{
 		`.terminal-composition-preview {`,
+		`overflow-wrap: normal;`,
 		`pointer-events: none;`,
+		`word-break: normal;`,
 		`.terminal-composition-preview[hidden]`,
 	} {
 		if !strings.Contains(styleSource, want) {

@@ -551,6 +551,30 @@ git diff --check
 - 验证结果：定向 Go/Node 行为测试、完整 `go test ./... -count=1`、`node --check`（新增模块、`main.js`、Service Worker）和 `git diff --check` 均通过；真实 iOS Safari、Lazycat WKWebView 与 Android WebView 仍需按设备矩阵复验 opencode/herdr 的滑动、点击、长按选择、双击键盘以及 Claude/Grok 回归。
 - 禁止复现：不得把 opencode/herdr 身份判断并入 Claude、Grok 或通用 mouse tracking；不得在通用路径中增加针对工具名称的分支；不得在未确认工具身份和 mouse tracking 的情况下抢占所有 TUI 触摸事件；工具行为变化时只修改对应工具适配层。
 
+### LCMD-20260814-01：中文预编辑文本增长导致终端逐级上移
+
+- 日期：2026-08-14
+- 来源：用户现场问题；中文输入法处于未确认 composition 状态时，每增加若干中文字符页面底部留白继续增大，终端内容被逐级向上推
+- 影响模块：`runtime/static/main.js` 终端 helper textarea、IME composition 预览、移动端 `visualViewport` 键盘避让与终端 viewport pan
+- 错误现象：英文输入或短中文预编辑时终端位置稳定；中文预编辑文本持续增长后，输入区域看似不断增高，页面底部出现越来越大的空白。实际 textarea CSS 高度没有主动增加，未确认文本也尚未发送到 PTY。
+- 根因：Ghostty helper textarea 被定位在终端光标处并限制为一个字符格宽，但浏览器仍需在该原生可编辑控件内维护完整 IME 预编辑值和组合光标。部分移动 WebView/IME 会随狭窄控件中的预编辑内容增长调整内部组合光标、候选窗锚点或 `visualViewport`；WebShell 又把这些 composition 期间的瞬时 viewport 高度/inset 变化当成键盘几何变化，更新底部 dock 并重新计算 `terminalViewportPanY`，从而把宿主波动逐级放大为终端上移和底部留白。现有 host viewport guard 只清理 `terminal-host` 的滚动和多余节点，没有固定 textarea 自身的单行几何，也没有为 composition 建立稳定 viewport 基线。
+- 实施方案：helper textarea 显式设置 `rows=1`、`wrap=off`、固定且相同的 height/min-height/max-height、禁止纵向 overflow/wrap，并使用从当前光标到终端右边界的稳定宽度，不再保持单字符格宽；预编辑预览继续由独立绝对定位元素绘制并限制在剩余终端宽度。composition 开始前先同步一次真实键盘 viewport，然后锁定当前 viewport height、reference height、键盘 inset、安全偏移和终端 pan；composition update 期间忽略后续 IME 瞬时 viewport 波动，composition end、blur、session 清理或方向变化时释放锁并重新同步真实 viewport。保留原生 composition 默认行为和现有重复上屏去重，不通过清空 textarea 或 `preventDefault()` 修复。
+- Guard：扩展 `TestRuntimeMobileIMECompositionPreviewVisible`，固定单行 textarea 属性、稳定宽高、预览边界、composition viewport 锁的捕获/应用/释放路径，并禁止恢复成单字符格宽；原有 guard 继续禁止 composition 分支清空 textarea、镜像写入 `event.data` 或阻止默认事件。
+- 验证结果：IME/resize 定向 Go 测试、完整 `go test ./... -count=1`、`go test -race ./... -count=1`、`node --check runtime/static/main.js`、Service Worker JavaScript 语法检查和 `git diff --check` 通过。真实 iOS Safari、Lazycat WKWebView、Android WebView 与 Windows WebView 仍需复验连续中文预编辑、候选词切换、删除、语音输入、确认上屏、键盘收起和屏幕旋转。
+- 禁止复现：终端 helper textarea 不得恢复为单字符格宽的多字符原生预编辑载体；composition 文本长度不得改变 textarea 块方向尺寸；composition 期间不得把 IME 候选窗引起的 viewport 波动继续累加到 terminal pan 或移动底部 dock；不得以阻止原生 composition 默认行为换取几何稳定。
+
+### LCMD-20260814-02：终端行尾继续中文输入仍触发一次上移
+
+- 日期：2026-08-14
+- 来源：LCMD-20260814-01 修复后的用户复验；普通位置已稳定，但单行最后一个中文字符后继续输入仍会向上移动
+- 影响模块：`runtime/static/main.js` helper textarea 锚点、中文 composition 生命周期和移动端 viewport 锁
+- 错误现象：上一版把 textarea 宽度改为“终端光标到行尾的剩余宽度”，所以问题不再每个字符触发，而是在光标到达行尾、textarea 再次退化为一个字符格宽时触发。每个候选确认后的 `compositionend` 还会释放锁，下一次 `compositionstart` 把已经发生的上移重新保存为新基线。
+- 根因：原生 IME 输入载体仍随终端光标列/行移动，且其几何边界在行尾变窄；composition 预览虽然独立绘制，但浏览器仍会为原生 textarea 的组合光标和候选窗执行避让。viewport 锁按单次 composition 生命周期工作，无法覆盖连续中文候选之间的焦点会话。
+- 实施方案：textarea 在焦点会话内固定在首次输入位置，使用终端整行宽度和固定高度，并通过 text indent 保留初始候选锚点；终端光标位置只更新独立 `.terminal-composition-preview`。viewport 锁改为焦点会话级，compositionend 不释放，只有 textarea 失焦、键盘检测到真实收起、方向变化或 session 清理才释放；键盘重新收起时仍允许真实 viewport 恢复。
+- Guard：扩展 `TestRuntimeMobileIMECompositionPreviewVisible`，禁止恢复按光标剩余宽度计算的 textarea、固定焦点锚点和整行宽度，并固定 compositionend 不释放 viewport 锁、blur/keyboard close/方向变化释放锁。
+- 验证结果：本轮定向 Go IME/resize 测试、完整 `go test ./... -count=1`、`go test -race ./... -count=1`、`node --check runtime/static/main.js`、Service Worker JavaScript 语法检查和 `git diff --check` 均通过。真实 iOS Safari、Lazycat WKWebView、Android WebView 与 Windows WebView 仍需复验连续中文、行尾换行、候选切换、删除、语音输入、键盘收起和旋转。
+- 禁止复现：textarea 不得再次跟随终端光标列缩小或跟随光标行移动；不得在每个 `compositionend` 释放并重建 viewport 基线；不得让候选预览承担原生 IME 输入载体职责；不得通过阻止 composition 默认事件修复几何问题。
+
 ## 新增记录模板
 
 ```md

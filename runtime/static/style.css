@@ -792,6 +792,10 @@ body.split-resize-active * {
   outline: 0 !important;
   box-shadow: none !important;
   caret-color: transparent !important;
+  overflow: hidden !important;
+  overflow-wrap: normal !important;
+  white-space: pre !important;
+  word-break: normal !important;
   will-change: transform;
 }
 
@@ -894,7 +898,9 @@ body.split-resize-active * {
   margin: 0;
   padding: 0;
   overflow: hidden;
+  overflow-wrap: normal;
   white-space: pre;
+  word-break: normal;
   pointer-events: none;
   will-change: transform;
 }

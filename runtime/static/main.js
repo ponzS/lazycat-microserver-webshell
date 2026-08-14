@@ -703,6 +703,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   let mobileKeyboardResizeReleaseTimer = 0;
   let mobileKeyboardDockMoveTimer = 0;
   let mobileKeyboardDismissRecoverySeq = 0;
+  let terminalInputViewportLockSession = null;
   let themePickerEdgeSwipe = null;
   let mobileOverviewEdgeSwipe = null;
   let resolvedThemeCardWidth = themeCardWidth;
@@ -7832,6 +7833,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   );
 
   const terminalViewportPanY = (session) => {
+    const lockedPanY = Number(session?.inputViewportLock?.panY);
+    if (session?.inputViewportLock && Number.isFinite(lockedPanY)) {
+      return Math.max(0, lockedPanY);
+    }
     if (!isMobileKeyboardResizeSuppressed()) {
       return 0;
     }
@@ -7868,6 +7873,55 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         node.style.willChange = transform ? "transform" : "";
       }
     }
+  };
+
+  // Keep native IME viewport jitter from changing terminal geometry for the whole keyboard focus session.
+  const activeTerminalInputViewportLock = () => {
+    const session = terminalInputViewportLockSession;
+    const textarea = session?.term?.textarea;
+    if (!session?.inputViewportLock || document.activeElement !== textarea) {
+      return null;
+    }
+    return { session, ...session.inputViewportLock };
+  };
+
+  const releaseTerminalInputViewportLock = (session, { resync = true } = {}) => {
+    if (!session) {
+      return;
+    }
+    session.inputViewportLock = null;
+    if (terminalInputViewportLockSession === session) {
+      terminalInputViewportLockSession = null;
+    }
+    if (!resync || !isTouchShortcutLayout()) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      if (
+        session.closed
+        || document.activeElement === session.term?.textarea
+      ) {
+        return;
+      }
+      syncMobileVisualViewport({ detectOrientation: false, ignoreTerminalInputLock: true });
+      scheduleMobileViewportResize();
+    });
+  };
+
+  const captureTerminalInputViewportLock = (session) => {
+    if (!session || session.inputViewportLock || !isTouchShortcutLayout()) {
+      return;
+    }
+    syncMobileVisualViewport({ detectOrientation: false, ignoreTerminalInputLock: true });
+    session.inputViewportLock = {
+      viewportHeight: mobileViewportHeight,
+      referenceHeight: mobileViewportReferenceHeight,
+      keyboardInsetBottom: mobileKeyboardInsetBottom,
+      clientBottomSafeOffset: mobileClientBottomSafeOffset,
+      keyboardActive: mobileKeyboardViewportActive,
+      panY: terminalViewportPanY(session),
+    };
+    terminalInputViewportLockSession = session;
   };
 
   const isKeyboardLikeViewportHeightChange = (previousHeight, nextHeight, { orientationChanged = false } = {}) => {
@@ -8036,7 +8090,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
   };
 
-  const syncTerminalCompositionPreview = (session, { x = 0, y = 0, width = 1, height = 16 } = {}) => {
+  const syncTerminalCompositionPreview = (session, {
+    x = 0,
+    y = 0,
+    width = 1,
+    height = 16,
+    maxWidth = width,
+  } = {}) => {
     const preview = session?.compositionPreview;
     if (!preview) {
       return;
@@ -8053,9 +8113,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     preview.style.left = `${x}px`;
     preview.style.top = `${y}px`;
     preview.style.minWidth = `${Math.max(width, 2)}px`;
+    preview.style.maxWidth = `${Math.max(maxWidth, width, 2)}px`;
     preview.style.height = `${height}px`;
-    preview.style.lineHeight = `${height}px`;
     preview.style.font = `${terminalFontSize}px ${terminalOptionsBase.fontFamily}`;
+    preview.style.lineHeight = `${height}px`;
+    preview.style.boxSizing = "border-box";
     preview.style.color = activeTheme.foreground;
     preview.style.background = activeTheme.background;
     setTerminalCompositionPreviewVisible(session, true);
@@ -8083,15 +8145,28 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     const height = Math.max(1, Number(metrics.height) || Number(terminalFontSize) || 16);
     const cursorX = Math.max(0, Math.min(Math.max(0, (term.cols || 1) - 1), Number(cursor.x) || 0));
     const cursorY = Math.max(0, Math.min(Math.max(0, (term.rows || 1) - 1), Number(cursor.y) || 0));
-    const left = cursorX * width;
-    const top = cursorY * height;
+    const previewLeft = cursorX * width;
+    const previewTop = cursorY * height;
+    const hostWidth = Math.max(width, Number(session.terminalHost?.clientWidth) || (Number(term.cols) || 1) * width);
+    const hostHeight = Math.max(height, Number(session.terminalHost?.clientHeight) || (Number(term.rows) || 1) * height);
+    const preserveAnchor = document.activeElement === textarea;
+    const previousAnchor = preserveAnchor ? session.terminalInputAnchor : null;
+    const anchorTop = Math.max(0, Math.min(hostHeight - height, Number(previousAnchor?.top ?? previewTop) || 0));
+    const anchorIndent = Math.max(0, Math.min(hostWidth - width, Number(previousAnchor?.indent ?? previewLeft) || 0));
+    session.terminalInputAnchor = { top: anchorTop, indent: anchorIndent };
+    textarea.setAttribute("rows", "1");
+    textarea.setAttribute("wrap", "off");
     textarea.style.position = "absolute";
-    textarea.style.left = `${left}px`;
-    textarea.style.top = `${top}px`;
-    textarea.style.width = `${Math.max(width, 2)}px`;
+    textarea.style.left = "0px";
+    textarea.style.top = `${anchorTop}px`;
+    textarea.style.width = `${Math.max(hostWidth, 2)}px`;
+    textarea.style.minWidth = `${Math.max(hostWidth, 2)}px`;
+    textarea.style.maxWidth = `${Math.max(hostWidth, 2)}px`;
     textarea.style.height = `${height}px`;
-    textarea.style.lineHeight = `${height}px`;
+    textarea.style.minHeight = `${height}px`;
+    textarea.style.maxHeight = `${height}px`;
     textarea.style.font = `${terminalFontSize}px ${terminalOptionsBase.fontFamily}`;
+    textarea.style.lineHeight = `${height}px`;
     textarea.style.padding = "0";
     textarea.style.border = "0";
     textarea.style.outline = "0";
@@ -8099,19 +8174,34 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     textarea.style.appearance = "none";
     textarea.style.webkitAppearance = "none";
     textarea.style.margin = "0";
+    textarea.style.boxSizing = "border-box";
     // Windows WebView IME may ignore a focused textarea when it is fully transparent.
     textarea.style.opacity = "0.01";
     textarea.style.clipPath = "none";
     textarea.style.overflow = "hidden";
+    textarea.style.overflowX = "hidden";
+    textarea.style.overflowY = "hidden";
     textarea.style.whiteSpace = "pre";
+    textarea.style.overflowWrap = "normal";
+    textarea.style.wordBreak = "normal";
+    textarea.style.textIndent = `${anchorIndent}px`;
     textarea.style.resize = "none";
     textarea.style.color = "transparent";
     textarea.style.background = "transparent";
     textarea.style.caretColor = "transparent";
     textarea.style.pointerEvents = "none";
     textarea.style.zIndex = "1";
+    if (textarea.scrollTop !== 0) {
+      textarea.scrollTop = 0;
+    }
     prepareTerminalTextareaForInput(session);
-    syncTerminalCompositionPreview(session, { x: left, y: top, width, height });
+    syncTerminalCompositionPreview(session, {
+      x: previewLeft,
+      y: previewTop,
+      width,
+      height,
+      maxWidth: Math.max(width, hostWidth - previewLeft),
+    });
   };
 
   const focusTerminalInput = (session) => {
@@ -8122,6 +8212,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (requiresTouchKeyboardDoubleTap() && performance.now() > Number(session?.allowMobileKeyboardFocusUntil || 0)) {
       blurTerminalInput(session);
       return;
+    }
+    if (document.activeElement !== textarea) {
+      session.terminalInputAnchor = null;
     }
     positionTerminalInput(session);
     try {
@@ -8199,6 +8292,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
 
   const setTerminalInputComposing = (session, composing) => {
     const wasComposing = Boolean(session.composingIME);
+    if (composing && !session.inputViewportLock) {
+      captureTerminalInputViewportLock(session);
+    }
     session.composingIME = composing;
     if (composing) {
       if (!wasComposing) {
@@ -8585,9 +8681,16 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     textarea.setAttribute("inputmode", "text");
     textarea.setAttribute("enterkeyhint", "enter");
+    textarea.setAttribute("rows", "1");
+    textarea.setAttribute("wrap", "off");
     term.focus = () => focusTerminalInput(session);
-    textarea.addEventListener("focus", updateMobileActiveTabTitle);
+    textarea.addEventListener("focus", () => {
+      positionTerminalInput(session);
+      updateMobileActiveTabTitle();
+    });
     textarea.addEventListener("blur", () => {
+      session.terminalInputAnchor = null;
+      releaseTerminalInputViewportLock(session);
       updateMobileActiveTabTitle();
       scheduleMobileKeyboardDismissRecovery();
     });
@@ -8676,6 +8779,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       session.lastPasteAt = performance.now();
       pasteIntoSession(session, text).catch((error) => showToast(error.message));
     }, { capture: true });
+    addSessionCleanup(session, () => releaseTerminalInputViewportLock(session, { resync: false }));
     host.addEventListener("pointerdown", (event) => {
       if (event.pointerType === "touch" || event.pointerType === "pen") {
         return;
@@ -9471,17 +9575,48 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return dockChanged;
   };
 
-  const syncMobileVisualViewport = ({ detectOrientation = true } = {}) => {
+  const syncMobileVisualViewport = ({ detectOrientation = true, ignoreTerminalInputLock = false } = {}) => {
     const supportsViewportInsets = usesMobileViewportInsets();
     const shouldResizeTerminal = supportsViewportInsets && isTouchShortcutLayout();
     const useKeyboardInset = isIOSPlatform();
     const visualViewport = window.visualViewport;
     const nextHeight = Math.max(0, Math.round(visualViewport?.height || window.innerHeight || 0));
-    if (nextHeight > 0) {
-      document.documentElement.style.setProperty("--mobile-visual-viewport-height", `${nextHeight}px`);
-    }
     const orientationChanged = detectOrientation && rememberMobileViewportOrientationChange();
     const shouldRecoverOrientation = orientationChanged || (detectOrientation && mobileOrientationRecoveryTimer);
+    if (orientationChanged && terminalInputViewportLockSession) {
+      terminalInputViewportLockSession.terminalInputAnchor = null;
+      releaseTerminalInputViewportLock(terminalInputViewportLockSession, { resync: false });
+    }
+    let inputLock = ignoreTerminalInputLock ? null : activeTerminalInputViewportLock();
+    if (
+      inputLock?.keyboardActive
+      && nextHeight - inputLock.viewportHeight > mobileKeyboardInsetThresholdPx
+      && measureMobileViewportBottomInset() <= mobileKeyboardInsetThresholdPx
+    ) {
+      releaseTerminalInputViewportLock(inputLock.session, { resync: false });
+      inputLock = null;
+    }
+    const appliedHeight = inputLock?.viewportHeight || nextHeight;
+    if (appliedHeight > 0) {
+      document.documentElement.style.setProperty("--mobile-visual-viewport-height", `${appliedHeight}px`);
+    }
+    if (inputLock && !orientationChanged) {
+      mobileViewportHeight = inputLock.viewportHeight;
+      mobileViewportReferenceHeight = inputLock.referenceHeight;
+      if (
+        mobileKeyboardInsetBottom !== inputLock.keyboardInsetBottom
+        || mobileClientBottomSafeOffset !== inputLock.clientBottomSafeOffset
+        || mobileKeyboardViewportActive !== inputLock.keyboardActive
+      ) {
+        applyMobileViewportInsets(
+          inputLock.keyboardInsetBottom,
+          inputLock.clientBottomSafeOffset,
+          { animateDock: false, keyboardActive: inputLock.keyboardActive },
+        );
+      }
+      syncTerminalViewportPan(inputLock.session);
+      return;
+    }
     if (orientationChanged && nextHeight > 0) {
       mobileViewportReferenceHeight = nextHeight;
     }
@@ -16346,6 +16481,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       suppressGeneratedTerminalInputUntil: 0,
       inputLocked: false,
       composingIME: false,
+      terminalInputAnchor: null,
+      inputViewportLock: null,
       exitExpected: false,
       workspaceExitPending: false,
       closed: false,
