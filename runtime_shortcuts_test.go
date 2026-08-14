@@ -33,6 +33,18 @@ func TestTerminalResizeSchedulerBehavior(t *testing.T) {
 	}
 }
 
+func TestInstancesLoaderBehavior(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is unavailable")
+	}
+	command := exec.Command(node, "--test", "instances_loader_test.mjs")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("instances loader tests failed: %v\n%s", err, output)
+	}
+}
+
 func TestKittyGraphicsBehavior(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -68,6 +80,7 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 	}
 	mainSource := string(mainData)
 	for _, want := range []string{
+		`import { createInstancesLoader } from "./instances_loader.js";`,
 		`import { createTerminalCacheV2 } from "./terminal_cache_v2.js";`,
 		`import { createTerminalResizeScheduler } from "./terminal_resize_scheduler.js";`,
 		`isClientInstanceName(session.name)`,
@@ -148,6 +161,9 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 	workerSource := string(workerData)
 	if !strings.Contains(workerSource, "${assetBase}terminal_resize_scheduler.js") {
 		t.Fatal("service worker must precache the terminal resize scheduler")
+	}
+	if !strings.Contains(workerSource, "${assetBase}instances_loader.js") {
+		t.Fatal("service worker must precache the instances loader")
 	}
 	if !strings.Contains(workerSource, "${assetBase}kitty_graphics.js") {
 		t.Fatal("service worker must precache Kitty Graphics support")

@@ -15,6 +15,7 @@ import { installOpencodeFullscreenTouchAdapter } from "./opencode_fullscreen_tou
 import { isHerdrFullscreenTouchCandidate } from "./herdr_fullscreen_touch.js";
 import { installHerdrFullscreenTouchAdapter } from "./herdr_fullscreen_touch_adapter.js";
 import { createPerformanceTaskMonitor } from "./performance_tasks.js";
+import { createInstancesLoader } from "./instances_loader.js";
 import { createTerminalCacheV2 } from "./terminal_cache_v2.js";
 import { createTerminalHistoryCache } from "./terminal_history_cache.js";
 import {
@@ -4397,18 +4398,20 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
   };
 
-  const loadInstances = async () => {
-    const response = await fetch("./api/instances", { cache: "no-store" });
-    if (!response.ok) {
-      throw new Error(`Failed to load instances (${response.status})`);
-    }
-    const instances = await response.json();
-    if (!Array.isArray(instances)) {
-      throw new Error("Invalid instances response");
-    }
-    currentInstances = instances;
-    return instances;
-  };
+  const instancesLoader = createInstancesLoader({
+    isDisposed: () => disposed,
+    onInstances: (instances) => {
+      currentInstances = instances;
+    },
+    onRetry: ({ attempt, delay, error }) => {
+      console.warn("[instances] startup request retry", {
+        attempt,
+        delay,
+        status: Number(error?.status) || 0,
+      });
+    },
+  });
+  const loadInstances = () => instancesLoader.load();
 
   const loadDefaultInstanceName = async () => {
     const instances = currentInstances.length > 0 ? currentInstances : await loadInstances();
@@ -20288,6 +20291,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return "";
     }
     disposed = true;
+    instancesLoader.dispose();
     clearWorkspaceRefreshRetry();
     stopPerformanceMeter();
     sendDeviceOfflineBeacon();

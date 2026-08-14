@@ -39,6 +39,7 @@ type pluginServer struct {
 	workspaces             *workspaceManager
 	adminInfoResolver      func(context.Context) (adminInfo, error)
 	instancesResolver      func(context.Context) ([]instanceSummary, error)
+	instanceRetryDelays    []time.Duration
 	deployUIDResolver      func() string
 	publishHTTPClient      *http.Client
 	attachmentBackend      attachmentUploadBackend
@@ -111,6 +112,66 @@ const assetRevisionLength = 24
 var errInstanceForbidden = errors.New("instance is not accessible by current account")
 var errInvalidPublishCreatePayload = errors.New("invalid publish create payload")
 var errClientTerminalProxyUnavailable = errors.New("client terminal proxy is not available yet")
+
+var defaultInstanceRetryDelays = []time.Duration{100 * time.Millisecond, 300 * time.Millisecond}
+
+type instanceDiscoveryAttemptError struct {
+	Kind       string
+	StatusCode int
+	Retryable  bool
+	Err        error
+}
+
+func (e *instanceDiscoveryAttemptError) Error() string {
+	if e == nil || e.Err == nil {
+		return "instance discovery failed"
+	}
+	return e.Err.Error()
+}
+
+func (e *instanceDiscoveryAttemptError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+type instanceDiscoveryError struct {
+	Stage      string
+	Kind       string
+	StatusCode int
+	Attempts   int
+	Err        error
+}
+
+func (e *instanceDiscoveryError) Error() string {
+	if e == nil {
+		return "instance discovery failed"
+	}
+	detail := "instance discovery failed"
+	if e.Err != nil {
+		detail = e.Err.Error()
+	}
+	kind := strings.TrimSpace(e.Kind)
+	if kind == "" {
+		kind = "request"
+	}
+	return fmt.Sprintf("instances %s %s failed after %d attempt(s): %s", e.Stage, kind, e.Attempts, detail)
+}
+
+func (e *instanceDiscoveryError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func (e *instanceDiscoveryError) HTTPStatusCode() int {
+	if e != nil && e.StatusCode >= 400 && e.StatusCode <= 599 {
+		return e.StatusCode
+	}
+	return http.StatusBadGateway
+}
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
@@ -720,9 +781,12 @@ func unquoteLightOSConfigValue(value string) string {
 }
 
 func writeAuthorizationError(w http.ResponseWriter, err error) {
+	var discoveryErr *instanceDiscoveryError
 	switch {
 	case err == nil:
 		return
+	case errors.As(err, &discoveryErr):
+		http.Error(w, err.Error(), discoveryErr.HTTPStatusCode())
 	case errors.Is(err, errInstanceForbidden):
 		http.Error(w, err.Error(), http.StatusForbidden)
 	case errors.Is(err, errClientTerminalProxyUnavailable):
@@ -994,16 +1058,78 @@ func (s *pluginServer) listRequestVisibleInstances(ctx context.Context, header h
 	if s != nil && s.instancesResolver != nil {
 		return s.instancesResolver(ctx)
 	}
-	items, err := s.listLightOSAdminWebshellInstances(ctx, header, accountID)
+	delays := defaultInstanceRetryDelays
+	if s != nil && s.instanceRetryDelays != nil {
+		delays = s.instanceRetryDelays
+	}
+	info, err := retryInstanceDiscovery(ctx, delays, "admin-info", func() (adminInfo, error) {
+		info, err := s.resolveLightOSAdminInfo(ctx)
+		if err != nil {
+			return adminInfo{}, &instanceDiscoveryAttemptError{Kind: "resolve", Retryable: true, Err: err}
+		}
+		return info, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	clientItems, err := s.listLightOSAdminClientInstances(ctx, header, accountID)
+	items, err := retryInstanceDiscovery(ctx, delays, "webshell-instances", func() ([]instanceSummary, error) {
+		return s.listLightOSAdminWebshellInstancesWithInfo(ctx, header, accountID, info)
+	})
+	if err != nil {
+		return nil, err
+	}
+	clientItems, err := retryInstanceDiscovery(ctx, delays, "client-instances", func() ([]clientInstanceSummary, error) {
+		return s.listLightOSAdminClientInstancesWithInfo(ctx, header, accountID, info)
+	})
 	if err != nil {
 		return nil, err
 	}
 	items = append(items, clientInstanceSummariesToInstances(clientItems)...)
 	return items, nil
+}
+
+func retryInstanceDiscovery[T any](ctx context.Context, delays []time.Duration, stage string, operation func() (T, error)) (T, error) {
+	var zero T
+	for attempt := 1; ; attempt++ {
+		value, err := operation()
+		if err == nil {
+			return value, nil
+		}
+		attemptErr := &instanceDiscoveryAttemptError{Kind: "request", Err: err}
+		var typedAttemptErr *instanceDiscoveryAttemptError
+		if errors.As(err, &typedAttemptErr) {
+			attemptErr = typedAttemptErr
+		}
+		canRetry := attemptErr.Retryable && ctx.Err() == nil && attempt <= len(delays)
+		if !canRetry {
+			return zero, &instanceDiscoveryError{
+				Stage:      stage,
+				Kind:       attemptErr.Kind,
+				StatusCode: attemptErr.StatusCode,
+				Attempts:   attempt,
+				Err:        attemptErr.Err,
+			}
+		}
+		log.Printf("[instances] stage=%s kind=%s attempt=%d/%d status=%d retry=true", stage, attemptErr.Kind, attempt, len(delays)+1, attemptErr.StatusCode)
+		timer := time.NewTimer(delays[attempt-1])
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return zero, &instanceDiscoveryError{
+				Stage:      stage,
+				Kind:       attemptErr.Kind,
+				StatusCode: attemptErr.StatusCode,
+				Attempts:   attempt,
+				Err:        ctx.Err(),
+			}
+		case <-timer.C:
+		}
+	}
 }
 
 func dedupeInstanceSummaries(items []instanceSummary) []instanceSummary {
@@ -1080,13 +1206,17 @@ func (s *pluginServer) listLightOSAdminWebshellInstances(ctx context.Context, he
 	if err != nil {
 		return nil, err
 	}
+	return s.listLightOSAdminWebshellInstancesWithInfo(ctx, header, accountID, info)
+}
+
+func (s *pluginServer) listLightOSAdminWebshellInstancesWithInfo(ctx context.Context, header http.Header, accountID string, info adminInfo) ([]instanceSummary, error) {
 	targetURL, err := buildLightOSAdminURL(resolvePublishProxyLightOSAdminBaseURL(info), &url.URL{Path: "/api/webshell/instances"})
 	if err != nil {
-		return nil, err
+		return nil, &instanceDiscoveryAttemptError{Kind: "request", Err: err}
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, &instanceDiscoveryAttemptError{Kind: "request", Err: err}
 	}
 	copyPublishProxyRequestHeaders(request.Header, header)
 	setPublishProxyAuthHeaders(request.Header, header, accountID)
@@ -1094,7 +1224,7 @@ func (s *pluginServer) listLightOSAdminWebshellInstances(ctx context.Context, he
 
 	response, err := s.publishClient().Do(request)
 	if err != nil {
-		return nil, err
+		return nil, &instanceDiscoveryAttemptError{Kind: "transport", Retryable: true, Err: err}
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -1103,11 +1233,16 @@ func (s *pluginServer) listLightOSAdminWebshellInstances(ctx context.Context, he
 		if message == "" {
 			message = response.Status
 		}
-		return nil, errors.New(message)
+		return nil, &instanceDiscoveryAttemptError{
+			Kind:       "upstream",
+			StatusCode: response.StatusCode,
+			Retryable:  response.StatusCode == http.StatusBadGateway || response.StatusCode == http.StatusServiceUnavailable || response.StatusCode == http.StatusGatewayTimeout,
+			Err:        errors.New(message),
+		}
 	}
 	var items []instanceSummary
 	if err := json.NewDecoder(response.Body).Decode(&items); err != nil {
-		return nil, err
+		return nil, &instanceDiscoveryAttemptError{Kind: "decode", Err: err}
 	}
 	return items, nil
 }
@@ -1121,13 +1256,17 @@ func (s *pluginServer) listLightOSAdminClientInstances(ctx context.Context, head
 	if err != nil {
 		return nil, err
 	}
+	return s.listLightOSAdminClientInstancesWithInfo(ctx, header, accountID, info)
+}
+
+func (s *pluginServer) listLightOSAdminClientInstancesWithInfo(ctx context.Context, header http.Header, accountID string, info adminInfo) ([]clientInstanceSummary, error) {
 	targetURL, err := buildLightOSAdminURL(resolvePublishProxyLightOSAdminBaseURL(info), &url.URL{Path: "/api/client-instances"})
 	if err != nil {
-		return nil, err
+		return nil, &instanceDiscoveryAttemptError{Kind: "request", Err: err}
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, &instanceDiscoveryAttemptError{Kind: "request", Err: err}
 	}
 	copyPublishProxyRequestHeaders(request.Header, header)
 	setPublishProxyAuthHeaders(request.Header, header, accountID)
@@ -1135,7 +1274,7 @@ func (s *pluginServer) listLightOSAdminClientInstances(ctx context.Context, head
 
 	response, err := s.publishClient().Do(request)
 	if err != nil {
-		return nil, err
+		return nil, &instanceDiscoveryAttemptError{Kind: "transport", Retryable: true, Err: err}
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -1144,11 +1283,16 @@ func (s *pluginServer) listLightOSAdminClientInstances(ctx context.Context, head
 		if message == "" {
 			message = response.Status
 		}
-		return nil, errors.New(message)
+		return nil, &instanceDiscoveryAttemptError{
+			Kind:       "upstream",
+			StatusCode: response.StatusCode,
+			Retryable:  response.StatusCode == http.StatusBadGateway || response.StatusCode == http.StatusServiceUnavailable || response.StatusCode == http.StatusGatewayTimeout,
+			Err:        errors.New(message),
+		}
 	}
 	var items []clientInstanceSummary
 	if err := json.NewDecoder(response.Body).Decode(&items); err != nil {
-		return nil, err
+		return nil, &instanceDiscoveryAttemptError{Kind: "decode", Err: err}
 	}
 	return items, nil
 }

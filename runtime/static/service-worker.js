@@ -13,6 +13,7 @@ const appShellAssets = [
   `${assetBase}icon-512.png`,
   `${assetBase}manifest.webmanifest`,
   `${assetBase}performance_tasks.js`,
+  `${assetBase}instances_loader.js`,
   `${assetBase}terminal_cache_v2.js`,
   `${assetBase}terminal_history_cache.js`,
   `${assetBase}terminal_size_sync.js`,

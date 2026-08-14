@@ -626,6 +626,19 @@ git diff --check
 - 验证结果：定向初始化焦点、Android 键盘、IME 与 terminal pan guard、完整 `go test ./... -count=1`、`go test -race ./... -count=1`、运行时 JavaScript `node --check` 和 `git diff --check` 均通过；`lzc-cli project release` 已生成 `cloud.lazycat.webshell.lcmd-v1.0.29.lpk`，包内 `package.yml` 与 `.lpk-version` 均为 `1.0.29`，运行时包含 system/user focus 隔离、延迟键盘锁升级和 render 后动态 pan，且不再包含固定 `panY` 锁。LPK SHA-256 为 `1e504ad558edbdc08b919716eefaddabb5c541fcc35e282a610bb48ac54140ae`。真实 Android WebView 仍需复验首次进入缓存命中/无缓存、第一次双击、立即输入到自动换行及初始化期间连接完成的交错时序。
 - 禁止复现：移动端初始化、连接、replay、resize 或 tab 激活任务不得取得用户键盘焦点所有权；无用户手势的 system focus 不得 blur 已有输入；IME viewport 锁不得包含随光标变化的 pan；键盘打开前捕获的非键盘基线不得屏蔽随后真实的键盘收缩事件。
 
+### LCMD-20260814-07：首次进入时实例发现短暂 502 导致启动失败
+
+- 日期：2026-08-14
+- 来源：用户现场问题；WebShell 首次打开偶发显示 `Failed to load instances (502)`，强制刷新后恢复
+- 发布：LPK version `1.0.30`
+- 影响模块：Provider `/api/instances`、LightOS Admin 实例发现接口、前端 bootstrap 实例加载
+- 错误现象：应用或 LightOS Admin 刚启动时，WebShell 首次请求实例列表可能收到 502，前端立即进入致命启动错误；稍后强制刷新会重新请求并恢复。该接口已使用 `cache: no-store`，Service Worker 也明确绕过 `/api/*`，因此现象不是浏览器缓存命中旧响应。
+- 根因：Provider 获取可见实例依赖 `lightosctl system admin-info --json`、Admin `/api/webshell/instances` 和 `/api/client-instances` 三个启动依赖，任一步短暂未就绪都会失败；原实现还为两个 Admin 接口分别重复解析一次 admin-info，并把上游状态和失败阶段统一压成 502。前端 `loadInstances()` 只请求一次，失败后直接拒绝 bootstrap 的 `instancesPromise`，没有等待依赖完成的恢复窗口；强制刷新只是把同一请求推迟到 Admin 和路由已经 ready 的时刻。
+- 实施方案：Provider 在一次 `/api/instances` 请求内只复用一次成功解析的 Admin 信息，分别标记 `admin-info`、`webshell-instances`、`client-instances` 以及 `resolve/transport/upstream/decode` 错误种类；admin-info、网络错误和上游 502/503/504 使用 100ms、300ms 的有限重试，上游 4xx 原样返回且不重试，并记录不含身份凭据的阶段、状态与重试次数。浏览器新增独立实例加载器，对网络错误和 502/503/504 使用 250ms、750ms、1500ms、3000ms 退避，所有并发调用共享同一个 Promise；读取 Provider 响应正文并在最终错误中保留真实阶段，页面销毁时取消等待和请求，只有重试耗尽才让 bootstrap 进入错误页。
+- Guard：`TestHandleInstancesRetriesTransientDependenciesAndReusesAdminInfo` 固定同一请求共享 Admin 信息并恢复两个上游瞬时错误；`TestHandleInstancesRetriesAdminInfoStartupFailure`、`TestHandleInstancesRetriesTransportFailure` 固定启动与网络重试；`TestHandleInstancesPreservesAuthorizationFailureWithoutRetry` 固定 401/403 状态和零重试；`TestHandleInstancesReportsDecodeStageWithoutRetry` 固定无效 JSON 的阶段；`TestInstancesLoaderBehavior` 执行 `instances_loader_test.mjs`，覆盖 502/503/504、网络错误、4xx、单飞 Promise、最终正文和无效 JSON。静态资源 guard 同时固定主入口导入和 Service Worker 预缓存新加载器。
+- 验证结果：实例加载 Node 行为测试 5/5、完整 `go test ./... -count=1`、`go test -race ./... -count=1`、运行时 JavaScript `node --check` 和 `git diff --check` 通过；`lzc-cli project release` 已生成 `cloud.lazycat.webshell.lcmd-v1.0.30.lpk`，包内 `package.yml` 与 `.lpk-version` 均为 `1.0.30`，包含实例加载器和对应 Service Worker 预缓存声明且不包含 Node 测试文件。LPK SHA-256 为 `e4bf78109f60f345b89b362319d8abc85999a129edf5d99ec3ded5a7c02af789`。
+- 禁止复现：不得让首次可恢复的 502 立即击穿 bootstrap；不得对 400/401/403/404 或 JSON 解码错误盲目重试；不得为同一次实例列表请求重复解析成功的 admin-info；不得吞掉客户端实例接口失败或回退到本地 `lightosctl ps`，否则会隐藏 PC 实例或绕过 LightOS Admin 的账号可见性边界；API 响应不得进入 Service Worker 缓存。
+
 ## 新增记录模板
 
 ```md
