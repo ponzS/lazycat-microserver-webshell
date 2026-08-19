@@ -22,7 +22,8 @@ LightOS WebShell 的目标是为懒猫微服提供一个开箱即用的网页终
 - 使用实例内的持久 agent 管理终端工作区，刷新页面、重新打开页面或短暂断网后可重新连接到已有 tab 和 pane。
 - 服务升级后优先复用兼容的旧 agent，尽量保留正在运行的终端会话；协议不兼容时会明确提示。
 - 支持终端输出历史回放，减少重连后的上下文丢失。
-- LightOS 实例端使用 PTY 原始字节范围游标同步历史；容器页面在 workspace HTTP 响应确认账号、实例、workspace、tab 和 pane 身份后，立即从 Cache API v2 回放对应 history generation 的本地字节，首个有内容的有序读取批次即可显示不可交互的真实 Ghostty canvas，WebSocket 连接后再从本地 end cursor 接续服务端增量。
+- LightOS 实例端使用 PTY 原始字节范围游标同步历史；容器页面在 workspace HTTP 响应确认账号、实例、workspace、tab 和 pane 身份后，在后台从 Cache API v2 回放对应 history generation 的本地字节，回放期间隐藏 live canvas，待服务端 replay complete 和最终 full render 成功后一次性显示真实画面。第一批字节不是首帧。
+- 窗口尺寸、字号、字体、主题变化以及跨设备单击恢复尺寸时，只有确认终端几何确实变化才保留当前旧帧；后台 Ghostty 可继续渲染，当前尺寸的 full render 成功后一次性替换旧帧，不重新回放历史，也不等待 PTY 输出停顿。切换标签前会保留最后有效帧，激活后用当前状态的 full render 替换，避免黑屏。
 - Ghostty 每帧先完整物化当前可见 viewport，再原子提交 canvas；任一活动屏幕或 scrollback 行临时不可用时保留上一帧并自动重试，不把缺失行绘制成黑区。
 - 支持终端活动检测、自动标签命名、忙闲状态和当前工作目录显示。
 
@@ -79,13 +80,15 @@ LightOS WebShell 的目标是为懒猫微服提供一个开箱即用的网页终
 lzc-cli project release
 ```
 
-需要同步 Ghostty 运行时资产时，在本仓库目录执行：
+WebShell 仓库内的 `runtime/static/ghostty-web.js`、`ghostty-vt.wasm` 和许可证是发布资产。常规构建校验这些文件完整可用；如果相邻源码目录已有 WASM 构建物，还会比较核心 section 内容并给出非阻塞提示：
 
 ```sh
-./tools/sync-ghostty-web-assets.sh --sync
+./tools/sync-ghostty-web-assets.sh --check
 ```
 
-只有 Ghostty 子模块、WASM patch 或 ABI 发生变化时才使用 `--rebuild-wasm`；普通 TypeScript 渲染层修改不需要重建 WASM。
+需要确认相邻 `ghostty-web` 当前源码与随包 WASM 是否一致时使用 `--check-source`。该模式会先执行 `bun run build:wasm`，再解析并比较两份 WASM 的核心 section 内容；自定义构建元数据不参与版本判断。根目录 `ghostty-vt.wasm` 是被 Git 忽略的构建产物，不能在未重建时作为源码版本依据。
+
+WebShell 的 `ghostty-web.js` 还包含移动端像素滚动、resize 和渲染性能等历史定制。只有有意更新这部分前端代码时才执行 `--sync`，并在覆盖 bundle 后运行完整 WebShell 回归测试。只有 Ghostty 子模块、WASM patch 或 ABI 确实变化时才使用 `--rebuild-wasm`。
 
 安装到目标设备：
 
@@ -105,7 +108,7 @@ lzc-cli project deploy
 
 - 后端使用 Go 实现，Web UI 通过 `/=exec://8080` 由 LPK 启动。
 - 终端会话通过实例内 persistent agent 管理，并通过 WebSocket 转发到浏览器。
-- 实例端终端历史由 persistent agent 作为可信数据源维护。容器浏览器使用 Cache API v2 字节 warm replay 提前显示真实 canvas，期间保持输入锁定；`client:` PC target 继续使用 IndexedDB 与原完整历史回放协议，暂不启用容器 cache-v2 warm replay。
+- 实例端终端历史由 persistent agent 作为可信数据源维护。容器浏览器使用 Cache API v2 在后台恢复字节，服务端 replay complete 后才显示最终 live canvas；`client:` PC target 继续使用 IndexedDB 与原完整历史回放协议，暂不启用容器 cache-v2 warm replay。
 - HTML 入口使用 `/assets/<lpk-version>-<content-revision>/` 静态资源路径。即使误用相同 LPK 版本重新发布，只要二进制或 runtime 内容变化，JS/CSS/module/WASM URL 和 Service Worker cache 名称也会变化；内容寻址资源可长期缓存，旧 `/static/` 仅保留兼容。
 - PWA Service Worker 对当前 LPK 版本的 immutable 静态 app shell 使用 cache-first，版本 URL 变化负责主动更新；缓存未命中才联网，终端 API、WebSocket 和 Cache API 虚拟记录始终绕过 Service Worker。
 - 终端渲染使用项目内随包分发的 Ghostty Web 运行时资源。

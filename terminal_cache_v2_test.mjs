@@ -202,6 +202,36 @@ test("cache-v2 coalesces small appends into bounded byte blocks", async () => {
   assert.deepEqual(replayed, [1, 2, 3, 4, 5, 6]);
 });
 
+test("cache-v2 defaults to one MiB byte blocks", async () => {
+  const cacheStorage = new MemoryCacheStorage();
+  const cache = createTerminalCacheV2({
+    cacheStorage,
+    baseURL: "https://example.test/",
+  });
+  const first = new Uint8Array(600 * 1024).fill(1);
+  const second = new Uint8Array(424 * 1024).fill(2);
+  const third = new Uint8Array([3]);
+  await cache.reset(identity(), "history-a", 0n);
+  await cache.append(identity(), "history-a", [{
+    startCursor: 0n,
+    endCursor: BigInt(first.byteLength),
+    data: first,
+  }]);
+  await cache.append(identity(), "history-a", [{
+    startCursor: BigInt(first.byteLength),
+    endCursor: BigInt(first.byteLength + second.byteLength),
+    data: second,
+  }]);
+  await cache.append(identity(), "history-a", [{
+    startCursor: BigInt(first.byteLength + second.byteLength),
+    endCursor: BigInt(first.byteLength + second.byteLength + third.byteLength),
+    data: third,
+  }]);
+
+  const manifest = await cache.loadManifest(identity());
+  assert.deepEqual(manifest.chunks.map((chunk) => chunk.byteLength), [1024 * 1024, 1]);
+});
+
 test("cache-v2 compacts legacy small blocks after committing replacement blocks", async () => {
   const cacheStorage = new MemoryCacheStorage();
   const cache = createTerminalCacheV2({

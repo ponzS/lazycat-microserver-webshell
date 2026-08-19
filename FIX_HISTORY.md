@@ -2,6 +2,8 @@
 
 本文档用于保存 `lazycat-microserver-webshell` 的架构基线、已确认的历史问题和防止问题复现的 guard。它不是发布日志，也不记录未经证实的猜测或已经否定的方案。
 
+当前行为以本文前半部分“当前架构基线”和最新修复条目为准。后半部分历史条目保留当时的实现和现场证据；其中出现的“首批字节可见”、`cacheV2WarmFrameReady` 或方向变化重新回放等描述仅表示旧版本行为，均已被 `LCMD-20260819-02` 取代，不得作为新代码的设计依据。
+
 首版建立于 2026-07-27。初始历史条目根据仓库 Git 提交、当前实现和现有测试重建；后续每次 Bug 修复都应在同一次变更中更新本文档。
 
 ## 使用规则
@@ -58,7 +60,7 @@
 - LightOS 实例终端历史以 persistent agent 保存的原始 PTY 字节为可信来源；浏览器渲染状态不是历史权威。
 - 历史流使用 `history_generation` 和绝对 byte cursor 表示范围。服务端根据本地范围选择 `snapshot`、`delta` 或 `current`，所有 chunk 必须连续。
 - 容器实例使用 Cache API v2 保存按账号 scope、完整 selector、workspace generation、tab、pane 和 history generation 隔离的不可变 PTY 字节块，并以 commit-last manifest 暴露已持久化 cursor。缓存无效时可以丢弃并从 agent 重建，但不能把不连续缓存拼接到新 generation。
-- 容器页面从网络 workspace 响应取得完整账号 scope、selector、workspace、tab 和 pane 身份后，立即从 Cache API 并发读取该精确身份下的 PTY 字节并直接回放到 Ghostty canvas，不等待 WebSocket open、replay start 或 replay complete。首个包含可见内容的有序读取批次即可显示真实 canvas，剩余 chunk 继续后台回放并在 manifest end 最终 render。canvas 可见与输入就绪是独立状态：本地字节画面可以在连接灰点存在时显示，但输入必须继续锁到服务端 generation/cursor 校验、增量或 snapshot、缓存提交、fit 和最终 render 全部完成。
+- 容器页面从网络 workspace 响应取得完整账号 scope、selector、workspace、tab 和 pane 身份后，在后台从 Cache API 并发读取该精确身份下的 PTY 字节并回放到 Ghostty/WASM；回放期间 live canvas 保持隐藏，只有服务端 replay complete、cursor 连续、fit 当前且最终 full render 成功后才显示。第一批字节不是首帧。窗口、字体、主题变化和跨设备单击恢复尺寸仅在确认 cols/rows 或 canvas backing store 变化后使用 presentation hold 保留旧帧；hold 覆盖期间 Ghostty 继续按正常节流渲染，当前状态的 full render 成功后立即替换，不等待 PTY 输出安静，也不重新回放历史。切换 tab 前保存有效帧，激活后用当前状态的 full render 替换，不能显示黑屏。
 - Ghostty renderer 在修改 canvas 前必须一次性物化当前可见活动屏幕和 scrollback 行；活动 viewport 每帧只导出一次。任一可见行缺失时保留上一帧和 dirty 状态，由事件驱动 scheduler 退避重试，失败帧不得触发成功 `onRender` 或 pane presented generation 推进。
 - tab 总览不得只复制已经激活过的 live canvas。未激活 pane 可以按完整 cache-v2 身份读取已提交的图片缩略图，但缩略图只用于总览，不能参与终端启动显示、Ghostty 状态恢复或输入就绪判断。
 - 服务端接受本地 range 时，`delta/current` 必须复用已经恢复的 Ghostty 状态，不得再次清空和重复回放本地 chunk。服务端返回 `snapshot` 时，保持已显示的同身份本地 canvas，先在内存收齐服务端 snapshot，再一次性重置并回放权威字节；本地缓存字节不得参与 snapshot 状态计算。
@@ -638,6 +640,44 @@ git diff --check
 - Guard：`TestHandleInstancesRetriesTransientDependenciesAndReusesAdminInfo` 固定同一请求共享 Admin 信息并恢复两个上游瞬时错误；`TestHandleInstancesRetriesAdminInfoStartupFailure`、`TestHandleInstancesRetriesTransportFailure` 固定启动与网络重试；`TestHandleInstancesPreservesAuthorizationFailureWithoutRetry` 固定 401/403 状态和零重试；`TestHandleInstancesReportsDecodeStageWithoutRetry` 固定无效 JSON 的阶段；`TestInstancesLoaderBehavior` 执行 `instances_loader_test.mjs`，覆盖 502/503/504、网络错误、4xx、单飞 Promise、最终正文和无效 JSON。静态资源 guard 同时固定主入口导入和 Service Worker 预缓存新加载器。
 - 验证结果：实例加载 Node 行为测试 5/5、完整 `go test ./... -count=1`、`go test -race ./... -count=1`、运行时 JavaScript `node --check` 和 `git diff --check` 通过；`lzc-cli project release` 已生成 `cloud.lazycat.webshell.lcmd-v1.0.30.lpk`，包内 `package.yml` 与 `.lpk-version` 均为 `1.0.30`，包含实例加载器和对应 Service Worker 预缓存声明且不包含 Node 测试文件。LPK SHA-256 为 `e4bf78109f60f345b89b362319d8abc85999a129edf5d99ec3ded5a7c02af789`。
 - 禁止复现：不得让首次可恢复的 502 立即击穿 bootstrap；不得对 400/401/403/404 或 JSON 解码错误盲目重试；不得为同一次实例列表请求重复解析成功的 admin-info；不得吞掉客户端实例接口失败或回退到本地 `lightosctl ps`，否则会隐藏 PC 实例或绕过 LightOS Admin 的账号可见性边界；API 响应不得进入 Service Worker 缓存。
+
+### LCMD-20260819-01：过期 Ghostty 本地构建物导致 WebShell 发布误判
+
+- 日期：2026-08-19
+- 来源：`./lightos-build.sh` 构建失败；随后按源码、Git 历史和实际 WASM 内容重新核对
+- 影响模块：`tools/sync-ghostty-web-assets.sh`、LPK 发布构建与相邻 `ghostty-web` 开发仓库
+- 错误现象：相邻 `ghostty-web/ghostty-vt.wasm` 与 WebShell 随包 WASM 的整文件摘要不同，旧校验直接判定未同步并阻塞发布。根目录文件随后确认是被 `.gitignore` 排除的本地构建产物，并不对应某个 Git 提交。
+- 根因：旧校验没有从当前源码重建 WASM，只比较了两个现存构建物的摘要，因此把过期本地输出误当成源码差异。使用当前 `ghostty-web` 源码、patch、Ghostty 子模块和 Zig 0.15.2 重新构建后，生成的 423873 字节 WASM 与 WebShell 随包文件逐字节一致。WebShell 的 `ghostty-web.js` 另有移动端像素滚动、resize、渲染限频和 Canvas 热路径等历史定制，不能据此直接覆盖。
+- 实施方案：新增 `tools/compare-wasm-content.mjs`，按 WebAssembly 二进制结构解析并逐字节比较所有非自定义核心 section，不使用整文件摘要推断源码版本。`--check-source` 先运行当前源码的 `build:wasm` 再比较，允许仅自定义构建元数据不同；`--check` 验证发布资产完整性，并在相邻源构建物存在时提供非阻塞的内容比较提示。普通 `--sync` 在源 WASM 核心内容不一致时拒绝覆盖，并且不再复制未重建的 WASM；`--rebuild-wasm` 才重建并同步完整资产。
+- Guard：`TestGhosttyAssetCheckRebuildsAndComparesWasmCoreContent` 使用假的构建命令证明源码检查确实先重建，并覆盖“核心内容相同但自定义 section 不同”成功以及核心 section 不同失败两种情况；既有运行时 guard 继续固定 WebShell 定制 bundle 行为。
+- 验证结果：使用当前源码、patch、Ghostty 子模块和 Zig 0.15.2 执行真实 `--check-source` 后，两份 423873 字节 WASM 完整内容一致。Ghostty Web 全量 Bun 测试 386/386、TypeScript、Biome 和 Prettier 通过；WebShell 定向 guard、完整 `go test ./... -count=1`、`go test -race ./... -count=1`、脚本语法、比较器语法和 `git diff --check` 通过。根目录 `./lightos-build.sh` 成功生成本地 WebShell LPK 与 `cloud.lazycat.lightos.entry-v0.3.56-501.lpk`，并通过内嵌 WebShell 内容校验。
+- 禁止复现：不得使用未重建、被 Git 忽略的 `ghostty-vt.wasm` 判断源码版本；不得把整文件摘要差异直接等同于 WASM 核心代码差异；不得在普通同步路径用本地临时 WASM 覆盖 WebShell 随包文件；不得直接覆盖 WebShell 定制 `ghostty-web.js`。
+
+### LCMD-20260819-02：历史回放首帧和尺寸变化暴露 PTY 重排过程
+
+- 日期：2026-08-19
+- 来源：用户现场复验；长历史终端首次进入、窗口/字体变化及跨设备使用场景
+- 发布：LPK version `1.0.31`
+- 影响模块：`runtime/static/main.js`、Cache API v2 warm replay、Ghostty Canvas presentation、跨设备终端尺寸同步
+- 错误现象：长历史进入终端时能看到内容从旧字节逐步滚到底部；窗口大小或字体变化时会再次看到 PTY 状态重排；同一 tab 在手机和 PC 间切换后，服务端 PTY 尺寸可能停留在上一个设备的分辨率。
+- 根因：按 `baseCursor` 顺序读到的第一批历史字节曾被误当成首帧，并在回放中暴露中间 render；尺寸或字体变化直接触发 Ghostty resize/full render，旧 Canvas 没有覆盖整个状态变更窗口；跨设备仅在输入、鼠标或窗口变化时才声明当前尺寸。
+- 实施方案：Cache API v2 使用 1 MiB chunk、compaction 和 replay write budget；warm replay 期间只写 Ghostty/WASM，不渲染 live canvas，服务端 replay complete 后只做一次最终 full render。窗口、字号、字体、主题、方向变化和跨设备单击统一使用 presentation hold：先保留旧帧，再更新当前 Ghostty 状态和 PTY 输出，安静窗口后提交最终 full render；单击终端先按当前设备重新 fit，再强制发送当前 cols/rows/pixel size，不关闭 WebSocket、不重新回放历史。普通实时输出仍保持 128 KiB batching budget。
+- Guard：`TestRuntimeTerminalCanvasResidueGuard` 固定 replay complete 和 presentation hold 门禁；`TestRuntimeTerminalSizeClaimSurvivesCrossClientResize` 固定单击 pointerdown、当前设备 fit 和强制 resize；`TestRuntimeMobileOrientationKeepsTerminalStateAfterViewportSettle` 固定方向变化不触发历史重放；`terminal_cache_v2_test.mjs` 固定 1 MiB Cache v2 默认 chunk。
+- 验证结果：`node --check runtime/static/main.js`、`node --check runtime/static/terminal_cache_v2.js`、Cache v2 Node tests、定向 WebShell Go guard 和 `git diff --check` 通过。掉帧、TUI 动画和切 Tab 的视觉表现不在本条修复范围，需单独分析。
+- 禁止复现：第一批缓存字节不得作为 live canvas 首帧；resize、字体、主题、方向和单击尺寸恢复不得调用历史重放或清空当前 Ghostty 状态；presentation hold 未完成前不得释放旧帧；跨设备点击必须先 fit 当前设备再发送尺寸声明。
+
+### LCMD-20260819-03：presentation hold 阻塞持续 TUI 渲染且切 tab 短暂黑屏
+
+- 日期：2026-08-19
+- 发布：LPK version `1.0.32`
+- 来源：`LCMD-20260819-02` 现场复验；Codex 等持续 TUI 输出时 working 渐变和计时周期性掉帧，计时可从 `30s` 跳到 `35s`；切换已有 tab 时先出现黑屏。
+- 影响模块：`runtime/static/main.js` 的 Ghostty Canvas presentation、Tab 激活、跨设备尺寸声明和 Cache API v2 preview。
+- 错误现象：单击终端、切换 tab 或请求 resize 后，即使尺寸没有变化，当前 canvas 仍进入 presentation hold。持续 PTY 输出会不断取消已排队的 render，并重新等待输出安静窗口，导致终端数秒只显示旧帧，随后一次跳到最新 TUI 状态。inactive tab 使用 `display:none`，激活时又无条件 `hideUntilRender`，旧 canvas 不能稳定作为可显示位图，因而短暂呈现黑色背景。持续输出下每次 Cache API append 还会在很短延迟后触发 Canvas PNG preview，放大主线程竞争。
+- 根因：`schedulePaneResize()` 和跨设备单击在尚未测量当前 `cols/rows`/canvas 前无条件开始 hold；`deferPaneRenderDuringResize()` 对每批输出取消 Ghostty render 并重置最终提交时机。Tab 切换只在激活后处理画面，错过了隐藏前复制有效帧的时机。preview 截图没有要求输出静止或浏览器空闲。
+- 实施方案：hold 只在 `resizePane()` 已确认终端尺寸或 canvas backing store 将变化后创建；hold 仅覆盖可见画面，Ghostty 在其下继续使用正常节流 render，尺寸更新后的 full render 立即提交，不再等待 PTY 安静窗口，也不在普通输出路径取消 render。跨设备单击仍强制发送当前尺寸，但尺寸未变时不冻结画面。切出 tab 前复制最后有效 frame；切回时保持该 frame 直至一次当前状态的 full render 成功，避免黑屏。Cache API 字节仍按 1 MiB/1 秒策略持久化；preview 改为连续 3 秒无终端输出后才在 `requestIdleCallback` 中编码，并在编码前后复查输出活跃性。
+- Guard：扩展 `TestRuntimeTerminalCanvasResidueGuard`，固定 hold 发生在几何测量之后、无安静窗口、hold 中普通输出不取消 render、tab 在隐藏前保留 frame、preview 的空闲/静止门禁；扩展 `TestRuntimeTerminalSizeClaimSurvivesCrossClientResize`，固定无尺寸变化的 size claim 不直接进入 hold。`terminal_cache_v2_test.mjs` 和 `terminal_resize_scheduler_test.mjs` 继续覆盖 Cache v2 连续 cursor/1 MiB block 与 resize 合并行为。
+- 验证结果：`node --check runtime/static/main.js`、`node --test terminal_cache_v2_test.mjs terminal_resize_scheduler_test.mjs`（15/15）、`go test ./...`、`git diff --check` 通过。当前环境没有真实浏览器性能录制能力，仍需在持续 Codex TUI 输出、跨 PC/手机尺寸、字体变化和多 tab 切换下复验帧连续性及主线程长任务。
+- 禁止复现：不得让单击、tab 激活或仅排队 resize 在尚未确认几何变化时开始 presentation hold；不得在 hold 中对每批普通输出取消 Ghostty render 或依赖输出安静窗口；不得在 tab 已被 `display:none` 后才尝试获得唯一的旧帧；不得在持续输出期间高频编码 Cache API preview。
 
 ## 新增记录模板
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -76,6 +77,99 @@ func TestBuildWritesPackageVersionForRuntimeAssets(t *testing.T) {
 		if !strings.Contains(source, want) {
 			t.Fatalf("LPK asset version build guard missing %q", want)
 		}
+	}
+}
+
+func TestGhosttyAssetCheckRebuildsAndComparesWasmCoreContent(t *testing.T) {
+	nodePath, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is required for the WASM content comparator")
+	}
+
+	scriptData, err := os.ReadFile("tools/sync-ghostty-web-assets.sh")
+	if err != nil {
+		t.Fatalf("ReadFile(sync-ghostty-web-assets.sh) error = %v", err)
+	}
+	comparatorData, err := os.ReadFile("tools/compare-wasm-content.mjs")
+	if err != nil {
+		t.Fatalf("ReadFile(compare-wasm-content.mjs) error = %v", err)
+	}
+
+	root := t.TempDir()
+	toolsDir := filepath.Join(root, "tools")
+	staticDir := filepath.Join(root, "runtime", "static")
+	sourceDir := filepath.Join(root, "ghostty-web")
+	binDir := filepath.Join(root, "bin")
+	for _, dir := range []string{toolsDir, staticDir, sourceDir, binDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", dir, err)
+		}
+	}
+
+	scriptPath := filepath.Join(toolsDir, "sync-ghostty-web-assets.sh")
+	comparatorPath := filepath.Join(toolsDir, "compare-wasm-content.mjs")
+	rebuiltWasmPath := filepath.Join(root, "rebuilt.wasm")
+	fakeBunPath := filepath.Join(binDir, "bun")
+	wasmWithCustomSection := func(name string) []byte {
+		wasm := []byte("\x00asm\x01\x00\x00\x00")
+		payloadSize := 1 + len(name)
+		wasm = append(wasm, 0, byte(payloadSize), byte(len(name)))
+		return append(wasm, name...)
+	}
+	wasmWithEmptyTypeSection := append([]byte("\x00asm\x01\x00\x00\x00"), 1, 1, 0)
+	files := map[string][]byte{
+		scriptPath: scriptData,
+		comparatorPath: comparatorData,
+		fakeBunPath: []byte("#!/bin/sh\nset -eu\n" +
+			"[ \"${1:-} ${2:-}\" = \"run build:wasm\" ]\n" +
+			"cp \"$GHOSTTY_FAKE_REBUILT_WASM\" \"$PWD/ghostty-vt.wasm\"\n"),
+		rebuiltWasmPath: wasmWithCustomSection("source-build-metadata"),
+		filepath.Join(staticDir, "ghostty-vt.wasm"):     wasmWithCustomSection("runtime-build-metadata"),
+		filepath.Join(staticDir, "ghostty-web.js"):      []byte("export const runtime = true;\n"),
+		filepath.Join(staticDir, "ghostty-web.LICENSE"): []byte("license\n"),
+		filepath.Join(sourceDir, "ghostty-vt.wasm"):     wasmWithEmptyTypeSection,
+	}
+	for path, data := range files {
+		mode := os.FileMode(0o600)
+		if path == scriptPath || path == fakeBunPath {
+			mode = 0o700
+		}
+		if err := os.WriteFile(path, data, mode); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", path, err)
+		}
+	}
+
+	run := func(mode string) ([]byte, error) {
+		cmd := exec.Command(scriptPath, mode)
+		cmd.Env = []string{
+			"GHOSTTY_WEB_DIR=" + sourceDir,
+			"GHOSTTY_FAKE_REBUILT_WASM=" + rebuiltWasmPath,
+			"PATH=" + binDir + ":" + filepath.Dir(nodePath) + ":/usr/bin:/bin",
+		}
+		return cmd.CombinedOutput()
+	}
+
+	if output, err := run("--check"); err != nil {
+		t.Fatalf("vendored --check error = %v, output = %s", err, output)
+	}
+	output, err := run("--check-source")
+	if err != nil {
+		t.Fatalf("source content check error = %v, output = %s", err, output)
+	}
+	if !strings.Contains(string(output), "WASM core section content matches") ||
+		!strings.Contains(string(output), "差异仅位于可变的自定义 section") {
+		t.Fatalf("source metadata-only comparison output = %s", output)
+	}
+
+	if err := os.WriteFile(rebuiltWasmPath, wasmWithEmptyTypeSection, 0o600); err != nil {
+		t.Fatalf("WriteFile(rebuilt mismatch) error = %v", err)
+	}
+	output, err = run("--check-source")
+	if err == nil {
+		t.Fatalf("core mismatch --check-source unexpectedly succeeded: %s", output)
+	}
+	if !strings.Contains(string(output), "WASM core section content differs") {
+		t.Fatalf("core mismatch output = %s", output)
 	}
 }
 

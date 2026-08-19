@@ -5,8 +5,8 @@ const cachePathPrefix = "__terminal_cache__/v2";
 const defaultMaxAgeMs = 30 * 24 * 60 * 60 * 1000;
 const defaultMaxManifests = 64;
 const defaultReadConcurrency = 32;
-const defaultWriteBlockBytes = 128 * 1024;
-const defaultCompactionMinChunks = 64;
+const defaultWriteBlockBytes = 1 * 1024 * 1024;
+const defaultCompactionMinChunks = 2;
 
 //  https://webshell.invalid/ 是内部兜底用的虚拟 URL，不是真实服务器域名，也不会发起网络请求。
 

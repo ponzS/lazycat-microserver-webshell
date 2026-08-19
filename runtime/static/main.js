@@ -374,7 +374,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const mobileKeyboardResizeSettleMs = mobileKeyboardDockMoveSettleMs + 140;
   const mobileKeyboardDismissRecoveryDelays = [0, 80, 180, 360, 720, 1200];
   const mobileOrientationViewportRecoveryDelays = [0, 80, 180, 360, 720];
-  const mobileOrientationHistoryReplayDelayMs = 900;
+  const mobileOrientationFinalSettleMs = 900;
   const desktopSelectionCopyMoveThresholdPx = 4;
   const terminalSizeReassertIntervalMs = 250;
   const terminalSizeClaimIntervalMs = 250;
@@ -404,6 +404,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const workspaceRefreshRetryJitterRatio = 0.2;
   const terminalOutputFlushFallbackMs = 32;
   const terminalOutputFlushBudgetBytes = 128 * 1024;
+  const terminalReplayWriteBatchBytes = 1 * 1024 * 1024;
   const terminalResizeThrottleMs = 80;
   const terminalResizeSettleMs = 120;
   const terminalFullRenderValidationMs = 80;
@@ -411,16 +412,18 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const terminalOutputMeasureChunkChars = 32 * 1024;
   const terminalOutputMeasureBuffer = new Uint8Array(terminalOutputMeasureChunkChars * 4);
   const terminalHistoryCacheFlushBytes = 256 * 1024;
+  const terminalCacheV2FlushBytes = 1 * 1024 * 1024;
   const terminalHistoryCacheFlushDelayMs = 50;
   const terminalCacheV2FlushDelayMs = 1000;
+  const terminalCacheV2PreviewDelayMs = 3000;
   const terminalHistoryCacheOrphanTTL = 30 * 1000;
   const terminalCacheV2TouchIntervalMs = 5 * 60 * 1000;
   const terminalCacheV2ManifestTimeoutMs = 1500;
   const terminalCacheV2PreviewTimeoutMs = 3000;
-  const terminalCacheV2ReplayTimeoutMs = 15 * 1000;
+  const terminalCacheV2ReplayTimeoutMs = 2 * 1000;
   const terminalCacheV2CommitTimeoutMs = 3000;
-  const terminalCacheV2CompactionMinChunks = 64;
-  const terminalCacheV2CompactionTargetBytes = 128 * 1024;
+  const terminalCacheV2CompactionMinChunks = 2;
+  const terminalCacheV2CompactionTargetBytes = 1 * 1024 * 1024;
   const averageTerminalHistoryBytesPerLine = 350;
   const performanceMeterSampleMs = 500;
   const performanceMeterWarmupFrames = 12;
@@ -1768,6 +1771,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     terminalOptionsBase.fontFamily = buildTerminalFontFamily(selected);
     for (const tab of tabs.values()) {
       for (const pane of tab.panes.values()) {
+        beginTerminalPresentationHold(pane);
         pane.term.options.fontFamily = terminalOptionsBase.fontFamily;
         refreshTerminalMetrics(pane, { deferFitRetry: true });
       }
@@ -5758,6 +5762,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!session?.term) {
       return;
     }
+    beginTerminalPresentationHold(session);
     const nextTheme = cloneTheme(activeTheme);
     installRendererThemeMapper(session);
     installRendererCellSeamPatch(session);
@@ -6272,6 +6277,20 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.terminalFrameHeld = false;
   };
 
+  const beginTerminalPresentationHold = (session) => {
+    if (!session || session.closed) {
+      return false;
+    }
+    session.presentationCommitPending = false;
+    session.resizePresentationHold = true;
+    if (session.hasPresentedFrame && !session.terminalFrameHeld) {
+      holdSessionTerminalFrame(session);
+    }
+    setPaneRenderReady(session, false);
+    cancelPendingTerminalRender(session.term);
+    return true;
+  };
+
   const hideSessionTerminalPreview = (session) => {
     if (!session?.terminalPreview) {
       return;
@@ -6303,35 +6322,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       markSessionCacheV2RecoveryMetric(session, "realCanvasVisibleAt");
       if (session.replayComplete) {
         markSessionCacheV2RecoveryMetric(session, "inputReadyAt");
-      } else if (
-        sessionHasCacheV2WarmFrame(session)
-        && session.cacheV2WarmCanvasVisibleGeneration !== session.terminalReplayGeneration
-      ) {
-        session.cacheV2WarmCanvasVisibleGeneration = session.terminalReplayGeneration;
-        console.info("[terminal-cache-v2] warm canvas visible", JSON.stringify({
-          replayGeneration: session.terminalReplayGeneration,
-        }));
       }
       reportSessionCacheV2RecoveryMetrics(session);
     }
-  };
-
-  const sessionHasCacheV2WarmFrame = (session) => Boolean(
-    session?.cacheV2WarmFrameReady || session?.cacheV2WarmReplayReady
-  );
-
-  const terminalHasVisibleContent = (session) => {
-    const term = session?.term;
-    const buffer = term?.buffer?.active;
-    const length = Math.max(0, Number(buffer?.length || 0));
-    const rows = Math.max(1, Number(term?.rows || 1));
-    for (let row = Math.max(0, length - rows); row < length; row += 1) {
-      const line = buffer?.getLine?.(row);
-      if (String(line?.translateToString?.(true) || "").trim()) {
-        return true;
-      }
-    }
-    return false;
   };
 
   const panePresentationIsCurrent = (session) => Boolean(
@@ -6382,8 +6375,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (
       !session.fullRenderPending
       || session.activationFitPending
-      || (session.replayCompletionPending && !sessionHasCacheV2WarmFrame(session))
-      || (!session.replayComplete && !sessionHasCacheV2WarmFrame(session))
+      || session.replayCompletionPending
+      || !session.replayComplete
       || session.pendingRenderFitGeneration !== session.measuredFitGeneration
       || session.pendingRenderReplayGeneration !== session.terminalReplayGeneration
       || session.pendingRenderContentGeneration !== session.terminalContentGeneration
@@ -6395,6 +6388,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.presentedReplayGeneration = session.terminalReplayGeneration;
     session.hasPresentedFrame = true;
     session.shellEl.dataset.hasPresentedFrame = "true";
+    if (session.presentationCommitPending && session.resizePresentationHold) {
+      session.presentationCommitPending = false;
+      session.resizePresentationHold = false;
+    }
     if (!session.renderReady && !session.resizePresentationHold) {
       setPaneRenderReady(session, true);
     }
@@ -6440,12 +6437,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return true;
   };
 
-  const deferPaneRenderDuringResize = (session) => {
-    if (!session?.term || session.closed || !session.resizePresentationHold) {
+  const commitTerminalPresentationNow = (session) => {
+    if (!session?.term || session.closed || !session.resizePresentationHold || !session.hasPresentedFrame) {
       return false;
     }
-    requestPaneFullRender(session);
-    cancelPendingTerminalRender(session.term);
+    session.presentationCommitPending = true;
+    renderPaneFullNow(session);
     return true;
   };
 
@@ -6476,7 +6473,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (
       !session
       || session.closed
-      || (!session.replayComplete && !sessionHasCacheV2WarmFrame(session))
+      || !session.replayComplete
       || panePresentationIsCurrent(session)
     ) {
       return;
@@ -6486,7 +6483,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       session.fullRenderValidationTimer = 0;
       if (
         !session.closed
-        && (session.replayComplete || sessionHasCacheV2WarmFrame(session))
+        && session.replayComplete
         && !panePresentationIsCurrent(session)
         && !session.resizePresentationHold
         && isPaneVisibleForSizing(session)
@@ -7780,6 +7777,14 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
   };
 
+  const preserveTabTerminalFrames = (tab) => {
+    for (const pane of tab?.panes?.values?.() || []) {
+      if (pane.hasPresentedFrame && !pane.terminalFrameHeld) {
+        holdSessionTerminalFrame(pane);
+      }
+    }
+  };
+
   const focusPaneAtPoint = (clientX, clientY) => {
     if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) {
       return false;
@@ -8833,6 +8838,18 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       pasteIntoSession(session, text).catch((error) => showToast(error.message));
     }, { capture: true });
     addSessionCleanup(session, () => releaseTerminalInputViewportLock(session, { resync: false }));
+    const isTerminalTouchTarget = (target) => target instanceof Element && target.closest(".terminal-host") === host;
+    const claimCurrentDeviceTerminalSize = (event) => {
+      if (
+        !isTerminalTouchTarget(event.target)
+        || event.isPrimary === false
+        || (event.pointerType === "mouse" && event.button !== 0)
+      ) {
+        return;
+      }
+      claimTerminalSizeForCurrentDevice(session);
+    };
+    shell.addEventListener("pointerdown", claimCurrentDeviceTerminalSize, { capture: true, passive: true });
     host.addEventListener("pointerdown", (event) => {
       if (event.pointerType === "touch" || event.pointerType === "pen") {
         return;
@@ -8842,14 +8859,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       }
       window.requestAnimationFrame(() => focusTerminalInput(session));
     });
-    const isTerminalTouchTarget = (target) => target instanceof Element && target.closest(".terminal-host") === host;
     const startMobileTap = (event) => {
       mobileTapFinishState = null;
       if (!requiresTouchKeyboardDoubleTap() || event.touches.length !== 1 || !isTerminalTouchTarget(event.target)) {
         mobileTapTouchState = null;
         return;
       }
-      claimTerminalSize(session);
+      claimTerminalSizeForCurrentDevice(session);
       blurTerminalInput(session);
       const touch = event.touches[0];
       mobileTapTouchState = {
@@ -8920,6 +8936,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     shell.addEventListener("touchend", settleMobileTap);
     shell.addEventListener("touchcancel", cancelMobileTap, { capture: true, passive: true });
     addSessionCleanup(session, () => {
+      shell.removeEventListener("pointerdown", claimCurrentDeviceTerminalSize, { capture: true });
       shell.removeEventListener("touchstart", startMobileTap, { capture: true });
       shell.removeEventListener("touchmove", moveMobileTap, { capture: true });
       shell.removeEventListener("touchend", finishMobileTap, { capture: true });
@@ -9144,9 +9161,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       const canvasNeedsResize = !terminalCanvasMatchesExpectedSize(pane, fittedDimensions);
       const dimensionsWillChange = !dimensionsEqualTerminalSize(pane, fittedDimensions) || canvasNeedsResize;
       const shouldHoldFrame = dimensionsWillChange && pane.hasPresentedFrame;
-      if (!shouldSettlePresentation) {
+      if (shouldHoldFrame) {
+        beginTerminalPresentationHold(pane);
+      } else if (!shouldSettlePresentation) {
         pane.resizePresentationHold = true;
       }
+      const shouldCommitAfterHold = pane.resizePresentationHold && pane.hasPresentedFrame;
       if (shouldHoldFrame && !pane.terminalFrameHeld) {
         holdSessionTerminalFrame(pane);
       }
@@ -9186,15 +9206,18 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       if (!pane.initialRuntimeResetDone && !pane.replayComplete) {
         resetTerminalAfterInitialFit(pane);
       }
-      if (fitGenerationChanged && (pane.replayComplete || sessionHasCacheV2WarmFrame(pane))) {
+      if (fitGenerationChanged && pane.replayComplete) {
         setPaneRenderReady(pane, false);
-      }
-      if (forceFullRender || fitGenerationChanged || hideUntilRender || pane.fullRenderPending || !pane.hasPresentedFrame) {
-        renderPaneFullNow(pane);
       }
       sendTerminalSize(pane, { force: forceSizeSync });
       updateMobileSelectionHandles(pane);
-      if (shouldSettlePresentation) {
+      if (shouldCommitAfterHold) {
+        requestPaneFullRender(pane);
+        commitTerminalPresentationNow(pane);
+      } else if (forceFullRender || fitGenerationChanged || hideUntilRender || pane.fullRenderPending || !pane.hasPresentedFrame) {
+        renderPaneFullNow(pane);
+      }
+      if (shouldSettlePresentation && !shouldCommitAfterHold) {
         pane.resizePresentationHold = false;
         if (!pane.fullRenderPending && pane.hasPresentedFrame) {
           setPaneRenderReady(pane, true);
@@ -9236,19 +9259,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (isMobileKeyboardResizeSuppressed()) {
       return false;
     }
-    if (isPaneVisibleForSizing(pane)) {
-      pane.resizePresentationHold = true;
-      if (pane.hasPresentedFrame && !pane.terminalFrameHeld) {
-        holdSessionTerminalFrame(pane);
-      }
-      setPaneRenderReady(pane, false);
-    }
     return paneResizeScheduler.schedule(pane, options, scheduleOptions);
   };
 
   const cancelScheduledPaneResize = (pane) => {
     paneResizeScheduler.cancel(pane);
     if (pane) {
+      pane.presentationCommitPending = false;
       pane.resizePresentationHold = false;
     }
   };
@@ -9322,22 +9339,24 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (tab.resizeFrame) {
       window.cancelAnimationFrame(tab.resizeFrame);
     }
+    const resizeVisiblePanes = () => {
+      for (const pane of tab.panes.values()) {
+        const presentationCurrent = panePresentationIsCurrent(pane);
+        schedulePaneResize(pane, {
+          forceFullRender: !presentationCurrent || !pane.hasPresentedFrame,
+          hideUntilRender: !presentationCurrent,
+        }, { immediate: true });
+      }
+      connectPendingSessionsForTab(tab);
+    };
     if (immediate) {
       tab.resizeFrame = 0;
-      scheduleTabResize(tab, {
-        forceFullRender: true,
-        hideUntilRender: true,
-      }, { immediate: true });
-      connectPendingSessionsForTab(tab);
+      resizeVisiblePanes();
       return;
     }
     tab.resizeFrame = window.requestAnimationFrame(() => {
       tab.resizeFrame = 0;
-      scheduleTabResize(tab, {
-        forceFullRender: true,
-        hideUntilRender: true,
-      }, { immediate: true });
-      connectPendingSessionsForTab(tab);
+      resizeVisiblePanes();
     });
   };
 
@@ -9365,6 +9384,29 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return;
     }
     reassertTerminalSize(session, { force: true });
+  };
+
+  const claimTerminalSizeForCurrentDevice = (pane) => {
+    if (!pane || pane.closed) {
+      return false;
+    }
+    const now = performance.now();
+    const lastClaimAt = Number(pane.lastSizeClaimAt || 0);
+    if (!pane.sizeClaimRequired && lastClaimAt > 0 && now - lastClaimAt < terminalSizeClaimIntervalMs) {
+      return false;
+    }
+    if (!isPaneVisibleForSizing(pane)) {
+      return claimTerminalSize(pane);
+    }
+    const fit = resizePane(pane, {
+      forceSizeSync: true,
+      settlePresentation: true,
+    });
+    if (!fit.ok) {
+      return claimTerminalSize(pane);
+    }
+    pane.lastSizeClaimAt = now;
+    return true;
   };
 
   const resizeTabForCurrentDevice = (tab, options = {}) => {
@@ -9478,8 +9520,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       }
       mobileOrientationRecoveryTimer = 0;
       runMobileOrientationViewportRecoveryPass(seq);
-      replayActiveTabFromServerAfterViewportChange();
-    }, mobileOrientationHistoryReplayDelayMs);
+    }, mobileOrientationFinalSettleMs);
   };
 
   const handleMobileViewportResize = () => {
@@ -9772,14 +9813,19 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return;
     }
     try {
+      beginTerminalPresentationHold(session);
       installRendererBaselinePatch(session);
       if (session.term.renderer && typeof session.term.renderer.measureFont === "function") {
         session.term.renderer.metrics = session.term.renderer.measureFont();
       }
-      session.term.requestRender?.({ full: true });
-      resizePane(session);
+      cancelPendingTerminalRender(session.term);
+      resizePane(session, { settlePresentation: true });
       if (deferFitRetry) {
-        window.setTimeout(() => resizePane(session), 60);
+        window.setTimeout(() => {
+          if (!session.closed) {
+            resizePane(session, { settlePresentation: true });
+          }
+        }, 60);
       }
     } catch (error) {
     }
@@ -9792,6 +9838,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     window.localStorage.setItem(fontSizeStorageKey, String(terminalFontSize));
     for (const tab of tabs.values()) {
       for (const pane of tab.panes.values()) {
+        beginTerminalPresentationHold(pane);
         pane.term.options.fontSize = terminalFontSize;
         refreshTerminalMetrics(pane, { deferFitRetry: true });
       }
@@ -13937,13 +13984,20 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return;
     }
     clearSessionHistoryCacheWriteSchedule(session);
+    if (session.cacheV2PreviewCaptureTimer) {
+      window.clearTimeout(session.cacheV2PreviewCaptureTimer);
+      session.cacheV2PreviewCaptureTimer = 0;
+    }
+    if (session.cacheV2PreviewCaptureIdle && typeof window.cancelIdleCallback === "function") {
+      window.cancelIdleCallback(session.cacheV2PreviewCaptureIdle);
+      session.cacheV2PreviewCaptureIdle = 0;
+    }
     session.historyCacheDisabled = true;
     session.historyCacheWriteQueue = [];
     session.historyCacheWriteBytes = 0;
     session.historyCacheSnapshot = null;
     session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
     session.cacheV2WarmReplayActive = false;
-    session.cacheV2WarmFrameReady = false;
     session.cacheV2WarmReplayReady = false;
     session.cacheV2WarmReplayPromise = null;
     session.cacheV2WarmReplaySnapshot = null;
@@ -14084,7 +14138,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     session.historyCacheWriteQueue.push({ startCursor, endCursor, data });
     session.historyCacheWriteBytes += data.byteLength;
-    if (session.historyCacheWriteBytes >= terminalHistoryCacheFlushBytes) {
+    const flushBytes = sessionUsesTerminalCacheV2(session)
+      ? terminalCacheV2FlushBytes
+      : terminalHistoryCacheFlushBytes;
+    if (session.historyCacheWriteBytes >= flushBytes) {
       flushSessionHistoryCacheWrites(session);
     } else {
       scheduleSessionHistoryCacheWrite(session);
@@ -14566,7 +14623,6 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return;
     }
     session.cacheV2WarmReplayActive = false;
-    session.cacheV2WarmFrameReady = false;
     session.cacheV2WarmReplayReady = false;
     session.cacheV2WarmReplaySnapshot = null;
     session.cacheV2ReplayActive = false;
@@ -14602,7 +14658,6 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       && session.appliedHistoryCursor === snapshot.endCursor
     ) {
       session.cacheV2WarmReplayGeneration = session.terminalReplayGeneration;
-      session.cacheV2WarmFrameReady = true;
       session.replayFitGeneration = session.measuredFitGeneration;
       return true;
     }
@@ -14617,7 +14672,6 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.cacheV2WarmReplaySeq = replaySeq;
     session.cacheV2WarmReplayGeneration = replayGeneration;
     session.cacheV2WarmReplayActive = true;
-    session.cacheV2WarmFrameReady = false;
     session.cacheV2WarmReplayReady = false;
     session.cacheV2WarmReplaySnapshot = snapshot;
     session.cacheV2ServerSnapshotPending = false;
@@ -14638,7 +14692,6 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       data,
       startCursor,
       endCursor,
-      batchEnd,
     }) => {
       if (
         session.closed
@@ -14652,23 +14705,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         startCursor,
         endCursor,
       });
-      clearSessionOutputFlushSchedule(session);
+      flushSessionOutput(session, { force: true });
       if (session.cacheV2RecoveryMetrics) {
         session.cacheV2RecoveryMetrics.localReplayBytes += data.byteLength;
-      }
-      if (batchEnd) {
-        flushSessionOutput(session, { force: true });
-        const firstVisibleFrame = !session.cacheV2WarmFrameReady && terminalHasVisibleContent(session);
-        if (firstVisibleFrame) {
-          session.cacheV2WarmFrameReady = true;
-          markSessionCacheV2RecoveryMetric(session, "localFirstFrameAt");
-        }
-        renderPaneFullNow(session);
-        if (firstVisibleFrame) {
-          console.info("[terminal-cache-v2] warm canvas first frame", JSON.stringify({
-            cursor: session.appliedHistoryCursor.toString(),
-          }));
-        }
       }
     }), terminalCacheV2ReplayTimeoutMs, "Terminal warm cache replay timed out.").then(() => {
       if (
@@ -14683,12 +14722,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         throw new Error("terminal warm cache replay did not reach its manifest cursor");
       }
       session.cacheV2WarmReplayActive = false;
-      session.cacheV2WarmFrameReady = true;
       session.cacheV2WarmReplayReady = true;
-      markSessionCacheV2RecoveryMetric(session, "localFirstFrameAt");
       markSessionCacheV2RecoveryMetric(session, "localReplayCompleteAt");
-      renderPaneFullNow(session);
-      console.info("[terminal-cache-v2] warm canvas ready", JSON.stringify({
+      console.info("[terminal-cache-v2] warm replay ready", JSON.stringify({
         chunks: snapshot.chunks.length,
         bytes: Number(snapshot.endCursor - snapshot.baseCursor),
       }));
@@ -14715,7 +14751,6 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     const snapshotStartCursor = session.cacheV2ServerSnapshotStartCursor;
     session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
     session.cacheV2WarmReplayActive = false;
-    session.cacheV2WarmFrameReady = false;
     session.cacheV2WarmReplayReady = false;
     session.cacheV2WarmReplaySnapshot = null;
     session.cacheV2ServerSnapshotPending = false;
@@ -14748,10 +14783,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         throw new Error("server snapshot did not reach its target cursor");
       }
       session.cacheV2WarmReplayGeneration = session.terminalReplayGeneration;
-      session.cacheV2WarmFrameReady = true;
       session.cacheV2WarmReplayReady = true;
       flushSessionOutput(session, { force: true });
-      renderPaneFullNow(session);
     } catch (error) {
       rejectHistorySync(error?.message || "server snapshot replay failed");
     }
@@ -14773,6 +14806,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         startCursor,
         endCursor,
       });
+      flushSessionOutput(session, { force: true });
       if (session.cacheV2RecoveryMetrics) {
         session.cacheV2RecoveryMetrics.localReplayBytes += data.byteLength;
       }
@@ -14825,6 +14859,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       || !session.historyStateReady
       || !session.historyGeneration
       || session.outputQueueSize > 0
+      || performance.now() - Number(session.lastTerminalOutputAt || 0) < terminalCacheV2PreviewDelayMs
     ) {
       return;
     }
@@ -14836,6 +14871,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       || !panePresentationIsCurrent(session)
       || session.persistedHistoryCursor !== cursor
       || session.outputQueueSize > 0
+      || performance.now() - Number(session.lastTerminalOutputAt || 0) < terminalCacheV2PreviewDelayMs
     ) {
       return;
     }
@@ -14858,6 +14894,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       || !session.historyStateReady
       || !panePresentationIsCurrent(session)
       || session.outputQueueSize > 0
+      || performance.now() - Number(session.lastTerminalOutputAt || 0) < terminalCacheV2PreviewDelayMs
       || session.appliedHistoryCursor !== cursor
       || session.persistedHistoryCursor !== cursor
       || canvas.width !== width
@@ -14885,19 +14922,32 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     if (session.cacheV2PreviewCaptureTimer) {
       window.clearTimeout(session.cacheV2PreviewCaptureTimer);
+      session.cacheV2PreviewCaptureTimer = 0;
+    }
+    if (session.cacheV2PreviewCaptureIdle && typeof window.cancelIdleCallback === "function") {
+      window.cancelIdleCallback(session.cacheV2PreviewCaptureIdle);
+      session.cacheV2PreviewCaptureIdle = 0;
     }
     const captureSeq = Number(session.cacheV2PreviewCaptureSeq || 0) + 1;
     session.cacheV2PreviewCaptureSeq = captureSeq;
     session.cacheV2PreviewCaptureTimer = window.setTimeout(() => {
       session.cacheV2PreviewCaptureTimer = 0;
-      captureSessionCacheV2Preview(session, captureSeq).catch((error) => {
-        console.warn("[terminal-cache-v2] preview capture failed", {
-          name: session.name,
-          pane: session.id,
-          error: error?.message || String(error),
+      const capture = () => {
+        session.cacheV2PreviewCaptureIdle = 0;
+        captureSessionCacheV2Preview(session, captureSeq).catch((error) => {
+          console.warn("[terminal-cache-v2] preview capture failed", {
+            name: session.name,
+            pane: session.id,
+            error: error?.message || String(error),
+          });
         });
-      });
-    }, 180);
+      };
+      if (typeof window.requestIdleCallback === "function") {
+        session.cacheV2PreviewCaptureIdle = window.requestIdleCallback(capture, { timeout: 1500 });
+      } else {
+        window.setTimeout(capture, 0);
+      }
+    }, terminalCacheV2PreviewDelayMs);
   };
 
   const scheduleSessionCacheV2Compaction = (session) => {
@@ -15078,10 +15128,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       recordTerminalRuntimeMetric("terminalOutputBatches");
       recordTerminalRuntimeMetric("terminalOutputBytes", terminalOutputByteLength(data));
       measurePerformanceTask("terminal render", () => session.term.write(data));
+      session.lastTerminalOutputAt = performance.now();
       session.term.requestRender?.({ throttle: true });
       advanceTerminalContentGeneration(session);
       drainGeneratedTerminalResponses(session);
-      if (replayOutput || deferHiddenPaneRender(session) || deferPaneRenderDuringResize(session)) {
+      if (replayOutput || deferHiddenPaneRender(session)) {
         cancelPendingTerminalRender(session.term);
       }
       return true;
@@ -15132,7 +15183,6 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.historyCacheReplayCommitPending = false;
     session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
     session.cacheV2WarmReplayActive = false;
-    session.cacheV2WarmFrameReady = false;
     session.cacheV2WarmReplayReady = false;
     session.cacheV2WarmReplayPromise = null;
     session.cacheV2WarmReplaySnapshot = null;
@@ -15188,8 +15238,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       if (force) {
         flushQueue.push(...queue);
       } else {
+        const flushBudgetBytes = queue[0]?.replayOutput
+          ? terminalReplayWriteBatchBytes
+          : terminalOutputFlushBudgetBytes;
         for (const entry of queue) {
-          if (restQueue.length > 0 || (flushQueue.length > 0 && flushBytes + entry.byteLength > terminalOutputFlushBudgetBytes)) {
+          if (restQueue.length > 0 || (flushQueue.length > 0 && flushBytes + entry.byteLength > flushBudgetBytes)) {
             restQueue.push(entry);
             restBytes += entry.byteLength;
           } else {
@@ -15241,7 +15294,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
             historyEndCursor: entry.historyEndCursor,
           };
         }
-        if (batch.chunks.length > 0 && batch.byteLength + entry.byteLength > terminalOutputFlushBudgetBytes) {
+        const batchLimitBytes = entry.replayOutput
+          ? terminalReplayWriteBatchBytes
+          : terminalOutputFlushBudgetBytes;
+        if (batch.chunks.length > 0 && batch.byteLength + entry.byteLength > batchLimitBytes) {
           flushBatch();
           batch = {
             kind: entry.kind,
@@ -15305,6 +15361,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     // Output chunks carry replay state because the replay-complete control frame can arrive before the next paint.
     const replayOutput = !session.replayComplete;
     const allowGeneratedInput = replayOutput && session.allowGeneratedInputDuringReplay === true;
+    const outputChunkBytes = replayOutput
+      ? terminalReplayWriteBatchBytes
+      : terminalOutputFlushBudgetBytes;
     const trackHistory = kind === "bytes" && session.historyProtocolActive;
     let nextHistoryCursor = trackHistory
       ? (startCursor === null ? session.receivedHistoryCursor : startCursor)
@@ -15334,14 +15393,14 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       recordTerminalRuntimeMetric("outputQueuedBytes", byteLength);
       recordTerminalRuntimeMaxMetric("outputQueuePeakBytes", session.outputQueueSize);
     };
-    if (kind === "bytes" && outputData.byteLength > terminalOutputFlushBudgetBytes) {
+    if (kind === "bytes" && outputData.byteLength > outputChunkBytes) {
       for (let offset = 0; offset < outputData.byteLength;) {
-        const end = terminalOutputByteChunkEnd(outputData, offset, terminalOutputFlushBudgetBytes);
+        const end = terminalOutputByteChunkEnd(outputData, offset, outputChunkBytes);
         enqueueEntry(outputData.subarray(offset, end));
         offset = end;
       }
-    } else if (kind === "text" && terminalOutputByteLength(outputData) > terminalOutputFlushBudgetBytes) {
-      for (const chunk of splitTerminalOutputText(outputData, terminalOutputFlushBudgetBytes)) {
+    } else if (kind === "text" && terminalOutputByteLength(outputData) > outputChunkBytes) {
+      for (const chunk of splitTerminalOutputText(outputData, outputChunkBytes)) {
         enqueueEntry(chunk);
       }
     } else {
@@ -15368,11 +15427,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return;
     }
     measurePerformanceTask("terminal render", () => session.term.write(data));
+    session.lastTerminalOutputAt = performance.now();
     session.term.requestRender?.({ throttle: true });
     advanceTerminalContentGeneration(session);
     drainGeneratedTerminalResponses(session);
     deferHiddenPaneRender(session);
-    deferPaneRenderDuringResize(session);
     resetTerminalHostViewport(session, { clean: true });
     positionTerminalInput(session);
     schedulePaneFullRenderValidation(session);
@@ -15507,7 +15566,6 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.resetOnNextReplay = true;
     session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
     session.cacheV2WarmReplayActive = false;
-    session.cacheV2WarmFrameReady = false;
     session.cacheV2WarmReplayReady = false;
     session.cacheV2WarmReplayPromise = null;
     session.cacheV2WarmReplaySnapshot = null;
@@ -15521,7 +15579,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (socket) {
       detachSessionSocket(session, socket, { connection: "connecting" });
       try {
-        socket.close(4000, "viewport changed");
+        socket.close(4000, "history resync");
       } catch (error) {
       }
     } else {
@@ -15533,16 +15591,6 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     connectSession(session).catch((error) => {
       showSessionStartupError(session, error.message || "WebSocket reconnect failed.");
     });
-  };
-
-  const replayActiveTabFromServerAfterViewportChange = () => {
-    const tab = currentTab();
-    if (!tab) {
-      return;
-    }
-    for (const pane of tab.panes.values()) {
-      requestSessionHistoryReplay(pane);
-    }
   };
 
   const markSessionSocketHealth = (session, currentSocket) => {
@@ -15852,7 +15900,6 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       const paneID = String(message?.pane_id || message?.paneId || "").trim() || "unknown";
       session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
       session.cacheV2WarmReplayActive = false;
-      session.cacheV2WarmFrameReady = false;
       session.cacheV2WarmReplayReady = false;
       session.cacheV2WarmReplayPromise = null;
       session.cacheV2WarmReplaySnapshot = null;
@@ -15877,7 +15924,6 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       session.historyGeneration = "";
       session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
       session.cacheV2WarmReplayActive = false;
-      session.cacheV2WarmFrameReady = false;
       session.cacheV2WarmReplayReady = false;
       session.cacheV2WarmReplayPromise = null;
       session.cacheV2WarmReplaySnapshot = null;
@@ -16029,12 +16075,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
                 session.resetOnNextReplay = false;
                 if (syncMode === "snapshot") {
                   const snapshot = session.historyCacheSnapshot;
-                  const keepWarmCanvas = Boolean(
+                  const keepWarmState = Boolean(
                     sessionCacheV2WarmReplayMatchesSnapshot(session, snapshot)
                     && snapshot.historyGeneration === historyGeneration
                     && snapshot.endCursor <= serverEndCursor
                   );
-                  const stageServerSnapshot = keepWarmCanvas || session.hasPresentedFrame;
+                  const stageServerSnapshot = keepWarmState || session.hasPresentedFrame;
                   if (stageServerSnapshot) {
                     session.cacheV2ServerSnapshotPending = true;
                     session.cacheV2ServerSnapshotStartCursor = deltaFromCursor;
@@ -16535,13 +16581,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       cacheV2NetworkQueueBytes: 0,
       cacheV2WarmReplaySeq: 0,
       cacheV2WarmReplayGeneration: 0,
-      cacheV2WarmCanvasLoggedGeneration: 0,
       cacheV2WarmReplayActive: false,
-      cacheV2WarmFrameReady: false,
       cacheV2WarmReplayReady: false,
       cacheV2WarmReplayPromise: null,
       cacheV2WarmReplaySnapshot: null,
-      cacheV2WarmCanvasVisibleGeneration: 0,
       cacheV2ServerSnapshotPending: false,
       cacheV2ServerSnapshotStartCursor: 0n,
       cacheV2PreviewURL: "",
@@ -16550,7 +16593,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       cacheV2PreviewPreparePromise: null,
       cacheV2PreviewPrepareSeq: 0,
       cacheV2PreviewCaptureTimer: 0,
+      cacheV2PreviewCaptureIdle: 0,
       cacheV2PreviewCaptureSeq: 0,
+      lastTerminalOutputAt: 0,
       cacheV2OverviewPreview: null,
       cacheV2OverviewPreviewPromise: null,
       cacheV2OverviewPreviewSeq: 0,
@@ -16586,6 +16631,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       presentationPending: true,
       fullRenderPending: false,
       fullRenderValidationTimer: 0,
+      presentationCommitPending: false,
       hasPresentedFrame: false,
       activationFitPending: false,
       resizePresentationHold: false,
@@ -17023,6 +17069,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return measurePerformanceTask("tab switch", () => {
       const previousTabId = activeTabId;
       const wasActive = previousTabId === tab.id;
+      if (!wasActive) {
+        preserveTabTerminalFrames(tabs.get(previousTabId));
+      }
       activeTabId = tab.id;
       if (rememberRecent) {
         rememberRecentTab(tab.id, previousTabId);
@@ -17036,6 +17085,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       }
       for (const pane of tab.panes.values()) {
         pane.activationFitPending = !wasActive || !panePresentationIsCurrent(pane);
+        if (!wasActive && pane.terminalFrameHeld) {
+          pane.resizePresentationHold = true;
+          pane.presentationCommitPending = false;
+          setPaneRenderReady(pane, false);
+        }
         if (!panePresentationIsCurrent(pane)) {
           setPaneRenderReady(pane, false);
         }
@@ -17654,10 +17708,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       window.clearTimeout(pane.cacheV2PreviewCaptureTimer);
       pane.cacheV2PreviewCaptureTimer = 0;
     }
+    if (pane.cacheV2PreviewCaptureIdle && typeof window.cancelIdleCallback === "function") {
+      window.cancelIdleCallback(pane.cacheV2PreviewCaptureIdle);
+      pane.cacheV2PreviewCaptureIdle = 0;
+    }
     pane.cacheV2PreviewCaptureSeq = Number(pane.cacheV2PreviewCaptureSeq || 0) + 1;
     pane.cacheV2WarmReplaySeq = Number(pane.cacheV2WarmReplaySeq || 0) + 1;
     pane.cacheV2WarmReplayActive = false;
-    pane.cacheV2WarmFrameReady = false;
     pane.cacheV2WarmReplayReady = false;
     pane.cacheV2WarmReplayPromise = null;
     pane.cacheV2WarmReplaySnapshot = null;
@@ -20129,10 +20186,14 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   document.addEventListener("gestureend", preventMobileViewportZoom, { capture: true, passive: false });
   document.addEventListener("touchstart", recoverVisibleSessionsFromUserGesture, { capture: true, passive: true });
   document.addEventListener("pointerdown", (event) => {
-    if (typeof PointerEvent === "undefined" || !(event instanceof PointerEvent) || !event.pointerType || event.pointerType === "mouse") {
+    const target = event.target;
+    const terminalPointer = target instanceof Element && Boolean(target.closest(".terminal-host"));
+    if (
+      !terminalPointer
+      && (typeof PointerEvent === "undefined" || !(event instanceof PointerEvent) || !event.pointerType || event.pointerType === "mouse")
+    ) {
       reassertTerminalSize(activeSession());
     }
-    const target = event.target;
     if (contextMenu && !contextMenu.hidden && target instanceof Node && !contextMenu.contains(target)) {
       closeContextMenu();
     }

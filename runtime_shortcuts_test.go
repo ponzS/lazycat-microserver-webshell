@@ -90,11 +90,12 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`socketUrl.searchParams.set("workspace_generation"`,
 		`validateSessionCacheV2ReplayIdentity`,
 		`startSessionCacheV2WarmReplay`,
-		`session.cacheV2WarmFrameReady`,
 		`session.cacheV2WarmReplayReady`,
-		`[terminal-cache-v2] warm canvas first frame`,
-		`[terminal-cache-v2] warm canvas ready`,
-		`[terminal-cache-v2] warm canvas visible`,
+		`[terminal-cache-v2] warm replay ready`,
+		`const terminalReplayWriteBatchBytes = 1 * 1024 * 1024;`,
+		`const terminalCacheV2FlushBytes = 1 * 1024 * 1024;`,
+		`const terminalCacheV2ReplayTimeoutMs = 2 * 1000;`,
+		`const terminalCacheV2CompactionTargetBytes = 1 * 1024 * 1024;`,
 		`prepareTabOverviewCachePreviews`,
 		`sessionCacheV2OverviewPreviewMatches`,
 		`[terminal-cache-v2] overview preview load failed`,
@@ -102,7 +103,7 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`session.cacheV2ServerSnapshotPending`,
 		`beginSessionCacheV2Replay`,
 		`session.cacheV2NetworkQueue.push(data);`,
-		`(!session.replayComplete && !sessionHasCacheV2WarmFrame(session))`,
+		`|| !session.replayComplete`,
 		`session.renderReady`,
 		`session.shellEl?.dataset.previewReady !== "true"`,
 		`requestTerminalStoragePersistence`,
@@ -148,7 +149,8 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`historyGeneration: source.historyGeneration`,
 		`checkpointCursor !== endCursor`,
 		`const defaultReadConcurrency = 32;`,
-		`const defaultWriteBlockBytes = 128 * 1024;`,
+		`const defaultWriteBlockBytes = 1 * 1024 * 1024;`,
+		`const defaultCompactionMinChunks = 2;`,
 		`const loaded = await Promise.all(batch.map(async (chunk) => {`,
 		`batchEnd: batchIndex === loaded.length - 1`,
 		`const compact = (sourceIdentity, {`,
@@ -249,38 +251,31 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`} else {
                   if (!historyConnectRange`)
 	for _, want := range []string{
-		`const keepWarmCanvas = Boolean(`,
+		`const keepWarmState = Boolean(`,
 		`sessionCacheV2WarmReplayMatchesSnapshot(session, snapshot)`,
 		`snapshot.historyGeneration === historyGeneration`,
 		`snapshot.endCursor <= serverEndCursor`,
-		`const stageServerSnapshot = keepWarmCanvas || session.hasPresentedFrame;`,
+		`const stageServerSnapshot = keepWarmState || session.hasPresentedFrame;`,
 		`session.cacheV2ServerSnapshotPending = true;`,
 	} {
 		if !strings.Contains(snapshotReplayBlock, want) {
-			t.Fatalf("snapshot warm canvas guard missing %q", want)
+			t.Fatalf("snapshot staged-state guard missing %q", want)
 		}
 	}
 	completeReplayBlock := sourceBetween(t, mainSource,
 		`case "history-replay-complete":`,
 		`case "agent-preparing":`)
 	if !strings.Contains(completeReplayBlock, `applySessionCacheV2ServerSnapshot(session, currentSocket, rejectHistorySync);`) {
-		t.Fatal("completed server snapshot must atomically replace the already visible warm cache canvas")
+		t.Fatal("completed server snapshot must atomically replace the staged terminal state")
 	}
 	warmReplayBlock := sourceBetween(t, mainSource,
 		"const startSessionCacheV2WarmReplay = (session, snapshot) => {",
 		"const applySessionCacheV2ServerSnapshot = (session, currentSocket, rejectHistorySync) => {")
 	for _, want := range []string{
 		`terminalCacheV2.readChunks(snapshot`,
-		`batchEnd`,
-		`clearSessionOutputFlushSchedule(session);`,
-		`if (batchEnd) {`,
-		`const firstVisibleFrame = !session.cacheV2WarmFrameReady && terminalHasVisibleContent(session);`,
-		`terminalHasVisibleContent(session)`,
-		`session.cacheV2WarmFrameReady = true;`,
-		`markSessionCacheV2RecoveryMetric(session, "localFirstFrameAt");`,
 		`flushSessionOutput(session, { force: true });`,
 		`session.cacheV2WarmReplayReady = true;`,
-		`renderPaneFullNow(session);`,
+		`markSessionCacheV2RecoveryMetric(session, "localReplayCompleteAt");`,
 		`if (!session.cacheV2ServerSnapshotPending) {`,
 		`drainSessionCacheV2NetworkQueue(session);`,
 	} {
@@ -288,15 +283,27 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 			t.Fatalf("warm byte replay guard missing %q", want)
 		}
 	}
+	for _, forbidden := range []string{
+		`batchEnd`,
+		`cacheV2WarmFrameReady`,
+		`terminalHasVisibleContent`,
+		`localFirstFrameAt`,
+		`renderPaneFullNow(session);`,
+		`warm canvas`,
+	} {
+		if strings.Contains(warmReplayBlock, forbidden) {
+			t.Fatalf("warm byte replay must stay hidden and unrendered, found %q", forbidden)
+		}
+	}
 	renderReadyBlock := sourceBetween(t, mainSource,
 		"const markPaneRenderedIfMeasurable = (session) => {",
 		"const requestPaneFullRender = (session) => {")
 	for _, want := range []string{
-		`session.replayCompletionPending && !sessionHasCacheV2WarmFrame(session)`,
-		`!session.replayComplete && !sessionHasCacheV2WarmFrame(session)`,
+		`|| session.replayCompletionPending`,
+		`|| !session.replayComplete`,
 	} {
 		if !strings.Contains(renderReadyBlock, want) {
-			t.Fatalf("warm canvas presentation guard missing %q", want)
+			t.Fatalf("completed replay presentation guard missing %q", want)
 		}
 	}
 	inputReadyBlock := sourceBetween(t, mainSource,
@@ -304,8 +311,7 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		"const sendSessionInputChunk = (session, data, { generated = false } = {}) => {")
 	if !strings.Contains(inputReadyBlock, `session?.replayComplete`) ||
 		strings.Contains(inputReadyBlock, `session.renderReady`) ||
-		strings.Contains(inputReadyBlock, `cacheV2WarmReplayReady`) ||
-		strings.Contains(inputReadyBlock, `cacheV2WarmFrameReady`) {
+		strings.Contains(inputReadyBlock, `cacheV2WarmReplayReady`) {
 		t.Fatal("terminal input readiness must not depend on the presentation frame")
 	}
 	prepareCacheBlock := sourceBetween(t, mainSource,
@@ -337,6 +343,26 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 	} {
 		if !strings.Contains(drawOverviewBlock, want) {
 			t.Fatalf("tab overview must use an identity-checked cached preview for unopened tabs: missing %q", want)
+		}
+	}
+
+	for _, marker := range []string{
+		`  const applyTerminalFont = () => {`,
+		`  const setTerminalFontSize = (size) => {`,
+	} {
+		end := `  const adjustTerminalFontSize = (delta) =>`
+		if marker == `  const applyTerminalFont = () => {` {
+			end = `  const syncFontEditControls = () => {`
+		}
+		body := sourceBetween(t, mainSource, marker, end)
+		holdIndex := strings.Index(body, `beginTerminalPresentationHold(pane);`)
+		fontUpdate := `pane.term.options.fontFamily = terminalOptionsBase.fontFamily;`
+		if marker != `  const applyTerminalFont = () => {` {
+			fontUpdate = `pane.term.options.fontSize = terminalFontSize;`
+		}
+		fontIndex := strings.Index(body, fontUpdate)
+		if holdIndex < 0 || fontIndex < 0 || holdIndex > fontIndex {
+			t.Fatalf("font changes must hold the prior terminal frame before updating Ghostty options")
 		}
 	}
 }
@@ -2292,6 +2318,7 @@ func TestRuntimeTerminalOutputBatchingGuard(t *testing.T) {
 	wantSnippets := []string{
 		"const terminalOutputFlushFallbackMs = 32;",
 		"const terminalOutputFlushBudgetBytes = 128 * 1024;",
+		"const terminalReplayWriteBatchBytes = 1 * 1024 * 1024;",
 		"const terminalOutputQueueSoftLimitBytes = 1 * 1024 * 1024;",
 		"const terminalOutputMeasureChunkChars = 32 * 1024;",
 		"const terminalOutputMeasureBuffer = new Uint8Array(terminalOutputMeasureChunkChars * 4);",
@@ -2306,7 +2333,9 @@ func TestRuntimeTerminalOutputBatchingGuard(t *testing.T) {
 		"const flushSessionOutput = (session, { force = false } = {}) => {",
 		"window.requestAnimationFrame(flush);",
 		"session.outputQueue.push({",
-		"outputData.byteLength > terminalOutputFlushBudgetBytes",
+		"outputData.byteLength > outputChunkBytes",
+		"entry.replayOutput",
+		"? terminalReplayWriteBatchBytes",
 		"finishSessionHistoryReplayIfReady(session) || flushSessionOutput(session);",
 		"flushSessionOutput(session, { force: true });",
 		"const handleTerminalOutputOverload = (session, reason) => {",
@@ -2462,6 +2491,8 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"clearTerminalCanvasPixels(session);",
 		"const holdSessionTerminalFrame = (session) => {",
 		"const releaseSessionTerminalFrame = (session) => {",
+		"const beginTerminalPresentationHold = (session) => {",
+		"presentationCommitPending: false,",
 		"session.shellEl.dataset.hasPresentedFrame = session.hasPresentedFrame ? \"true\" : \"false\";",
 		"const markPaneRenderedIfMeasurable = (session) => {",
 		"!session.fullRenderPending",
@@ -2517,7 +2548,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"if (isMobileKeyboardResizeSuppressed()) {",
 		"Skip terminal resize holds while the mobile IME changes the viewport.",
 		"const deferHiddenPaneRender = (session) => {",
-		"const deferPaneRenderDuringResize = (session) => {",
+		"const commitTerminalPresentationNow = (session) => {",
 		"holdSessionTerminalFrame(pane);",
 		"const ratio = Math.max(",
 		"ctx.drawImage(source, 0, 0, hold.width, hold.height);",
@@ -2529,6 +2560,9 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"if (!settled) {",
 		"settlePresentation: true,",
 		"settlePresentation: !session.resizePresentationHold,",
+		"const shouldCommitAfterHold = pane.resizePresentationHold && pane.hasPresentedFrame;",
+		"requestPaneFullRender(pane);",
+		"commitTerminalPresentationNow(pane);",
 		"cancelScheduledPaneResize(session);",
 		"cleanupCallbacks: [],",
 		"installTerminalCanvasRecovery(session);",
@@ -2546,7 +2580,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"clearTerminalCanvasPixels(pane);",
 		"requestPaneFullRender(session);",
 		"renderPaneFullNow(session);",
-		"deferPaneRenderDuringResize(session)",
+		"if (replayOutput || deferHiddenPaneRender(session)) {",
 		"cancelPendingTerminalRender(session.term);",
 		"schedulePaneFullRenderValidation(session);",
 	}
@@ -2710,6 +2744,57 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"const writeSessionImmediateOutput =",
 		"const readAgentStartupError =",
 	)
+	presentationBlock := sourceBetween(t, mainSource,
+		"const beginTerminalPresentationHold = (session) => {",
+		"const hideSessionTerminalPreview = (session) => {")
+	if strings.Contains(presentationBlock, "scheduleTerminalPresentationCommit") || strings.Contains(presentationBlock, "terminalPresentationQuietMs") {
+		t.Fatal("presentation hold must not wait for an output quiet window")
+	}
+	resizeBlock := sourceBetween(t, mainSource,
+		"const resizePane = (pane, {",
+		"const paneResizeScheduler = createTerminalResizeScheduler({")
+	holdIndex := strings.Index(resizeBlock, "if (shouldHoldFrame) {")
+	beginIndex := strings.Index(resizeBlock, "beginTerminalPresentationHold(pane);")
+	dimensionsIndex := strings.Index(resizeBlock, "const dimensionsWillChange = !dimensionsEqualTerminalSize(pane, fittedDimensions) || canvasNeedsResize;")
+	commitIndex := strings.Index(resizeBlock, "commitTerminalPresentationNow(pane);")
+	if dimensionsIndex < 0 || holdIndex <= dimensionsIndex || beginIndex <= holdIndex || commitIndex <= beginIndex {
+		t.Fatal("resize must enter a presentation hold only after confirming a geometry change, then commit its full render directly")
+	}
+	scheduleResizeBlock := sourceBetween(t, mainSource,
+		"const schedulePaneResize = (pane, options = {}, scheduleOptions = {}) => {",
+		"const cancelScheduledPaneResize = (pane) => {")
+	if strings.Contains(scheduleResizeBlock, "beginTerminalPresentationHold") {
+		t.Fatal("scheduling a resize must not freeze a current terminal before its geometry is measured")
+	}
+	queuedOutputBlock := sourceBetween(t, mainSource,
+		"const writeTerminalOutputBatch = (session, data, replayOutput, allowGeneratedInput) => {",
+		"const finishSessionHistoryReplayIfReady =")
+	if strings.Contains(queuedOutputBlock, "deferPaneRenderDuringResize") {
+		t.Fatal("normal PTY output must continue rendering while a presentation frame is held")
+	}
+	tabSwitchBlock := sourceBetween(t, mainSource,
+		"const setActiveTab = (tabId, { focus = true, remember = true, rememberRecent = true } = {}) => {",
+		"const renderLeaf = (tab, node) => {")
+	preserveIndex := strings.Index(tabSwitchBlock, "preserveTabTerminalFrames(tabs.get(previousTabId));")
+	activateIndex := strings.Index(tabSwitchBlock, "activeTabId = tab.id;")
+	if preserveIndex < 0 || activateIndex < 0 || preserveIndex > activateIndex || !strings.Contains(tabSwitchBlock, "pane.terminalFrameHeld") {
+		t.Fatal("tab switching must preserve the prior live frame before hiding its pane and render through that frame on activation")
+	}
+	previewBlock := sourceBetween(t, mainSource,
+		"const captureSessionCacheV2Preview = async (session, captureSeq) => {",
+		"const scheduleSessionCacheV2Compaction = (session) => {")
+	for _, want := range []string{
+		"const terminalCacheV2PreviewDelayMs = 3000;",
+		"performance.now() - Number(session.lastTerminalOutputAt || 0) < terminalCacheV2PreviewDelayMs",
+		"window.requestIdleCallback(capture, { timeout: 1500 })",
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("cache preview must stay outside the active output render path: missing %q", want)
+		}
+	}
+	if strings.Count(previewBlock, "performance.now() - Number(session.lastTerminalOutputAt || 0) < terminalCacheV2PreviewDelayMs") < 2 {
+		t.Fatal("cache preview must recheck terminal output activity before and after image encoding")
+	}
 	if strings.Contains(rendererSource, "this.requestRender({ full: s })") {
 		t.Fatal("terminal writes must not depend on scrollback generation alone for full redraws")
 	}
@@ -2763,7 +2848,7 @@ func TestRuntimeOfflineFrameAndWorkspaceRetryGuard(t *testing.T) {
 		"scheduleReconnect(session, { immediate: true });",
 		"session.workspaceExitPending = true;",
 		"refreshWorkspaceWithRetry({ focus: shouldFocusAfterExit })",
-		"const stageServerSnapshot = keepWarmCanvas || session.hasPresentedFrame;",
+		"const stageServerSnapshot = keepWarmState || session.hasPresentedFrame;",
 		"holdSessionTerminalFrame(session);",
 		"reconnectWorkspaceSessions({ allowHidden: true });",
 	} {
@@ -3125,6 +3210,9 @@ func TestRuntimeTerminalSizeClaimSurvivesCrossClientResize(t *testing.T) {
 		`const sendTerminalSize = (pane, { force = false } = {}) => {`,
 		`shouldSendTerminalSize({`,
 		`const claimTerminalSize = (pane) => {`,
+		`const claimTerminalSizeForCurrentDevice = (pane) => {`,
+		`forceSizeSync: true,`,
+		`settlePresentation: true,`,
 		`sendTerminalSize(pane, { force: true });`,
 		`pane.serverCols = Math.max(0, Math.floor(Number(paneState.cols) || 0));`,
 		`pane.serverRows = Math.max(0, Math.floor(Number(paneState.rows) || 0));`,
@@ -3133,10 +3221,19 @@ func TestRuntimeTerminalSizeClaimSurvivesCrossClientResize(t *testing.T) {
 		`pane.sizeClaimRequired = terminalSizeDiffersFromServer({`,
 		`resizePane(session, { forceSizeSync: true });`,
 		`prepareMouseInput: () => claimTerminalSize(session),`,
+		`const claimCurrentDeviceTerminalSize = (event) => {`,
+		`claimTerminalSizeForCurrentDevice(session);`,
+		`shell.addEventListener("pointerdown", claimCurrentDeviceTerminalSize, { capture: true, passive: true });`,
 	} {
 		if !strings.Contains(source, want) {
 			t.Fatalf("runtime cross-client terminal size claim missing %q", want)
 		}
+	}
+	claimBlock := sourceBetween(t, source,
+		`const claimTerminalSizeForCurrentDevice = (pane) => {`,
+		`const resizeTabForCurrentDevice = (tab, options = {}) => {`)
+	if strings.Contains(claimBlock, `beginTerminalPresentationHold(pane);`) {
+		t.Fatal("a size claim without a geometry change must not freeze terminal rendering")
 	}
 
 	startMobileTap := sourceBetween(
@@ -3145,10 +3242,10 @@ func TestRuntimeTerminalSizeClaimSurvivesCrossClientResize(t *testing.T) {
 		`    const startMobileTap = (event) => {`,
 		`    const moveMobileTap = (event) => {`,
 	)
-	claimIndex := strings.Index(startMobileTap, `claimTerminalSize(session);`)
+	claimIndex := strings.Index(startMobileTap, `claimTerminalSizeForCurrentDevice(session);`)
 	blurIndex := strings.Index(startMobileTap, `blurTerminalInput(session);`)
 	if claimIndex < 0 || blurIndex < 0 || claimIndex > blurIndex {
-		t.Fatal("mobile touchstart must reclaim terminal size before keyboard and touch consumers")
+		t.Fatal("mobile touchstart must fit and reclaim terminal size before keyboard and touch consumers")
 	}
 
 	for _, marker := range []string{
@@ -3477,7 +3574,7 @@ func TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs(t *testing.T) {
 	}
 }
 
-func TestRuntimeMobileOrientationReplaysVisibleTerminalAfterViewportSettle(t *testing.T) {
+func TestRuntimeMobileOrientationKeepsTerminalStateAfterViewportSettle(t *testing.T) {
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {
 		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
@@ -3486,29 +3583,29 @@ func TestRuntimeMobileOrientationReplaysVisibleTerminalAfterViewportSettle(t *te
 
 	wantSnippets := []string{
 		"const mobileOrientationViewportRecoveryDelays = [0, 80, 180, 360, 720];",
-		"const mobileOrientationHistoryReplayDelayMs = 900;",
+		"const mobileOrientationFinalSettleMs = 900;",
 		"const currentMobileViewportOrientation = () => {",
 		"const rememberMobileViewportOrientationChange = () => {",
 		"const scheduleMobileOrientationViewportRecovery = () => {",
 		"if (rememberMobileViewportOrientationChange() || mobileOrientationRecoveryTimer) {",
 		"const shouldRecoverOrientation = orientationChanged || (detectOrientation && mobileOrientationRecoveryTimer);",
 		"syncMobileVisualViewport({ detectOrientation: false });",
-		"replayActiveTabFromServerAfterViewportChange();",
-		"const resetTerminalForHistoryReplay = (session) => {",
-		"resetTerminalRuntimeState(session)",
-		"session.initialRuntimeResetDone = true;",
-		"session.replayFitGeneration = session.measuredFitGeneration;",
-		"const requestSessionHistoryReplay = (session) => {",
-		"session.resetOnNextReplay = true;",
-		"socket.close(4000, \"viewport changed\");",
-		"const replayActiveTabFromServerAfterViewportChange = () => {",
-		"resetTerminalForHistoryReplay(session)",
+		"resizeActiveTabForCurrentDevice();",
 		"window.addEventListener(\"orientationchange\", handleMobileOrientationChange);",
 		"window.screen?.orientation?.addEventListener?.(\"change\", handleMobileOrientationChange);",
 	}
 	for _, want := range wantSnippets {
 		if !strings.Contains(source, want) {
-			t.Fatalf("runtime mobile orientation replay guard missing %q", want)
+			t.Fatalf("runtime mobile orientation state-preservation guard missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"replayActiveTabFromServerAfterViewportChange",
+		"mobileOrientationHistoryReplayDelayMs",
+		"socket.close(4000, \"viewport changed\")",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("orientation recovery must not trigger history replay, found %q", forbidden)
 		}
 	}
 }
