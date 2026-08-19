@@ -22,7 +22,7 @@ LightOS WebShell 的目标是为懒猫微服提供一个开箱即用的网页终
 - 使用实例内的持久 agent 管理终端工作区，刷新页面、重新打开页面或短暂断网后可重新连接到已有 tab 和 pane。
 - 服务升级后优先复用兼容的旧 agent，尽量保留正在运行的终端会话；协议不兼容时会明确提示。
 - 支持终端输出历史回放，减少重连后的上下文丢失。
-- LightOS 实例端使用 PTY 原始字节范围游标同步历史；容器页面在 workspace HTTP 响应确认账号、实例、workspace、tab 和 pane 身份后，在后台从 Cache API v2 回放对应 history generation 的本地字节，回放期间隐藏 live canvas，待服务端 replay complete 和最终 full render 成功后一次性显示真实画面。第一批字节不是首帧。
+- LightOS 实例端使用 PTY 原始字节范围游标同步历史；容器页面在 workspace HTTP 响应确认账号、实例、workspace、tab 和 pane 身份后，从 Cache API v2 使用 8 块滚动预读恢复对应 history generation。本地历史和恢复期间排队的实时字节都会完整解析 ANSI、光标、模式、Kitty Graphics 和终端响应，但不提交中间 Canvas；追平服务端 `endCursor` 后只执行一次最终 full render，再切回普通实时渲染。第一批字节不是首帧。
 - 窗口尺寸、字号、字体、主题变化以及跨设备单击恢复尺寸时，只有确认终端几何确实变化才保留当前旧帧；后台 Ghostty 可继续渲染，当前尺寸的 full render 成功后一次性替换旧帧，不重新回放历史，也不等待 PTY 输出停顿。切换标签前会保留最后有效帧，激活后用当前状态的 full render 替换，避免黑屏。
 - Ghostty 每帧先完整物化当前可见 viewport，再原子提交 canvas；任一活动屏幕或 scrollback 行临时不可用时保留上一帧并自动重试，不把缺失行绘制成黑区。
 - 支持终端活动检测、自动标签命名、忙闲状态和当前工作目录显示。
@@ -108,7 +108,7 @@ lzc-cli project deploy
 
 - 后端使用 Go 实现，Web UI 通过 `/=exec://8080` 由 LPK 启动。
 - 终端会话通过实例内 persistent agent 管理，并通过 WebSocket 转发到浏览器。
-- 实例端终端历史由 persistent agent 作为可信数据源维护。容器浏览器使用 Cache API v2 在后台恢复字节，服务端 replay complete 后才显示最终 live canvas；`client:` PC target 继续使用 IndexedDB 与原完整历史回放协议，暂不启用容器 cache-v2 warm replay。
+- 实例端终端历史由 persistent agent 作为可信数据源维护。容器浏览器使用 Cache API v2 在后台恢复字节，Ghostty 通过复用的 WASM 输入缓冲区批量解析历史，不绘制中间帧；服务端 replay complete、实时队列追平并完成最终 full render 后才显示 live canvas。新增 Cache 字节的持久化继续在后台完成，不阻塞本次 Canvas 显示。`client:` PC target 继续使用 IndexedDB 与原完整历史回放协议，暂不启用容器 cache-v2 warm replay。
 - HTML 入口使用 `/assets/<lpk-version>-<content-revision>/` 静态资源路径。即使误用相同 LPK 版本重新发布，只要二进制或 runtime 内容变化，JS/CSS/module/WASM URL 和 Service Worker cache 名称也会变化；内容寻址资源可长期缓存，旧 `/static/` 仅保留兼容。
 - PWA Service Worker 对当前 LPK 版本的 immutable 静态 app shell 使用 cache-first，版本 URL 变化负责主动更新；缓存未命中才联网，终端 API、WebSocket 和 Cache API 虚拟记录始终绕过 Service Worker。
 - 终端渲染使用项目内随包分发的 Ghostty Web 运行时资源。

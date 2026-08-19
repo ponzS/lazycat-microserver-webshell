@@ -124,10 +124,34 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`connectPendingSessionsForTab(nextActiveTab, { allowHidden: true })`,
 		`terminalCacheV2.compact(identity`,
 		`navigator.serviceWorker.register("./service-worker.js"`,
+		`withTerminalCacheProgressTimeout((reportProgress) => terminalCacheV2.readChunks`,
+		`Terminal warm cache replay made no progress.`,
+		`Terminal cache replay made no progress.`,
+		`historyCacheReplayCommitSeq: 0,`,
 	} {
 		if !strings.Contains(mainSource, want) {
 			t.Fatalf("runtime cache-v2 guard missing %q", want)
 		}
+	}
+	finishReplayBlock := sourceBetween(t, mainSource,
+		"const finishSessionHistoryReplayIfReady = (session) => {",
+		"const discardSessionOutputBuffers = (session) => {")
+	commitIndex := strings.Index(finishReplayBlock, "const commit = flushSessionHistoryCacheWrites(session);")
+	replayReadyIndex := strings.Index(finishReplayBlock, "session.replayComplete = true;")
+	if commitIndex < 0 || replayReadyIndex <= commitIndex {
+		t.Fatal("runtime history replay must start cache persistence before presenting the final canvas")
+	}
+	for _, want := range []string{
+		`const commitSeq = Number(session.historyCacheReplayCommitSeq || 0) + 1;`,
+		`session.historyCacheReplayCommitSeq === commitSeq`,
+		`session.historyCacheReplayCommitSeq = Number(session.historyCacheReplayCommitSeq || 0) + 1;`,
+	} {
+		if !strings.Contains(finishReplayBlock, want) && !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime background cache commit generation guard missing %q", want)
+		}
+	}
+	if strings.Contains(finishReplayBlock[commitIndex:replayReadyIndex], "return false;") || strings.Contains(finishReplayBlock, "finishSessionHistoryReplayIfReady(session);") {
+		t.Fatal("runtime final canvas must not wait for the background cache commit")
 	}
 	cacheSource := string(cacheData)
 	appendBlock := sourceBetween(t, cacheSource,
@@ -148,11 +172,14 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`paneID: requiredText`,
 		`historyGeneration: source.historyGeneration`,
 		`checkpointCursor !== endCursor`,
-		`const defaultReadConcurrency = 32;`,
+		`const defaultReadConcurrency = 8;`,
 		`const defaultWriteBlockBytes = 1 * 1024 * 1024;`,
 		`const defaultCompactionMinChunks = 2;`,
-		`const loaded = await Promise.all(batch.map(async (chunk) => {`,
-		`batchEnd: batchIndex === loaded.length - 1`,
+		`const pending = new Map();`,
+		`const fillReadAhead = () => {`,
+		`pending.set(chunkIndex, loadChunk(normalized.chunks[chunkIndex]).then(`,
+		`pending.delete(chunkIndex);`,
+		`batchEnd: chunkIndex === normalized.chunks.length - 1`,
 		`const compact = (sourceIdentity, {`,
 		`compactedFromChunks: manifest.chunks.length`,
 	} {
@@ -2580,7 +2607,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"clearTerminalCanvasPixels(pane);",
 		"requestPaneFullRender(session);",
 		"renderPaneFullNow(session);",
-		"if (replayOutput || deferHiddenPaneRender(session)) {",
+		"if ((replayOutput && !replayWriter) || (!replayOutput && deferHiddenPaneRender(session))) {",
 		"cancelPendingTerminalRender(session.term);",
 		"schedulePaneFullRenderValidation(session);",
 	}
@@ -2630,7 +2657,14 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"const GHOSTTY_OUTPUT_RENDER_INTERVAL_MS = 33;",
 		"const GHOSTTY_TEXT_ENCODER = new TextEncoder();",
 		"Failed to allocate terminal input buffer",
+		"this.inputBufferPtr = 0",
+		"ensureInputBuffer(A)",
+		"this.exports.ghostty_terminal_write(this.handle, this.inputBufferPtr, E.byteLength)",
+		"this.exports.ghostty_wasm_free_u8_array(this.inputBufferPtr, this.inputBufferSize)",
 		"this.writeBytes(A);",
+		"writeReplay(A)",
+		"this.renderSuppressionDepth += 1",
+		"this.renderSuppressionDepth > 0",
 		"this.requestRender({ throttle: !0 })",
 		"this.renderThrottleTimer = void 0",
 		"this.lastRenderAt = performance.now()",
@@ -2713,8 +2747,36 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 			t.Fatalf("runtime terminal canvas residue guard missing renderer snippet %q", want)
 		}
 	}
+	wasmWriteBlock := sourceBetween(t, rendererSource,
+		"  writeBytes(A) {",
+		"  resize(A, B) {")
+	if strings.Contains(wasmWriteBlock, "ghostty_wasm_alloc_u8_array") || strings.Contains(wasmWriteBlock, "ghostty_wasm_free_u8_array") {
+		t.Fatal("runtime Ghostty write hot path must reuse its instance input buffer")
+	}
 	if strings.Contains(rendererSource, "C !== void 0 && s !== void 0 ? s - C >>> 0") {
 		t.Fatal("runtime must not silently fall back to scrollback length when generation ABI is missing")
+	}
+	queuedOutputBlock := sourceBetween(t, mainSource,
+		"const writeTerminalOutputBatch =",
+		"const finishSessionHistoryReplayIfReady =")
+	for _, want := range []string{
+		`const replayWriter = replayOutput && typeof session.term.writeReplay === "function";`,
+		`session.term.writeReplay(data);`,
+		`session.term.write(data);`,
+		`if (!replayWriter) {`,
+		`session.term.requestRender?.({ throttle: true });`,
+		`if ((replayOutput && !replayWriter) || (!replayOutput && deferHiddenPaneRender(session))) {`,
+	} {
+		if !strings.Contains(queuedOutputBlock, want) {
+			t.Fatalf("runtime queued PTY replay/render guard missing %q", want)
+		}
+	}
+	writeReplayIndex := strings.Index(queuedOutputBlock, `session.term.writeReplay(data);`)
+	normalWriteIndex := strings.Index(queuedOutputBlock, `session.term.write(data);`)
+	renderIndex := strings.Index(queuedOutputBlock, `session.term.requestRender?.({ throttle: true });`)
+	contentGenerationIndex := strings.Index(queuedOutputBlock, `advanceTerminalContentGeneration(session);`)
+	if writeReplayIndex < 0 || normalWriteIndex < 0 || renderIndex <= normalWriteIndex || contentGenerationIndex <= renderIndex {
+		t.Fatal("runtime queued PTY output must split replay writes from rendered live writes")
 	}
 	assertOutputRender := func(label, startMarker, endMarker string) {
 		t.Helper()
@@ -2734,11 +2796,6 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 			t.Fatalf("runtime %s output must write, request a throttled render, then advance content generation", label)
 		}
 	}
-	assertOutputRender(
-		"queued PTY",
-		"const writeTerminalOutputBatch =",
-		"const finishSessionHistoryReplayIfReady =",
-	)
 	assertOutputRender(
 		"immediate PTY",
 		"const writeSessionImmediateOutput =",
@@ -2766,10 +2823,10 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	if strings.Contains(scheduleResizeBlock, "beginTerminalPresentationHold") {
 		t.Fatal("scheduling a resize must not freeze a current terminal before its geometry is measured")
 	}
-	queuedOutputBlock := sourceBetween(t, mainSource,
+	resizeOutputBlock := sourceBetween(t, mainSource,
 		"const writeTerminalOutputBatch = (session, data, replayOutput, allowGeneratedInput) => {",
 		"const finishSessionHistoryReplayIfReady =")
-	if strings.Contains(queuedOutputBlock, "deferPaneRenderDuringResize") {
+	if strings.Contains(resizeOutputBlock, "deferPaneRenderDuringResize") {
 		t.Fatal("normal PTY output must continue rendering while a presentation frame is held")
 	}
 	tabSwitchBlock := sourceBetween(t, mainSource,

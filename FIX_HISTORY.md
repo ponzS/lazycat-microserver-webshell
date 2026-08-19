@@ -60,7 +60,7 @@
 - LightOS 实例终端历史以 persistent agent 保存的原始 PTY 字节为可信来源；浏览器渲染状态不是历史权威。
 - 历史流使用 `history_generation` 和绝对 byte cursor 表示范围。服务端根据本地范围选择 `snapshot`、`delta` 或 `current`，所有 chunk 必须连续。
 - 容器实例使用 Cache API v2 保存按账号 scope、完整 selector、workspace generation、tab、pane 和 history generation 隔离的不可变 PTY 字节块，并以 commit-last manifest 暴露已持久化 cursor。缓存无效时可以丢弃并从 agent 重建，但不能把不连续缓存拼接到新 generation。
-- 容器页面从网络 workspace 响应取得完整账号 scope、selector、workspace、tab 和 pane 身份后，在后台从 Cache API 并发读取该精确身份下的 PTY 字节并回放到 Ghostty/WASM；回放期间 live canvas 保持隐藏，只有服务端 replay complete、cursor 连续、fit 当前且最终 full render 成功后才显示。第一批字节不是首帧。窗口、字体、主题变化和跨设备单击恢复尺寸仅在确认 cols/rows 或 canvas backing store 变化后使用 presentation hold 保留旧帧；hold 覆盖期间 Ghostty 继续按正常节流渲染，当前状态的 full render 成功后立即替换，不等待 PTY 输出安静，也不重新回放历史。切换 tab 前保存有效帧，激活后用当前状态的 full render 替换，不能显示黑屏。
+- 容器页面从网络 workspace 响应取得完整账号 scope、selector、workspace、tab 和 pane 身份后，以 8 块滚动预读窗口从 Cache API 读取该精确身份下的 PTY 字节。历史区间和恢复期间排队的实时字节通过 Ghostty 专用 replay 写入完整解析，但不调度中间 Canvas render；WASM 输入缓冲区按实例复用。只有服务端 replay complete、cursor 连续、实时队列追平、fit 当前且最终 full render 成功后才显示；新增缓存字节的持久化在后台完成，不阻塞最终 Canvas。第一批字节不是首帧。窗口、字体、主题变化和跨设备单击恢复尺寸仅在确认 cols/rows 或 canvas backing store 变化后使用 presentation hold 保留旧帧；这些操作复用当前内存终端状态，不进入历史 replay 写入。hold 覆盖期间 Ghostty 继续按正常节流渲染，当前状态的 full render 成功后立即替换，不等待 PTY 输出安静，也不重新回放历史。切换 tab 前保存有效帧，激活后用当前状态的 full render 替换，不能显示黑屏。
 - Ghostty renderer 在修改 canvas 前必须一次性物化当前可见活动屏幕和 scrollback 行；活动 viewport 每帧只导出一次。任一可见行缺失时保留上一帧和 dirty 状态，由事件驱动 scheduler 退避重试，失败帧不得触发成功 `onRender` 或 pane presented generation 推进。
 - tab 总览不得只复制已经激活过的 live canvas。未激活 pane 可以按完整 cache-v2 身份读取已提交的图片缩略图，但缩略图只用于总览，不能参与终端启动显示、Ghostty 状态恢复或输入就绪判断。
 - 服务端接受本地 range 时，`delta/current` 必须复用已经恢复的 Ghostty 状态，不得再次清空和重复回放本地 chunk。服务端返回 `snapshot` 时，保持已显示的同身份本地 canvas，先在内存收齐服务端 snapshot，再一次性重置并回放权威字节；本地缓存字节不得参与 snapshot 状态计算。
@@ -678,6 +678,19 @@ git diff --check
 - Guard：扩展 `TestRuntimeTerminalCanvasResidueGuard`，固定 hold 发生在几何测量之后、无安静窗口、hold 中普通输出不取消 render、tab 在隐藏前保留 frame、preview 的空闲/静止门禁；扩展 `TestRuntimeTerminalSizeClaimSurvivesCrossClientResize`，固定无尺寸变化的 size claim 不直接进入 hold。`terminal_cache_v2_test.mjs` 和 `terminal_resize_scheduler_test.mjs` 继续覆盖 Cache v2 连续 cursor/1 MiB block 与 resize 合并行为。
 - 验证结果：`node --check runtime/static/main.js`、`node --test terminal_cache_v2_test.mjs terminal_resize_scheduler_test.mjs`（15/15）、`go test ./...`、`git diff --check` 通过。当前环境没有真实浏览器性能录制能力，仍需在持续 Codex TUI 输出、跨 PC/手机尺寸、字体变化和多 tab 切换下复验帧连续性及主线程长任务。
 - 禁止复现：不得让单击、tab 激活或仅排队 resize 在尚未确认几何变化时开始 presentation hold；不得在 hold 中对每批普通输出取消 Ghostty render 或依赖输出安静窗口；不得在 tab 已被 `display:none` 后才尝试获得唯一的旧帧；不得在持续输出期间高频编码 Cache API preview。
+
+### LCMD-20260819-04：历史恢复仍按普通写入调度渲染并重复分配 WASM 缓冲区
+
+- 日期：2026-08-19
+- 发布：LPK version `1.0.33`
+- 来源：长历史首次进入性能优化；用户确认“无渲染”必须表示完整解析后延迟 Canvas 提交，不能跳过正在输出的 Codex/Agent 状态
+- 影响模块：`runtime/static/ghostty-web.js`、`runtime/static/main.js`、Cache API v2 读取流水线、历史恢复完成门禁
+- 错误现象：历史 Canvas 虽已隐藏，但每批 replay 仍调用普通 `Terminal.write()` 并请求渲染，随后由 WebShell 取消 RAF；WASM 每个 128 KiB 子块还会重复分配和释放输入内存。Cache API 一次并发读取 32 块并等待整批完成才开始顺序消费，大历史会形成明显的首块等待、内存峰值和 GC 压力。固定 2 秒绝对超时还可能中断仍在持续前进的正常恢复。
+- 根因：终端模型解析与 Canvas 展示调度没有独立入口，历史恢复只能复用普通实时写入后再撤销渲染；WASM 输入内存生命周期绑定单个子块；Cache 读取采用批次屏障而不是有界流水线；最终 replay ready 又等待本地 Cache commit，把非权威持久化延迟加入可见时间。
+- 实施方案：Ghostty 增加 `writeReplay()`，仍完整经过 Kitty Graphics、VT/ANSI parser、光标/模式、标题、响铃和 generated response 处理，但在调用栈内抑制 render 调度；普通 `write()` 保持现有 128 KiB/33ms 实时节流。GhosttyTerminal 增加按需扩容、实例级复用的 WASM 输入缓冲区，释放终端时统一释放。Cache API 默认使用 8 块滚动预读窗口，按 cursor 消费一块即补读一块；2 秒限制改为无 cursor 进展超时。恢复期间服务端新增字节继续进入现有队列，历史与队列都通过 replay 写入追平，随后一次 full render 并切回普通实时输出。Cache commit 在追平后后台完成，失败只禁用本地缓存，不阻塞最终 Canvas；commit generation 序号隔离断线和下一轮恢复，迟到 Promise 不得清除新一轮状态。
+- Guard：`terminal_cache_v2_test.mjs` 固定 8 块默认窗口、在首块回调尚未结束时继续补读后续块、cursor 顺序和最终边界；`TestRuntimeContainerCacheV2AndPWAContract` 固定滚动预读结构、无进度超时和后台 commit 不阻塞最终显示；`TestRuntimeTerminalCanvasResidueGuard` 固定 `writeReplay()` 渲染抑制、WASM 输入缓冲区复用和 replay/live 写入分流；既有输出 batching guard 继续固定普通实时输出的 128 KiB 预算与 33ms 渲染节流。
+- 验证结果：`node --check` 通过 `main.js`、`terminal_cache_v2.js` 和 `ghostty-web.js`；Cache API v2、resize、Kitty Graphics、实例加载 Node 测试 35/35 通过；完整 `go test ./... -count=1`、`go test -race ./... -count=1`、Ghostty 资产校验和 `git diff --check` 通过。`lzc-cli project release` 已生成 `cloud.lazycat.webshell.lcmd-v1.0.33.lpk`，包内 `package.yml` 与 `.lpk-version` 均为 `1.0.33`，运行时包含 replay 专用写入、滚动预读、无进度超时和后台 commit generation guard；LPK SHA-256 为 `5facc2feb5969116dd2ec9cbcbfef8b1202b29e2d6ffe6f1b54daa6aaf6fe8e2`。真实浏览器仍需使用无缓存、warm cache、大历史且 Codex 持续输出三种场景记录恢复耗时和主线程长任务。
+- 禁止复现：不得把 replay 写入理解为跳过终端解析或丢弃恢复期间的实时字节；不得让普通实时输出进入 replay 渲染抑制；不得在每个 WASM 子块重复申请/释放输入内存；Cache 预读不得乱序消费或恢复整批屏障；有持续 cursor 进展时不得因固定总时长中断；本地 Cache commit 不得重新成为最终 Canvas 的可见门槛。
 
 ## 新增记录模板
 

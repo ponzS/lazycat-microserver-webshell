@@ -4,7 +4,7 @@ const defaultBaseURL = "https://webshell.invalid/";
 const cachePathPrefix = "__terminal_cache__/v2";
 const defaultMaxAgeMs = 30 * 24 * 60 * 60 * 1000;
 const defaultMaxManifests = 64;
-const defaultReadConcurrency = 32;
+const defaultReadConcurrency = 8;
 const defaultWriteBlockBytes = 1 * 1024 * 1024;
 const defaultCompactionMinChunks = 2;
 
@@ -396,35 +396,51 @@ export const createTerminalCacheV2 = ({
     const identity = normalizeIdentity(normalized, { requireHistory: true });
     const store = await cache();
     const concurrency = Math.max(1, Math.floor(Number(readConcurrency) || defaultReadConcurrency));
-    let cursor = normalized.baseCursor;
-    for (let offset = 0; offset < normalized.chunks.length; offset += concurrency) {
-      const batch = normalized.chunks.slice(offset, offset + concurrency);
-      const loaded = await Promise.all(batch.map(async (chunk) => {
-        const response = await store.match(chunkURL(identity, chunk.startCursor, chunk.endCursor));
-        if (!response) {
-          throw new Error("Terminal cache chunk is missing.");
-        }
-        const data = new Uint8Array(await response.arrayBuffer());
-        if (data.byteLength !== chunk.byteLength || chunk.endCursor - chunk.startCursor !== BigInt(data.byteLength)) {
-          throw new Error("Terminal cache chunk data is invalid.");
-        }
-        return { chunk, data };
-      }));
-      for (let batchIndex = 0; batchIndex < loaded.length; batchIndex += 1) {
-        const { chunk, data } = loaded[batchIndex];
-        if (chunk.startCursor !== cursor) {
-          throw new Error("Terminal cache chunk data is invalid.");
-        }
-        await onChunk?.({
-          startCursor: chunk.startCursor,
-          endCursor: chunk.endCursor,
-          data,
-          chunkIndex: offset + batchIndex,
-          chunkCount: normalized.chunks.length,
-          batchEnd: batchIndex === loaded.length - 1,
-        });
-        cursor = chunk.endCursor;
+    const loadChunk = async (chunk) => {
+      const response = await store.match(chunkURL(identity, chunk.startCursor, chunk.endCursor));
+      if (!response) {
+        throw new Error("Terminal cache chunk is missing.");
       }
+      const data = new Uint8Array(await response.arrayBuffer());
+      if (data.byteLength !== chunk.byteLength || chunk.endCursor - chunk.startCursor !== BigInt(data.byteLength)) {
+        throw new Error("Terminal cache chunk data is invalid.");
+      }
+      return { chunk, data };
+    };
+    const pending = new Map();
+    let nextChunkIndex = 0;
+    const fillReadAhead = () => {
+      while (nextChunkIndex < normalized.chunks.length && pending.size < concurrency) {
+        const chunkIndex = nextChunkIndex;
+        nextChunkIndex += 1;
+        pending.set(chunkIndex, loadChunk(normalized.chunks[chunkIndex]).then(
+          (loaded) => ({ loaded }),
+          (error) => ({ error }),
+        ));
+      }
+    };
+    let cursor = normalized.baseCursor;
+    fillReadAhead();
+    for (let chunkIndex = 0; chunkIndex < normalized.chunks.length; chunkIndex += 1) {
+      const result = await pending.get(chunkIndex);
+      pending.delete(chunkIndex);
+      fillReadAhead();
+      if (result?.error) {
+        throw result.error;
+      }
+      const { chunk, data } = result.loaded;
+      if (chunk.startCursor !== cursor) {
+        throw new Error("Terminal cache chunk data is invalid.");
+      }
+      await onChunk?.({
+        startCursor: chunk.startCursor,
+        endCursor: chunk.endCursor,
+        data,
+        chunkIndex,
+        chunkCount: normalized.chunks.length,
+        batchEnd: chunkIndex === normalized.chunks.length - 1,
+      });
+      cursor = chunk.endCursor;
     }
     if (cursor !== normalized.endCursor) {
       throw new Error("Terminal cache replay did not reach the manifest cursor.");

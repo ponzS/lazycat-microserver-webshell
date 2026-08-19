@@ -132,7 +132,7 @@ test("cache-v2 detects a missing immutable byte block during replay", async () =
   await assert.rejects(cache.readChunks(manifest, () => {}), /chunk is missing/);
 });
 
-test("cache-v2 reads immutable chunks concurrently but replays them in cursor order", async () => {
+test("cache-v2 rolls its read-ahead window while replaying chunks in cursor order", async () => {
   const cacheStorage = new MemoryCacheStorage();
   const cache = createTerminalCacheV2({
     cacheStorage,
@@ -151,9 +151,24 @@ test("cache-v2 reads immutable chunks concurrently but replays them in cursor or
   const store = await cacheStorage.open("lcmd-webshell-terminal-v2");
   let activeMatches = 0;
   let maxActiveMatches = 0;
+  let resolveFirstCallback;
+  let releaseFirstCallback;
+  let resolveThirdRead;
+  const firstCallbackStarted = new Promise((resolve) => {
+    resolveFirstCallback = resolve;
+  });
+  const firstCallbackGate = new Promise((resolve) => {
+    releaseFirstCallback = resolve;
+  });
+  const thirdReadStarted = new Promise((resolve) => {
+    resolveThirdRead = resolve;
+  });
   store.matchHook = async (key) => {
     if (!key.endsWith(".bin")) {
       return;
+    }
+    if (key.includes("/2-3.bin")) {
+      resolveThirdRead();
     }
     activeMatches += 1;
     maxActiveMatches = Math.max(maxActiveMatches, activeMatches);
@@ -164,16 +179,30 @@ test("cache-v2 reads immutable chunks concurrently but replays them in cursor or
   const manifest = await cache.loadManifest(identity());
   const replayed = [];
   const batches = [];
-  await cache.readChunks(manifest, ({ data, chunkIndex, chunkCount, batchEnd }) => {
+  const replayPromise = cache.readChunks(manifest, async ({ data, chunkIndex, chunkCount, batchEnd }) => {
     replayed.push(...data);
     batches.push({ chunkIndex, chunkCount, batchEnd });
+    if (chunkIndex === 0) {
+      resolveFirstCallback();
+      await firstCallbackGate;
+    }
   });
+  await firstCallbackStarted;
+  try {
+    await Promise.race([
+      thirdReadStarted,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("rolling read-ahead did not refill")), 100)),
+    ]);
+  } finally {
+    releaseFirstCallback();
+  }
+  await replayPromise;
 
   assert.equal(maxActiveMatches, 2);
   assert.deepEqual(replayed, [1, 2, 3, 4]);
   assert.deepEqual(batches, [
     { chunkIndex: 0, chunkCount: 4, batchEnd: false },
-    { chunkIndex: 1, chunkCount: 4, batchEnd: true },
+    { chunkIndex: 1, chunkCount: 4, batchEnd: false },
     { chunkIndex: 2, chunkCount: 4, batchEnd: false },
     { chunkIndex: 3, chunkCount: 4, batchEnd: true },
   ]);
@@ -203,6 +232,7 @@ test("cache-v2 coalesces small appends into bounded byte blocks", async () => {
 });
 
 test("cache-v2 defaults to one MiB byte blocks", async () => {
+  assert.match(source, /const defaultReadConcurrency = 8;/);
   const cacheStorage = new MemoryCacheStorage();
   const cache = createTerminalCacheV2({
     cacheStorage,

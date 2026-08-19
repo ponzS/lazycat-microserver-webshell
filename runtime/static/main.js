@@ -13979,6 +13979,39 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     });
   });
 
+  const withTerminalCacheProgressTimeout = (operation, timeoutMs, message) => new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = 0;
+    const arm = () => {
+      if (settled) {
+        throw new Error(message);
+      }
+      if (timer) {
+        window.clearTimeout(timer);
+      }
+      timer = window.setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          reject(new Error(message));
+        }
+      }, timeoutMs);
+    };
+    arm();
+    Promise.resolve().then(() => operation(arm)).then((value) => {
+      if (!settled) {
+        settled = true;
+        window.clearTimeout(timer);
+        resolve(value);
+      }
+    }, (error) => {
+      if (!settled) {
+        settled = true;
+        window.clearTimeout(timer);
+        reject(error);
+      }
+    });
+  });
+
   const disableSessionHistoryCache = (session, error = null) => {
     if (!session) {
       return;
@@ -13996,6 +14029,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.historyCacheWriteQueue = [];
     session.historyCacheWriteBytes = 0;
     session.historyCacheSnapshot = null;
+    session.historyCacheReplayCommitSeq = Number(session.historyCacheReplayCommitSeq || 0) + 1;
+    session.historyCacheReplayCommitPending = false;
     session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
     session.cacheV2WarmReplayActive = false;
     session.cacheV2WarmReplayReady = false;
@@ -14688,11 +14723,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.persistedHistoryCursor = snapshot.endCursor;
     session.replayFitGeneration = session.measuredFitGeneration;
     let replayPromise = null;
-    replayPromise = withTerminalCacheTimeout(terminalCacheV2.readChunks(snapshot, ({
+    replayPromise = withTerminalCacheProgressTimeout((reportProgress) => terminalCacheV2.readChunks(snapshot, ({
       data,
       startCursor,
       endCursor,
     }) => {
+      reportProgress();
       if (
         session.closed
         || session.cacheV2WarmReplaySeq !== replaySeq
@@ -14709,7 +14745,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       if (session.cacheV2RecoveryMetrics) {
         session.cacheV2RecoveryMetrics.localReplayBytes += data.byteLength;
       }
-    }), terminalCacheV2ReplayTimeoutMs, "Terminal warm cache replay timed out.").then(() => {
+      reportProgress();
+    }), terminalCacheV2ReplayTimeoutMs, "Terminal warm cache replay made no progress.").then(() => {
       if (
         session.closed
         || session.cacheV2WarmReplaySeq !== replaySeq
@@ -14797,7 +14834,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.cacheV2NetworkQueue = [];
     session.cacheV2NetworkQueueBytes = 0;
     let replayPromise = null;
-    replayPromise = withTerminalCacheTimeout(terminalCacheV2.readChunks(snapshot, ({ data, startCursor, endCursor }) => {
+    replayPromise = withTerminalCacheProgressTimeout((reportProgress) => terminalCacheV2.readChunks(snapshot, ({ data, startCursor, endCursor }) => {
+      reportProgress();
       if (session.socket !== currentSocket || session.terminalReplayGeneration !== replayGeneration) {
         throw new Error("terminal cache replay session changed");
       }
@@ -14810,7 +14848,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       if (session.cacheV2RecoveryMetrics) {
         session.cacheV2RecoveryMetrics.localReplayBytes += data.byteLength;
       }
-    }), terminalCacheV2ReplayTimeoutMs, "Terminal cache replay timed out.").then(() => {
+      reportProgress();
+    }), terminalCacheV2ReplayTimeoutMs, "Terminal cache replay made no progress.").then(() => {
       if (session.socket !== currentSocket || session.terminalReplayGeneration !== replayGeneration) {
         return;
       }
@@ -14954,6 +14993,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (
       !sessionUsesTerminalCacheV2(session)
       || session.closed
+      || session.historyCacheDisabled
       || session.cacheV2CompactionScheduled
       || !session.historyGeneration
     ) {
@@ -15124,15 +15164,24 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       armReplayGeneratedInputSuppression(session);
       session.replayOutputDepth += 1;
     }
+    const replayWriter = replayOutput && typeof session.term.writeReplay === "function";
     try {
       recordTerminalRuntimeMetric("terminalOutputBatches");
       recordTerminalRuntimeMetric("terminalOutputBytes", terminalOutputByteLength(data));
-      measurePerformanceTask("terminal render", () => session.term.write(data));
+      measurePerformanceTask("terminal write", () => {
+        if (replayWriter) {
+          session.term.writeReplay(data);
+        } else {
+          session.term.write(data);
+        }
+      });
       session.lastTerminalOutputAt = performance.now();
-      session.term.requestRender?.({ throttle: true });
+      if (!replayWriter) {
+        session.term.requestRender?.({ throttle: true });
+      }
       advanceTerminalContentGeneration(session);
       drainGeneratedTerminalResponses(session);
-      if (replayOutput || deferHiddenPaneRender(session)) {
+      if ((replayOutput && !replayWriter) || (!replayOutput && deferHiddenPaneRender(session))) {
         cancelPendingTerminalRender(session.term);
       }
       return true;
@@ -15164,23 +15213,35 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     ) {
       if (!session.historyCacheReplayCommitPending) {
         session.historyCacheReplayCommitPending = true;
+        const commitSeq = Number(session.historyCacheReplayCommitSeq || 0) + 1;
+        session.historyCacheReplayCommitSeq = commitSeq;
+        const historyGeneration = session.historyGeneration;
+        const replayTargetCursor = session.historyReplayTargetCursor;
         const commit = flushSessionHistoryCacheWrites(session);
         const waitForCommit = sessionUsesTerminalCacheV2(session)
           ? withTerminalCacheTimeout(commit, terminalCacheV2CommitTimeoutMs, "Terminal cache commit timed out.")
           : commit;
         waitForCommit.catch((error) => disableSessionHistoryCache(session, error)).finally(() => {
-          session.historyCacheReplayCommitPending = false;
-          finishSessionHistoryReplayIfReady(session);
+          if (
+            session.historyCacheReplayCommitSeq === commitSeq
+            && !session.closed
+            && session.historyGeneration === historyGeneration
+            && session.historyReplayTargetCursor === replayTargetCursor
+          ) {
+            markSessionCacheV2RecoveryMetric(session, "cacheCommitCompleteAt");
+            scheduleSessionCacheV2Compaction(session);
+            session.historyCacheReplayCommitPending = false;
+          }
         });
       }
-      return false;
+    } else {
+      markSessionCacheV2RecoveryMetric(session, "cacheCommitCompleteAt");
     }
     session.replayCompletionPending = false;
     session.replayComplete = true;
     session.replayVerified = false;
     session.historyStateReady = true;
     session.historyCacheSnapshot = null;
-    session.historyCacheReplayCommitPending = false;
     session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
     session.cacheV2WarmReplayActive = false;
     session.cacheV2WarmReplayReady = false;
@@ -15191,7 +15252,6 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.agentPreparing = false;
     session.outputOverloadPending = false;
     session.allowGeneratedInputDuringReplay = false;
-    markSessionCacheV2RecoveryMetric(session, "cacheCommitCompleteAt");
     clearAttachReadyTimer(session);
     session.reconnectAttempts = 0;
     session.shellEl.dataset.connection = "open";
@@ -15211,6 +15271,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.outputQueue = [];
     session.outputQueueSize = 0;
     session.replayCompletionPending = false;
+    session.historyCacheReplayCommitSeq = Number(session.historyCacheReplayCommitSeq || 0) + 1;
     session.historyCacheReplayCommitPending = false;
   };
 
@@ -15504,6 +15565,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.replayComplete = false;
     session.replayVerified = false;
     session.replayCompletionPending = false;
+    session.historyCacheReplayCommitSeq = Number(session.historyCacheReplayCommitSeq || 0) + 1;
     session.historyCacheReplayCommitPending = false;
     session.allowGeneratedInputDuringReplay = false;
     session.agentPreparing = false;
@@ -15548,6 +15610,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         if (!resetTerminalRuntimeState(session)) {
           return false;
         }
+        cancelPendingTerminalRender(session.term);
         session.initialRuntimeResetDone = true;
         session.replayFitGeneration = session.measuredFitGeneration;
       } catch (error) {
@@ -16571,6 +16634,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       historyCacheWritePromise: Promise.resolve(),
       historyCacheDestroyPromise: null,
       historyCacheReplayCommitPending: false,
+      historyCacheReplayCommitSeq: 0,
       cacheV2WorkspaceIdentity: activeWorkspaceCacheV2Identity && activeWorkspaceCacheV2Identity.selector === instanceName
         ? { ...activeWorkspaceCacheV2Identity }
         : null,
