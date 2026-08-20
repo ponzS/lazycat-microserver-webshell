@@ -739,7 +739,7 @@ git diff --check
 - 影响模块：终端设置、底部快捷键栏和终端可用视口尺寸
 - 错误现象：底部快捷键栏仅在触摸布局出现，PC 用户不能主动保持该栏可见。
 - 根因：快捷键栏的显示条件只由触摸媒体查询控制，没有独立的 PC 设置和持久化状态。
-- 实施方案：在“终端设置 > 鼠标”增加默认关闭的“在PC中开启底部快捷键栏”；设置通过 `api/settings` 持久化。开启后，PC 复用现有快捷键栏并同步为终端、选择菜单、网络提示和通知预留底部空间；触摸设备的既有行为不变。
+- 实施方案：在“终端设置 > 鼠标”下方新增独立的“快捷键栏”设置模块，提供默认关闭的“在PC中开启底部快捷键栏”；设置通过 `api/settings` 持久化。开启后，PC 复用现有快捷键栏并同步为终端、选择菜单、网络提示和通知预留底部空间；触摸设备的既有行为不变。
 - Guard：`TestRuntimeDesktopShortcutsBarSetting`、`TestHandleSettingsDefaultsDesktopMouseClipboardMobilePixelScrollAndDoubleTapReminderEnabled` 和 `TestHandleSettingsPatchDesktopMouseClipboardMobilePixelScrollAndDoubleTapReminderPreservesFontAndScrollback`。
 - 验证结果：`node --check runtime/static/main.js`、`go test ./...`、`node --test terminal_cache_v2_test.mjs terminal_resize_scheduler_test.mjs` 和 `git diff --check` 通过。
 - 禁止复现：PC 快捷键栏必须默认关闭；开启后不得遮挡终端内容或底部浮层；触摸布局不得因该 PC 开关改变既有显示行为。

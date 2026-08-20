@@ -1193,17 +1193,22 @@ func TestRuntimeDesktopShortcutsBarSetting(t *testing.T) {
 		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
 	}
 	indexSource := string(indexData)
-	mouseSection := sourceBetween(t, indexSource, `<section class="settings-section" aria-labelledby="settingsMouseTitle">`, `<section class="settings-section" aria-labelledby="settingsMultiScreenOutputTitle">`)
+	mouseSection := sourceBetween(t, indexSource, `<section class="settings-section" aria-labelledby="settingsMouseTitle">`, `<section class="settings-section" aria-labelledby="settingsDesktopShortcutsBarTitle">`)
+	if strings.Contains(mouseSection, `settingsDesktopShortcutsBarToggle`) {
+		t.Fatal("desktop shortcuts bar option must not be nested in the mouse settings section")
+	}
+	shortcutsSection := sourceBetween(t, indexSource, `<section class="settings-section" aria-labelledby="settingsDesktopShortcutsBarTitle">`, `<section class="settings-section" aria-labelledby="settingsMultiScreenOutputTitle">`)
 	for _, want := range []string{
+		`<h3 id="settingsDesktopShortcutsBarTitle">快捷键栏</h3>`,
 		`id="settingsDesktopShortcutsBarToggle"`,
 		`在PC中开启底部快捷键栏`,
 		`type="checkbox" />`,
 	} {
-		if !strings.Contains(mouseSection, want) {
-			t.Fatalf("desktop shortcuts bar option missing %q from mouse settings", want)
+		if !strings.Contains(shortcutsSection, want) {
+			t.Fatalf("desktop shortcuts bar option missing %q from its settings section", want)
 		}
 	}
-	if strings.Contains(mouseSection, `id="settingsDesktopShortcutsBarToggle" type="checkbox" checked`) {
+	if strings.Contains(shortcutsSection, `id="settingsDesktopShortcutsBarToggle" type="checkbox" checked`) {
 		t.Fatal("desktop shortcuts bar must default to disabled")
 	}
 
