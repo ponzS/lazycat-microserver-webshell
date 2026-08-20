@@ -1187,6 +1187,64 @@ func TestRuntimeMobileDoubleTapReminderSetting(t *testing.T) {
 	}
 }
 
+func TestRuntimeDesktopShortcutsBarSetting(t *testing.T) {
+	indexData, err := os.ReadFile("runtime/static/index.html")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
+	}
+	indexSource := string(indexData)
+	mouseSection := sourceBetween(t, indexSource, `<section class="settings-section" aria-labelledby="settingsMouseTitle">`, `<section class="settings-section" aria-labelledby="settingsMultiScreenOutputTitle">`)
+	for _, want := range []string{
+		`id="settingsDesktopShortcutsBarToggle"`,
+		`在PC中开启底部快捷键栏`,
+		`type="checkbox" />`,
+	} {
+		if !strings.Contains(mouseSection, want) {
+			t.Fatalf("desktop shortcuts bar option missing %q from mouse settings", want)
+		}
+	}
+	if strings.Contains(mouseSection, `id="settingsDesktopShortcutsBarToggle" type="checkbox" checked`) {
+		t.Fatal("desktop shortcuts bar must default to disabled")
+	}
+
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	mainSource := string(mainData)
+	for _, want := range []string{
+		`const settingsDesktopShortcutsBarToggle = document.getElementById("settingsDesktopShortcutsBarToggle");`,
+		`let desktopShortcutsBarEnabled = false;`,
+		`desktopShortcutsBarEnabled = state?.desktop_shortcuts_bar_enabled === true;`,
+		`document.body.classList.toggle("desktop-shortcuts-bar-enabled", desktopShortcutsBarEnabled);`,
+		`body: JSON.stringify({ desktop_shortcuts_bar_enabled: enabled }),`,
+		`resizeActiveTabForCurrentDevice();`,
+		`settingsDesktopShortcutsBarToggle?.addEventListener("change", () => {`,
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("desktop shortcuts bar runtime guard missing %q", want)
+		}
+	}
+
+	styleData, err := os.ReadFile("runtime/static/style.css")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/style.css) error = %v", err)
+	}
+	styleSource := string(styleData)
+	for _, want := range []string{
+		`@media (hover: hover) and (pointer: fine) {`,
+		`body.desktop-shortcuts-bar-enabled .mobile-shortcuts {`,
+		`body.desktop-shortcuts-bar-enabled .app-shell {`,
+		`inset: 0 0 var(--mobile-shortcuts-total-height) 0;`,
+		`body.desktop-shortcuts-bar-enabled .selection-sheet {`,
+		`body.desktop-shortcuts-bar-enabled .network-banner {`,
+	} {
+		if !strings.Contains(styleSource, want) {
+			t.Fatalf("desktop shortcuts bar CSS guard missing %q", want)
+		}
+	}
+}
+
 func TestRuntimeTouchKeyboardRequiresDoubleTapOnWideTouchScreens(t *testing.T) {
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {

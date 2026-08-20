@@ -18,6 +18,7 @@ type settingsPatch struct {
 	TerminalScrollback             optionalInt              `json:"terminal_scrollback"`
 	TerminalLineHeightPercent      optionalInt              `json:"terminal_line_height_percent"`
 	DesktopMouseClipboardEnabled   optionalBool             `json:"desktop_mouse_clipboard_enabled"`
+	DesktopShortcutsBarEnabled     optionalBool             `json:"desktop_shortcuts_bar_enabled"`
 	MobilePixelScrollEnabled       optionalBool             `json:"mobile_pixel_scroll_enabled"`
 	MobileDoubleTapReminderEnabled optionalBool             `json:"mobile_double_tap_reminder_enabled"`
 	MobileShortcuts                optionalMobileShortcuts  `json:"mobile_shortcuts"`
@@ -177,6 +178,9 @@ func (s *pluginServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			if payload.DesktopMouseClipboardEnabled.Set && !payload.DesktopMouseClipboardEnabled.Null {
 				settings.DesktopMouseClipboardEnabled = &payload.DesktopMouseClipboardEnabled.Value
+			}
+			if payload.DesktopShortcutsBarEnabled.Set && !payload.DesktopShortcutsBarEnabled.Null {
+				settings.DesktopShortcutsBarEnabled = &payload.DesktopShortcutsBarEnabled.Value
 			}
 			if payload.MobilePixelScrollEnabled.Set && !payload.MobilePixelScrollEnabled.Null {
 				settings.MobilePixelScrollEnabled = &payload.MobilePixelScrollEnabled.Value

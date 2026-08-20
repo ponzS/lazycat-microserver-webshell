@@ -6158,6 +6158,107 @@ body.mobile-keyboard-dock-moving .mobile-shortcuts {
 }
 
 @media (hover: hover) and (pointer: fine) {
+  body.desktop-shortcuts-bar-enabled .mobile-shortcuts {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 80;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px;
+    overflow: hidden;
+    border-top: 1px solid var(--chrome-line);
+    background: var(--terminal-bg);
+    color: var(--terminal-fg);
+    box-sizing: border-box;
+  }
+
+  body.desktop-shortcuts-bar-enabled .mobile-shortcuts.is-empty {
+    display: none;
+  }
+
+  body.desktop-shortcuts-bar-enabled .mobile-shortcut-row {
+    display: flex;
+    justify-content: safe center;
+    gap: 6px;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+
+  body.desktop-shortcuts-bar-enabled .mobile-shortcut-row::-webkit-scrollbar {
+    display: none;
+  }
+
+  body.desktop-shortcuts-bar-enabled .mobile-shortcuts button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    min-width: 28px;
+    height: 28px;
+    padding: 0 6px;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  body.desktop-shortcuts-bar-enabled .mobile-shortcuts button[data-kind="menu"] {
+    width: 40px;
+    min-width: 40px;
+    padding: 0;
+  }
+
+  body.desktop-shortcuts-bar-enabled .mobile-shortcuts button[data-kind="symbol"] {
+    min-width: 24px;
+    padding: 0 4px;
+    font-size: 14px;
+  }
+
+  body.desktop-shortcuts-bar-enabled .mobile-shortcuts button[data-kind="nav"] {
+    min-width: 24px;
+    padding: 0 4px;
+    font-size: 13px;
+  }
+
+  body.desktop-shortcuts-bar-enabled .mobile-shortcuts button.active,
+  body.desktop-shortcuts-bar-enabled .mobile-shortcuts button[aria-pressed="true"] {
+    background: var(--accent);
+    color: #ffffff;
+    opacity: 1;
+  }
+
+  body.desktop-shortcuts-bar-enabled .mobile-shortcuts button[data-kind="feedback"].active,
+  body.desktop-shortcuts-bar-enabled .mobile-shortcuts button[data-kind="feedback"][aria-pressed="true"] {
+    background: transparent;
+    color: var(--accent);
+  }
+
+  body.desktop-shortcuts-bar-enabled .app-shell {
+    inset: 0 0 var(--mobile-shortcuts-total-height) 0;
+  }
+
+  body.desktop-shortcuts-bar-enabled.mobile-shortcuts-empty .app-shell {
+    inset: 0;
+  }
+
+  body.desktop-shortcuts-bar-enabled .selection-sheet {
+    bottom: calc(var(--mobile-shortcuts-total-height) + 12px);
+  }
+
+  body.desktop-shortcuts-bar-enabled .network-banner {
+    bottom: calc(var(--mobile-shortcuts-total-height) + 12px);
+  }
+
+  body.desktop-shortcuts-bar-enabled .toast {
+    bottom: calc(var(--mobile-shortcuts-total-height) + 12px);
+  }
+
   .mobile-shortcuts {
     display: none;
   }

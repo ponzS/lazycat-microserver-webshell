@@ -50,6 +50,7 @@ type State struct {
 	TerminalScrollback             int                  `json:"terminal_scrollback"`
 	TerminalLineHeightPercent      int                  `json:"terminal_line_height_percent"`
 	DesktopMouseClipboardEnabled   bool                 `json:"desktop_mouse_clipboard_enabled"`
+	DesktopShortcutsBarEnabled     bool                 `json:"desktop_shortcuts_bar_enabled"`
 	MobilePixelScrollEnabled       bool                 `json:"mobile_pixel_scroll_enabled"`
 	MobileDoubleTapReminderEnabled bool                 `json:"mobile_double_tap_reminder_enabled"`
 	MobileShortcuts                MobileShortcutRows   `json:"mobile_shortcuts"`
@@ -63,6 +64,7 @@ type Settings struct {
 	TerminalScrollback             int                  `json:"terminal_scrollback"`
 	TerminalLineHeightPercent      int                  `json:"terminal_line_height_percent"`
 	DesktopMouseClipboardEnabled   *bool                `json:"desktop_mouse_clipboard_enabled,omitempty"`
+	DesktopShortcutsBarEnabled     *bool                `json:"desktop_shortcuts_bar_enabled,omitempty"`
 	MobilePixelScrollEnabled       *bool                `json:"mobile_pixel_scroll_enabled,omitempty"`
 	MobileDoubleTapReminderEnabled *bool                `json:"mobile_double_tap_reminder_enabled,omitempty"`
 	MobileShortcuts                *MobileShortcutRows  `json:"mobile_shortcuts,omitempty"`
@@ -364,6 +366,7 @@ func (s Store) State() (State, error) {
 		TerminalScrollback:             settings.TerminalScrollback,
 		TerminalLineHeightPercent:      settings.TerminalLineHeightPercent,
 		DesktopMouseClipboardEnabled:   desktopMouseClipboardEnabled(settings),
+		DesktopShortcutsBarEnabled:     desktopShortcutsBarEnabled(settings),
 		MobilePixelScrollEnabled:       mobilePixelScrollEnabled(settings),
 		MobileDoubleTapReminderEnabled: mobileDoubleTapReminderEnabled(settings),
 		MobileShortcuts:                effectiveMobileShortcuts(settings),
@@ -396,6 +399,7 @@ func (s Store) ReadSettings() (Settings, error) {
 	settings.TerminalScrollback = normalizeTerminalScrollback(settings.TerminalScrollback)
 	settings.TerminalLineHeightPercent = normalizeTerminalLineHeightPercent(settings.TerminalLineHeightPercent)
 	settings.DesktopMouseClipboardEnabled = normalizeDesktopMouseClipboardEnabled(settings.DesktopMouseClipboardEnabled)
+	settings.DesktopShortcutsBarEnabled = normalizeDesktopShortcutsBarEnabled(settings.DesktopShortcutsBarEnabled)
 	settings.MobilePixelScrollEnabled = normalizeMobilePixelScrollEnabled(settings.MobilePixelScrollEnabled)
 	settings.MobileDoubleTapReminderEnabled = normalizeMobileDoubleTapReminderEnabled(settings.MobileDoubleTapReminderEnabled)
 	if settings.MobileShortcuts != nil {
@@ -629,6 +633,7 @@ func (s Store) WriteSettings(settings Settings) error {
 	settings.TerminalScrollback = normalizeTerminalScrollback(settings.TerminalScrollback)
 	settings.TerminalLineHeightPercent = normalizeTerminalLineHeightPercent(settings.TerminalLineHeightPercent)
 	settings.DesktopMouseClipboardEnabled = normalizeDesktopMouseClipboardEnabled(settings.DesktopMouseClipboardEnabled)
+	settings.DesktopShortcutsBarEnabled = normalizeDesktopShortcutsBarEnabled(settings.DesktopShortcutsBarEnabled)
 	settings.MobilePixelScrollEnabled = normalizeMobilePixelScrollEnabled(settings.MobilePixelScrollEnabled)
 	settings.MobileDoubleTapReminderEnabled = normalizeMobileDoubleTapReminderEnabled(settings.MobileDoubleTapReminderEnabled)
 	if settings.MobileShortcuts != nil {
@@ -684,6 +689,7 @@ func (s Store) SaveSettings(settings Settings) error {
 		return err
 	}
 	settings.DesktopMouseClipboardEnabled = normalizeDesktopMouseClipboardEnabled(settings.DesktopMouseClipboardEnabled)
+	settings.DesktopShortcutsBarEnabled = normalizeDesktopShortcutsBarEnabled(settings.DesktopShortcutsBarEnabled)
 	settings.MobilePixelScrollEnabled = normalizeMobilePixelScrollEnabled(settings.MobilePixelScrollEnabled)
 	settings.MobileDoubleTapReminderEnabled = normalizeMobileDoubleTapReminderEnabled(settings.MobileDoubleTapReminderEnabled)
 	if settings.MobileShortcuts != nil {
@@ -718,6 +724,7 @@ func (s Store) MergeSettings(settings Settings, pruneMissingSelection bool) (Set
 		return Settings{}, err
 	}
 	settings.DesktopMouseClipboardEnabled = normalizeDesktopMouseClipboardEnabled(settings.DesktopMouseClipboardEnabled)
+	settings.DesktopShortcutsBarEnabled = normalizeDesktopShortcutsBarEnabled(settings.DesktopShortcutsBarEnabled)
 	settings.MobilePixelScrollEnabled = normalizeMobilePixelScrollEnabled(settings.MobilePixelScrollEnabled)
 	settings.MobileDoubleTapReminderEnabled = normalizeMobileDoubleTapReminderEnabled(settings.MobileDoubleTapReminderEnabled)
 	if settings.MobileShortcuts != nil {
@@ -931,6 +938,14 @@ func normalizeTerminalLineHeightPercentForSave(value int) (int, error) {
 func normalizeDesktopMouseClipboardEnabled(value *bool) *bool {
 	if value == nil {
 		return boolPtr(true)
+	}
+	enabled := *value
+	return &enabled
+}
+
+func normalizeDesktopShortcutsBarEnabled(value *bool) *bool {
+	if value == nil {
+		return boolPtr(false)
 	}
 	enabled := *value
 	return &enabled
@@ -1243,6 +1258,13 @@ func desktopMouseClipboardEnabled(settings Settings) bool {
 		return true
 	}
 	return *settings.DesktopMouseClipboardEnabled
+}
+
+func desktopShortcutsBarEnabled(settings Settings) bool {
+	if settings.DesktopShortcutsBarEnabled == nil {
+		return false
+	}
+	return *settings.DesktopShortcutsBarEnabled
 }
 
 func mobilePixelScrollEnabled(settings Settings) bool {

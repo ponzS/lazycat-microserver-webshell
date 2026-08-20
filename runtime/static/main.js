@@ -206,6 +206,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const settingsPerformanceTasksToggle = document.getElementById("settingsPerformanceTasksToggle");
   const settingsMobileRemoteDesktopToggle = document.getElementById("settingsMobileRemoteDesktopToggle");
   const settingsDesktopMouseClipboardToggle = document.getElementById("settingsDesktopMouseClipboardToggle");
+  const settingsDesktopShortcutsBarToggle = document.getElementById("settingsDesktopShortcutsBarToggle");
   const settingsMobilePixelScrollToggle = document.getElementById("settingsMobilePixelScrollToggle");
   const settingsMobileDoubleTapReminderToggle = document.getElementById("settingsMobileDoubleTapReminderToggle");
   const settingsMobileShortcutAddButton = document.getElementById("settingsMobileShortcutAddButton");
@@ -657,6 +658,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   let activeTerminalFontID = "";
   let terminalSymbolFont = null;
   let desktopMouseClipboardEnabled = true;
+  let desktopShortcutsBarEnabled = false;
   let mobilePixelScrollEnabled = true;
   let mobileDoubleTapReminderEnabled = true;
   let debugModeEnabled = window.localStorage.getItem(debugModeStorageKey) === "true";
@@ -740,6 +742,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   let settingsScrollbackSaveTimer = 0;
   let settingsScrollbackSaveRequestSeq = 0;
   let settingsDesktopMouseClipboardRequestSeq = 0;
+  let settingsDesktopShortcutsBarRequestSeq = 0;
   let settingsMobilePixelScrollRequestSeq = 0;
   let settingsMobileDoubleTapReminderRequestSeq = 0;
   let attachmentBrowserEdgeSwipe = null;
@@ -1601,6 +1604,17 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
   };
 
+  const applyDesktopShortcutsBarVisibility = () => {
+    document.body.classList.toggle("desktop-shortcuts-bar-enabled", desktopShortcutsBarEnabled);
+  };
+
+  const syncSettingsDesktopShortcutsBarToggle = () => {
+    if (settingsDesktopShortcutsBarToggle) {
+      settingsDesktopShortcutsBarToggle.checked = desktopShortcutsBarEnabled;
+    }
+    applyDesktopShortcutsBarVisibility();
+  };
+
   const syncSettingsMobilePixelScrollToggle = () => {
     if (settingsMobilePixelScrollToggle) {
       settingsMobilePixelScrollToggle.checked = mobilePixelScrollEnabled;
@@ -1652,6 +1666,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const setSettingsDesktopMouseClipboardSaving = (saving) => {
     if (settingsDesktopMouseClipboardToggle) {
       settingsDesktopMouseClipboardToggle.disabled = saving;
+    }
+  };
+
+  const setSettingsDesktopShortcutsBarSaving = (saving) => {
+    if (settingsDesktopShortcutsBarToggle) {
+      settingsDesktopShortcutsBarToggle.disabled = saving;
     }
   };
 
@@ -2702,6 +2722,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     terminalOptionsBase.scrollback = normalizeTerminalScrollback(state?.terminal_scrollback);
     applyTerminalScrollback();
     desktopMouseClipboardEnabled = state?.desktop_mouse_clipboard_enabled !== false;
+    desktopShortcutsBarEnabled = state?.desktop_shortcuts_bar_enabled === true;
     mobilePixelScrollEnabled = state?.mobile_pixel_scroll_enabled !== false;
     mobileDoubleTapReminderEnabled = state?.mobile_double_tap_reminder_enabled !== false;
     applyMobileShortcutRows(normalizeMobileShortcutRows(state?.mobile_shortcuts), { remember: true });
@@ -2714,6 +2735,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       syncSettingsLineHeightInput();
     }
     syncSettingsDesktopMouseClipboardToggle();
+    syncSettingsDesktopShortcutsBarToggle();
     syncSettingsMobilePixelScrollToggle();
     syncSettingsMobileDoubleTapReminderToggle();
     syncSettingsDebugOptions();
@@ -2790,6 +2812,21 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     });
     if (!response.ok) {
       throw new Error(await readResponseText(response, `鼠标复制粘贴设置保存失败 (${response.status})`));
+    }
+    await applySettingsState(await response.json(), { syncScrollbackInput: false, syncLineHeightInput: false });
+  });
+
+  const saveDesktopShortcutsBarEnabled = async (enabled) => measurePerformanceTask("settings save", async () => {
+    desktopShortcutsBarEnabled = enabled;
+    syncSettingsDesktopShortcutsBarToggle();
+    resizeActiveTabForCurrentDevice();
+    const response = await fetch("./api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ desktop_shortcuts_bar_enabled: enabled }),
+    });
+    if (!response.ok) {
+      throw new Error(await readResponseText(response, `PC底部快捷键栏设置保存失败 (${response.status})`));
     }
     await applySettingsState(await response.json(), { syncScrollbackInput: false, syncLineHeightInput: false });
   });
@@ -3621,6 +3658,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     syncSettingsLineHeightInput();
     syncSettingsDebugOptions();
     syncSettingsDesktopMouseClipboardToggle();
+    syncSettingsDesktopShortcutsBarToggle();
     syncSettingsMobilePixelScrollToggle();
     syncSettingsMobileDoubleTapReminderToggle();
     setSettingsFeedback("");
@@ -19948,6 +19986,26 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       .finally(() => {
         if (requestSeq === settingsDesktopMouseClipboardRequestSeq) {
           setSettingsDesktopMouseClipboardSaving(false);
+        }
+      });
+  });
+  settingsDesktopShortcutsBarToggle?.addEventListener("change", () => {
+    const previous = desktopShortcutsBarEnabled;
+    const enabled = settingsDesktopShortcutsBarToggle.checked;
+    const requestSeq = ++settingsDesktopShortcutsBarRequestSeq;
+    setSettingsDesktopShortcutsBarSaving(true);
+    saveDesktopShortcutsBarEnabled(enabled)
+      .catch((error) => {
+        if (requestSeq === settingsDesktopShortcutsBarRequestSeq) {
+          desktopShortcutsBarEnabled = previous;
+          syncSettingsDesktopShortcutsBarToggle();
+          resizeActiveTabForCurrentDevice();
+        }
+        setSettingsFeedback(error.message || "PC底部快捷键栏设置保存失败。", "error");
+      })
+      .finally(() => {
+        if (requestSeq === settingsDesktopShortcutsBarRequestSeq) {
+          setSettingsDesktopShortcutsBarSaving(false);
         }
       });
   });

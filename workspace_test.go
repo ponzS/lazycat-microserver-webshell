@@ -859,6 +859,9 @@ func TestHandleSettingsDefaultsDesktopMouseClipboardMobilePixelScrollAndDoubleTa
 	if !state.DesktopMouseClipboardEnabled {
 		t.Fatalf("DesktopMouseClipboardEnabled = false, want default true")
 	}
+	if state.DesktopShortcutsBarEnabled {
+		t.Fatalf("DesktopShortcutsBarEnabled = true, want default false")
+	}
 	if !state.MobilePixelScrollEnabled {
 		t.Fatalf("MobilePixelScrollEnabled = false, want default true")
 	}
@@ -885,7 +888,7 @@ func TestHandleSettingsPatchDesktopMouseClipboardMobilePixelScrollAndDoubleTapRe
 	}
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"desktop_mouse_clipboard_enabled":false,"mobile_pixel_scroll_enabled":false,"mobile_double_tap_reminder_enabled":false}`))
+	request := httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(`{"desktop_mouse_clipboard_enabled":false,"desktop_shortcuts_bar_enabled":true,"mobile_pixel_scroll_enabled":false,"mobile_double_tap_reminder_enabled":false}`))
 	request.Header.Set("Content-Type", "application/json")
 	server.handleSettings(recorder, request)
 
@@ -896,8 +899,8 @@ func TestHandleSettingsPatchDesktopMouseClipboardMobilePixelScrollAndDoubleTapRe
 	if err := json.NewDecoder(recorder.Body).Decode(&state); err != nil {
 		t.Fatalf("decode response error = %v", err)
 	}
-	if state.TerminalFontID != font.ID || state.TerminalScrollback != 44000 || state.DesktopMouseClipboardEnabled || state.MobilePixelScrollEnabled || state.MobileDoubleTapReminderEnabled {
-		t.Fatalf("State = %+v, want selected font, scrollback 44000, disabled mouse clipboard, disabled mobile pixel scroll, and disabled double tap reminder", state)
+	if state.TerminalFontID != font.ID || state.TerminalScrollback != 44000 || state.DesktopMouseClipboardEnabled || !state.DesktopShortcutsBarEnabled || state.MobilePixelScrollEnabled || state.MobileDoubleTapReminderEnabled {
+		t.Fatalf("State = %+v, want selected font, scrollback 44000, disabled mouse clipboard, enabled PC shortcuts bar, disabled mobile pixel scroll, and disabled double tap reminder", state)
 	}
 }
 
