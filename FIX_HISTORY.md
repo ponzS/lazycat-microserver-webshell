@@ -707,3 +707,15 @@ git diff --check
 - 验证结果：执行的命令、设备/浏览器/系统和结果
 - 禁止复现：后续修改不得破坏的不变量
 ```
+
+### LCMD-20260820-01：WebSocket 断连状态、重试语义与错误诊断补全
+
+- 日期：2026-08-20
+- 来源：用户反馈；WebShell 右上角出现静态红点后终端无法继续使用，现场未能稳定复现
+- 影响模块：`runtime/static/main.js` 的终端 WebSocket、网络恢复、设备状态心跳、版本检查和调试设置；`runtime/static/index.html`、`runtime/static/style.css` 的调试日志界面
+- 错误现象：连接建立卡住时没有超时；缓存/历史等异步前置失败后可能只显示启动错误而不再重试；后台或离线恢复路径不完整；重连红点与普通错误红点语义混淆；设备心跳默认运行；版本查询使用循环轮询；用户无法看到足够的网络和重试上下文
+- 根因：连接状态、连接建立中和重连状态没有统一状态机；可恢复错误没有统一进入退避重试；建立阶段缺少明确超时；网络离线只更新提示而没有覆盖全部会话；设备心跳和版本检查生命周期未按调试/挂载语义收敛
+- 实施方案：增加 12 秒 WebSocket 建立超时，并将 WebSocket close/error、健康检查、ping、历史同步、异步连接前置失败统一导向 `reconnecting` 与已有退避/抖动重试；后台会话允许重试，离线会话显示 `offline`，网络恢复后重连全部工作区会话。`reconnecting` 使用红色呼吸点，`offline`、`closed`、不可恢复 `error` 使用静态红点，初次 `connecting` 不显示红点。设备心跳仅在调试模式启用，关闭调试或卸载时停止；版本检查改为页面挂载约 1 秒后的单次请求。调试模式新增默认关闭的错误日志开关，开启后在终端右上角显示最大高度、可滚动日志窗口，保留最多 200 条，捕获关键连接/网络/异步错误、重试和控制台错误；同一类控制台警告在 5 秒内去重，不记录正常轮询成功日志
+- Guard：更新 `TestRuntimeTerminalOutputBatchingGuard`；新增 `TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard`，固定连接建立超时、异步失败重试、状态点语义、心跳开关、单次版本查询、日志捕获/去重及日志窗口滚动限制；既有 `TestRuntimeOfflineFrameAndWorkspaceRetryGuard`、`TestRuntimeWebSocketReconnectHealthGuard` 继续覆盖后台、离线和健康检查恢复
+- 验证结果：`node --check runtime/static/main.js`、`go test ./...`、`git diff --check` 通过
+- 禁止复现：不得把可恢复断连标记为静态错误后停止重试；不得在连接建立、异步前置或后台/网络恢复路径丢失重试；设备心跳不得在非调试模式默认启动；版本查询不得恢复为循环轮询；日志不得记录成功轮询或因重复控制台警告刷屏；暂不实现单 WebSocket 多路复用，也不改为只连接活动 tab

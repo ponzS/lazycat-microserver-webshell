@@ -2370,7 +2370,7 @@ func TestRuntimeTerminalOutputBatchingGuard(t *testing.T) {
 		"const genericWebSocketStartupFallbacks = new Set([",
 		"const isGenericWebSocketStartupFallback = (message) =>",
 		"if (isGenericWebSocketStartupFallback(fallback)) {",
-		"showSessionStartupError(session, error.message || \"WebSocket connection failed.\");",
+		"retrySessionConnectionAfterFailure(session, error, { allowHidden: true });",
 	}
 	for _, want := range wantSnippets {
 		if !strings.Contains(source, want) {
@@ -2992,6 +2992,100 @@ func TestRuntimeWebSocketReconnectHealthGuard(t *testing.T) {
 	for _, want := range wantSnippets {
 		if !strings.Contains(source, want) {
 			t.Fatalf("runtime websocket reconnect health guard missing %q", want)
+		}
+	}
+}
+
+func TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard(t *testing.T) {
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	styleData, err := os.ReadFile("runtime/static/style.css")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/style.css) error = %v", err)
+	}
+	indexData, err := os.ReadFile("runtime/static/index.html")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
+	}
+	mainSource := string(mainData)
+	styleSource := string(styleData)
+	indexSource := string(indexData)
+
+	for _, want := range []string{
+		"const terminalWebSocketConnectTimeoutMs = 12 * 1000;",
+		"const startSocketConnectTimer = (session, currentSocket) => {",
+		"closeSessionSocketForReconnect(session, currentSocket, `Terminal WebSocket connect timed out",
+		"const retrySessionConnectionAfterFailure = (session, error, { allowHidden = true } = {}) => {",
+		"connectPendingSession(session, { allowHidden: allowHidden || force });",
+		"connectSession(session, { allowHidden: true }).catch((error) => {",
+		"session.shellEl.dataset.connection = \"offline\";",
+		"session.shellEl.dataset.connection = \"reconnecting\";",
+		"appendDebugWarning(\n      \"终端连接将在重试\"",
+		"appendDebugError(\"终端连接建立失败\"",
+		"const debugLogStorageKey = `${storagePrefix}.debugLog`;",
+		"const debugLogEntryLimit = 200;",
+		"const debugLogDedupWindowMs = 5000;",
+		"const debugLogLastSeen = new Map();",
+		"const appendDebugLog = (level, message, details = \"\", { dedupeKey = \"\" } = {}) => {",
+		"const dedupeKey = `console:${level}:",
+		"debugLogPanel.hidden = !debugModeEnabled || !debugLogEnabled;",
+		"debugLogEntries.splice(0, debugLogEntries.length - debugLogEntryLimit);",
+		"console[method] = (...args) => {",
+		"window.addEventListener(\"error\", (event) => {",
+		"window.addEventListener(\"unhandledrejection\", (event) => {",
+		"const handleDeviceHeartbeatError = (error) => {",
+		"if (disposed || !debugModeEnabled || navigator.onLine === false)",
+		"const stopDeviceHeartbeat = () => {",
+		"postDeviceHeartbeat().catch(handleDeviceHeartbeatError);",
+		"if (debugModeEnabled) {\n      startDeviceHeartbeat();\n    }",
+		"const scheduleInitialServerRevisionCheck = () => {",
+		"serverRevisionInitialCheckTimer = window.setTimeout(() => {",
+		"scheduleInitialServerRevisionCheck();",
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime connection diagnostics guard missing %q", want)
+		}
+	}
+	if strings.Contains(mainSource, "serverRevisionRefreshTimer") {
+		t.Fatal("server revision must not keep a refresh loop timer")
+	}
+	initialRevisionBlock := sourceBetween(t, mainSource,
+		"const scheduleInitialServerRevisionCheck = () => {",
+		"const fetchWorkspaceState = async (name = activeName) => {")
+	if strings.Count(initialRevisionBlock, "refreshServerRevision().catch(") != 1 {
+		t.Fatal("initial server revision check must perform exactly one delayed request")
+	}
+	for _, want := range []string{
+		`.pane-shell[data-connection="reconnecting"]::after`,
+		`animation: pane-connection-breathe 1.35s ease-in-out infinite;`,
+		`@keyframes pane-connection-breathe`,
+		`.pane-shell[data-connection="offline"]::after`,
+		`.pane-shell[data-connection="closed"]::after`,
+	} {
+		if !strings.Contains(styleSource, want) {
+			t.Fatalf("runtime connection indicator style guard missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		`id="settingsDebugLogToggle"`,
+		`id="debugLogPanel"`,
+		`id="debugLogList"`,
+		`id="debugLogClear"`,
+	} {
+		if !strings.Contains(indexSource, want) {
+			t.Fatalf("runtime debug log index guard missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		".debug-log-panel {",
+		"max-height: min(46vh, 360px);",
+		".debug-log-list {",
+		"overflow: auto;",
+	} {
+		if !strings.Contains(styleSource, want) {
+			t.Fatalf("runtime debug log style guard missing %q", want)
 		}
 	}
 }
