@@ -719,3 +719,15 @@ git diff --check
 - Guard：更新 `TestRuntimeTerminalOutputBatchingGuard`；新增 `TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard`，固定连接建立超时、异步失败重试、状态点语义、心跳开关、单次版本查询、日志捕获/去重及日志窗口滚动限制；既有 `TestRuntimeOfflineFrameAndWorkspaceRetryGuard`、`TestRuntimeWebSocketReconnectHealthGuard` 继续覆盖后台、离线和健康检查恢复
 - 验证结果：`node --check runtime/static/main.js`、`go test ./...`、`git diff --check` 通过
 - 禁止复现：不得把可恢复断连标记为静态错误后停止重试；不得在连接建立、异步前置或后台/网络恢复路径丢失重试；设备心跳不得在非调试模式默认启动；版本查询不得恢复为循环轮询；日志不得记录成功轮询或因重复控制台警告刷屏；暂不实现单 WebSocket 多路复用，也不改为只连接活动 tab
+
+### LCMD-20260820-02：初次连接被错误标记为重连红点
+
+- 日期：2026-08-20
+- 来源：`LCMD-20260820-01` 上线后现场观察；进入 WebShell 时尚在建立 WebSocket 和等待 PTY 回放，右上角已显示红色呼吸点
+- 影响模块：`runtime/static/main.js` 的终端连接状态映射；`runtime/static/style.css` 的连接状态点
+- 错误现象：初次打开终端的正常连接与 PTY 回放阶段显示红色呼吸点，容易被误判为网络异常重试
+- 根因：`sessionConnectingState()` 把 `reconnectAttempts` 和 `reconnectPending` 作为视觉状态推断依据；这两个调度字段不能表达“是否已发生断线”这一语义
+- 实施方案：增加独立的 `connectionRetrying` 状态，仅在 WebSocket 实际断开或开始退避重试时置为真，回放完成时清除。初次连接和 PTY 回放维持 `connecting`，样式改为呼吸灰点；真实 `reconnecting` 保持呼吸红点
+- Guard：扩展 `TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard`，固定首次连接状态不依赖重试计数且 `connecting`、`reconnecting` 均有状态点样式
+- 验证结果：`node --check runtime/static/main.js`、`go test ./...`、`node --test terminal_cache_v2_test.mjs terminal_resize_scheduler_test.mjs`、`git diff --check` 通过
+- 禁止复现：首次 WebSocket 连接、agent preparing 和 PTY 历史回放不得显示红色重连状态点；只有已发生连接异常并调度重试时才可使用 `reconnecting`

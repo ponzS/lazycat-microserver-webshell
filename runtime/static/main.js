@@ -15425,6 +15425,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       appendDebugLog("info", "终端连接已恢复", `${session.name}/${session.id}`);
     }
     session.reconnectAttempts = 0;
+    session.connectionRetrying = false;
     session.shellEl.dataset.connection = "open";
     setPaneRenderReady(session, false);
     renderPaneFullNow(session);
@@ -15751,15 +15752,14 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.lastSocketHealthAt = 0;
     clearSessionConnectionTimers(session);
     if (connection) {
+      session.connectionRetrying = connection === "reconnecting";
       session.shellEl.dataset.connection = connection;
     }
     return true;
   };
 
   const sessionConnectingState = (session) => (
-    Number(session?.reconnectAttempts || 0) > 0 || session?.reconnectPending
-      ? "reconnecting"
-      : "connecting"
+    session?.connectionRetrying === true ? "reconnecting" : "connecting"
   );
 
   const resetTerminalForHistoryReplay = (session) => {
@@ -15825,6 +15825,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     } else {
       session.replayComplete = false;
       session.replayVerified = false;
+      session.connectionRetrying = true;
       session.shellEl.dataset.connection = "reconnecting";
     }
     session.reconnectAttempts = Math.max(1, Number(session.reconnectAttempts || 0));
@@ -15858,6 +15859,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     const jitter = baseDelay * terminalReconnectJitterRatio * ((Math.random() * 2) - 1);
     const delay = Math.max(0, Math.round(baseDelay + jitter));
     session.reconnectPending = true;
+    session.connectionRetrying = true;
     session.shellEl.dataset.connection = "reconnecting";
     appendDebugWarning(
       "终端连接将在重试",
@@ -16807,6 +16809,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       reconnectTimer: 0,
       reconnectPending: false,
       reconnectAttempts: 0,
+      connectionRetrying: false,
       socketConnectTimer: 0,
       socketHealthTimer: 0,
       attachReadyTimer: 0,

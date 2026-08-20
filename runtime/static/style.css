@@ -707,6 +707,7 @@ body.split-resize-active * {
   pointer-events: none;
 }
 
+.pane-shell[data-connection="connecting"]::after,
 .pane-shell[data-connection="reconnecting"]::after,
 .pane-shell[data-connection="offline"]::after,
 .pane-shell[data-connection="closed"]::after,
@@ -728,6 +729,7 @@ body.split-resize-active * {
   background: #ef4444;
 }
 
+.pane-shell[data-connection="connecting"]::after,
 .pane-shell[data-connection="reconnecting"]::after {
   animation: pane-connection-breathe 1.35s ease-in-out infinite;
 }

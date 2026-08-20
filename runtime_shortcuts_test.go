@@ -3020,6 +3020,10 @@ func TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard(t *testing.T) 
 		"const retrySessionConnectionAfterFailure = (session, error, { allowHidden = true } = {}) => {",
 		"connectPendingSession(session, { allowHidden: allowHidden || force });",
 		"connectSession(session, { allowHidden: true }).catch((error) => {",
+		"const sessionConnectingState = (session) => (\n    session?.connectionRetrying === true ? \"reconnecting\" : \"connecting\"",
+		"connectionRetrying: false,",
+		"session.connectionRetrying = true;",
+		"session.connectionRetrying = false;",
 		"session.shellEl.dataset.connection = \"offline\";",
 		"session.shellEl.dataset.connection = \"reconnecting\";",
 		"appendDebugWarning(\n      \"终端连接将在重试\"",
@@ -3058,6 +3062,7 @@ func TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard(t *testing.T) 
 		t.Fatal("initial server revision check must perform exactly one delayed request")
 	}
 	for _, want := range []string{
+		`.pane-shell[data-connection="connecting"]::after`,
 		`.pane-shell[data-connection="reconnecting"]::after`,
 		`animation: pane-connection-breathe 1.35s ease-in-out infinite;`,
 		`@keyframes pane-connection-breathe`,
