@@ -1250,6 +1250,38 @@ func TestRuntimeDesktopShortcutsBarSetting(t *testing.T) {
 	}
 }
 
+func TestRuntimeDesktopShortcutsDoNotRetainButtonFocus(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+	bindBody := sourceBetween(t, source, `  const bindMobileShortcutButton = (button, shortcut) => {`, `  const renderMobileShortcuts = () => {`)
+	for _, want := range []string{
+		`button.addEventListener("mousedown", (event) => {`,
+		`if (!isDesktopShortcutBarLayout()) {`,
+		`event.preventDefault();`,
+		`rememberShortcutSession();`,
+		`button.blur();`,
+	} {
+		if !strings.Contains(bindBody, want) {
+			t.Fatalf("desktop shortcut focus isolation guard missing %q", want)
+		}
+	}
+	if !strings.Contains(source, `const isDesktopShortcutBarLayout = () => desktopShortcutsBarEnabled && !isTouchShortcutLayout();`) {
+		t.Fatal("desktop shortcut layout guard is missing")
+	}
+	for _, forbidden := range []string{
+		`const desktopShortcutPendingModifiers =`,
+		`const activeShortcutModifiers =`,
+		`event.pointerType === "mouse" && isDesktopShortcutBarLayout()`,
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("desktop shortcut focus fix must not replace mobile sticky state, found %q", forbidden)
+		}
+	}
+}
+
 func TestRuntimeTouchKeyboardRequiresDoubleTapOnWideTouchScreens(t *testing.T) {
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {

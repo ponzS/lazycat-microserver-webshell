@@ -743,3 +743,15 @@ git diff --check
 - Guard：`TestRuntimeDesktopShortcutsBarSetting`、`TestHandleSettingsDefaultsDesktopMouseClipboardMobilePixelScrollAndDoubleTapReminderEnabled` 和 `TestHandleSettingsPatchDesktopMouseClipboardMobilePixelScrollAndDoubleTapReminderPreservesFontAndScrollback`。
 - 验证结果：`node --check runtime/static/main.js`、`go test ./...`、`node --test terminal_cache_v2_test.mjs terminal_resize_scheduler_test.mjs` 和 `git diff --check` 通过。
 - 禁止复现：PC 快捷键栏必须默认关闭；开启后不得遮挡终端内容或底部浮层；触摸布局不得因该 PC 开关改变既有显示行为。
+
+### LCMD-20260820-04：PC 快捷键按钮持续接收实体回车
+
+- 日期：2026-08-20
+- 来源：用户现场反馈；PC 单击底部快捷键后，连续按实体回车会反复执行刚才的快捷键，点击页面空白处后才恢复。
+- 影响模块：`runtime/static/main.js` 的底部快捷键栏按钮焦点管理。
+- 错误现象：PC 单击任意快捷键按钮后，按钮持续保留浏览器焦点，实体回车被浏览器解释为再次激活该按钮。
+- 根因：PC 鼠标按下时没有阻止按钮获得焦点；现有触摸路径不会产生相同的键盘焦点问题。
+- 实施方案：仅在 PC 快捷键栏的鼠标按下路径阻止默认聚焦，并记住当前终端会话；快捷键点击完成后对按钮执行失焦兜底。移动端触摸、笔输入、长按重复和粘滞键逻辑保持不变。
+- Guard：`TestRuntimeDesktopShortcutsDoNotRetainButtonFocus`；既有 `TestRuntimeMobileShortcutsPreserveKeyboardExceptMenu` 和 `TestRuntimeMobileReturnShortcutRepeats` 继续覆盖移动端行为。
+- 验证结果：`node --check runtime/static/main.js`、`go test ./...`、`node --test terminal_cache_v2_test.mjs terminal_resize_scheduler_test.mjs` 和 `git diff --check` 通过。
+- 禁止复现：PC 单击快捷键后实体回车不得再次激活该按钮；不得通过改变移动端粘滞键、触摸焦点或长按重复语义修复此问题。

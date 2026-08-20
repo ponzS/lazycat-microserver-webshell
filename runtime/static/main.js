@@ -6056,6 +6056,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
 
   const isMobileLayout = () => Boolean(mobileLayoutQuery?.matches);
   const isTouchShortcutLayout = () => Boolean(touchShortcutLayoutQuery?.matches);
+  const isDesktopShortcutBarLayout = () => desktopShortcutsBarEnabled && !isTouchShortcutLayout();
   const isTouchSelectionLayout = () => isMobileLayout() || isTouchShortcutLayout();
   const requiresTouchKeyboardDoubleTap = () => isTouchShortcutLayout();
 
@@ -12889,6 +12890,14 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
 
     button.addEventListener("touchstart", preserveMobileKeyboardOnTouchStart, { capture: true, passive: false });
 
+    button.addEventListener("mousedown", (event) => {
+      if (!isDesktopShortcutBarLayout()) {
+        return;
+      }
+      event.preventDefault();
+      rememberShortcutSession();
+    });
+
     button.addEventListener("pointerdown", (event) => {
       if (!(event instanceof PointerEvent) || !event.isPrimary) {
         return;
@@ -12955,6 +12964,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         return;
       }
       triggerMobileShortcut(shortcut, shortcutSession || activeSession());
+      if (isDesktopShortcutBarLayout()) {
+        button.blur();
+      }
       shortcutSession = null;
     });
   };
