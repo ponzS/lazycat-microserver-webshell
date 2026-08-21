@@ -906,6 +906,12 @@ func observeServerRevisionState(ctx context.Context, scope agentScope, clientID,
 }
 
 func (s *pluginServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	if strings.TrimSpace(r.URL.Query().Get("mode")) == "queue" {
+		if err := s.attachPersistentPaneQueue(w, r); err != nil {
+			log.Printf("websocket queue attach failed: %v", err)
+		}
+		return
+	}
 	cols, rows := parseTerminalSize(r.URL.Query().Get("cols"), r.URL.Query().Get("rows"))
 	if err := s.attachPersistentPane(w, r, cols, rows); err != nil {
 		log.Printf("websocket attach failed: %v", err)

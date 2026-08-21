@@ -19,6 +19,7 @@ LightOS WebShell 的目标是为懒猫微服提供一个开箱即用的网页终
 
 - 自动发现 LightOS 实例，并在多个运行中的实例之间切换。
 - 在浏览器中打开实例内 Shell，支持原始终端输入输出、窗口尺寸同步和 WebSocket 连接。
+- 容器实例的单页面浏览器连接池最多使用 3 条终端 WebSocket：2 条当前 tab 的 pane 专属高速连接，以及在两条高速连接都已就绪后才创建的 1 条共享队列连接。当前 tab 的其他可见 pane 通过队列持续更新；点击或输入 pane 会立即提升为高速连接。后台 tab 不占用队列，`client:` PC target 暂时继续最多 3 条直连。
 - 使用实例内的持久 agent 管理终端工作区，刷新页面、重新打开页面或短暂断网后可重新连接到已有 tab 和 pane。
 - 服务升级后优先复用兼容的旧 agent，尽量保留正在运行的终端会话；协议不兼容时会明确提示。
 - 支持终端输出历史回放，减少重连后的上下文丢失。
@@ -74,19 +75,25 @@ LightOS WebShell 的目标是为懒猫微服提供一个开箱即用的网页终
 - `lzc-cli`。
 - 可安装 LPK 的懒猫微服环境。
 
+首次克隆后初始化仓库固定的 Ghostty Web fork：
+
+```sh
+git submodule update --init --recursive
+```
+
 构建 LPK：
 
 ```sh
 lzc-cli project release
 ```
 
-WebShell 仓库内的 `runtime/static/ghostty-web.js`、`ghostty-vt.wasm` 和许可证是发布资产。常规构建校验这些文件完整可用；如果相邻源码目录已有 WASM 构建物，还会比较核心 section 内容并给出非阻塞提示：
+`ghostty-web/` 是固定到 `ponzS/ghostty-web` fork 的 submodule；源码同步和重建默认只使用该目录。WebShell 仓库内的 `runtime/static/ghostty-web.js`、`ghostty-vt.wasm` 和许可证是发布资产。常规构建校验这些文件完整可用；如果 submodule 中已有 WASM 构建物，还会比较核心 section 内容并给出非阻塞提示：
 
 ```sh
 ./tools/sync-ghostty-web-assets.sh --check
 ```
 
-需要确认相邻 `ghostty-web` 当前源码与随包 WASM 是否一致时使用 `--check-source`。该模式会先执行 `bun run build:wasm`，再解析并比较两份 WASM 的核心 section 内容；自定义构建元数据不参与版本判断。根目录 `ghostty-vt.wasm` 是被 Git 忽略的构建产物，不能在未重建时作为源码版本依据。
+需要确认 submodule 当前源码与随包 WASM 是否一致时使用 `--check-source`。该模式会先执行 `bun run build:wasm`，再解析并比较两份 WASM 的核心 section 内容；自定义构建元数据不参与版本判断。submodule 根目录的 `ghostty-vt.wasm` 是被 Git 忽略的构建产物，不能在未重建时作为源码版本依据。
 
 WebShell 的 `ghostty-web.js` 还包含移动端像素滚动、resize 和渲染性能等历史定制。只有有意更新这部分前端代码时才执行 `--sync`，并在覆盖 bundle 后运行完整 WebShell 回归测试。只有 Ghostty 子模块、WASM patch 或 ABI 确实变化时才使用 `--rebuild-wasm`。
 
@@ -107,7 +114,7 @@ lzc-cli project deploy
 ## 技术说明
 
 - 后端使用 Go 实现，Web UI 通过 `/=exec://8080` 由 LPK 启动。
-- 终端会话通过实例内 persistent agent 管理，并通过 WebSocket 转发到浏览器。
+- 终端会话通过实例内 persistent agent 管理，并通过 WebSocket 转发到浏览器。浏览器 Queue 复用只发生在 Provider 中转层；persistent agent 不需要修改，仍持续维护所有 PTY、任务、历史和 cursor。
 - 实例端终端历史由 persistent agent 作为可信数据源维护。容器浏览器使用 Cache API v2 在后台恢复字节，Ghostty 通过复用的 WASM 输入缓冲区批量解析历史，不绘制中间帧；服务端 replay complete、实时队列追平并完成最终 full render 后才显示 live canvas。新增 Cache 字节的持久化继续在后台完成，不阻塞本次 Canvas 显示。`client:` PC target 继续使用 IndexedDB 与原完整历史回放协议，暂不启用容器 cache-v2 warm replay。
 - HTML 入口使用 `/assets/<lpk-version>-<content-revision>/` 静态资源路径。即使误用相同 LPK 版本重新发布，只要二进制或 runtime 内容变化，JS/CSS/module/WASM URL 和 Service Worker cache 名称也会变化；内容寻址资源可长期缓存，旧 `/static/` 仅保留兼容。
 - PWA Service Worker 对当前 LPK 版本的 immutable 静态 app shell 使用 cache-first，版本 URL 变化负责主动更新；缓存未命中才联网，终端 API、WebSocket 和 Cache API 虚拟记录始终绕过 Service Worker。

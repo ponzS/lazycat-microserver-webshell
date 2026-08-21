@@ -3,7 +3,7 @@
 set -euo pipefail
 
 REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-GHOSTTY_WEB_DIR="${GHOSTTY_WEB_DIR:-${REPO_DIR}/../ghostty-web}"
+GHOSTTY_WEB_DIR="${GHOSTTY_WEB_DIR:-${REPO_DIR}/ghostty-web}"
 STATIC_DIR="${REPO_DIR}/runtime/static"
 
 usage() {
@@ -21,7 +21,7 @@ usage() {
   --rebuild-wasm  重建 WASM 和 JavaScript，再同步全部运行时资产。
 
 可选环境变量:
-  GHOSTTY_WEB_DIR 指向 ghostty-web 源码目录；源码不可用时 --check 仍验证随包 WASM 格式。
+  GHOSTTY_WEB_DIR 覆盖仓库内 ghostty-web submodule 路径；源码不可用时 --check 仍验证随包 WASM 格式。
 EOF
 }
 
@@ -75,6 +75,7 @@ check_runtime_assets() {
 require_source_tree() {
   if [[ ! -d "$GHOSTTY_WEB_DIR" ]]; then
     echo "找不到 Ghostty Web 源码目录: ${GHOSTTY_WEB_DIR}" >&2
+    echo "请执行 git submodule update --init --recursive ghostty-web" >&2
     return 1
   fi
 }
@@ -114,11 +115,11 @@ compare_source_wasm_content() {
 
 check_existing_source_wasm() {
   if [[ ! -f "$source_wasm" ]]; then
-    echo "相邻 Ghostty 源构建物不存在；跳过源码内容提示。"
+    echo "Ghostty Web submodule 中没有现有 WASM 构建物；跳过源码内容提示。"
     return 0
   fi
   if [[ ! -f "$wasm_comparator" ]] || ! command -v node >/dev/null 2>&1; then
-    echo "缺少 WASM 内容比较工具；跳过相邻源构建物提示。"
+    echo "缺少 WASM 内容比较工具；跳过 submodule 源构建物提示。"
     return 0
   fi
   if cmp -s "$source_wasm" "$runtime_wasm"; then
@@ -129,7 +130,7 @@ check_existing_source_wasm() {
     echo "现有 Ghostty 源构建物核心内容一致；差异仅位于可变的自定义 section。"
     return 0
   fi
-  echo "警告：相邻 Ghostty WASM 构建物的核心内容不同，可能是未从当前源码重建的旧文件。" >&2
+  echo "警告：Ghostty Web submodule 的 WASM 构建物核心内容不同，可能是未从当前源码重建的旧文件。" >&2
   echo "发布仍使用 WebShell 随包 WASM；请执行 --check-source 重建源码后再确认。" >&2
 }
 

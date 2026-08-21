@@ -1,0 +1,4 @@
+[submodule "ghostty-web"]
+	path = ghostty-web
+	url = https://github.com/ponzS/ghostty-web.git
+	branch = main

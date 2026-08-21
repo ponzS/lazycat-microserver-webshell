@@ -80,6 +80,32 @@ func TestBuildWritesPackageVersionForRuntimeAssets(t *testing.T) {
 	}
 }
 
+func TestGhosttyWebSubmodulePinsFork(t *testing.T) {
+	modulesData, err := os.ReadFile(".gitmodules")
+	if err != nil {
+		t.Fatalf("ReadFile(.gitmodules) error = %v", err)
+	}
+	modules := string(modulesData)
+	for _, want := range []string{
+		`[submodule "ghostty-web"]`,
+		`path = ghostty-web`,
+		`url = https://github.com/ponzS/ghostty-web.git`,
+		`branch = main`,
+	} {
+		if !strings.Contains(modules, want) {
+			t.Fatalf("Ghostty Web submodule guard missing %q", want)
+		}
+	}
+
+	scriptData, err := os.ReadFile("tools/sync-ghostty-web-assets.sh")
+	if err != nil {
+		t.Fatalf("ReadFile(sync-ghostty-web-assets.sh) error = %v", err)
+	}
+	if !strings.Contains(string(scriptData), `GHOSTTY_WEB_DIR="${GHOSTTY_WEB_DIR:-${REPO_DIR}/ghostty-web}"`) {
+		t.Fatal("Ghostty asset sync must default to the pinned repository submodule")
+	}
+}
+
 func TestGhosttyAssetCheckRebuildsAndComparesWasmCoreContent(t *testing.T) {
 	nodePath, err := exec.LookPath("node")
 	if err != nil {

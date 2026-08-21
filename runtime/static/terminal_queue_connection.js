@@ -1,0 +1,521 @@
+export const terminalQueueProtocolVersion = 1;
+
+const queueBinaryMagic = "LCQ1";
+const queueBinaryPrefixBytes = 8;
+const textDecoder = new TextDecoder();
+
+const socketConnecting = 0;
+const socketOpen = 1;
+const socketClosing = 2;
+const socketClosed = 3;
+
+export const terminalQueueGateAllowsCreation = ({
+  fastCapacity = 2,
+  fastLeaseStates = [],
+  queueCandidateCount = 0,
+  queueClosing = false,
+} = {}) => {
+  const requiredFast = Math.max(1, Math.floor(Number(fastCapacity) || 0));
+  const states = Array.from(fastLeaseStates || [], (state) => String(state || ""));
+  return !queueClosing
+    && Math.floor(Number(queueCandidateCount) || 0) > 0
+    && states.length === requiredFast
+    && states.every((state) => state === "open" || state === "leased");
+};
+
+const normalizeIdentity = (descriptor = {}) => {
+  const paneID = String(descriptor.pane_id || descriptor.paneID || "").trim();
+  const streamID = String(descriptor.stream_id || descriptor.streamID || "").trim();
+  const channelGeneration = Math.floor(Number(descriptor.channel_generation || descriptor.channelGeneration || 0));
+  if (!paneID || !streamID || !Number.isSafeInteger(channelGeneration) || channelGeneration <= 0) {
+    throw new Error("invalid terminal queue logical stream identity");
+  }
+  return { paneID, streamID, channelGeneration };
+};
+
+const streamKey = ({ paneID, streamID, channelGeneration }) => (
+  `${paneID}\u0000${streamID}\u0000${channelGeneration}`
+);
+
+const parseCursor = (value) => {
+  const text = String(value ?? "").trim();
+  if (!/^\d+$/.test(text)) {
+    return null;
+  }
+  try {
+    return BigInt(text);
+  } catch (error) {
+    return null;
+  }
+};
+
+export const decodeTerminalQueueBinaryFrame = (input) => {
+  const data = input instanceof Uint8Array
+    ? input
+    : input instanceof ArrayBuffer
+      ? new Uint8Array(input)
+      : ArrayBuffer.isView(input)
+        ? new Uint8Array(input.buffer, input.byteOffset, input.byteLength)
+        : null;
+  if (!data || data.byteLength < queueBinaryPrefixBytes) {
+    throw new Error("terminal queue binary frame is truncated");
+  }
+  const magic = String.fromCharCode(data[0], data[1], data[2], data[3]);
+  if (magic !== queueBinaryMagic) {
+    throw new Error("terminal queue binary frame has invalid magic");
+  }
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const headerLength = view.getUint32(4, false);
+  if (headerLength <= 0 || queueBinaryPrefixBytes + headerLength > data.byteLength) {
+    throw new Error("terminal queue binary frame has invalid header length");
+  }
+  let header;
+  try {
+    header = JSON.parse(textDecoder.decode(data.subarray(queueBinaryPrefixBytes, queueBinaryPrefixBytes + headerLength)));
+  } catch (error) {
+    throw new Error("terminal queue binary frame has invalid header");
+  }
+  const payload = data.subarray(queueBinaryPrefixBytes + headerLength);
+  return {
+    header,
+    payload: payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength),
+  };
+};
+
+const createListenerStore = () => {
+  const listeners = new Map();
+  return {
+    add(type, listener) {
+      if (typeof listener !== "function") {
+        return;
+      }
+      const entries = listeners.get(type) || new Set();
+      entries.add(listener);
+      listeners.set(type, entries);
+    },
+    remove(type, listener) {
+      listeners.get(type)?.delete(listener);
+    },
+    dispatch(type, event) {
+      for (const listener of Array.from(listeners.get(type) || [])) {
+        try {
+          listener.call(null, event);
+        } catch (error) {
+          queueMicrotask(() => { throw error; });
+        }
+      }
+    },
+    clear() {
+      listeners.clear();
+    },
+  };
+};
+
+export const createTerminalQueueConnection = ({
+  url,
+  WebSocketImpl = globalThis.WebSocket,
+  onStateChange = () => {},
+  onProtocolError = () => {},
+} = {}) => {
+  if (!url || typeof WebSocketImpl !== "function") {
+    throw new TypeError("terminal queue connection requires a URL and WebSocket implementation");
+  }
+
+  const logicalStreams = new Map();
+  let physicalSocket = null;
+  let physicalReadyState = socketClosed;
+  let disposed = false;
+  let subscriptionUpdatePending = false;
+  let physicalErrorDispatched = false;
+  let resolveClosed;
+  const closed = new Promise((resolve) => { resolveClosed = resolve; });
+  let closedResolved = false;
+
+  const resolveFinalClose = () => {
+    if (closedResolved) {
+      return;
+    }
+    closedResolved = true;
+    resolveClosed();
+  };
+
+  const snapshot = () => ({
+    physicalReadyState,
+    logicalCount: logicalStreams.size,
+    paneIDs: Array.from(logicalStreams.values(), (entry) => entry.identity.paneID),
+  });
+
+  const emitState = () => onStateChange(snapshot());
+
+  const sendPhysical = (payload) => {
+    if (!physicalSocket || physicalSocket.readyState !== socketOpen) {
+      return false;
+    }
+    physicalSocket.send(typeof payload === "string" ? payload : JSON.stringify(payload));
+    return true;
+  };
+
+  const sendSubscriptions = () => {
+    subscriptionUpdatePending = false;
+    const subscriptions = Array.from(logicalStreams.values(), (entry) => ({ ...entry.subscription }));
+    if (!sendPhysical({
+      type: "replace-subscriptions",
+      protocol_version: terminalQueueProtocolVersion,
+      subscriptions,
+    })) {
+      subscriptionUpdatePending = true;
+      return false;
+    }
+    return true;
+  };
+
+  const scheduleSubscriptionUpdate = () => {
+    if (subscriptionUpdatePending) {
+      return;
+    }
+    subscriptionUpdatePending = true;
+    queueMicrotask(() => {
+      if (!disposed && subscriptionUpdatePending) {
+        sendSubscriptions();
+      }
+    });
+  };
+
+  const dispatchLogicalClose = (entry, { code = 1000, reason = "", wasClean = true } = {}) => {
+    if (!entry || entry.readyState === socketClosed) {
+      return;
+    }
+    entry.readyState = socketClosed;
+    entry.listeners.dispatch("close", { type: "close", code, reason, wasClean, target: entry.socket });
+  };
+
+  const failLogicalProtocol = (entry, message) => {
+    const error = new Error(message);
+    onProtocolError(error, entry?.identity || null);
+    if (!entry || entry.readyState === socketClosed) {
+      return;
+    }
+    entry.listeners.dispatch("message", {
+      type: "message",
+      data: JSON.stringify({ type: "connection-error", retryable: true, resync_required: true, message }),
+      target: entry.socket,
+    });
+  };
+
+  const dispatchPhysicalError = (message, originalEvent = null) => {
+    if (physicalErrorDispatched) {
+      return false;
+    }
+    const entry = logicalStreams.values().next().value;
+    if (!entry || entry.readyState === socketClosed) {
+      return false;
+    }
+    physicalErrorDispatched = true;
+    entry.listeners.dispatch("error", {
+      type: "error",
+      message: String(message || "terminal queue connection failed"),
+      originalEvent,
+      target: entry.socket,
+    });
+    return true;
+  };
+
+  const routePaneControl = (message) => {
+    const identity = normalizeIdentity(message);
+    const entry = logicalStreams.get(streamKey(identity));
+    if (!entry || entry.readyState !== socketOpen) {
+      return false;
+    }
+    const payload = message.payload;
+    if (!payload || typeof payload !== "object") {
+      failLogicalProtocol(entry, "terminal queue pane control payload is invalid");
+      return false;
+    }
+    if (payload.type === "history-replay-start") {
+      const cursor = parseCursor(payload.delta_from_cursor);
+      if (cursor === null) {
+        failLogicalProtocol(entry, "terminal queue replay start cursor is invalid");
+        return false;
+      }
+      entry.expectedCursor = cursor;
+    } else if (payload.type === "history-replay-complete") {
+      const cursor = parseCursor(payload.history_cursor);
+      if (cursor === null || entry.expectedCursor === null || cursor !== entry.expectedCursor) {
+        failLogicalProtocol(entry, "terminal queue replay completion cursor is not continuous");
+        return false;
+      }
+    }
+    entry.listeners.dispatch("message", {
+      type: "message",
+      data: JSON.stringify(payload),
+      queueMetadata: identity,
+      target: entry.socket,
+    });
+    return true;
+  };
+
+  const routeBinary = (data) => {
+    let decoded;
+    try {
+      decoded = decodeTerminalQueueBinaryFrame(data);
+    } catch (error) {
+      onProtocolError(error, null);
+      return false;
+    }
+    let identity;
+    try {
+      identity = normalizeIdentity(decoded.header);
+    } catch (error) {
+      onProtocolError(error, null);
+      return false;
+    }
+    const entry = logicalStreams.get(streamKey(identity));
+    if (!entry || entry.readyState !== socketOpen) {
+      return false;
+    }
+    const startCursor = parseCursor(decoded.header.start_cursor);
+    const endCursor = parseCursor(decoded.header.end_cursor);
+    if (
+      startCursor === null
+      || endCursor === null
+      || endCursor < startCursor
+      || BigInt(decoded.payload.byteLength) !== endCursor - startCursor
+      || entry.expectedCursor === null
+      || entry.expectedCursor !== startCursor
+    ) {
+      failLogicalProtocol(entry, "terminal queue binary cursor is not continuous");
+      return false;
+    }
+    entry.expectedCursor = endCursor;
+    entry.listeners.dispatch("message", {
+      type: "message",
+      data: decoded.payload,
+      queueMetadata: { ...identity, startCursor, endCursor },
+      target: entry.socket,
+    });
+    return true;
+  };
+
+  const closeAllLogical = (event = {}) => {
+    const entries = Array.from(logicalStreams.values());
+    logicalStreams.clear();
+    for (const entry of entries) {
+      dispatchLogicalClose(entry, event);
+      entry.listeners.clear();
+    }
+    emitState();
+  };
+
+  const ensurePhysicalSocket = () => {
+    if (disposed || physicalSocket?.readyState === socketOpen || physicalSocket?.readyState === socketConnecting) {
+      return;
+    }
+    physicalReadyState = socketConnecting;
+    const socket = new WebSocketImpl(String(url));
+    physicalSocket = socket;
+    socket.binaryType = "arraybuffer";
+    emitState();
+    socket.addEventListener("open", () => {
+      if (physicalSocket !== socket || disposed) {
+        return;
+      }
+      physicalReadyState = socketOpen;
+      physicalErrorDispatched = false;
+      sendSubscriptions();
+      for (const entry of logicalStreams.values()) {
+        if (entry.readyState === socketConnecting) {
+          entry.readyState = socketOpen;
+          entry.listeners.dispatch("open", { type: "open", target: entry.socket });
+        }
+      }
+      emitState();
+    });
+    socket.addEventListener("message", (event) => {
+      if (physicalSocket !== socket || disposed) {
+        return;
+      }
+      if (typeof event.data === "string") {
+        let message;
+        try {
+          message = JSON.parse(event.data);
+        } catch (error) {
+          onProtocolError(new Error("terminal queue control frame is invalid"), null);
+          return;
+        }
+        if (message.type === "pane-control") {
+          routePaneControl(message);
+        } else if (message.type === "queue-state" && message.state === "agent-preparing") {
+          for (const entry of logicalStreams.values()) {
+            entry.listeners.dispatch("message", {
+              type: "message",
+              data: JSON.stringify({ type: "agent-preparing" }),
+              target: entry.socket,
+            });
+          }
+        } else if (message.type === "queue-error") {
+          const detail = String(message.payload?.message || message.message || "terminal queue connection failed");
+          if (!message.payload || message.payload.retryable !== true) {
+            onProtocolError(new Error(detail), null);
+          }
+          dispatchPhysicalError(detail, event);
+        }
+        return;
+      }
+      routeBinary(event.data);
+    });
+    socket.addEventListener("error", (event) => {
+      if (physicalSocket !== socket || disposed) {
+        return;
+      }
+      dispatchPhysicalError("terminal queue websocket error", event);
+    });
+    socket.addEventListener("close", (event) => {
+      if (physicalSocket !== socket) {
+        return;
+      }
+      physicalSocket = null;
+      physicalReadyState = socketClosed;
+      disposed = true;
+      closeAllLogical({
+        code: Number(event.code || 1006),
+        reason: String(event.reason || "terminal queue connection closed"),
+        wasClean: event.wasClean === true,
+      });
+      resolveFinalClose();
+    });
+  };
+
+  const open = (descriptor = {}) => {
+    if (disposed) {
+      throw new Error("terminal queue connection is closed");
+    }
+    const identity = normalizeIdentity(descriptor);
+    const key = streamKey(identity);
+    if (logicalStreams.has(key)) {
+      throw new Error("terminal queue logical stream already exists");
+    }
+    for (const entry of logicalStreams.values()) {
+      if (entry.identity.paneID === identity.paneID) {
+        throw new Error("terminal queue pane already has a logical stream");
+      }
+    }
+    const listeners = createListenerStore();
+    const entry = {
+      identity,
+      subscription: {
+        ...descriptor,
+        pane_id: identity.paneID,
+        stream_id: identity.streamID,
+        channel_generation: identity.channelGeneration,
+      },
+      readyState: physicalReadyState === socketOpen ? socketOpen : socketConnecting,
+      expectedCursor: null,
+      listeners,
+      socket: null,
+    };
+    const logicalSocket = {
+      get readyState() {
+        return entry.readyState;
+      },
+      get bufferedAmount() {
+        return Number(physicalSocket?.bufferedAmount || 0);
+      },
+      binaryType: "arraybuffer",
+      addEventListener(type, listener) {
+        listeners.add(String(type || ""), listener);
+      },
+      removeEventListener(type, listener) {
+        listeners.remove(String(type || ""), listener);
+      },
+      send(data) {
+        if (entry.readyState !== socketOpen) {
+          throw new Error("terminal queue logical socket is not open");
+        }
+        let control;
+        try {
+          control = typeof data === "string" ? JSON.parse(data) : data;
+        } catch (error) {
+          throw new Error("terminal queue logical socket requires JSON control messages");
+        }
+        if (!control || typeof control !== "object") {
+          throw new Error("terminal queue logical socket control payload is invalid");
+        }
+        if (!sendPhysical({
+          type: "pane-control",
+          protocol_version: terminalQueueProtocolVersion,
+          pane_id: identity.paneID,
+          stream_id: identity.streamID,
+          channel_generation: identity.channelGeneration,
+          control,
+        })) {
+          throw new Error("terminal queue physical socket is not open");
+        }
+      },
+      close(code = 1000, reason = "logical stream closed") {
+        if (entry.readyState === socketClosed || entry.readyState === socketClosing) {
+          return;
+        }
+        entry.readyState = socketClosing;
+        logicalStreams.delete(key);
+        dispatchLogicalClose(entry, { code, reason: String(reason || ""), wasClean: true });
+        listeners.clear();
+        if (logicalStreams.size === 0) {
+          disposed = true;
+          const socket = physicalSocket;
+          if (socket && socket.readyState < socketClosing) {
+            physicalReadyState = socketClosing;
+            socket.close(1000, "terminal queue has no subscriptions");
+          } else if (!socket || socket.readyState === socketClosed) {
+            physicalSocket = null;
+            physicalReadyState = socketClosed;
+            resolveFinalClose();
+          }
+        } else {
+          scheduleSubscriptionUpdate();
+        }
+        emitState();
+      },
+    };
+    entry.socket = logicalSocket;
+    logicalStreams.set(key, entry);
+    ensurePhysicalSocket();
+    if (entry.readyState === socketOpen) {
+      scheduleSubscriptionUpdate();
+      queueMicrotask(() => {
+        if (entry.readyState === socketOpen) {
+          listeners.dispatch("open", { type: "open", target: logicalSocket });
+        }
+      });
+    }
+    emitState();
+    return logicalSocket;
+  };
+
+  const close = (code = 1000, reason = "terminal queue disposed") => {
+    if (disposed) {
+      return;
+    }
+    disposed = true;
+    const socket = physicalSocket;
+    physicalReadyState = socket && socket.readyState !== socketClosed ? socketClosing : socketClosed;
+    closeAllLogical({ code, reason, wasClean: true });
+    if (socket && socket.readyState < socketClosing) {
+      socket.close(code, reason);
+    } else if (!socket || socket.readyState === socketClosed) {
+      physicalSocket = null;
+      physicalReadyState = socketClosed;
+      resolveFinalClose();
+    }
+  };
+
+  return {
+    open,
+    close,
+    closed,
+    snapshot,
+    hasPane(paneID) {
+      const normalized = String(paneID || "").trim();
+      return Array.from(logicalStreams.values()).some((entry) => entry.identity.paneID === normalized);
+    },
+  };
+};

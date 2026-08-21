@@ -1,0 +1,302 @@
+package main
+
+import (
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
+
+func TestTerminalQueueBinaryFrameCarriesLogicalStreamAndCursor(t *testing.T) {
+	header := terminalQueueBinaryHeader{
+		ProtocolVersion:   terminalQueueProtocolVersion,
+		PaneID:            "pane-3",
+		StreamID:          "stream-7",
+		ChannelGeneration: 12,
+		StartCursor:       "40",
+		EndCursor:         "45",
+	}
+	frame, err := encodeTerminalQueueBinaryFrame(header, []byte("hello"))
+	if err != nil {
+		t.Fatalf("encodeTerminalQueueBinaryFrame() error = %v", err)
+	}
+	if string(frame[:4]) != terminalQueueBinaryMagic {
+		t.Fatalf("binary magic = %q", frame[:4])
+	}
+	headerSize := int(binary.BigEndian.Uint32(frame[4:8]))
+	var decoded terminalQueueBinaryHeader
+	if err := json.Unmarshal(frame[8:8+headerSize], &decoded); err != nil {
+		t.Fatalf("decode queue header: %v", err)
+	}
+	if !reflect.DeepEqual(decoded, header) {
+		t.Fatalf("decoded header = %+v, want %+v", decoded, header)
+	}
+	if got := string(frame[8+headerSize:]); got != "hello" {
+		t.Fatalf("binary payload = %q", got)
+	}
+}
+
+func TestTerminalQueueWebSocketRequiresAccountHeader(t *testing.T) {
+	server := &pluginServer{}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/ws?mode=queue&name=demo@owner", nil)
+	server.handleWebSocket(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("queue websocket status = %d, want 401", recorder.Code)
+	}
+}
+
+func TestTerminalQueueWebSocketRejectsClientTargets(t *testing.T) {
+	server := &pluginServer{}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/ws?mode=queue&name=client:device-one", nil)
+	request.Header.Set(lightOSUserIDHeader, "user-one")
+	server.handleWebSocket(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("client queue websocket status = %d, want 400", recorder.Code)
+	}
+}
+
+func TestValidateTerminalQueueSubscriptionRequiresCompleteCursorRange(t *testing.T) {
+	base := terminalQueueSubscription{
+		PaneID:            "pane-1",
+		StreamID:          "stream-1",
+		ChannelGeneration: 1,
+	}
+	if _, _, err := validateTerminalQueueSubscription(base); err != nil {
+		t.Fatalf("minimal subscription rejected: %v", err)
+	}
+	incomplete := base
+	incomplete.HistoryGeneration = "generation-1"
+	if _, _, err := validateTerminalQueueSubscription(incomplete); err == nil {
+		t.Fatal("expected incomplete history range to be rejected")
+	}
+	invalid := base
+	invalid.HistoryGeneration = "generation-1"
+	invalid.LocalBaseCursor = "20"
+	invalid.LocalEndCursor = "10"
+	if _, _, err := validateTerminalQueueSubscription(invalid); err == nil {
+		t.Fatal("expected reversed history range to be rejected")
+	}
+	valid := base
+	valid.HistoryGeneration = "generation-1"
+	valid.LocalBaseCursor = "10"
+	valid.LocalEndCursor = "20"
+	_, syncRequest, err := validateTerminalQueueSubscription(valid)
+	if err != nil {
+		t.Fatalf("valid history range rejected: %v", err)
+	}
+	if !syncRequest.hasRange || syncRequest.localBase != 10 || syncRequest.localEnd != 20 {
+		t.Fatalf("sync request = %+v", syncRequest)
+	}
+}
+
+func TestTerminalQueueWriterUsesFixedRoundTargetAndVisitsOtherPanes(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var orderMu sync.Mutex
+	var order []string
+	var callbackErr error
+	var first *terminalQueuePaneStream
+	broker := newTerminalQueueBroker(ctx, agentScope{}, "", func(messageType int, payload []byte) error {
+		if messageType != websocket.TextMessage {
+			orderMu.Lock()
+			callbackErr = fmt.Errorf("message type = %d, want text", messageType)
+			orderMu.Unlock()
+			return callbackErr
+		}
+		var message terminalQueueServerMessage
+		if err := json.Unmarshal(payload, &message); err != nil {
+			orderMu.Lock()
+			callbackErr = fmt.Errorf("decode server message: %w", err)
+			orderMu.Unlock()
+			return callbackErr
+		}
+		orderMu.Lock()
+		order = append(order, message.PaneID)
+		if len(order) == 1 {
+			first.enqueue(terminalQueueOutbound{messageType: websocket.TextMessage, payload: []byte(`{"type":"late"}`), byteCost: 1})
+		}
+		orderMu.Unlock()
+		return nil
+	})
+	first = &terminalQueuePaneStream{
+		broker:       broker,
+		subscription: terminalQueueSubscription{PaneID: "pane-1", StreamID: "s1", ChannelGeneration: 1},
+		order:        1,
+		active:       true,
+	}
+	second := &terminalQueuePaneStream{
+		broker:       broker,
+		subscription: terminalQueueSubscription{PaneID: "pane-2", StreamID: "s2", ChannelGeneration: 1},
+		order:        2,
+		active:       true,
+	}
+	broker.streams[first.subscription.PaneID] = first
+	broker.streams[second.subscription.PaneID] = second
+	first.enqueue(terminalQueueOutbound{messageType: websocket.TextMessage, payload: []byte(`{"type":"first"}`), byteCost: 1})
+	second.enqueue(terminalQueueOutbound{messageType: websocket.TextMessage, payload: []byte(`{"type":"second"}`), byteCost: 1})
+	go broker.runWriter()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		orderMu.Lock()
+		complete := len(order) >= 3 || callbackErr != nil
+		orderMu.Unlock()
+		if complete {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	broker.close()
+	orderMu.Lock()
+	gotOrder := append([]string(nil), order...)
+	gotErr := callbackErr
+	orderMu.Unlock()
+	if gotErr != nil {
+		t.Fatal(gotErr)
+	}
+	if !reflect.DeepEqual(gotOrder, []string{"pane-1", "pane-2", "pane-1"}) {
+		t.Fatalf("writer order = %v, want fixed-target round robin", gotOrder)
+	}
+}
+
+func TestTerminalQueueWriterEmitsOneRenderBoundaryAfterBinaryTurn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	var messageTypes []int
+	var controlType string
+	broker := newTerminalQueueBroker(ctx, agentScope{}, "", func(messageType int, payload []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		messageTypes = append(messageTypes, messageType)
+		if messageType == websocket.TextMessage {
+			var message terminalQueueServerMessage
+			if err := json.Unmarshal(payload, &message); err != nil {
+				return err
+			}
+			var control map[string]any
+			if err := json.Unmarshal(message.Payload, &control); err != nil {
+				return err
+			}
+			controlType = fmt.Sprint(control["type"])
+		}
+		return nil
+	})
+	stream := &terminalQueuePaneStream{
+		broker:       broker,
+		subscription: terminalQueueSubscription{PaneID: "pane-1", StreamID: "s1", ChannelGeneration: 1},
+		order:        1,
+		active:       true,
+	}
+	broker.streams["pane-1"] = stream
+	stream.enqueue(terminalQueueOutbound{
+		messageType: websocket.BinaryMessage,
+		payload:     []byte("hello"),
+		startCursor: 10,
+		endCursor:   15,
+		byteCost:    5,
+	})
+	go broker.runWriter()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		complete := len(messageTypes) >= 2
+		mu.Unlock()
+		if complete {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	broker.close()
+	mu.Lock()
+	gotTypes := append([]int(nil), messageTypes...)
+	gotControl := controlType
+	mu.Unlock()
+	if !reflect.DeepEqual(gotTypes, []int{websocket.BinaryMessage, websocket.TextMessage}) {
+		t.Fatalf("message types = %v, want binary plus turn boundary", gotTypes)
+	}
+	if gotControl != "queue-turn-complete" {
+		t.Fatalf("turn control = %q, want queue-turn-complete", gotControl)
+	}
+}
+
+func TestTerminalQueueRejectsOrdinaryInput(t *testing.T) {
+	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "", func(int, []byte) error { return nil })
+	stream := &terminalQueuePaneStream{
+		broker:       broker,
+		subscription: terminalQueueSubscription{PaneID: "pane-1", StreamID: "s1", ChannelGeneration: 1},
+		active:       true,
+	}
+	broker.streams["pane-1"] = stream
+	control, _ := json.Marshal(terminalControlMessage{Type: "input", Data: "pwd\n"})
+	err := broker.handlePaneControl(terminalQueueClientMessage{
+		Type:              "pane-control",
+		PaneID:            "pane-1",
+		StreamID:          "s1",
+		ChannelGeneration: 1,
+		Control:           control,
+	})
+	if err == nil {
+		t.Fatal("ordinary queue input must be rejected")
+	}
+}
+
+func TestTerminalQueueStreamAcceptsContinuousReplayCursor(t *testing.T) {
+	stream := &terminalQueuePaneStream{
+		broker: &terminalQueueBroker{wake: make(chan struct{}, 1)},
+		active: true,
+	}
+	stream.enqueueText([]byte(`{"type":"history-replay-start","delta_from_cursor":"10"}`))
+	stream.enqueueBinary([]byte("hello"))
+	stream.enqueueText([]byte(`{"type":"history-replay-complete","history_cursor":"15"}`))
+
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if stream.overloaded {
+		t.Fatal("continuous replay cursor unexpectedly requested resynchronization")
+	}
+	if !stream.hasCursor || stream.cursor != 15 {
+		t.Fatalf("stream cursor = %d, hasCursor=%v, want 15/true", stream.cursor, stream.hasCursor)
+	}
+	if len(stream.buffer) != 3 {
+		t.Fatalf("buffer length = %d, want replay start, binary, and completion", len(stream.buffer))
+	}
+	if stream.buffer[1].startCursor != 10 || stream.buffer[1].endCursor != 15 {
+		t.Fatalf("binary cursor range = %d..%d, want 10..15", stream.buffer[1].startCursor, stream.buffer[1].endCursor)
+	}
+}
+
+func TestTerminalQueueStreamRequestsResyncForWrongReplayCompletionCursor(t *testing.T) {
+	stream := &terminalQueuePaneStream{
+		broker: &terminalQueueBroker{wake: make(chan struct{}, 1)},
+		active: true,
+	}
+	stream.enqueueText([]byte(`{"type":"history-replay-start","delta_from_cursor":"10"}`))
+	stream.enqueueBinary([]byte("hi"))
+	stream.enqueueText([]byte(`{"type":"history-replay-complete","history_cursor":"13"}`))
+
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if !stream.overloaded {
+		t.Fatal("wrong replay completion cursor must request resynchronization")
+	}
+	if len(stream.buffer) != 1 {
+		t.Fatalf("buffer length = %d, want only resync error", len(stream.buffer))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stream.buffer[0].payload, &payload); err != nil {
+		t.Fatalf("decode resync payload: %v", err)
+	}
+	if payload["type"] != "connection-error" || payload["resync_required"] != true {
+		t.Fatalf("resync payload = %#v", payload)
+	}
+}

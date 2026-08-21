@@ -10,7 +10,7 @@
 
 ### 开始任务前
 
-1. 阅读 `AGENTS.md`、`README.md`、本文档和本次修改涉及的源码、调用方及测试。
+1. 阅读根目录的 `AGENTS.md`、`README.md`、本文档和本次修改涉及的源码、调用方及测试。
 2. 在“架构基线”和“长期 guard”中确认状态归属、协议边界、终端历史、平台输入和账号隔离要求。
 3. 在“历史修复记录”中搜索相关模块、协议字段、事件类型、缓存字段或错误现象。
 4. 修改终端渲染、重连、输入、移动端手势或 agent 时，先画清事件/数据时序，不能只根据最终画面修补表象。
@@ -58,6 +58,8 @@
 ### 终端历史与渲染
 
 - LightOS 实例终端历史以 persistent agent 保存的原始 PTY 字节为可信来源；浏览器渲染状态不是历史权威。
+- 容器实例的单个 WebShell 页面最多维持 3 条浏览器终端 WebSocket：2 条当前活动 tab 的 pane 专属 Fast 连接，以及在两条 Fast 均已绑定并处于 `open/leased` 后才允许创建的 1 条 Queue 复用连接。Queue 只服务当前 tab 其余可见 pane；后台 tab 不进入 Queue。Queue 的 `CONNECTING`、`OPEN`、`CLOSING` 都占用第三个物理连接槽，真实物理 close 确认前不得创建替代 Queue。`client:` target 暂不使用 Queue，继续保留最多 3 条直连。
+- Queue 复用只发生在浏览器与 Provider 之间。Provider 为每个 Queue pane 复用现有 agent attach、持续 drain 上游并按 pane 公平轮转；persistent agent 不修改，继续维护全部 PTY、任务、历史和 cursor。普通用户输入只允许经 Fast，点击或输入 Queue pane 时先提升到 Fast；同一 pane 任意时刻只能由一个有效 channel generation 写入 Ghostty。
 - 历史流使用 `history_generation` 和绝对 byte cursor 表示范围。服务端根据本地范围选择 `snapshot`、`delta` 或 `current`，所有 chunk 必须连续。
 - 容器实例使用 Cache API v2 保存按账号 scope、完整 selector、workspace generation、tab、pane 和 history generation 隔离的不可变 PTY 字节块，并以 commit-last manifest 暴露已持久化 cursor。缓存无效时可以丢弃并从 agent 重建，但不能把不连续缓存拼接到新 generation。
 - 容器页面从网络 workspace 响应取得完整账号 scope、selector、workspace、tab 和 pane 身份后，以 8 块滚动预读窗口从 Cache API 读取该精确身份下的 PTY 字节。历史区间和恢复期间排队的实时字节通过 Ghostty 专用 replay 写入完整解析，但不调度中间 Canvas render；WASM 输入缓冲区按实例复用。只有服务端 replay complete、cursor 连续、实时队列追平、fit 当前且最终 full render 成功后才显示；新增缓存字节的持久化在后台完成，不阻塞最终 Canvas。第一批字节不是首帧。窗口、字体、主题变化和跨设备单击恢复尺寸仅在确认 cols/rows 或 canvas backing store 变化后使用 presentation hold 保留旧帧；这些操作复用当前内存终端状态，不进入历史 replay 写入。hold 覆盖期间 Ghostty 继续按正常节流渲染，当前状态的 full render 成功后立即替换，不等待 PTY 输出安静，也不重新回放历史。切换 tab 前保存有效帧，激活后用当前状态的 full render 替换，不能显示黑屏。
@@ -95,6 +97,7 @@
 | 工作区恢复 | 最后 selector/tab 持久恢复；用户明确返回首页时清除恢复意图 | 超过 30 秒、WebView 重载、无效 URL、浏览器前进后退 |
 | 设置 | PATCH 只更新显式字段，保留其他设置；null 与空值语义稳定 | 字体、scrollback、line height、移动/桌面快捷键 |
 | 客户端终端 | 浏览器不可见票据和服务凭据；每次连接前重新验证可见性 | 下线、过期票据、403/401、Device API 失败、附件代理 |
+| 浏览器连接池 | 容器页面最多 2 Fast + 1 Queue；两条 Fast 未全部 `open/leased` 时 Queue 必须不存在；物理 close 确认前不得复用 slot | 首次进入、12 分屏、Fast `CONNECTING/CLOSING`、点击提升、tab 切换、Queue 断线/重连 |
 | 依赖边界 | 不引入 `tmux`、`xterm.js` 或其改名/复制实现 | Go/npm/构建依赖、脚本、vendor、示例代码迁入 |
 
 ## 验证基线
@@ -755,3 +758,27 @@ git diff --check
 - Guard：`TestRuntimeDesktopShortcutsDoNotRetainButtonFocus`；既有 `TestRuntimeMobileShortcutsPreserveKeyboardExceptMenu` 和 `TestRuntimeMobileReturnShortcutRepeats` 继续覆盖移动端行为。
 - 验证结果：`node --check runtime/static/main.js`、`go test ./...`、`node --test terminal_cache_v2_test.mjs terminal_resize_scheduler_test.mjs` 和 `git diff --check` 通过。
 - 禁止复现：PC 单击快捷键后实体回车不得再次激活该按钮；不得通过改变移动端粘滞键、触摸焦点或长按重复语义修复此问题。
+
+### LCMD-20260820-05：单页面终端 WebSocket 缺少连接容量治理
+
+- 日期：2026-08-20
+- 来源：用户现场反馈；同一 WebShell 页面打开较多 tab/分屏后，全部终端可能同时断连
+- 影响模块：`runtime/static/main.js` 的 pane WebSocket 生命周期、tab/pane 激活、输入与离线恢复；新增 `runtime/static/terminal_connection_scheduler.js`
+- 错误现象：每个 pane 独立持有和重试 WebSocket，页面连接数随 tab/分屏数量增长；当前会话与后台会话没有统一容量、优先级和抢占边界，无法验证降低长连接数量是否能改善集中断线。
+- 根因：连接建立、健康重试、历史重放、用户输入、页面恢复和销毁路径分别直接控制 `connectSession()`/`socket.close()`，缺少集中式租约状态机；旧异步回调也没有独立于 pane 对象的租约 generation。
+- 实施方案：增加单页面容量为 3 的 pane 专属 WebSocket 租约调度器，`CONNECTING`、`OPEN` 和等待 close 的 `CLOSING` 都占用 slot；仅调度器授予租约后可以调用 `connectSession()`。当前活动/交互 pane 使用 P0/P1，当前 tab 其他可见 pane 使用 P2，后台 pane 使用 P3/P4；P0-P2 可以抢占更低优先级租约，关闭确认前不分配第四条连接。被抢占 pane 进入 `parked`，保留 Ghostty、Canvas、Cache API v2 和 cursor，不显示红点、不启动重试；用户点击或输入后立即提升，parked 输入沿用顺序队列但限制为 256 KiB/10 秒，超限或超时明确提示。每次租约使用单调递增 `leaseID`，WebSocket open/message/error/close、replay ready 和异步连接前置都校验当前租约。网络失败进入 scheduler backoff，离线停止新连接，在线前先刷新全部 demand，再只连接最高优先级的三个 pane。
+- Guard：新增 `terminal_connection_scheduler_test.mjs`，覆盖容量、CONNECTING/CLOSING 计数、P0/P2 抢占、四分屏、稳定同级、tab generation、parked、backoff、离线、迟到 leaseID、注销和输入提升；新增 `TestRuntimeTerminalConnectionSchedulerGuard`，固定 `connectSession()` 唯一调用点、service worker 预缓存、生命周期注册/注销、parked 语义及输入 lease 校验。
+- 验证结果：`node --check runtime/static/main.js runtime/static/terminal_connection_scheduler.js`、全部 Node 测试和 `go test ./... -count=1` 通过；真实多 tab/四分屏断线率仍需在现场设备与代理链路上对比验证。
+- 禁止复现：不得绕过 scheduler 直接连接或重试；不得在收到 close 前复用 closing slot；主动抢占不得设置 `connectionRetrying`、显示红点、清空终端状态或进入 backoff；旧租约回调不得写入新租约；不得把本方案改成单 WebSocket 多路复用。
+
+### LCMD-20260821-01：两条高速连接加一条队列连接服务当前 tab 多分屏
+
+- 日期：2026-08-21
+- 来源：用户对 12 分屏人工验收后的方案调整；三条 pane 专属连接只能让非租约 pane 在点击提升后更新，要求在浏览器仍保持最多三条长连接的前提下持续照顾当前 tab 其余可见 pane
+- 影响模块：Provider `/ws` 路由与新增 `terminal_queue.go`；浏览器 `terminal_connection_scheduler.js`、新增 `terminal_queue_connection.js`、`main.js` 的通道调度、回放、输入和渲染；Service Worker 与协议/静态 guard
+- 错误现象：三条 pane 专属连接虽限制了浏览器连接数，但同一 tab 有 12 个分屏时，未持有租约的 pane 必须点击后才能通过历史追平看到新内容；若简单继续增加独立 WebSocket，会重新触发部分手机/WebView 在长连接过多时全部会话断开的风险。
+- 根因：浏览器连接容量治理只有 pane 专属租约，没有一条能承载多个逻辑 pane 的持续流；非 Fast pane 的服务端任务和历史仍正常运行，但浏览器没有订阅其增量。与此同时，Queue 若在 Fast 未用满、Fast 正在连接/关闭或旧 Queue 尚未真实关闭时提前建立，会让普通 pane 错误进入低速通道或短暂突破三条物理连接上限。
+- 实施方案：容器 target 改为 2 条 Fast 专属连接加 1 条 Queue 物理连接；`client:` target 暂时继续 3 条直连。只有当前活动 tab 的两个 Fast 租约均处于 `open/leased`、存在剩余可见候选、没有 Queue 正在关闭时才允许创建 Queue；Fast 为 `connecting/closing`、少于两个有效租约、候选为空、离线或后台 tab 时立即关闭/禁止 Queue。浏览器 Queue 模块用一个物理 WebSocket 承载多个带 `pane_id`、`stream_id`、`channel_generation` 的逻辑 socket，并以 `replace-subscriptions` 原子更新成员；最后一个逻辑流关闭或 target 改变后，第三个槽必须等待 `connection.closed` 的真实物理 close 事件才能重建。Provider 不修改 persistent agent，而是为各逻辑 pane 启动现有 attach、持续读取上游、使用每 pane 4 MiB 有界缓冲，并按固定 sequence target、256 KiB 或 8ms 预算公平轮转；每个二进制时间片后发送 `queue-turn-complete`，浏览器使用 `writeReplay()` 解析该时间片并只在轮次边界 full render。队列普通输入被拒绝，用户点击/输入先关闭旧逻辑 generation 并提升到 Fast；generated input、resize、theme 和 input lock 仍可走 Queue。cursor 不连续或缓冲过载只让对应 pane 收到 `resync_required`，停止该内部 attach并用 agent 权威 history 的 delta/snapshot 重建，不关闭其他 Queue pane。物理 Queue 错误只计一次全局退避，单 pane resync 独立处理。
+- Guard：新增 `terminal_queue_test.go` 覆盖二进制 envelope、HTTP 401/`client:` 400、固定轮次公平性、`queue-turn-complete` 紧随二进制时间片、普通输入拒绝和 replay cursor 连续/错误重同步；新增 `terminal_queue_connection_test.mjs` 覆盖硬门禁、单物理连接多逻辑流、身份路由、迟到 generation、cursor 连续性、物理错误只触发一次、最后逻辑流关闭等待真实 close；扩展 `terminal_connection_scheduler_test.mjs` 和 `TestRuntimeTerminalConnectionSchedulerGuard`，固定动态 2/3 容量、`CONNECTING/CLOSING` 占槽、Queue closing Promise、`writeReplay()` 延迟渲染及 Service Worker 预缓存。
+- 验证结果：`node --check` 通过 `main.js`、Service Worker、Fast scheduler 和 Queue connection；Node Cache v2、resize、Kitty Graphics、实例加载、Fast scheduler 与 Queue connection 行为测试 64/64 通过；完整 `go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 通过。本地 Provider 入口和两个新增版本化模块返回 200、`application/javascript` 与 immutable 缓存头，Service Worker 已包含两模块。`terminal-browser` 因当前终端不支持其所需 Kitty 图片协议而无法启动，因此未完成真实页面自动化。用户此前已人工验证三条专属连接版本的基本连接管理；`2 Fast + 1 Queue` 仍需在目标 Android WebView、Lazycat WKWebView 和桌面浏览器以 3、4、12 分屏验证 Network 面板始终不超过三条终端 WebSocket、非 Fast pane 无需点击即可更新、点击提升速度、断线率、CPU、内存和长任务。
+- 禁止复现：两条 Fast 未同时 `open/leased` 时绝对不得创建 Queue；Queue `CONNECTING/CLOSING` 必须占用第三个槽；不得在旧物理 close 确认前创建替代 Queue；不得让后台 tab 或当前活动 pane进入 Queue；不得让同一 pane 的 Fast/Queue generation 双写 Ghostty；不得把 Queue 改成 HTTP 轮询、频繁关闭重建 pane WebSocket，或修改 persistent agent 才能工作；不得截断不连续 VT 字节后继续发送。

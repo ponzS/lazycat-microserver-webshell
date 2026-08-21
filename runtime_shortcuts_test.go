@@ -256,8 +256,9 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 	}
 	historyRangeIndex := strings.Index(mainSource, `const historyConnectRange = sessionHistoryRangeForConnect(session);`)
 	warmStartIndex := strings.Index(mainSource, `const cacheV2WarmReplayStarted = cacheV2WarmSnapshot`)
-	socketStartIndex := strings.Index(mainSource, `const currentSocket = new WebSocket(socketUrl.toString());`)
-	if historyRangeIndex < 0 || warmStartIndex < 0 || socketStartIndex < 0 || historyRangeIndex > warmStartIndex || warmStartIndex > socketStartIndex {
+	fastSocketStartIndex := strings.Index(mainSource, `currentSocket = new WebSocket(socketUrl.toString());`)
+	queueSocketStartIndex := strings.Index(mainSource, `currentSocket = terminalQueueConnection.open({`)
+	if historyRangeIndex < 0 || warmStartIndex < 0 || fastSocketStartIndex < 0 || queueSocketStartIndex < 0 || historyRangeIndex > warmStartIndex || warmStartIndex > fastSocketStartIndex || warmStartIndex > queueSocketStartIndex {
 		t.Fatal("cache-v2 byte replay must start from the validated local range before WebSocket construction")
 	}
 	cacheV2ReplayBlock := sourceBetween(t, mainSource,
@@ -2421,7 +2422,9 @@ func TestRuntimeWebSocketURLUsesWebSocketProtocols(t *testing.T) {
 		`url.protocol = "ws:";`,
 		`url.protocol !== "ws:" && url.protocol !== "wss:"`,
 		`const socketUrl = webSocketURL("./ws");`,
-		`const currentSocket = new WebSocket(socketUrl.toString());`,
+		`currentSocket = new WebSocket(socketUrl.toString());`,
+		`currentSocket = terminalQueueConnection.open({`,
+		`socketURL.searchParams.set("mode", "queue");`,
 	}
 	for _, want := range wantSnippets {
 		if !strings.Contains(source, want) {
@@ -2702,7 +2705,9 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"clearTerminalCanvasPixels(pane);",
 		"requestPaneFullRender(session);",
 		"renderPaneFullNow(session);",
-		"if ((replayOutput && !replayWriter) || (!replayOutput && deferHiddenPaneRender(session))) {",
+		"const replayWriter = (replayOutput || suppressRender) && typeof session.term.writeReplay === \"function\";",
+		"((replayOutput || suppressRender) && !replayWriter)",
+		"|| (!replayOutput && !suppressRender && deferHiddenPaneRender(session))",
 		"cancelPendingTerminalRender(session.term);",
 		"schedulePaneFullRenderValidation(session);",
 	}
@@ -2855,12 +2860,13 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"const writeTerminalOutputBatch =",
 		"const finishSessionHistoryReplayIfReady =")
 	for _, want := range []string{
-		`const replayWriter = replayOutput && typeof session.term.writeReplay === "function";`,
+		`const replayWriter = (replayOutput || suppressRender) && typeof session.term.writeReplay === "function";`,
 		`session.term.writeReplay(data);`,
 		`session.term.write(data);`,
 		`if (!replayWriter) {`,
 		`session.term.requestRender?.({ throttle: true });`,
-		`if ((replayOutput && !replayWriter) || (!replayOutput && deferHiddenPaneRender(session))) {`,
+		`((replayOutput || suppressRender) && !replayWriter)`,
+		`|| (!replayOutput && !suppressRender && deferHiddenPaneRender(session))`,
 	} {
 		if !strings.Contains(queuedOutputBlock, want) {
 			t.Fatalf("runtime queued PTY replay/render guard missing %q", want)
@@ -2919,7 +2925,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		t.Fatal("scheduling a resize must not freeze a current terminal before its geometry is measured")
 	}
 	resizeOutputBlock := sourceBetween(t, mainSource,
-		"const writeTerminalOutputBatch = (session, data, replayOutput, allowGeneratedInput) => {",
+		"const writeTerminalOutputBatch = (session, data, replayOutput, allowGeneratedInput, suppressRender = false) => {",
 		"const finishSessionHistoryReplayIfReady =")
 	if strings.Contains(resizeOutputBlock, "deferPaneRenderDuringResize") {
 		t.Fatal("normal PTY output must continue rendering while a presentation frame is held")
@@ -3114,14 +3120,15 @@ func TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard(t *testing.T) 
 		"closeSessionSocketForReconnect(session, currentSocket, `Terminal WebSocket connect timed out",
 		"const retrySessionConnectionAfterFailure = (session, error, { allowHidden = true } = {}) => {",
 		"connectPendingSession(session, { allowHidden: allowHidden || force });",
-		"connectSession(session, { allowHidden: true }).catch((error) => {",
+		"const started = await connectSession(session, {",
+		"terminalConnectionScheduler = createTerminalConnectionScheduler({",
 		"const sessionConnectingState = (session) => (\n    session?.connectionRetrying === true ? \"reconnecting\" : \"connecting\"",
 		"connectionRetrying: false,",
 		"session.connectionRetrying = true;",
 		"session.connectionRetrying = false;",
 		"session.shellEl.dataset.connection = \"offline\";",
 		"session.shellEl.dataset.connection = \"reconnecting\";",
-		"appendDebugWarning(\n      \"终端连接将在重试\"",
+		"\"终端连接将在重试\"",
 		"appendDebugError(\"终端连接建立失败\"",
 		"const debugLogStorageKey = `${storagePrefix}.debugLog`;",
 		"const debugLogEntryLimit = 200;",
@@ -3187,6 +3194,113 @@ func TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard(t *testing.T) 
 		if !strings.Contains(styleSource, want) {
 			t.Fatalf("runtime debug log style guard missing %q", want)
 		}
+	}
+}
+
+func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	schedulerData, err := os.ReadFile("runtime/static/terminal_connection_scheduler.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/terminal_connection_scheduler.js) error = %v", err)
+	}
+	queueData, err := os.ReadFile("runtime/static/terminal_queue_connection.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/terminal_queue_connection.js) error = %v", err)
+	}
+	serviceWorkerData, err := os.ReadFile("runtime/static/service-worker.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/service-worker.js) error = %v", err)
+	}
+	mainSource := string(mainData)
+	schedulerSource := string(schedulerData)
+	queueSource := string(queueData)
+	serviceWorkerSource := string(serviceWorkerData)
+
+	for _, want := range []string{
+		`import { createTerminalConnectionScheduler } from "./terminal_connection_scheduler.js";`,
+		"createTerminalQueueConnection,",
+		"terminalQueueGateAllowsCreation,",
+		"const terminalFastWebSocketCapacity = 2;",
+		"const terminalClientDirectWebSocketCapacity = 3;",
+		"const requestSessionConnection = (session, {",
+		"const syncTerminalConnectionDemands = ({",
+		"terminalConnectionScheduler.setCapacity(",
+		"terminalConnectionScheduler = createTerminalConnectionScheduler({",
+		"const terminalFastGateState = () => {",
+		"const fastLeaseStates = terminalFastGateState();",
+		"if (!terminalQueueGateAllowsCreation({",
+		"queueCandidateCount: candidates.length,",
+		"queueClosing: Boolean(terminalQueueClosingPromise),",
+		"let terminalQueueClosingPromise = null;",
+		"if (terminalQueueClosingPromise) {",
+		"const closingPromise = Promise.resolve(connection.closed).finally(() => {",
+		"if (!ensureTerminalQueueConnection()) {",
+		"connectTerminalQueueSession(pane);",
+		`case "queue-turn-complete":`,
+		`deferRender: channel === "queue" && session.replayComplete,`,
+		`detachTerminalQueueSession(session, "promote_to_fast");`,
+		`session.connectionChannel === "fast"`,
+		`session.connectionChannel === "queue"`,
+		"terminalConnectionScheduler.register(session);",
+		`terminalConnectionScheduler?.unregister(pane, "session_closed");`,
+		`terminalConnectionScheduler?.setOnline(false);`,
+		`terminalConnectionScheduler?.setOnline(true);`,
+		`session.shellEl.dataset.connection = "parked";`,
+		`terminalConnectionScheduler?.notifyReplayReady(session, Number(session.connectionLeaseID || 0));`,
+		"terminalConnectionScheduler?.currentLease(session)?.leaseID === session.connectionLeaseID",
+		"const maxParkedPendingInputBytes = 256 * 1024;",
+		"const terminalPendingInputMaxWaitMs = 10 * 1000;",
+		"schedulePendingInputExpiry(session);",
+		`appendDebugError("终端输入等待连接超时"`,
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime terminal connection scheduler guard missing %q", want)
+		}
+	}
+	if count := strings.Count(mainSource, "connectSession(session,"); count != 2 {
+		t.Fatalf("connectSession must only be called by fast lease and queue logical stream callbacks, count=%d", count)
+	}
+	for _, want := range []string{
+		"const normalizeCapacity = (value) => Math.max(1",
+		"const setCapacity = (value) => {",
+		`requestDisconnect(victim, "scheduler_preempt");`,
+		`lease.state = "closing";`,
+		"record.lease.leaseID !== leaseID",
+		"record.status = \"backoff\";",
+		"activeCount > safeCapacity",
+	} {
+		if !strings.Contains(schedulerSource, want) {
+			t.Fatalf("terminal connection scheduler module guard missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"export const terminalQueueProtocolVersion = 1;",
+		"export const terminalQueueGateAllowsCreation = ({",
+		"states.length === requiredFast",
+		"const queueBinaryMagic = \"LCQ1\";",
+		"export const createTerminalQueueConnection = ({",
+		`type: "replace-subscriptions"`,
+		`type: "pane-control"`,
+		"entry.expectedCursor !== startCursor",
+		"logicalStreams.size === 0",
+		"disposed = true;",
+		"resolveFinalClose();",
+	} {
+		if !strings.Contains(queueSource, want) {
+			t.Fatalf("terminal queue connection guard missing %q", want)
+		}
+	}
+	if strings.Contains(mainSource, `schedulerCloseReason === "queue_resync"`) {
+		t.Fatal("runtime must not retain the obsolete queue_resync close reason")
+	}
+	if !strings.Contains(serviceWorkerSource, "`${assetBase}terminal_connection_scheduler.js`,") {
+		t.Fatal("service worker must precache the terminal connection scheduler")
+	}
+	if !strings.Contains(serviceWorkerSource, "`${assetBase}terminal_queue_connection.js`,") {
+		t.Fatal("service worker must precache the terminal queue connection")
 	}
 }
 
