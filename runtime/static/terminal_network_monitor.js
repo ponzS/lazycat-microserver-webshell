@@ -161,15 +161,19 @@ export const createTerminalNetworkMonitor = ({
     }
   };
 
-  const availableChannel = (kind) => {
+  const availableChannel = (kind, slot = null) => {
     if (kind === "queue") {
       return currentLayout === "multiplexed" && !channels[2].socket ? channels[2] : null;
     }
     const limit = currentLayout === "direct" ? 3 : 2;
+    const requestedSlot = slot === null || slot === undefined ? -1 : Math.floor(Number(slot));
+    if (requestedSlot >= 0 && requestedSlot < limit) {
+      return !channels[requestedSlot].socket ? channels[requestedSlot] : null;
+    }
     return channels.slice(0, limit).find((channel) => !channel.socket) || null;
   };
 
-  const attachSocket = (socket, { kind = "fast" } = {}) => {
+  const attachSocket = (socket, { kind = "fast", slot = null } = {}) => {
     if (
       disposed
       || !socket
@@ -183,7 +187,7 @@ export const createTerminalNetworkMonitor = ({
       return attachments.get(socket).handle;
     }
     const normalizedKind = kind === "queue" ? "queue" : "fast";
-    const channel = availableChannel(normalizedKind);
+    const channel = availableChannel(normalizedKind, slot);
     if (!channel) {
       return null;
     }

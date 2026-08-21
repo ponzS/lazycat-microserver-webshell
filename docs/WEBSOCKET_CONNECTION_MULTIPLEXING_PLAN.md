@@ -68,9 +68,9 @@ Provider 内部为队列成员维持的 agent attach 数量可以高于 3；这�
 
 ### 4.2 分配
 
-- **硬性前置条件：两个高速通道未用满时，绝对不能创建队列通道。** 创建 Queue WebSocket、启动 Queue broker、发送 `replace-subscriptions` 或让任何 pane 进入队列，都必须建立在 `Fast A` 和 `Fast B` 都已绑定有效 pane 的前提下。不能因为队列候选较多，就在第二个高速 pane 尚未分配时先默认使用队列。
-- 页面首次打开或切换 tab 时，调度器必须先完成高速通道填充，再决定是否创建队列。若当前 tab 有至少两个可见 pane，第二个高速名额即使没有明确的最近交互记录，也要从当前 tab 的可见 pane 中按稳定顺序选择一个作为 `Fast B`；只有这一步完成后，剩余 pane 才能进入 Queue。若当前 tab 只有一个可见 pane，只建立一个高速连接，不创建 Queue。
-- 高速连接建立失败、仍处于连接建立中、正在关闭或尚未完成租约确认时，都不能把对应名额视为“已用满”；此时不得创建 Queue 作为替代。应按高速连接的现有重试状态机继续处理，队列只能在两个高速租约都有效后出现。
+- **首次创建的硬性前置条件：两个高速通道未完成各自本轮启动首帧时，绝对不能创建队列通道。** 第一次创建 Queue WebSocket、启动 Queue broker、发送首个 `replace-subscriptions` 或让任何 pane 首次进入队列，都必须建立在 `Fast A` 和 `Fast B` 各自的 PTY/history replay、追平、尺寸校验和最终 full render 完成之后。WebSocket `open`、租约 `leased` 或仅完成 socket 建立均不算就绪。
+- 页面首次打开或切换 tab 时严格串行：先启动并完整就绪 `Fast A`，再启动并完整就绪 `Fast B`，最后才允许创建 Queue WebSocket。若当前 tab 有至少两个可见 pane，第二个高速名额即使没有明确的最近交互记录，也按稳定顺序选择 `Fast B`；当前 tab 少于两个可见 pane 时不创建 Queue。
+- 初始阶段 Fast A 或 Fast B 的连接、回放、渲染或重试尚未完成时，后续阶段不得启动。Queue 已经存在后，普通 PTY 输出、一次 Canvas render pending、尺寸校验或下一帧内容 generation 推进不得撤销任何物理通道或 Queue 订阅；这些只是运行期画面状态，不能重新解释为启动失败。Fast 的真实 socket 失败仍由该 pane 的独立重试状态机处理；在它恢复前不添加新的 Queue 成员，但已存在的 Queue 流保持运行。
 - `Fast A`：当前正在输入、鼠标操作或刚被显式选中的 pane。它必须立即取得 pane 专属连接。
 - `Fast B`：当前 tab 中除 `Fast A` 外最近使用的 pane；无候选时空闲。
 - `Queue`：当前 tab 中其余可见 pane。只有一个成员时，它仍是持续实时流，效果等同第三条专属连接。
@@ -92,7 +92,7 @@ Fast B: pane-1 或 pane-2 中最近使用者
 Queue : 其余可见 pane，包括被 LRU 淘汰者
 ```
 
-切换不能在同一 pane 上并行写入两条流。浏览器必须先完成该 pane 的通道 generation 切换，再接收新通道的数据；迟到的旧 generation 数据一律丢弃。
+该提升只关闭 `pane-8` 的 Queue logical stream，并在两条 Fast 中以最近最少使用者替换一条。另一条 Fast 与 Queue 物理 WebSocket 必须保持运行，不能因为一次优先级切换关闭并重建三条连接。切换不能在同一 pane 上并行写入两条流。浏览器必须先完成该 pane 的通道 generation 切换，再接收新通道的数据；迟到的旧 generation 数据一律丢弃。
 
 ### 4.3 队列公平性
 
@@ -178,7 +178,7 @@ Provider 按 pane 保存尚未写入 Queue WebSocket 的有界数据和 cursor�
 
 ## 8. 执行计划
 
-当前进度：阶段 0 至阶段 3 的首版实现已经完成；阶段 4 的目标设备灰度、性能数据和断线率对比尚未完成。实现保持 persistent agent 零改动，Provider 新增 Queue relay，浏览器启用 `2 Fast + 1 Queue`；不提交、不推送由当前工作约束单独控制。
+当前进度：阶段 0 至阶段 3 及 [初始化状态机修复方案](WEBSOCKET_INITIALIZATION_STATE_MACHINE_REPAIR_PLAN.md) 已实现。浏览器由单一 controller 严格推进 `Fast A -> Fast B -> Queue`，每个 Queue pane 启动任务都有有限结算；现阶段进入阶段 4 的目标设备验收。实现继续保持 persistent agent 零改动、浏览器 `2 Fast + 1 Queue`、无 HTTP 轮询与无周期性 pane WebSocket 重建；不提交、不推送由当前工作约束单独控制。
 
 ### 阶段 0：冻结契约与验收基线
 
@@ -208,7 +208,7 @@ Provider 按 pane 保存尚未写入 Queue WebSocket 的有界数据和 cursor�
 状态：已完成首版。实现位于 `runtime/static/terminal_connection_scheduler.js`、`terminal_queue_connection.js` 和 `main.js`。
 
 1. 将现有最多 3 个 pane 专属租约改造为 2 个 `fast` 租约加 1 个 `queue` 租约，Queue 本身只占一个浏览器连接 slot。
-2. 调度器先分配并确认 `Fast A`、`Fast B`，确认两个高速租约均有效后，才允许创建 Queue WebSocket 和发送 `replace-subscriptions`；当前 tab 只有一个可见 pane 时永远不创建 Queue。
+2. 调度器严格按 `Fast A -> Fast B -> Queue` 串行启动。每一个 Fast 必须完成 PTY/history replay、追平、尺寸校验和最终 full render；两个 Fast 均 presentation ready 后，才允许创建 Queue WebSocket 和发送 `replace-subscriptions`。当前 tab 少于两个可见 pane 时永远不创建 Queue。
 3. 当前 tab 布局变化、焦点、输入和 tab 切换驱动 `replace-subscriptions`，而非创建多个浏览器连接。
 4. 将 Queue frame 路由到对应 session，并让每个 pane 独立维护 `stream_id`、`channel_generation` 和已应用 cursor。
 5. 队列数据走 `writeReplay()`/受控 flush，轮次完成再请求最终 full render；高速数据保持现有实时写入路径。
@@ -255,7 +255,7 @@ Provider 按 pane 保存尚未写入 Queue WebSocket 的有界数据和 cursor�
 ## 10. 发布前不变量
 
 1. 浏览器终端物理 WebSocket 不超过 3 条：最多 2 Fast + 1 Queue。
-2. **Fast A、Fast B 未同时绑定有效 pane 时，Queue WebSocket 必须不存在；不得创建 Queue broker 或提交 Queue 订阅。**
+2. **首次创建 Queue 前，Fast A、Fast B 必须同时完成各自启动 generation 的 replay 和最终呈现；不得提前创建 Queue broker、提交首个 Queue 订阅或启动 Queue 本地缓存任务。运行中的 Queue 不得因普通输出、一次 render pending 或 Fast 槽位重排而关闭。**
 3. persistent agent 持续维护全部会话；本方案不修改 agent。
 4. Provider 必须持续 drain 队列 pane 的内部输出，不能让队列调度反压 PTY。
 5. 一个 pane 在浏览器端任意时刻只能有一个有效通道 generation 写入 Ghostty。

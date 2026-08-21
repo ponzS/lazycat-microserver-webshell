@@ -1087,6 +1087,13 @@ body.split-resize-active * {
   font-weight: 700;
 }
 
+.debug-log-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.debug-log-copy,
 .debug-log-clear {
   min-height: 22px;
   padding: 2px 7px;
@@ -1098,6 +1105,8 @@ body.split-resize-active * {
   font: inherit;
 }
 
+.debug-log-copy:hover,
+.debug-log-copy:focus-visible,
 .debug-log-clear:hover,
 .debug-log-clear:focus-visible {
   background: rgba(254, 202, 202, 0.16);

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createTerminalQueueTaskQueue,
+  createTerminalQueueStartupLatch,
   createTerminalQueueConnection,
   decodeTerminalQueueBinaryFrame,
   terminalQueueGateAllowsCreation,
@@ -86,32 +88,109 @@ test.beforeEach(() => {
   FakeWebSocket.instances = [];
 });
 
-test("queue creation is forbidden until both fast channels are fully open", () => {
+test("queue creation is forbidden until both fast channels finish presentation", () => {
   assert.equal(terminalQueueGateAllowsCreation({
-    fastLeaseStates: ["open"],
+    fastReadyStates: ["ready"],
     queueCandidateCount: 10,
   }), false);
   assert.equal(terminalQueueGateAllowsCreation({
-    fastLeaseStates: ["open", "connecting"],
+    fastReadyStates: ["ready", "starting"],
     queueCandidateCount: 10,
   }), false);
   assert.equal(terminalQueueGateAllowsCreation({
-    fastLeaseStates: ["open", "closing"],
+    fastReadyStates: ["ready", "open"],
     queueCandidateCount: 10,
   }), false);
   assert.equal(terminalQueueGateAllowsCreation({
-    fastLeaseStates: ["open", "leased"],
+    fastReadyStates: ["ready", "ready"],
     queueCandidateCount: 0,
   }), false);
   assert.equal(terminalQueueGateAllowsCreation({
-    fastLeaseStates: ["open", "leased"],
+    fastReadyStates: ["ready", "ready"],
     queueCandidateCount: 10,
     queueClosing: true,
   }), false);
   assert.equal(terminalQueueGateAllowsCreation({
-    fastLeaseStates: ["open", "leased"],
+    fastReadyStates: ["ready", "ready"],
     queueCandidateCount: 10,
   }), true);
+});
+
+test("queue cache tasks run in FIFO order without concurrent local reads", async () => {
+  const queue = createTerminalQueueTaskQueue();
+  const started = [];
+  let active = 0;
+  let peakActive = 0;
+  let releaseFirst;
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+
+  const first = queue.enqueue(async () => {
+    started.push("first");
+    active += 1;
+    peakActive = Math.max(peakActive, active);
+    await firstGate;
+    active -= 1;
+    return "first";
+  });
+  const second = queue.enqueue(async () => {
+    started.push("second");
+    active += 1;
+    peakActive = Math.max(peakActive, active);
+    active -= 1;
+    return "second";
+  });
+
+  await Promise.resolve();
+  assert.deepEqual(started, ["first"]);
+  assert.equal(queue.snapshot().pending, 2);
+  releaseFirst();
+  assert.deepEqual(await Promise.all([first, second]), ["first", "second"]);
+  assert.deepEqual(started, ["first", "second"]);
+  assert.equal(peakActive, 1);
+  assert.equal(queue.snapshot().pending, 0);
+});
+
+test("a failed queue cache task releases the next FIFO task", async () => {
+  const queue = createTerminalQueueTaskQueue();
+  const started = [];
+
+  const failed = queue.enqueue(async () => {
+    started.push("failed");
+    throw new Error("cache read failed");
+  });
+  const next = queue.enqueue(async () => {
+    started.push("next");
+    return "ready";
+  });
+
+  await assert.rejects(failed, /cache read failed/);
+  assert.equal(await next, "ready");
+  assert.deepEqual(started, ["failed", "next"]);
+  assert.equal(queue.snapshot().pending, 0);
+});
+
+test("a finite Queue startup timeout settles once and releases the next FIFO item", async () => {
+  const queue = createTerminalQueueTaskQueue();
+  let runTimeout;
+  let clearedTimer = false;
+  const first = queue.enqueue(async () => {
+    const latch = createTerminalQueueStartupLatch({
+      timeoutMs: 40_000,
+      setTimer: (callback) => {
+        runTimeout = callback;
+        return 1;
+      },
+      clearTimer: () => { clearedTimer = true; },
+    });
+    runTimeout();
+    assert.equal(await latch.promise, "timed_out");
+    assert.equal(latch.settle("ready"), false);
+    return "timed_out";
+  });
+  const second = queue.enqueue(async () => "next-pane");
+  assert.deepEqual(await Promise.all([first, second]), ["timed_out", "next-pane"]);
+  assert.equal(clearedTimer, true);
+  assert.equal(queue.snapshot().pending, 0);
 });
 
 test("logical streams share one physical websocket and replace subscriptions", async () => {
@@ -307,6 +386,27 @@ test("logical send wraps pane identity and closing the last stream closes the ph
   assert.equal(control.pane_id, "pane-1");
   assert.deepEqual(control.control, { type: "ping" });
   logical.close(4001, "promote to fast");
+  assert.ok(physical.readyState >= FakeWebSocket.CLOSING);
+});
+
+test("keepAliveWhenEmpty preserves an opened physical Queue transport across logical handoff", async () => {
+  const connection = createTerminalQueueConnection({
+    url: "ws://example/ws?mode=queue",
+    WebSocketImpl: FakeWebSocket,
+    keepAliveWhenEmpty: true,
+  });
+  connection.connect();
+  assert.equal(FakeWebSocket.instances.length, 1);
+  const physical = FakeWebSocket.instances[0];
+  physical.emit("open");
+  const logical = connection.open(subscription("pane-1"));
+  await Promise.resolve();
+  logical.close(4001, "promote to fast");
+  await Promise.resolve();
+  assert.equal(connection.snapshot().logicalCount, 0);
+  assert.equal(connection.snapshot().physicalReadyState, FakeWebSocket.OPEN);
+  assert.equal(physical.readyState, FakeWebSocket.OPEN);
+  connection.close(4001, "context changed");
   assert.ok(physical.readyState >= FakeWebSocket.CLOSING);
 });
 

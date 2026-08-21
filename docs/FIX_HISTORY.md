@@ -58,7 +58,7 @@
 ### 终端历史与渲染
 
 - LightOS 实例终端历史以 persistent agent 保存的原始 PTY 字节为可信来源；浏览器渲染状态不是历史权威。
-- 容器实例的单个 WebShell 页面最多维持 3 条浏览器终端 WebSocket：2 条当前活动 tab 的 pane 专属 Fast 连接，以及在两条 Fast 均已绑定并处于 `open/leased` 后才允许创建的 1 条 Queue 复用连接。Queue 只服务当前 tab 其余可见 pane；后台 tab 不进入 Queue。Queue 的 `CONNECTING`、`OPEN`、`CLOSING` 都占用第三个物理连接槽，真实物理 close 确认前不得创建替代 Queue。`client:` target 暂不使用 Queue，继续保留最多 3 条直连。
+- 容器实例的单个 WebShell 页面最多维持 3 条浏览器终端 WebSocket：2 条当前活动 tab 的 pane 专属 Fast 连接，以及在两个 Fast 都完成各自启动 replay 和最终首帧后才允许首次创建的 1 条 Queue 复用连接。Queue 只服务当前 tab 其余可见 pane；后台 tab 不进入 Queue。已创建的 Queue 不因普通输出、瞬态 Canvas render pending 或 Fast 槽位优先级交接而关闭；新增成员仍等待两个 Fast 回到启动就绪状态。Queue 的 `CONNECTING`、`OPEN`、`CLOSING` 都占用第三个物理连接槽，真实物理 close 确认前不得创建替代 Queue。`client:` target 暂不使用 Queue，继续保留最多 3 条直连。
 - Queue 复用只发生在浏览器与 Provider 之间。Provider 为每个 Queue pane 复用现有 agent attach、持续 drain 上游并按 pane 公平轮转；persistent agent 不修改，继续维护全部 PTY、任务、历史和 cursor。普通用户输入只允许经 Fast，点击或输入 Queue pane 时先提升到 Fast；同一 pane 任意时刻只能由一个有效 channel generation 写入 Ghostty。
 - 历史流使用 `history_generation` 和绝对 byte cursor 表示范围。服务端根据本地范围选择 `snapshot`、`delta` 或 `current`，所有 chunk 必须连续。
 - 容器实例使用 Cache API v2 保存按账号 scope、完整 selector、workspace generation、tab、pane 和 history generation 隔离的不可变 PTY 字节块，并以 commit-last manifest 暴露已持久化 cursor。缓存无效时可以丢弃并从 agent 重建，但不能把不连续缓存拼接到新 generation。
@@ -97,7 +97,7 @@
 | 工作区恢复 | 最后 selector/tab 持久恢复；用户明确返回首页时清除恢复意图 | 超过 30 秒、WebView 重载、无效 URL、浏览器前进后退 |
 | 设置 | PATCH 只更新显式字段，保留其他设置；null 与空值语义稳定 | 字体、scrollback、line height、移动/桌面快捷键 |
 | 客户端终端 | 浏览器不可见票据和服务凭据；每次连接前重新验证可见性 | 下线、过期票据、403/401、Device API 失败、附件代理 |
-| 浏览器连接池 | 容器页面最多 2 Fast + 1 Queue；两条 Fast 未全部 `open/leased` 时 Queue 必须不存在；物理 close 确认前不得复用 slot | 首次进入、12 分屏、Fast `CONNECTING/CLOSING`、点击提升、tab 切换、Queue 断线/重连 |
+| 浏览器连接池 | 容器页面最多 2 Fast + 1 Queue；首次创建 Queue 前两条 Fast 都完成启动首帧，运行中的 Queue 不因普通 render 状态或一次优先级交接重建；物理 close 确认前不得复用 slot | 首次进入、12 分屏、Fast `CONNECTING/CLOSING`、点击提升、tab 切换、Queue 断线/重连 |
 | 依赖边界 | 不引入 `tmux`、`xterm.js` 或其改名/复制实现 | Go/npm/构建依赖、脚本、vendor、示例代码迁入 |
 
 ## 验证基线
@@ -803,3 +803,70 @@ git diff --check
 - 实施方案：通道快照补充各自的合计字节和合计速率；每条通道在状态下方分别显示当前流量、已使用流量，以及接收/发送的实时和累计明细。底部保留所有通道合计，采样周期、物理 socket 监听和按需动态加载机制不变。
 - 回归 guard：Node 行为测试断言三条通道的收发、实时和累计数据彼此隔离；Go 静态 guard 固定通道级合计字段与展示样式。监视器未启用或调试总控关闭时仍不得加载模块、监听 socket 或启动采样 timer。
 - 验证结果：`node --check`、网络监视器 Node 行为测试 4/4、完整 `go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 均通过。无头 Chromium 在 1280×800 与 390×844 视口确认三条通道明细完整显示，面板 `scrollWidth === clientWidth` 且 `scrollHeight === clientHeight`，无文字或容器溢出。
+
+### LCMD-20260821-03：Queue 逻辑会话连接失败后丢失自动重试
+
+- 日期：2026-08-21
+- 来源：用户真机反馈；同一 tab 打开较多分屏后，部分 Queue pane 永久黑屏，只有点击并提升到直连通道后才恢复。
+- 影响模块：`runtime/static/main.js` 的 Queue 逻辑连接启动与重试调度。
+- 错误现象：Queue pane 在异步连接准备期间遇到通道或调度状态变化时，`connectSession()` 可以正常返回 `false`；该 pane 随后没有 socket、没有重试 timer，也不会再次订阅 Queue，直到点击或其他外部调度事件重新唤醒。
+- 根因：`connectTerminalQueueSession()` 在 Promise `.then()` 中先调用 `scheduleTerminalQueueSync()`，却直到后续 `.finally()` 才清除 `queueConnectPending`。reconcile microtask 先执行并因 pending 为真跳过该 pane；finally 清除 pending 后没有再次调度，形成确定性的丢失唤醒竞态。分屏越多，历史缓存准备和通道 generation 变化并发越多，越容易进入该分支。
+- 实施方案：连接未启动或抛错时只记录需要重试；统一在 `.finally()` 中先清除当前 generation 的 `queueConnectPending`，再调度 Queue backoff/reconcile。保留原有 Queue 物理连接、单 pane resync、两条直连门禁和事件驱动机制，不新增轮询或服务端改动。
+- 回归 guard：新增 `TestRuntimeTerminalQueueConnectRetrySettlesPendingBeforeReschedule`，截取 Queue 连接函数并固定只有一个重试调度出口，且该出口必须位于 finally 的 pending 清理之后。
+- 验证结果：`node --check runtime/static/main.js`、Queue/Fast/Cache Node 行为测试 40/40、针对性 Go guard、完整 `go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 均通过。
+- 禁止复现：Queue 逻辑连接的任何异步失败、取消或返回 `false` 路径，不得在 `queueConnectPending` 清除前安排同一 pane 的 reconcile；不得依赖用户点击、tab 切换或周期轮询才能恢复。
+
+#### Queue 本地缓存 FIFO 准备
+
+- 现象：Queue 必须优先复用本地缓存，避免向 Provider 重拉已存在的历史；但多个 pane 同时独立读取 manifest、提交缓存和 warm replay，会在移动端造成并发 Cache API/IndexedDB 压力并扩大连接状态窗口。
+- 根因：此前把“不能并发缓存准备”误改为“Queue 不使用缓存”，虽然缩小了状态窗口，却丢失了本地命中和 delta 回放，反而增加服务端回放流量。
+- 初版问题：32 分屏真机验证只显示约 10 个 pane，其余 pane 黑屏；点击后提升到直连通道能够恢复。原实现把“manifest 读取、逻辑订阅建立、Cache v2 warm replay 完成”全部放入一个 FIFO 任务。后排 pane 在前排完整历史回放期间没有逻辑订阅和独立错误/重试状态，表现为必须点击才能被直连调度唤醒。
+- 定时器问题：若先建立全部逻辑订阅、再串行读取本地缓存，后排 pane 又会在等待 FIFO 时被 8 秒 attach-ready 或 25 秒 socket health 定时器误判为失败，重新关闭 Queue 逻辑流，形成新的黑屏循环。
+- 实施方案：Queue 保持本地缓存优先和 cursor delta 协议，但拆成两个连续的 FIFO 阶段。第一阶段串行读取 manifest、确认既有缓存写入，并立即建立对应 pane 的共享 Queue 逻辑订阅；第二阶段再串行执行 Cache v2 `readChunks()` warm replay。等待本地缓存的 pane 仍保有有效逻辑订阅，Provider delta 进入既有有界网络缓冲；等其轮到 warm replay 后与本地历史连续合并。等待 FIFO 本地缓存时暂停该 pane 的 attach/health 超时，实际开始读取后恢复 attach 限时，而缓存读取自身保留 2 秒无进度超时。缓存未命中、缓存失败、升级 Fast、tab 切换、物理 Queue 关闭和旧 generation 都会释放任务并重新 reconcile。工作区加载不再自动并发预读全部 tab 总览缓存，避免与 Queue 首次恢复竞争。
+- 回归 guard：新增 `createTerminalQueueTaskQueue()` 的 FIFO/最大并发和“前一任务失败仍释放下一任务”Node 测试；`TestRuntimeTerminalQueueConnectSerializesAsyncCachePreparation` 固定 Queue 分阶段建立逻辑订阅、本地缓存串行回放、超时延期和未测量 pane 的自动尺寸调度。
+- 验证结果：`node --check` 通过；Queue/Fast/Cache/resize Node 行为测试 46/46 通过；完整 `go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 通过。仍待在目标设备以单 tab 32 分屏验证所有 pane 自动完成首次回放、全程仅 2 Fast + 1 Queue 物理 WebSocket，且不点击任何黑屏 pane。
+- 禁止复现：不得为避免并发而禁用 Queue 本地缓存或无条件请求 snapshot；不得让两个 Queue pane 同时执行 manifest 读取或 Cache v2 warm replay；不得把完整 FIFO 缓存回放当作建立逻辑订阅的前置条件；不得让等待 FIFO 的 pane 因 attach/health 定时器被关闭；不得让单个缓存失败阻塞 FIFO 后续任务。
+
+### LCMD-20260821-04：终端初始化并发抢占与 Queue pane 悬空黑屏
+
+- 日期：2026-08-21
+- 来源：用户在单 tab 多分屏真机复测；打开终端后仍有 Queue pane 黑屏，点击后提升至直连即可显示，同时两条直连 pane 的首次就绪速度被 Queue 初始化拖慢。
+- 根因：Fast scheduler 容量为 2 时会并发启动 Fast A/Fast B；Queue gate 又把 Fast WebSocket `open/leased` 当作就绪，因而在 PTY 回放、Cache API 读取、Ghostty 解析和首帧渲染尚未结束时就建立第三条物理连接并开始 Queue 工作。此前 Queue FIFO 还在逻辑订阅建立后立即释放当前任务；异步取消、关闭或旧 generation 可让 pane 保留逻辑 socket 但没有后续启动任务，且等待本地缓存时暂停的健康检查无法将它确定地转入重试，形成永久黑屏。
+- 实施方案：启动顺序改为严格 `Fast A -> Fast B -> Queue`。Fast A 仅在当前 generation 的 PTY/history replay 完成、实时数据追平、尺寸可用且最终 full render 已提交后放行 Fast B；Fast B 达到同一标准后才允许创建 Queue 物理 WebSocket。Queue gate 只接受两个 Fast 的 `presentation ready`，不接受 socket open 或 lease 状态。每个 Queue pane 将“缓存准备、逻辑订阅、PTY/history replay、最终首帧”作为一个 FIFO 任务；只有当前 pane 成功呈现、关闭、取消或失败后才结算任务并允许下一个 pane 开始。失败/取消统一释放 waiter、移除逻辑流并立即重新 reconcile，不能遗留有 socket 无任务的悬空状态。运行期既有 Queue pane 的持续输出仍由同一条 Queue WebSocket 实时承载，不引入 HTTP 轮询，不修改 persistent agent。
+- 回归 guard：Queue Node 测试要求两个 Fast 均为 `ready` 才允许创建 Queue；Go guard 固定 Fast presentation gate、`Fast A -> Fast B` 放行、Queue startup waiter 以及成功/关闭两条结算路径；既有 FIFO 行为测试继续确保单任务失败不阻塞后续任务。
+- 验证结果：`node --check`、Fast scheduler 与 Queue Node 行为测试 31/31、针对性 `go test ./...` 和 `git diff --check` 通过。仍需在目标设备以单 tab 32 分屏验证：直连 1 先就绪、直连 2 随后就绪、Queue 最后启动；不点击任一 Queue pane 时所有 pane 最终呈现或显示可诊断重试状态，浏览器物理终端 WebSocket 始终不超过 3 条。
+- 禁止复现：不得重新以 Fast socket `open`、`leased` 或容量已占满作为 Queue 启动条件；不得并发启动 Fast A/Fast B 或在 Fast B 首帧前创建 Queue；不得让 Queue pane 在未呈现、未失败且无 waiter 的状态占据逻辑流；不得把启动串行化扩大为运行期输出轮询或修改 persistent agent。
+
+### LCMD-20260821-05：Fast 槽位竞态导致全通道重建和 Queue 黑屏
+
+- 日期：2026-08-21
+- 来源：32 分屏真机复测；网络监视器显示直连通道 1/2 在初始化和点击 pane 时反复从连接中变为关闭。点击 Queue pane 后，两个直连和 Queue 物理连接都被关闭并重建，仍有部分 Queue pane 永久黑屏。
+- 根因：Fast 候选在每次 `syncTerminalConnectionDemands()` 时从异步尺寸测量和活动 pane 重新计算。`panePresentationIsCurrent()` 又把正常 PTY 输出到下一帧 Canvas 完成之间的短暂 content generation 差异解释为 Fast 未就绪，于是主动以 `fast_bootstrap_wait` 释放仍在初始化或正常运行的 Fast。Queue gate 同样依赖这个瞬态条件，任何一次重算都会关闭已有 Queue 流。点击 Queue pane 时，`pointerdown`、active pane health check 和 `focusin` 可重复触发全局重算；新候选尚未就绪时，原两个 Fast 与 Queue 会被整体撤销，形成三条物理连接一起重建。Queue Cache v2 warm replay 虽暂停 health timeout，但 8 秒 attach-ready timeout 仍会取消正常缓存回放中的 pane。
+- 实施方案：新增按当前 target/tab 归属的稳定 Fast A/Fast B 槽位。首个 Fast 完成当前 lease/replay 的最终首帧后才分配第二槽；后续普通输出、内容 generation 变化和一次 render pending 不得释放已分配槽位。Queue gate 仅控制第一次创建；已有 Queue 在 Fast 瞬态渲染状态变化或一次受控 Fast 交接时保留原物理连接及其逻辑成员。点击 Queue pane 时只将它提升到 Fast A，保留最近使用的另一 Fast，并在真实 close 确认后替换被淘汰的 LRU Fast；仅关闭该 pane 的旧 Queue logical stream。`setActivePane()` 去重 pointer/focus 的重复调度。Queue warm replay 期间同时延后 attach-ready timer 和同步健康检查，缓存读取完成后再恢复 attach 期限。
+- 回归 guard：扩展 `TestRuntimeTerminalConnectionSchedulerGuard`，禁止恢复 `fast_presentation_lost` 的通道释放；新增 `TestRuntimeTerminalFastSlotHandoffPreservesQueueTransport` 固定稳定槽位、单 Fast 替换、Queue 保留以及单次 pointer 调度；扩展 Queue 缓存测试，固定 attach-ready/synchronous health 两条超时路径在 warm replay 中暂停。
+- 验证结果：`node --check runtime/static/main.js`、Fast scheduler 与 Queue connection Node 测试 31/31、针对性 Go guard 通过。仍需在目标设备用单 tab 32 分屏验证：首次顺序为 Fast A、Fast B、Queue；点击 Queue pane 时网络监视器只显示一条 Fast 关闭/替换，另一 Fast 与 Queue 始终保持开启；无需点击任何其余 pane，全部最终完成首帧。
+- 禁止复现：不得把持续输出或 `panePresentationIsCurrent()` 的短暂失配作为 Fast lease/Queue 物理连接的释放原因；不得在一次 Queue -> Fast 提升中关闭未被淘汰的 Fast 或 Queue 物理连接；不得让 pointer、health check 和 focus 为同一点击重复发起全局连接重算；不得在 Queue Cache v2 warm replay 期间触发 attach-ready timeout。
+
+### LCMD-20260821-06：初始化拓扑缺少唯一所有者导致 Fast 抖动与 Queue 永久黑屏
+
+- 日期：2026-08-21
+- 来源：`LCMD-20260821-05` 后的 32 分屏真机复测；直连通道 1/2 在“连接中、已启用、已关闭”之间快速跳变，Queue 最终仅少量 pane 有首帧，其余 pane 无灰点、无重试且点击后才恢复。
+- 影响模块：浏览器 `runtime/static/main.js` 的容器终端初始化与连接生命周期；新增 `runtime/static/terminal_topology_controller.js`；Queue transport、Network Monitor、Service Worker 和对应 Node/Go guard。Provider 与 persistent agent 不修改。
+- 错误现象：多个 resize、首帧、replay、焦点、健康检查和 tab 激活入口同时调用全局 demand reconcile；任一次候选重算都可能撤销还在启动的 Fast lease。Queue 启动任务把 Cache API、逻辑订阅、PTY/history 回放和 Canvas 最终首帧持有在同一个无期限 FIFO 中；一个 pane 漏掉最终 render 后，后续全部 pane 失去启动机会。部分未及时测量的 pane 又根本不会成为候选，因而初始状态完全黑屏。
+- 根因：Fast/Queue 拓扑没有唯一所有者，稳定 slot 变量不足以约束所有异步回调；Queue 物理连接会在最后一个逻辑流短暂移除时自动关闭；Queue waiter 没有覆盖 render 漏回调这一终态；监视器按附着顺序而非 controller slot 标识通道，难以定位上述竞态。
+- 实施方案：新增纯前端 `TerminalTopologyController`，以 target/tab `epoch`、Fast A/B stable slot、attempt ID 和 Queue transport attempt 作为唯一拓扑状态。容器目标首次初始化严格为“活动 pane 可测量 -> Fast A 最终首帧 -> Fast B 最终首帧 -> Queue 物理连接 -> Queue pane FIFO”；普通输出、render pending、resize、health check 和 focus 只上报状态，不再释放或重排 Fast/Queue。旧 epoch/attempt 回调直接忽略；Fast 失败只保留同一阶段、同一 pane 交给原 scheduler 退避重试。Queue 物理连接支持显式 `connect()` 与 `keepAliveWhenEmpty`，单 pane 重试或提升 Fast 只关闭对应 logical stream，不关闭第三条物理 WebSocket。每个 Queue 启动项采用 40 秒有限 latch，`ready`、`cancelled`、`failed`、`timed_out` 都只结算一次并释放 Cache/warm replay FIFO；超时只重排当前 pane，后续 pane 立即继续。未测量 pane 显示 `awaiting_measurement` 灰点，并通过最多四次 `requestAnimationFrame` 尺寸确认自动进入流程，不产生网络轮询。Network Monitor 使用 controller stable slot 显示“直连通道 1 / 直连通道 2 / 队列通道”。
+- Guard：新增 `terminal_topology_controller_test.mjs`，覆盖 32 pane 严格阶段、活动 pane 测量门禁、重复 render 无抖动、延迟测量自动入队、旧 epoch/attempt 忽略、Fast 失败保持阶段及仅淘汰一个 LRU Fast；扩展 `terminal_queue_connection_test.mjs`，覆盖有限启动 latch 与超时后 FIFO 前进、空 logical stream 保持物理 Queue；扩展 `terminal_network_monitor_test.mjs`，覆盖稳定 Fast slot；更新 `TestRuntimeTerminalTopologyControllerOwnsFastQueueHandoff`、Queue FIFO 和静态资源 guard。
+- 验证结果：`node --check runtime/static/main.js runtime/static/terminal_topology_controller.js runtime/static/terminal_queue_connection.js runtime/static/terminal_network_monitor.js`、完整 Node 行为测试、`go test ./... -count=1`、`go test -race ./... -count=1` 与 `git diff --check` 通过。仍需在目标 Android WebView、Lazycat WKWebView 与桌面浏览器以单 tab 3、12、32 分屏进行实机验收。
+- 禁止复现：容器目标的 Fast lease、Queue physical transport 和 Queue logical membership 只能由 controller 分配或释放；不得恢复 `fast_bootstrap_wait` 全局撤销路径；Fast A 当前最终首帧前不得启动 Fast B，两个 Fast 当前最终首帧前不得创建 Queue 或运行 Queue Cache FIFO；Queue 最后一个 logical stream 临时关闭不得关闭物理 transport；单个 Queue pane 不能无限占用 FIFO，也不得依赖点击、HTTP 轮询或服务端 agent 改动才能恢复；初始化期间每个可见 pane 必须处于明确的灰点等待、重试或 ready 状态，禁止无状态黑屏。
+
+### LCMD-20260821-07：Queue logical pane 干扰物理连接退避
+
+- 日期：2026-08-21
+- 来源：`LCMD-20260821-06` 收尾检查；需要确保 Queue 的物理重连计数不会被任一 logical pane 的 replay 或同步状态影响。
+- 影响模块：`runtime/static/main.js` 的 Queue physical transport 退避和 logical pane 同步路径。
+- 错误现象：Queue physical transport 的 `OPEN` 快照会在 logical stream 增减时重复发出，导致重连计数被非物理事件重置；同时 logical pane 的同步调度会取消物理退避定时器。一次真实物理断开后，定时器可能被清掉，或在到期后因计数仍大于零反复安排等待而不发起新的连接，Queue pane 因而没有可恢复的 transport。
+- 根因：物理连接状态与 logical pane 状态共用了同一个 state callback 和调度入口，却没有区分真实 readyState 迁移与 logical membership 更新；退避定时器也暴露给了 logical reconcile。
+- 实施方案：记录 Queue 的上一次物理 readyState，仅在真实 `OPEN`/`CLOSED` 迁移时重置或递增重连计数。主动关闭 Queue physical transport 时清空旧 epoch 的退避。物理退避定时器到期后以明确的 `afterBackoff` 标记只执行一次新的连接尝试；logical Queue 同步不再读取、清除或重新安排该定时器和计数。
+- 回归 guard：`TestRuntimeTerminalTopologyControllerOwnsFastQueueHandoff` 固定物理状态迁移、退避到期重试、replay 隔离及 logical synchronize 不得触碰 physical backoff。
+- 验证结果：`node --check runtime/static/main.js runtime/static/terminal_topology_controller.js runtime/static/terminal_queue_connection.js runtime/static/terminal_network_monitor.js`、Node 行为测试 60/60、`go test ./... -count=1`、`go test -race ./... -count=1` 与 `git diff --check` 均通过。真实目标实例仍需验证一次 Queue 物理断开后的退避、自动重连及全部 logical pane 自动恢复。
+- 禁止复现：不得从 replay complete、逻辑流增删、Queue FIFO、pane 重试或普通 reconcile 修改 Queue physical reconnect attempts；不得让 logical pane 调度取消或替代物理 transport 的退避定时器。

@@ -309,9 +309,11 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		t.Fatal("completed server snapshot must atomically replace the staged terminal state")
 	}
 	warmReplayBlock := sourceBetween(t, mainSource,
-		"const startSessionCacheV2WarmReplay = (session, snapshot) => {",
+		"const stageSessionCacheV2WarmReplay = (session, snapshot) => {",
 		"const applySessionCacheV2ServerSnapshot = (session, currentSocket, rejectHistorySync) => {")
 	for _, want := range []string{
+		`const runSessionCacheV2WarmReplay = (session, snapshot) => {`,
+		`const startSessionCacheV2WarmReplay = (session, snapshot) => {`,
 		`terminalCacheV2.readChunks(snapshot`,
 		`flushSessionOutput(session, { force: true });`,
 		`session.cacheV2WarmReplayReady = true;`,
@@ -3157,6 +3159,11 @@ func TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard(t *testing.T) 
 		"const dedupeKey = `console:${level}:",
 		"debugLogPanel.hidden = !debugModeEnabled || !debugLogEnabled;",
 		"debugLogEntries.splice(0, debugLogEntries.length - debugLogEntryLimit);",
+		"const debugLogClipboardText = () => debugLogEntries",
+		"debugLogCopy?.addEventListener(\"click\", async () => {",
+		"showToast(\"暂无可复制的调试日志。\");",
+		"showToast(\"调试日志已复制。\");",
+		"showToast(\"复制调试日志失败。\");",
 		"console[method] = capture;",
 		"window.addEventListener(\"error\", handleDebugWindowError, true);",
 		"window.addEventListener(\"unhandledrejection\", handleDebugUnhandledRejection);",
@@ -3200,6 +3207,7 @@ func TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard(t *testing.T) 
 		`id="settingsDebugLogToggle"`,
 		`id="debugLogPanel"`,
 		`id="debugLogList"`,
+		`id="debugLogCopy"`,
 		`id="debugLogClear"`,
 	} {
 		if !strings.Contains(indexSource, want) {
@@ -3209,6 +3217,8 @@ func TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard(t *testing.T) 
 	for _, want := range []string{
 		".debug-log-panel {",
 		"max-height: min(46vh, 360px);",
+		".debug-log-panel-actions {",
+		".debug-log-copy,",
 		".debug-log-list {",
 		"overflow: auto;",
 	} {
@@ -3242,23 +3252,26 @@ func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
 
 	for _, want := range []string{
 		`import { createTerminalConnectionScheduler } from "./terminal_connection_scheduler.js";`,
+		`import { createTerminalTopologyController } from "./terminal_topology_controller.js";`,
 		"createTerminalQueueConnection,",
-		"terminalQueueGateAllowsCreation,",
+		"createTerminalQueueStartupLatch,",
 		"const terminalFastWebSocketCapacity = 2;",
 		"const terminalClientDirectWebSocketCapacity = 3;",
+		"const terminalQueueStartupDeadlineMs = 40 * 1000;",
 		"const requestSessionConnection = (session, {",
 		"const syncTerminalConnectionDemands = ({",
+		"const refreshTerminalTopology = ({",
+		"terminalTopologyController = createTerminalTopologyController({",
+		"case \"start-fast\":",
+		"case \"start-queue-transport\":",
+		"case \"sync-queue-candidates\":",
 		"terminalConnectionScheduler.setCapacity(",
 		"terminalConnectionScheduler = createTerminalConnectionScheduler({",
-		"const terminalFastGateState = () => {",
-		"const fastLeaseStates = terminalFastGateState();",
-		"if (!terminalQueueGateAllowsCreation({",
-		"queueCandidateCount: candidates.length,",
-		"queueClosing: Boolean(terminalQueueClosingPromise),",
 		"let terminalQueueClosingPromise = null;",
 		"if (terminalQueueClosingPromise) {",
 		"const closingPromise = Promise.resolve(connection.closed).finally(() => {",
-		"if (!ensureTerminalQueueConnection()) {",
+		"const startPendingTerminalTopologyQueueTransport = ({ afterBackoff = false } = {}) => {",
+		"keepAliveWhenEmpty: true,",
 		"connectTerminalQueueSession(pane);",
 		`case "queue-turn-complete":`,
 		`deferRender: channel === "queue" && session.replayComplete,`,
@@ -3299,10 +3312,11 @@ func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
 	}
 	for _, want := range []string{
 		"export const terminalQueueProtocolVersion = 1;",
-		"export const terminalQueueGateAllowsCreation = ({",
-		"states.length === requiredFast",
+		"export const createTerminalQueueStartupLatch = ({",
 		"const queueBinaryMagic = \"LCQ1\";",
 		"export const createTerminalQueueConnection = ({",
+		"keepAliveWhenEmpty = false,",
+		"const connect = () => {",
 		`type: "replace-subscriptions"`,
 		`type: "pane-control"`,
 		"entry.expectedCursor !== startCursor",
@@ -3317,11 +3331,276 @@ func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
 	if strings.Contains(mainSource, `schedulerCloseReason === "queue_resync"`) {
 		t.Fatal("runtime must not retain the obsolete queue_resync close reason")
 	}
+	if strings.Contains(mainSource, `fast_presentation_lost`) {
+		t.Fatal("ordinary presentation invalidation must not release or rebuild fast/queue channels")
+	}
 	if !strings.Contains(serviceWorkerSource, "`${assetBase}terminal_connection_scheduler.js`,") {
 		t.Fatal("service worker must precache the terminal connection scheduler")
 	}
 	if !strings.Contains(serviceWorkerSource, "`${assetBase}terminal_queue_connection.js`,") {
 		t.Fatal("service worker must precache the terminal queue connection")
+	}
+	if !strings.Contains(serviceWorkerSource, "`${assetBase}terminal_topology_controller.js`,") {
+		t.Fatal("service worker must precache the terminal topology controller")
+	}
+}
+
+func TestRuntimeTerminalQueueStartupAlwaysSettlesBeforeAdvancingFIFO(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+	start := strings.Index(source, "  const connectTerminalQueueSession = (session) => {")
+	if start < 0 {
+		t.Fatal("connectTerminalQueueSession is missing")
+	}
+	endOffset := strings.Index(source[start:], "\n  const reconcileTerminalQueue = () => {")
+	if endOffset < 0 {
+		t.Fatal("connectTerminalQueueSession boundary is missing")
+	}
+	functionSource := source[start : start+endOffset]
+	for _, want := range []string{
+		"const latch = createTerminalQueueStartupLatch({",
+		"timeoutMs: terminalQueueStartupDeadlineMs,",
+		"onTimeout: () => {",
+		"session.queueStartupWaiter = {",
+		"const outcome = await Promise.race([startupAttempt, latch.promise]);",
+		"session.queueTaskState = \"waiting_ready\";",
+		"session.queueTaskState = \"retrying\";",
+		"detachTerminalQueueSession(session, \"queue_retry\");",
+		"session.queueConnectPending = false;",
+		"scheduleTerminalQueueSync();",
+	} {
+		if !strings.Contains(functionSource, want) {
+			t.Fatalf("terminal queue startup settlement guard missing %q", want)
+		}
+	}
+	queueTaskIndex := strings.Index(functionSource, "const queueConnect = terminalQueueCachePreparationQueue.enqueue(async () => {")
+	latchWaitIndex := strings.Index(functionSource, "latch.promise")
+	if queueTaskIndex < 0 || latchWaitIndex < queueTaskIndex {
+		t.Fatal("queue pane must settle a finite startup latch inside the FIFO task")
+	}
+	for _, want := range []string{
+		"function settleTerminalQueueStartup(session, outcome) {",
+		"settleTerminalQueueStartup(session, \"ready\");",
+		"settleTerminalQueueStartup(session, \"cancelled\");",
+		"settleTerminalQueueStartup(session, \"timed_out\");",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("terminal queue completion boundary missing %q", want)
+		}
+	}
+}
+
+func TestRuntimeTerminalTopologyControllerOwnsFastQueueHandoff(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+	controllerData, err := os.ReadFile("runtime/static/terminal_topology_controller.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/terminal_topology_controller.js) error = %v", err)
+	}
+	controllerSource := string(controllerData)
+	for _, want := range []string{
+		"export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) => {",
+		"const startFast = (slot, record, reason) => {",
+		"setPhase(\"fast_a_starting\", reason);",
+		"setPhase(\"fast_b_starting\", reason);",
+		"const startQueueTransport = (reason) => {",
+		"const fastRendered = (pane, { eventEpoch = epoch, attemptID = 0 } = {}) => {",
+		"const promote = (pane, { reason = \"user_interaction\" } = {}) => {",
+		"reason: \"promote_to_fast\",",
+		"if (eventEpoch !== epoch)",
+	} {
+		if !strings.Contains(controllerSource, want) {
+			t.Fatalf("topology controller guard missing %q", want)
+		}
+	}
+	if strings.Contains(source, "fast_bootstrap_wait") {
+		t.Fatal("container topology must not release a Fast lease from a global bootstrap reconcile")
+	}
+
+	queueReconcile := sourceBetween(t, source,
+		"const reconcileTerminalQueue = () => {",
+		"scheduleTerminalQueueSync = () => {")
+	for _, want := range []string{
+		"scheduleUnmeasuredTerminalQueuePanes();",
+		"if (!terminalTopologyController?.isQueueAllowed() || !terminalQueueConnection)",
+		"const desired = new Set(candidates);",
+		"detachTerminalQueueSession(pane, \"queue_not_needed\");",
+	} {
+		if !strings.Contains(queueReconcile, want) {
+			t.Fatalf("queue preservation guard missing %q", want)
+		}
+	}
+
+	pointerStart := strings.Index(source, "shellEl.addEventListener(\"pointerdown\", (event) => {")
+	pointerEnd := strings.Index(source[pointerStart:], "shellEl.addEventListener(\"focusin\"")
+	if pointerStart < 0 || pointerEnd < 0 {
+		t.Fatal("pane pointer handoff boundary is missing")
+	}
+	pointerBlock := source[pointerStart : pointerStart+pointerEnd]
+	if !strings.Contains(pointerBlock, "setActivePane(current, session.id, { focus: false, userInteraction: true });") {
+		t.Fatal("pane pointer must perform one interaction-aware fast handoff")
+	}
+	if strings.Contains(pointerBlock, "syncTerminalConnectionDemands(") {
+		t.Fatal("pane pointer must not schedule a duplicate global connection reconciliation")
+	}
+	activePaneBlock := sourceBetween(t, source,
+		"const setActivePane = (tab, paneId, {",
+		"const preserveTabTerminalFrames = (tab) => {")
+	if !strings.Contains(activePaneBlock, "(!wasActive || userInteraction)") {
+		t.Fatal("repeated focus of an already active pane must not schedule another connection reconciliation")
+	}
+	if !strings.Contains(activePaneBlock, "if (!userInteraction && !wasActive) {") {
+		t.Fatal("a pointer-driven fast handoff must not trigger a second connection health reconciliation")
+	}
+	queueTransportBlock := sourceBetween(t, source,
+		"const resetTerminalQueuePhysicalReconnectBackoff = () => {",
+		"const connectTerminalQueueSession = (session) => {")
+	for _, want := range []string{
+		"let terminalQueuePhysicalReadyState = WebSocket.CLOSED;",
+		"const resetTerminalQueuePhysicalReconnectBackoff = () => {",
+		"const recordTerminalQueuePhysicalReconnectFailure = () => {",
+		"const physicalStateChanged = terminalQueuePhysicalReadyState !== state.physicalReadyState;",
+		"if (!physicalStateChanged) {",
+		"resetTerminalQueuePhysicalReconnectBackoff();",
+		"recordTerminalQueuePhysicalReconnectFailure();",
+		"const startPendingTerminalTopologyQueueTransport = ({ afterBackoff = false } = {}) => {",
+		"if (terminalQueueReconnectAttempts > 0 && !afterBackoff) {",
+		"startPendingTerminalTopologyQueueTransport({ afterBackoff: true });",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("queue physical reconnect guard missing %q", want)
+		}
+	}
+	if strings.Contains(queueTransportBlock, "session.replayComplete") {
+		t.Fatal("queue physical reconnect state must not be mutated from logical pane replay")
+	}
+	queueSyncBlock := sourceBetween(t, source,
+		"  scheduleTerminalQueueSync = () => {",
+		"  recycleTerminalQueueSession = (session, reason, { immediate = false } = {}) => {")
+	if strings.Contains(queueSyncBlock, "terminalQueueReconnectTimer") || strings.Contains(queueSyncBlock, "terminalQueueReconnectAttempts") {
+		t.Fatal("logical Queue synchronization must not alter physical transport backoff")
+	}
+}
+
+func TestRuntimeTerminalQueueConnectSerializesAsyncCachePreparation(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+	start := strings.Index(source, "  const connectSession = async (session, {")
+	if start < 0 {
+		t.Fatal("connectSession is missing")
+	}
+	endOffset := strings.Index(source[start:], "\n  const terminalQueueStreamID =")
+	if endOffset < 0 {
+		t.Fatal("connectSession boundary is missing")
+	}
+	functionSource := source[start : start+endOffset]
+	for _, want := range []string{
+		"await prepareSessionHistoryCache(session);",
+		"await (sessionUsesTerminalCacheV2(session)",
+		"const historyConnectRange = sessionHistoryRangeForConnect(session);",
+		"const cacheV2WarmSnapshot = historyConnectRange?.source === \"cache-v2\"",
+	} {
+		if !strings.Contains(functionSource, want) {
+			t.Fatalf("terminal queue cache preparation guard missing %q", want)
+		}
+	}
+	queueConnectStart := strings.Index(source, "const queueConnect = terminalQueueCachePreparationQueue.enqueue(async () => {")
+	queueConnectEnd := strings.Index(source[queueConnectStart:], "\n    queueConnect.then((outcome) => {")
+	if queueConnectStart < 0 || queueConnectEnd < 0 {
+		t.Fatal("terminal queue cache preparation FIFO is missing")
+	}
+	queueConnectSource := source[queueConnectStart : queueConnectStart+queueConnectEnd]
+	for _, want := range []string{
+		"const started = await connectSession(session, {",
+		"channel: \"queue\"",
+		"session.queueTaskState = \"waiting_ready\";",
+		"return startup;",
+		"const outcome = await Promise.race([startupAttempt, latch.promise]);",
+	} {
+		if !strings.Contains(queueConnectSource, want) {
+			t.Fatalf("terminal queue cache FIFO guard missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"scheduleUnmeasuredTerminalQueuePanes();",
+		"session.cacheV2WarmReplayActive",
+		"markSessionSocketHealth(session, currentSocket);",
+		"settleTerminalQueueStartup(session, \"ready\");",
+		"settleTerminalQueueStartup(session, \"cancelled\");",
+		"settleTerminalQueueStartup(session, \"timed_out\");",
+		"session.queueTaskState = \"retrying\";",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("terminal queue serialized startup guard missing %q", want)
+		}
+	}
+	queueSessionStart := strings.Index(source, "  const connectTerminalQueueSession = (session) => {")
+	queueSessionEnd := strings.Index(source[queueSessionStart:], "\n  const reconcileTerminalQueue = () => {")
+	if queueSessionStart < 0 || queueSessionEnd < 0 {
+		t.Fatal("connectTerminalQueueSession boundary is missing")
+	}
+	queueSessionSource := source[queueSessionStart : queueSessionStart+queueSessionEnd]
+	startupWait := strings.Index(queueSessionSource, "latch.promise")
+	startupSettled := strings.Index(source, "settleTerminalQueueStartup(session, \"ready\");")
+	if startupWait < 0 || startupSettled < 0 {
+		t.Fatal("queue local cache replay must settle its FIFO startup latch after final presentation")
+	}
+	connectBlock := sourceBetween(t, source,
+		"const connectSession = async (session, {",
+		"const terminalQueueStreamID =")
+	for _, want := range []string{
+		"startAttachReadyTimer(session, currentSocket);",
+		"session.cacheV2WarmReplayActive",
+		"startSessionCacheV2WarmReplay(session, cacheV2WarmSnapshot)",
+	} {
+		if !strings.Contains(connectBlock, want) {
+			t.Fatalf("queue serialized cache timeout guard missing %q", want)
+		}
+	}
+	warmReplayBlock := sourceBetween(t, source,
+		"const runSessionCacheV2WarmReplay = (session, snapshot) => {",
+		"const startSessionCacheV2WarmReplay = (session, snapshot) => {")
+	if !strings.Contains(warmReplayBlock, "startAttachReadyTimer(session, session.socket);") {
+		t.Fatal("queue cache replay completion must restart the attach-ready timeout window")
+	}
+	healthMonitorBlock := sourceBetween(t, source,
+		"const startSocketHealthMonitor = (session, currentSocket) => {",
+		"const startSocketConnectTimer = (session, currentSocket) => {")
+	for _, want := range []string{
+		"session.connectionChannel === \"queue\"",
+		"session.cacheV2WarmReplayActive",
+		"markSessionSocketHealth(session, currentSocket);",
+	} {
+		if !strings.Contains(healthMonitorBlock, want) {
+			t.Fatalf("queue deferred cache health guard missing %q", want)
+		}
+	}
+	attachReadyBlock := sourceBetween(t, source,
+		"const startAttachReadyTimer = (session, currentSocket, timeoutMs = terminalAttachReadyTimeoutMs) => {",
+		"const checkSessionConnectionHealth = (session, {")
+	for _, want := range []string{
+		"session.connectionChannel === \"queue\"",
+		"session.cacheV2WarmReplayActive",
+		"startAttachReadyTimer(session, currentSocket, timeoutMs);",
+	} {
+		if !strings.Contains(attachReadyBlock, want) {
+			t.Fatalf("queue warm replay attach-timeout guard missing %q", want)
+		}
+	}
+	connectionHealthBlock := sourceBetween(t, source,
+		"const checkSessionConnectionHealth = (session, {",
+		"const connectSession = async (session, {")
+	if !strings.Contains(connectionHealthBlock, "const queueWarmReplayActive = Boolean(") {
+		t.Fatal("queue warm replay must suppress synchronous attach timeout checks")
 	}
 }
 
@@ -3376,7 +3655,7 @@ func TestRuntimeTerminalNetworkMonitorIsOptIn(t *testing.T) {
 		`let networkMonitorEnabled = window.localStorage.getItem(networkMonitorStorageKey) === "true";`,
 		"const terminalNetworkMonitorShouldRun = () => debugModeEnabled && networkMonitorEnabled && !disposed;",
 		`terminalNetworkMonitorModulePromise ||= import("./terminal_network_monitor.js");`,
-		"terminalNetworkMonitor.attachSocket(pane.socket, { kind: \"fast\" });",
+		"terminalNetworkMonitor.attachSocket(pane.socket, { kind: \"fast\", slot });",
 		"terminalNetworkMonitor.attachSocket(queueSocket, { kind: \"queue\" });",
 		"terminalNetworkMonitor?.dispose();",
 		"window.clearInterval(terminalNetworkMonitorSampleTimer);",

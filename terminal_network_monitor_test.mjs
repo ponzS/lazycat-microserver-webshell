@@ -114,3 +114,14 @@ test("direct targets expose three direct channels instead of a queue slot", () =
     "直连通道 3",
   ]);
 });
+
+test("multiplexed Fast sockets can bind to stable controller slots", () => {
+  const monitor = createTerminalNetworkMonitor({ now: () => 0 });
+  const fastTwo = new FakeWebSocket(1);
+  const fastOne = new FakeWebSocket(1);
+  assert.equal(monitor.attachSocket(fastTwo, { kind: "fast", slot: 1 }).index, 1);
+  assert.equal(monitor.attachSocket(fastOne, { kind: "fast", slot: 0 }).index, 0);
+  const state = monitor.snapshot();
+  assert.equal(state.channels[0].label, "直连通道 1");
+  assert.equal(state.channels[1].label, "直连通道 2");
+});

@@ -11,16 +11,76 @@ const socketClosed = 3;
 
 export const terminalQueueGateAllowsCreation = ({
   fastCapacity = 2,
-  fastLeaseStates = [],
+  fastReadyStates = [],
   queueCandidateCount = 0,
   queueClosing = false,
 } = {}) => {
   const requiredFast = Math.max(1, Math.floor(Number(fastCapacity) || 0));
-  const states = Array.from(fastLeaseStates || [], (state) => String(state || ""));
+  const states = Array.from(fastReadyStates || [], (state) => String(state || ""));
   return !queueClosing
     && Math.floor(Number(queueCandidateCount) || 0) > 0
     && states.length === requiredFast
-    && states.every((state) => state === "open" || state === "leased");
+    && states.every((state) => state === "ready");
+};
+
+export const createTerminalQueueTaskQueue = () => {
+  let tail = Promise.resolve();
+  let pending = 0;
+
+  const enqueue = (task) => {
+    if (typeof task !== "function") {
+      return Promise.reject(new TypeError("terminal queue task must be a function"));
+    }
+    pending += 1;
+    const run = tail.then(() => task());
+    tail = run.catch(() => {});
+    return run.finally(() => {
+      pending = Math.max(0, pending - 1);
+    });
+  };
+
+  return {
+    enqueue,
+    snapshot: () => ({ pending }),
+  };
+};
+
+export const createTerminalQueueStartupLatch = ({
+  timeoutMs,
+  setTimer = (callback, delay) => setTimeout(callback, delay),
+  clearTimer = (timer) => clearTimeout(timer),
+  onTimeout = () => {},
+} = {}) => {
+  const safeTimeoutMs = Math.max(1, Math.floor(Number(timeoutMs) || 0));
+  let settled = false;
+  let outcome = "";
+  let timer = 0;
+  let resolvePromise;
+  const promise = new Promise((resolve) => {
+    resolvePromise = resolve;
+  });
+  const settle = (nextOutcome) => {
+    if (settled) {
+      return false;
+    }
+    settled = true;
+    outcome = String(nextOutcome || "failed");
+    if (timer) {
+      clearTimer(timer);
+      timer = 0;
+    }
+    resolvePromise(outcome);
+    return true;
+  };
+  timer = setTimer(() => {
+    onTimeout();
+    settle("timed_out");
+  }, safeTimeoutMs);
+  return {
+    promise,
+    settle,
+    snapshot: () => ({ settled, outcome }),
+  };
 };
 
 const normalizeIdentity = (descriptor = {}) => {
@@ -116,6 +176,7 @@ export const createTerminalQueueConnection = ({
   WebSocketImpl = globalThis.WebSocket,
   onStateChange = () => {},
   onProtocolError = () => {},
+  keepAliveWhenEmpty = false,
 } = {}) => {
   if (!url || typeof WebSocketImpl !== "function") {
     throw new TypeError("terminal queue connection requires a URL and WebSocket implementation");
@@ -459,7 +520,7 @@ export const createTerminalQueueConnection = ({
         logicalStreams.delete(key);
         dispatchLogicalClose(entry, { code, reason: String(reason || ""), wasClean: true });
         listeners.clear();
-        if (logicalStreams.size === 0) {
+        if (logicalStreams.size === 0 && !keepAliveWhenEmpty) {
           disposed = true;
           const socket = physicalSocket;
           if (socket && socket.readyState < socketClosing) {
@@ -470,7 +531,8 @@ export const createTerminalQueueConnection = ({
             physicalReadyState = socketClosed;
             resolveFinalClose();
           }
-        } else {
+        }
+        if (!disposed) {
           scheduleSubscriptionUpdate();
         }
         emitState();
@@ -508,7 +570,17 @@ export const createTerminalQueueConnection = ({
     }
   };
 
+  const connect = () => {
+    if (disposed) {
+      throw new Error("terminal queue connection is closed");
+    }
+    ensurePhysicalSocket();
+    emitState();
+    return snapshot();
+  };
+
   return {
+    connect,
     open,
     close,
     closed,

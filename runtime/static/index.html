@@ -108,7 +108,10 @@
           <div class="debug-log-panel" id="debugLogPanel" aria-live="polite" hidden>
             <div class="debug-log-panel-head">
               <span class="debug-log-panel-title">调试日志</span>
-              <button class="debug-log-clear" id="debugLogClear" type="button" aria-label="清空调试日志" title="清空调试日志">清空</button>
+              <div class="debug-log-panel-actions">
+                <button class="debug-log-copy" id="debugLogCopy" type="button" aria-label="复制全部调试日志" title="复制全部调试日志">复制</button>
+                <button class="debug-log-clear" id="debugLogClear" type="button" aria-label="清空调试日志" title="清空调试日志">清空</button>
+              </div>
             </div>
             <div class="debug-log-list" id="debugLogList"></div>
           </div>
