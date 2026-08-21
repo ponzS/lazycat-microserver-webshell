@@ -513,6 +513,9 @@ export const createTerminalQueueConnection = ({
     close,
     closed,
     snapshot,
+    getPhysicalSocket() {
+      return physicalSocket;
+    },
     hasPane(paneID) {
       const normalized = String(paneID || "").trim();
       return Array.from(logicalStreams.values()).some((entry) => entry.identity.paneID === normalized);

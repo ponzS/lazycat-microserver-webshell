@@ -87,13 +87,13 @@ git submodule update --init --recursive
 lzc-cli project release
 ```
 
-`ghostty-web/` 是固定到 `ponzS/ghostty-web` fork 的 submodule；源码同步和重建默认只使用该目录。WebShell 仓库内的 `runtime/static/ghostty-web.js`、`ghostty-vt.wasm` 和许可证是发布资产。常规构建校验这些文件完整可用；如果 submodule 中已有 WASM 构建物，还会比较核心 section 内容并给出非阻塞提示：
+`ghostty-web/` 是固定到 `ponzS/ghostty-web` fork 的 submodule，也是唯一的 Ghostty WASM 源码来源。WebShell 仓库内的 `runtime/static/ghostty-web.js`、`ghostty-vt.wasm` 和许可证是发布资产。常规构建会校验这些文件，然后从 submodule 当前源码重建 WASM 并比较核心 section；子模块、Bun、Zig 或源码校验任一缺失都会阻止发布：
 
 ```sh
 ./tools/sync-ghostty-web-assets.sh --check
 ```
 
-需要确认 submodule 当前源码与随包 WASM 是否一致时使用 `--check-source`。该模式会先执行 `bun run build:wasm`，再解析并比较两份 WASM 的核心 section 内容；自定义构建元数据不参与版本判断。submodule 根目录的 `ghostty-vt.wasm` 是被 Git 忽略的构建产物，不能在未重建时作为源码版本依据。
+`--check-source` 是同一源码校验的显式入口。校验会执行 `bun run build:wasm`，再解析并比较两份 WASM 的核心 section 内容；自定义构建元数据不参与版本判断。submodule 根目录的 `ghostty-vt.wasm` 是被 Git 忽略的构建产物，只有本次重建后才能作为比较输入。
 
 WebShell 的 `ghostty-web.js` 还包含移动端像素滚动、resize 和渲染性能等历史定制。只有有意更新这部分前端代码时才执行 `--sync`，并在覆盖 bundle 后运行完整 WebShell 回归测试。只有 Ghostty 子模块、WASM patch 或 ABI 确实变化时才使用 `--rebuild-wasm`。
 

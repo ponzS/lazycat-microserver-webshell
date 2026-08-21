@@ -171,6 +171,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const debugLogPanel = document.getElementById("debugLogPanel");
   const debugLogList = document.getElementById("debugLogList");
   const debugLogClear = document.getElementById("debugLogClear");
+  const terminalNetworkMonitorPanel = document.getElementById("terminalNetworkMonitor");
+  const terminalNetworkMonitorChannels = document.getElementById("terminalNetworkMonitorChannels");
+  const terminalNetworkMonitorRate = document.getElementById("terminalNetworkMonitorRate");
+  const terminalNetworkMonitorRateDetail = document.getElementById("terminalNetworkMonitorRateDetail");
+  const terminalNetworkMonitorUsage = document.getElementById("terminalNetworkMonitorUsage");
+  const terminalNetworkMonitorUsageDetail = document.getElementById("terminalNetworkMonitorUsageDetail");
   const startupErrorPanel = document.getElementById("startupErrorPanel");
   const startupErrorText = document.getElementById("startupErrorText");
   const instanceSwitcher = document.getElementById("instanceSwitcher");
@@ -205,6 +211,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const settingsScrollbackResetButton = document.getElementById("settingsScrollbackResetButton");
   const settingsDebugModeToggle = document.getElementById("settingsDebugModeToggle");
   const settingsDebugLogToggle = document.getElementById("settingsDebugLogToggle");
+  const settingsNetworkMonitorToggle = document.getElementById("settingsNetworkMonitorToggle");
   const settingsDebugOptions = document.getElementById("settingsDebugOptions");
   const settingsOnlineDevicesButton = document.getElementById("settingsOnlineDevicesButton");
   const settingsPerformanceMeterToggle = document.getElementById("settingsPerformanceMeterToggle");
@@ -353,6 +360,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const touchShortcutFeedbackStorageKey = `${storagePrefix}.touchShortcutFeedback`;
   const debugModeStorageKey = `${storagePrefix}.debugMode`;
   const debugLogStorageKey = `${storagePrefix}.debugLog`;
+  const networkMonitorStorageKey = `${storagePrefix}.networkMonitor`;
   const performanceMeterStorageKey = `${storagePrefix}.performanceMeter`;
   const performanceTasksStorageKey = `${storagePrefix}.performanceTasks`;
   const mobileRemoteDesktopStorageKey = "lightos-mobile-remote-desktop-enabled";
@@ -449,6 +457,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const performanceTaskPanelLimit = 10;
   const debugLogEntryLimit = 200;
   const debugLogDedupWindowMs = 5000;
+  const terminalNetworkMonitorSampleMs = 1000;
   const performanceTaskAlertThresholds = {
     count: 120,
     avgMs: 16,
@@ -687,8 +696,15 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   let mobileDoubleTapReminderEnabled = true;
   let debugModeEnabled = window.localStorage.getItem(debugModeStorageKey) === "true";
   let debugLogEnabled = window.localStorage.getItem(debugLogStorageKey) === "true";
+  let networkMonitorEnabled = window.localStorage.getItem(networkMonitorStorageKey) === "true";
   let debugLogEntries = [];
   const debugLogLastSeen = new Map();
+  let debugConsoleCaptureCleanup = null;
+  let debugWindowErrorCaptureActive = false;
+  let terminalNetworkMonitor = null;
+  let terminalNetworkMonitorModulePromise = null;
+  let terminalNetworkMonitorSampleTimer = 0;
+  let terminalNetworkMonitorStartGeneration = 0;
   let lastNetworkBannerState = null;
   let performanceMeterEnabled = window.localStorage.getItem(performanceMeterStorageKey) === "true";
   let performanceTasksEnabled = window.localStorage.getItem(performanceTasksStorageKey) === "true";
@@ -1025,6 +1041,185 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     onChange: () => renderPerformanceTaskMeter(),
   });
 
+  const terminalNetworkMonitorStateLabel = (state) => ({
+    connecting: "连接中",
+    open: "已启用",
+    closing: "关闭中",
+    error: "异常",
+    idle: "未启用",
+  })[state] || "未启用";
+
+  const formatTerminalNetworkMB = (bytes) => (Math.max(0, Number(bytes) || 0) / 1_000_000).toFixed(3);
+
+  const emptyTerminalNetworkMonitorState = () => ({
+    channels: (isClientInstanceName(activeName)
+      ? ["直连通道 1", "直连通道 2", "直连通道 3"]
+      : ["直连通道 1", "直连通道 2", "队列通道"]
+    ).map((label, index) => ({
+      index,
+      label,
+      state: "idle",
+      receivedBytes: 0,
+      sentBytes: 0,
+      totalBytes: 0,
+      receivedBytesPerSecond: 0,
+      sentBytesPerSecond: 0,
+      bytesPerSecond: 0,
+    })),
+    receivedBytes: 0,
+    sentBytes: 0,
+    totalBytes: 0,
+    receivedBytesPerSecond: 0,
+    sentBytesPerSecond: 0,
+    bytesPerSecond: 0,
+  });
+
+  const renderTerminalNetworkMonitor = (state = terminalNetworkMonitor?.snapshot()) => {
+    if (!terminalNetworkMonitorPanel) {
+      return;
+    }
+    const visible = debugModeEnabled && networkMonitorEnabled;
+    terminalNetworkMonitorPanel.hidden = !visible;
+    if (!visible) {
+      return;
+    }
+    const snapshot = state || emptyTerminalNetworkMonitorState();
+    if (terminalNetworkMonitorChannels) {
+      terminalNetworkMonitorChannels.textContent = "";
+      for (const channel of snapshot.channels || []) {
+        const row = document.createElement("div");
+        row.className = "terminal-network-monitor-channel";
+        const name = document.createElement("span");
+        name.className = "terminal-network-monitor-channel-name";
+        name.textContent = channel.label;
+        const status = document.createElement("span");
+        status.className = "terminal-network-monitor-channel-state";
+        status.dataset.state = channel.state || "idle";
+        status.textContent = terminalNetworkMonitorStateLabel(channel.state);
+        const rateLabel = document.createElement("span");
+        rateLabel.className = "terminal-network-monitor-channel-metric-label";
+        rateLabel.textContent = "当前流量";
+        const rate = document.createElement("strong");
+        rate.className = "terminal-network-monitor-channel-metric-value";
+        rate.textContent = `${formatTerminalNetworkMB(channel.bytesPerSecond)} MB/s`;
+        const usageLabel = document.createElement("span");
+        usageLabel.className = "terminal-network-monitor-channel-metric-label";
+        usageLabel.textContent = "已使用流量";
+        const usage = document.createElement("strong");
+        usage.className = "terminal-network-monitor-channel-metric-value";
+        usage.textContent = `${formatTerminalNetworkMB(channel.totalBytes)} MB`;
+        const detail = document.createElement("small");
+        detail.className = "terminal-network-monitor-channel-detail";
+        detail.textContent = `接收 ${formatTerminalNetworkMB(channel.receivedBytesPerSecond)} MB/s / ${formatTerminalNetworkMB(channel.receivedBytes)} MB · 发送 ${formatTerminalNetworkMB(channel.sentBytesPerSecond)} MB/s / ${formatTerminalNetworkMB(channel.sentBytes)} MB`;
+        row.append(name, status, rateLabel, rate, usageLabel, usage, detail);
+        terminalNetworkMonitorChannels.appendChild(row);
+      }
+    }
+    const receivedRate = formatTerminalNetworkMB(snapshot.receivedBytesPerSecond);
+    const sentRate = formatTerminalNetworkMB(snapshot.sentBytesPerSecond);
+    const receivedUsage = formatTerminalNetworkMB(snapshot.receivedBytes);
+    const sentUsage = formatTerminalNetworkMB(snapshot.sentBytes);
+    if (terminalNetworkMonitorRate) {
+      terminalNetworkMonitorRate.textContent = `${formatTerminalNetworkMB(snapshot.bytesPerSecond)} MB/s`;
+    }
+    if (terminalNetworkMonitorRateDetail) {
+      terminalNetworkMonitorRateDetail.textContent = `接收 ${receivedRate} MB/s · 发送 ${sentRate} MB/s`;
+    }
+    if (terminalNetworkMonitorUsage) {
+      terminalNetworkMonitorUsage.textContent = `${formatTerminalNetworkMB(snapshot.totalBytes)} MB`;
+    }
+    if (terminalNetworkMonitorUsageDetail) {
+      terminalNetworkMonitorUsageDetail.textContent = `接收 ${receivedUsage} MB · 发送 ${sentUsage} MB`;
+    }
+  };
+
+  const terminalNetworkMonitorShouldRun = () => debugModeEnabled && networkMonitorEnabled && !disposed;
+
+  const syncTerminalNetworkMonitorSockets = ({ reset = false } = {}) => {
+    if (!terminalNetworkMonitor) {
+      return;
+    }
+    if (reset) {
+      terminalNetworkMonitor.detachAll();
+    }
+    terminalNetworkMonitor.setLayout(isClientInstanceName(activeName) ? "direct" : "multiplexed");
+    for (const tab of tabs.values()) {
+      for (const pane of tab.panes.values()) {
+        if (
+          !pane.closed
+          && pane.name === activeName
+          && pane.connectionChannel === "fast"
+          && pane.socket
+        ) {
+          terminalNetworkMonitor.attachSocket(pane.socket, { kind: "fast" });
+        }
+      }
+    }
+    if (!isClientInstanceName(activeName) && terminalQueueTargetName === activeName) {
+      const queueSocket = terminalQueueConnection?.getPhysicalSocket?.();
+      if (queueSocket) {
+        terminalNetworkMonitor.attachSocket(queueSocket, { kind: "queue" });
+      }
+    }
+    renderTerminalNetworkMonitor();
+  };
+
+  const stopTerminalNetworkMonitor = () => {
+    terminalNetworkMonitorStartGeneration += 1;
+    if (terminalNetworkMonitorSampleTimer) {
+      window.clearInterval(terminalNetworkMonitorSampleTimer);
+      terminalNetworkMonitorSampleTimer = 0;
+    }
+    terminalNetworkMonitor?.dispose();
+    terminalNetworkMonitor = null;
+    renderTerminalNetworkMonitor();
+  };
+
+  const startTerminalNetworkMonitor = async () => {
+    if (!terminalNetworkMonitorShouldRun()) {
+      stopTerminalNetworkMonitor();
+      return;
+    }
+    if (terminalNetworkMonitor) {
+      syncTerminalNetworkMonitorSockets();
+      return;
+    }
+    const generation = ++terminalNetworkMonitorStartGeneration;
+    renderTerminalNetworkMonitor();
+    terminalNetworkMonitorModulePromise ||= import("./terminal_network_monitor.js");
+    try {
+      const module = await terminalNetworkMonitorModulePromise;
+      if (generation !== terminalNetworkMonitorStartGeneration || !terminalNetworkMonitorShouldRun()) {
+        return;
+      }
+      terminalNetworkMonitor = module.createTerminalNetworkMonitor({
+        layout: isClientInstanceName(activeName) ? "direct" : "multiplexed",
+        onStateChange: (state) => renderTerminalNetworkMonitor(state),
+      });
+      syncTerminalNetworkMonitorSockets();
+      terminalNetworkMonitorSampleTimer = window.setInterval(() => {
+        if (!terminalNetworkMonitorShouldRun()) {
+          stopTerminalNetworkMonitor();
+          return;
+        }
+        terminalNetworkMonitor?.sample();
+      }, terminalNetworkMonitorSampleMs);
+    } catch (error) {
+      if (generation === terminalNetworkMonitorStartGeneration) {
+        terminalNetworkMonitorModulePromise = null;
+        appendDebugError("网络监视器加载失败", error?.message || String(error));
+      }
+    }
+  };
+
+  const applyTerminalNetworkMonitorVisibility = () => {
+    if (terminalNetworkMonitorShouldRun()) {
+      startTerminalNetworkMonitor();
+    } else {
+      stopTerminalNetworkMonitor();
+    }
+  };
+
   const renderDebugLog = () => {
     if (!debugLogPanel || !debugLogList) {
       return;
@@ -1094,21 +1289,69 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   };
 
   const installDebugConsoleCapture = () => {
+    const captures = [];
     for (const [method, level] of [["warn", "warn"], ["error", "error"]]) {
-      const original = console[method]?.bind(console);
+      const original = console[method];
       if (!original) {
         continue;
       }
-      console[method] = (...args) => {
-        original(...args);
+      const capture = (...args) => {
+        original.apply(console, args);
         const message = args.map(formatDebugLogValue).filter(Boolean).join(" ").slice(0, 2000);
         const dedupeKey = `console:${level}:${typeof args[0] === "string" ? args[0] : message.slice(0, 160)}`;
         appendDebugLog(level, message, "", { dedupeKey });
       };
+      console[method] = capture;
+      captures.push({ method, original, capture });
+    }
+    return () => {
+      for (const { method, original, capture } of captures) {
+        if (console[method] === capture) {
+          console[method] = original;
+        }
+      }
+    };
+  };
+
+  const handleDebugWindowError = (event) => {
+    const targetURL = event.target instanceof HTMLScriptElement
+      ? event.target.src
+      : event.target instanceof HTMLLinkElement
+        ? event.target.href
+        : "";
+    const location = event.filename
+      ? `${event.filename}:${event.lineno || 0}:${event.colno || 0}`
+      : targetURL;
+    appendDebugError("页面运行错误", [event.message || event.error?.message || "资源加载失败", location].filter(Boolean).join(" - "));
+  };
+
+  const handleDebugUnhandledRejection = (event) => {
+    appendDebugError("未处理的异步错误", formatDebugLogValue(event.reason));
+  };
+
+  const syncDebugLogCapture = () => {
+    const active = debugModeEnabled && debugLogEnabled && !disposed;
+    if (active) {
+      if (!debugConsoleCaptureCleanup) {
+        debugConsoleCaptureCleanup = installDebugConsoleCapture();
+      }
+      if (!debugWindowErrorCaptureActive) {
+        window.addEventListener("error", handleDebugWindowError, true);
+        window.addEventListener("unhandledrejection", handleDebugUnhandledRejection);
+        debugWindowErrorCaptureActive = true;
+      }
+      return;
+    }
+    debugConsoleCaptureCleanup?.();
+    debugConsoleCaptureCleanup = null;
+    if (debugWindowErrorCaptureActive) {
+      window.removeEventListener("error", handleDebugWindowError, true);
+      window.removeEventListener("unhandledrejection", handleDebugUnhandledRejection);
+      debugWindowErrorCaptureActive = false;
     }
   };
 
-  installDebugConsoleCapture();
+  syncDebugLogCapture();
 
   const performanceTaskNow = () => (
     window.performance && typeof window.performance.now === "function"
@@ -1172,7 +1415,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!performanceMeterFps || !performanceMeterRefresh) {
       return;
     }
-    if (!performanceMeterEnabled || performanceMeterFrame) {
+    if (!debugModeEnabled || !performanceMeterEnabled || performanceMeterFrame) {
       return;
     }
     let frameCount = 0;
@@ -1182,7 +1425,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     const frameIntervals = [];
     const maxIntervals = 90;
     const update = (time) => {
-      if (disposed || !performanceMeterEnabled) {
+      if (disposed || !debugModeEnabled || !performanceMeterEnabled) {
         performanceMeterFrame = 0;
         return;
       }
@@ -1555,7 +1798,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   };
 
   const applyPerformanceMeterVisibility = () => {
-    if (performanceMeterEnabled) {
+    const performanceMeterActive = debugModeEnabled && performanceMeterEnabled;
+    if (performanceMeterActive) {
       mountPerformanceMeter();
       startPerformanceMeter();
     } else {
@@ -1565,11 +1809,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   };
 
   const applyPerformanceTaskMeterVisibility = () => {
+    const performanceTasksActive = debugModeEnabled && performanceTasksEnabled;
     if (performanceTaskMeter) {
-      performanceTaskMeter.hidden = !performanceTasksEnabled;
+      performanceTaskMeter.hidden = !performanceTasksActive;
     }
-    performanceTaskMonitor.setEnabled(performanceTasksEnabled);
-    if (performanceTasksEnabled) {
+    performanceTaskMonitor.setEnabled(performanceTasksActive);
+    if (performanceTasksActive) {
       renderPerformanceTaskMeter();
     }
   };
@@ -1592,15 +1837,25 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     renderDebugLog();
   };
 
+  const syncSettingsNetworkMonitorToggle = () => {
+    if (settingsNetworkMonitorToggle) {
+      settingsNetworkMonitorToggle.checked = networkMonitorEnabled;
+      settingsNetworkMonitorToggle.disabled = !debugModeEnabled;
+    }
+    renderTerminalNetworkMonitor();
+  };
+
   const syncSettingsPerformanceMeterToggle = () => {
     if (settingsPerformanceMeterToggle) {
       settingsPerformanceMeterToggle.checked = performanceMeterEnabled;
+      settingsPerformanceMeterToggle.disabled = !debugModeEnabled;
     }
   };
 
   const syncSettingsPerformanceTasksToggle = () => {
     if (settingsPerformanceTasksToggle) {
       settingsPerformanceTasksToggle.checked = performanceTasksEnabled;
+      settingsPerformanceTasksToggle.disabled = !debugModeEnabled;
     }
   };
 
@@ -1613,6 +1868,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const syncSettingsDebugOptions = () => {
     syncSettingsDebugModeControls();
     syncSettingsDebugLogToggle();
+    syncSettingsNetworkMonitorToggle();
     syncSettingsPerformanceMeterToggle();
     syncSettingsPerformanceTasksToggle();
     syncSettingsMobileRemoteDesktopToggle();
@@ -1620,6 +1876,17 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
 
   const syncDebugModeState = () => {
     syncSettingsDebugOptions();
+    syncDebugLogCapture();
+    applyPerformanceMeterVisibility();
+    applyPerformanceTaskMeterVisibility();
+    applyTerminalNetworkMonitorVisibility();
+    if (debugModeEnabled) {
+      startDeviceHeartbeat();
+    } else {
+      sendDeviceOfflineBeacon();
+      stopDeviceHeartbeat();
+      closeDevicePanel();
+    }
   };
 
   const syncSettingsDesktopMouseClipboardToggle = () => {
@@ -3797,6 +4064,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       activeName = normalized;
       activeInstanceGeneration += 1;
       setActiveWorkspaceCacheV2Identity(null);
+      if (terminalNetworkMonitor) {
+        syncTerminalNetworkMonitorSockets({ reset: true });
+      }
     }
     return activeInstanceGeneration;
   };
@@ -4567,6 +4837,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   };
 
   const openDevicePanel = () => {
+    if (!debugModeEnabled) {
+      return;
+    }
     closeContextMenu();
     closeThemePicker();
     closeSettings();
@@ -16484,6 +16757,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return false;
     }
     session.socket = currentSocket;
+    if (terminalNetworkMonitor) {
+      syncTerminalNetworkMonitorSockets();
+    }
     session.replayComplete = false;
     session.replayVerified = false;
     session.replayCompletionPending = false;
@@ -20299,11 +20575,6 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
 
   const bootstrap = async () => {
     syncDebugModeState();
-    applyPerformanceMeterVisibility();
-    applyPerformanceTaskMeterVisibility();
-    if (debugModeEnabled) {
-      startDeviceHeartbeat();
-    }
     const themePromise = loadThemeCatalog().finally(() => {
       markWebShellStartupMetric("themeReadyAt");
     });
@@ -20761,23 +21032,25 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   settingsDebugModeToggle?.addEventListener("change", () => {
     debugModeEnabled = settingsDebugModeToggle.checked;
     window.localStorage.setItem(debugModeStorageKey, debugModeEnabled ? "true" : "false");
-    if (debugModeEnabled) {
-      startDeviceHeartbeat();
-    } else {
-      sendDeviceOfflineBeacon();
-      stopDeviceHeartbeat();
-    }
     syncDebugModeState();
   });
   settingsDebugLogToggle?.addEventListener("change", () => {
     debugLogEnabled = settingsDebugLogToggle.checked;
     window.localStorage.setItem(debugLogStorageKey, debugLogEnabled ? "true" : "false");
     if (debugLogEnabled) {
+      syncDebugLogCapture();
       appendDebugLog("info", "错误日志已启用");
     } else {
+      syncDebugLogCapture();
       renderDebugLog();
     }
     syncSettingsDebugLogToggle();
+  });
+  settingsNetworkMonitorToggle?.addEventListener("change", () => {
+    networkMonitorEnabled = settingsNetworkMonitorToggle.checked;
+    window.localStorage.setItem(networkMonitorStorageKey, networkMonitorEnabled ? "true" : "false");
+    applyTerminalNetworkMonitorVisibility();
+    syncSettingsNetworkMonitorToggle();
   });
   debugLogClear?.addEventListener("click", () => {
     debugLogEntries = [];
@@ -21357,7 +21630,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (settingsBackdrop && !settingsBackdrop.hidden) {
       syncSettingsMobileNavigation();
     }
-    if (deviceBackdrop && !deviceBackdrop.hidden) {
+    if (debugModeEnabled && deviceBackdrop && !deviceBackdrop.hidden) {
       refreshDeviceList().catch(() => {});
     }
     ensureMobileOverviewHistoryGuard();
@@ -21373,20 +21646,6 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   window.visualViewport?.addEventListener("scroll", syncMobileCustomSelectPosition);
   syncMobileVisualViewport();
   ensureMobileOverviewHistoryGuard();
-  window.addEventListener("error", (event) => {
-    const targetURL = event.target instanceof HTMLScriptElement
-      ? event.target.src
-      : event.target instanceof HTMLLinkElement
-        ? event.target.href
-        : "";
-    const location = event.filename
-      ? `${event.filename}:${event.lineno || 0}:${event.colno || 0}`
-      : targetURL;
-    appendDebugError("页面运行错误", [event.message || event.error?.message || "资源加载失败", location].filter(Boolean).join(" - "));
-  }, true);
-  window.addEventListener("unhandledrejection", (event) => {
-    appendDebugError("未处理的异步错误", formatDebugLogValue(event.reason));
-  });
   document.fonts?.ready?.then(() => {
     for (const tab of tabs.values()) {
       for (const pane of tab.panes.values()) {
@@ -21434,12 +21693,14 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) {
       rememberWorkspaceRestoreState();
-      postDeviceHeartbeat().catch(handleDeviceHeartbeatError);
+      if (debugModeEnabled) {
+        postDeviceHeartbeat().catch(handleDeviceHeartbeatError);
+      }
       resizeActiveTab({ forceFullRender: true, hideUntilRender: true });
       claimTerminalSize(activeSession());
       reconnectVisibleSessions({ allowHidden: true, probe: true });
       refreshActivity({ silent: true }).catch(() => {});
-      if (deviceBackdrop && !deviceBackdrop.hidden) {
+      if (debugModeEnabled && deviceBackdrop && !deviceBackdrop.hidden) {
         refreshDeviceList().catch(() => {});
       }
       updateSelectionSheet();
@@ -21453,7 +21714,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   });
   window.addEventListener("pageshow", () => {
     rememberWorkspaceRestoreState();
-    postDeviceHeartbeat().catch(handleDeviceHeartbeatError);
+    if (debugModeEnabled) {
+      postDeviceHeartbeat().catch(handleDeviceHeartbeatError);
+    }
     resizeActiveTab({ forceFullRender: true, hideUntilRender: true });
     claimTerminalSize(activeSession());
     reconnectVisibleSessions({ allowHidden: true, probe: true });
@@ -21481,6 +21744,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     instancesLoader.dispose();
     clearWorkspaceRefreshRetry();
     stopPerformanceMeter();
+    stopTerminalNetworkMonitor();
+    syncDebugLogCapture();
     sendDeviceOfflineBeacon();
     window.clearInterval(workspaceRestoreHeartbeatTimer);
     stopDeviceHeartbeat();

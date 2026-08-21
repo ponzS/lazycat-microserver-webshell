@@ -33,6 +33,18 @@ func TestTerminalResizeSchedulerBehavior(t *testing.T) {
 	}
 }
 
+func TestTerminalNetworkMonitorBehavior(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is unavailable")
+	}
+	command := exec.Command(node, "--test", "terminal_network_monitor_test.mjs")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("terminal network monitor tests failed: %v\n%s", err, output)
+	}
+}
+
 func TestInstancesLoaderBehavior(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -706,7 +718,7 @@ func TestRuntimeInstanceSwitcherListScrollsWhenManyInstances(t *testing.T) {
 	}
 }
 
-func TestRuntimeDebugModeOnlyTogglesOptionsList(t *testing.T) {
+func TestRuntimeDebugModeControlsDebugTools(t *testing.T) {
 	indexData, err := os.ReadFile("runtime/static/index.html")
 	if err != nil {
 		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
@@ -743,7 +755,18 @@ func TestRuntimeDebugModeOnlyTogglesOptionsList(t *testing.T) {
 		`let performanceTasksEnabled = window.localStorage.getItem(performanceTasksStorageKey) === "true";`,
 		"mountPerformanceMeter();",
 		"unmountPerformanceMeter();",
-		"performanceTaskMonitor.setEnabled(performanceTasksEnabled);",
+		"const performanceMeterActive = debugModeEnabled && performanceMeterEnabled;",
+		"const performanceTasksActive = debugModeEnabled && performanceTasksEnabled;",
+		"performanceTaskMonitor.setEnabled(performanceTasksActive);",
+		"settingsPerformanceMeterToggle.disabled = !debugModeEnabled;",
+		"settingsPerformanceTasksToggle.disabled = !debugModeEnabled;",
+		"syncDebugLogCapture();",
+		"applyPerformanceMeterVisibility();",
+		"applyPerformanceTaskMeterVisibility();",
+		"applyTerminalNetworkMonitorVisibility();",
+		"stopDeviceHeartbeat();",
+		"closeDevicePanel();",
+		"if (!debugModeEnabled) {\n      return;\n    }\n    closeContextMenu();",
 		"performanceMeterEnabled = settingsPerformanceMeterToggle.checked;",
 		"performanceTasksEnabled = settingsPerformanceTasksToggle.checked;",
 		`const mobileRemoteDesktopStorageKey = "lightos-mobile-remote-desktop-enabled";`,
@@ -757,14 +780,10 @@ func TestRuntimeDebugModeOnlyTogglesOptionsList(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
-		"debugModeEnabled && window.localStorage.getItem(performanceMeterStorageKey)",
-		"debugModeEnabled && window.localStorage.getItem(performanceTasksStorageKey)",
-		"debugModeEnabled && performanceMeterEnabled",
-		"debugModeEnabled && performanceTasksEnabled",
-		"debugModeEnabled && settingsPerformanceMeterToggle.checked",
-		"debugModeEnabled && settingsPerformanceTasksToggle.checked",
 		"performanceMeterEnabled = false;",
 		"performanceTasksEnabled = false;",
+		"mobileRemoteDesktopEnabled = false;",
+		"window.localStorage.removeItem(mobileRemoteDesktopStorageKey)",
 	} {
 		if strings.Contains(source, forbidden) {
 			t.Fatalf("runtime debug mode must not gate feature state with %q", forbidden)
@@ -3138,9 +3157,11 @@ func TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard(t *testing.T) 
 		"const dedupeKey = `console:${level}:",
 		"debugLogPanel.hidden = !debugModeEnabled || !debugLogEnabled;",
 		"debugLogEntries.splice(0, debugLogEntries.length - debugLogEntryLimit);",
-		"console[method] = (...args) => {",
-		"window.addEventListener(\"error\", (event) => {",
-		"window.addEventListener(\"unhandledrejection\", (event) => {",
+		"console[method] = capture;",
+		"window.addEventListener(\"error\", handleDebugWindowError, true);",
+		"window.addEventListener(\"unhandledrejection\", handleDebugUnhandledRejection);",
+		"window.removeEventListener(\"error\", handleDebugWindowError, true);",
+		"window.removeEventListener(\"unhandledrejection\", handleDebugUnhandledRejection);",
 		"const handleDeviceHeartbeatError = (error) => {",
 		"if (disposed || !debugModeEnabled || navigator.onLine === false)",
 		"const stopDeviceHeartbeat = () => {",
@@ -3301,6 +3322,111 @@ func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
 	}
 	if !strings.Contains(serviceWorkerSource, "`${assetBase}terminal_queue_connection.js`,") {
 		t.Fatal("service worker must precache the terminal queue connection")
+	}
+}
+
+func TestRuntimeTerminalNetworkMonitorIsOptIn(t *testing.T) {
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	monitorData, err := os.ReadFile("runtime/static/terminal_network_monitor.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/terminal_network_monitor.js) error = %v", err)
+	}
+	queueData, err := os.ReadFile("runtime/static/terminal_queue_connection.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/terminal_queue_connection.js) error = %v", err)
+	}
+	indexData, err := os.ReadFile("runtime/static/index.html")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
+	}
+	styleData, err := os.ReadFile("runtime/static/style.css")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/style.css) error = %v", err)
+	}
+	serviceWorkerData, err := os.ReadFile("runtime/static/service-worker.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/service-worker.js) error = %v", err)
+	}
+	mainSource := string(mainData)
+	monitorSource := string(monitorData)
+	queueSource := string(queueData)
+	indexSource := string(indexData)
+	styleSource := string(styleData)
+	serviceWorkerSource := string(serviceWorkerData)
+
+	for _, want := range []string{
+		`id="settingsNetworkMonitorToggle"`,
+		`id="terminalNetworkMonitor"`,
+		`id="terminalNetworkMonitorChannels"`,
+		`id="terminalNetworkMonitorRate"`,
+		`id="terminalNetworkMonitorUsage"`,
+		`网络监视器`,
+		`0.000 MB/s`,
+		`0.000 MB`,
+	} {
+		if !strings.Contains(indexSource, want) {
+			t.Fatalf("runtime terminal network monitor index guard missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"const networkMonitorStorageKey = `${storagePrefix}.networkMonitor`;",
+		`let networkMonitorEnabled = window.localStorage.getItem(networkMonitorStorageKey) === "true";`,
+		"const terminalNetworkMonitorShouldRun = () => debugModeEnabled && networkMonitorEnabled && !disposed;",
+		`terminalNetworkMonitorModulePromise ||= import("./terminal_network_monitor.js");`,
+		"terminalNetworkMonitor.attachSocket(pane.socket, { kind: \"fast\" });",
+		"terminalNetworkMonitor.attachSocket(queueSocket, { kind: \"queue\" });",
+		"terminalNetworkMonitor?.dispose();",
+		"window.clearInterval(terminalNetworkMonitorSampleTimer);",
+		"window.setInterval(() => {",
+		`settingsNetworkMonitorToggle?.addEventListener("change", () => {`,
+		`window.localStorage.setItem(networkMonitorStorageKey, networkMonitorEnabled ? "true" : "false");`,
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime terminal network monitor main guard missing %q", want)
+		}
+	}
+	if strings.Contains(mainSource, `import { createTerminalNetworkMonitor } from "./terminal_network_monitor.js";`) {
+		t.Fatal("terminal network monitor must remain dynamically loaded only after opt-in")
+	}
+	if strings.Contains(serviceWorkerSource, "terminal_network_monitor.js") {
+		t.Fatal("service worker must not prefetch the opt-in terminal network monitor")
+	}
+	for _, want := range []string{
+		"export const terminalNetworkPayloadBytes = (payload) => {",
+		"export const createTerminalNetworkMonitor = ({",
+		"const wrappedSend = function sendWithNetworkMeasurement(payload) {",
+		"const wrappedClose = function closeWithNetworkMeasurement(...args) {",
+		"socket.addEventListener(type, listener);",
+		"socket.removeEventListener(type, listener);",
+		"delete socket.send;",
+		"delete socket.close;",
+		"detachAll({ emitChange: false });",
+		"receivedBytesPerSecond",
+		"sentBytesPerSecond",
+		"totalBytes: channel.receivedBytes + channel.sentBytes",
+		"bytesPerSecond: channel.receivedBytesPerSecond + channel.sentBytesPerSecond",
+	} {
+		if !strings.Contains(monitorSource, want) {
+			t.Fatalf("terminal network monitor module guard missing %q", want)
+		}
+	}
+	if !strings.Contains(queueSource, "getPhysicalSocket() {") {
+		t.Fatal("terminal queue connection must expose its physical socket only for opt-in instrumentation")
+	}
+	for _, want := range []string{
+		".terminal-network-monitor {",
+		".terminal-network-monitor-channel {",
+		".terminal-network-monitor-channel-metric-value {",
+		".terminal-network-monitor-channel-detail {",
+		".terminal-network-monitor-summary {",
+		"font-variant-numeric: tabular-nums;",
+	} {
+		if !strings.Contains(styleSource, want) {
+			t.Fatalf("runtime terminal network monitor style guard missing %q", want)
+		}
 	}
 }
 

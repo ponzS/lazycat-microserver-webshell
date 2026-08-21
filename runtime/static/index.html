@@ -93,6 +93,18 @@
             <div class="performance-task-meter-title">性能监视器</div>
             <div class="performance-task-meter-list" id="performanceTaskMeterList"></div>
           </div>
+          <div class="terminal-network-monitor" id="terminalNetworkMonitor" aria-live="off" hidden>
+            <div class="terminal-network-monitor-title">网络监视器</div>
+            <div class="terminal-network-monitor-channels" id="terminalNetworkMonitorChannels"></div>
+            <div class="terminal-network-monitor-summary">
+              <span>当前流量</span>
+              <strong id="terminalNetworkMonitorRate">0.000 MB/s</strong>
+              <small id="terminalNetworkMonitorRateDetail">接收 0.000 MB/s · 发送 0.000 MB/s</small>
+              <span>已使用流量</span>
+              <strong id="terminalNetworkMonitorUsage">0.000 MB</strong>
+              <small id="terminalNetworkMonitorUsageDetail">接收 0.000 MB · 发送 0.000 MB</small>
+            </div>
+          </div>
           <div class="debug-log-panel" id="debugLogPanel" aria-live="polite" hidden>
             <div class="debug-log-panel-head">
               <span class="debug-log-panel-title">调试日志</span>
@@ -296,7 +308,7 @@
                 <label class="settings-switch-row" for="settingsDebugModeToggle">
                   <span class="settings-switch-label">
                     <span>调试模式</span>
-                    <span>显示调试相关工具，默认关闭</span>
+                    <span>关闭时停止调试工具，移动端远程桌面授权除外</span>
                   </span>
                   <input class="settings-switch-input" id="settingsDebugModeToggle" type="checkbox" />
                   <span class="settings-switch" aria-hidden="true"></span>
@@ -330,6 +342,14 @@
                       <span>在终端右上角记录连接、网络和错误状态，默认关闭</span>
                     </span>
                     <input class="settings-switch-input" id="settingsDebugLogToggle" type="checkbox" />
+                    <span class="settings-switch" aria-hidden="true"></span>
+                  </label>
+                  <label class="settings-switch-row" for="settingsNetworkMonitorToggle">
+                    <span class="settings-switch-label">
+                      <span>网络监视器</span>
+                      <span>在终端右上角显示 WebSocket 通道和 MB 流量，默认关闭</span>
+                    </span>
+                    <input class="settings-switch-input" id="settingsNetworkMonitorToggle" type="checkbox" />
                     <span class="settings-switch" aria-hidden="true"></span>
                   </label>
                   <label class="settings-switch-row" for="settingsMobileRemoteDesktopToggle">

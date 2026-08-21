@@ -15,13 +15,13 @@ usage() {
   ./tools/sync-ghostty-web-assets.sh --rebuild-wasm
 
 说明:
-  --check         校验 WebShell 仓库内随包 JS、WASM 和许可证；发布构建使用此模式。
-  --check-source  从当前 Ghostty 源码重建 WASM，再比较实际核心 section 内容。
+  --check         校验随包资产，并从 Ghostty Web submodule 重建 WASM 比较核心 section；发布构建使用此模式。
+  --check-source  显式执行与 --check 相同的源码 WASM 校验。
   --sync          构建并同步 JavaScript/许可证；要求现有源 WASM 核心内容已一致。
   --rebuild-wasm  重建 WASM 和 JavaScript，再同步全部运行时资产。
 
 可选环境变量:
-  GHOSTTY_WEB_DIR 覆盖仓库内 ghostty-web submodule 路径；源码不可用时 --check 仍验证随包 WASM 格式。
+  GHOSTTY_WEB_DIR 覆盖仓库内 ghostty-web submodule 路径。
 EOF
 }
 
@@ -78,6 +78,11 @@ require_source_tree() {
     echo "请执行 git submodule update --init --recursive ghostty-web" >&2
     return 1
   fi
+  if [[ ! -f "${GHOSTTY_WEB_DIR}/package.json" || ! -x "${GHOSTTY_WEB_DIR}/scripts/build-wasm.sh" ]]; then
+    echo "Ghostty Web 源码目录不完整: ${GHOSTTY_WEB_DIR}" >&2
+    echo "请执行 git submodule update --init --recursive ghostty-web" >&2
+    return 1
+  fi
 }
 
 require_bun() {
@@ -113,39 +118,22 @@ compare_source_wasm_content() {
   echo "Ghostty WASM 核心内容一致；差异仅位于可变的自定义 section。"
 }
 
-check_existing_source_wasm() {
-  if [[ ! -f "$source_wasm" ]]; then
-    echo "Ghostty Web submodule 中没有现有 WASM 构建物；跳过源码内容提示。"
-    return 0
-  fi
-  if [[ ! -f "$wasm_comparator" ]] || ! command -v node >/dev/null 2>&1; then
-    echo "缺少 WASM 内容比较工具；跳过 submodule 源构建物提示。"
-    return 0
-  fi
-  if cmp -s "$source_wasm" "$runtime_wasm"; then
-    echo "现有 Ghostty 源构建物与 WebShell 随包 WASM 内容完全一致。"
-    return 0
-  fi
-  if node "$wasm_comparator" "$source_wasm" "$runtime_wasm"; then
-    echo "现有 Ghostty 源构建物核心内容一致；差异仅位于可变的自定义 section。"
-    return 0
-  fi
-  echo "警告：Ghostty Web submodule 的 WASM 构建物核心内容不同，可能是未从当前源码重建的旧文件。" >&2
-  echo "发布仍使用 WebShell 随包 WASM；请执行 --check-source 重建源码后再确认。" >&2
+verify_source_wasm() {
+  require_source_tree
+  require_bun
+  (cd "$GHOSTTY_WEB_DIR" && bun run build:wasm)
+  compare_source_wasm_content
 }
 
 if [[ "$mode" == "--check" ]]; then
   check_runtime_assets
-  check_existing_source_wasm
+  verify_source_wasm
   exit 0
 fi
 
 if [[ "$mode" == "--check-source" ]]; then
   check_runtime_assets
-  require_source_tree
-  require_bun
-  (cd "$GHOSTTY_WEB_DIR" && bun run build:wasm)
-  compare_source_wasm_content
+  verify_source_wasm
   exit 0
 fi
 

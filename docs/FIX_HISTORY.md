@@ -782,3 +782,24 @@ git diff --check
 - Guard：新增 `terminal_queue_test.go` 覆盖二进制 envelope、HTTP 401/`client:` 400、固定轮次公平性、`queue-turn-complete` 紧随二进制时间片、普通输入拒绝和 replay cursor 连续/错误重同步；新增 `terminal_queue_connection_test.mjs` 覆盖硬门禁、单物理连接多逻辑流、身份路由、迟到 generation、cursor 连续性、物理错误只触发一次、最后逻辑流关闭等待真实 close；扩展 `terminal_connection_scheduler_test.mjs` 和 `TestRuntimeTerminalConnectionSchedulerGuard`，固定动态 2/3 容量、`CONNECTING/CLOSING` 占槽、Queue closing Promise、`writeReplay()` 延迟渲染及 Service Worker 预缓存。
 - 验证结果：`node --check` 通过 `main.js`、Service Worker、Fast scheduler 和 Queue connection；Node Cache v2、resize、Kitty Graphics、实例加载、Fast scheduler 与 Queue connection 行为测试 64/64 通过；完整 `go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 通过。本地 Provider 入口和两个新增版本化模块返回 200、`application/javascript` 与 immutable 缓存头，Service Worker 已包含两模块。`terminal-browser` 因当前终端不支持其所需 Kitty 图片协议而无法启动，因此未完成真实页面自动化。用户此前已人工验证三条专属连接版本的基本连接管理；`2 Fast + 1 Queue` 仍需在目标 Android WebView、Lazycat WKWebView 和桌面浏览器以 3、4、12 分屏验证 Network 面板始终不超过三条终端 WebSocket、非 Fast pane 无需点击即可更新、点击提升速度、断线率、CPU、内存和长任务。
 - 禁止复现：两条 Fast 未同时 `open/leased` 时绝对不得创建 Queue；Queue `CONNECTING/CLOSING` 必须占用第三个槽；不得在旧物理 close 确认前创建替代 Queue；不得让后台 tab 或当前活动 pane进入 Queue；不得让同一 pane 的 Fast/Queue generation 双写 Ghostty；不得把 Queue 改成 HTTP 轮询、频繁关闭重建 pane WebSocket，或修改 persistent agent 才能工作；不得截断不连续 VT 字节后继续发送。
+
+### LCMD-20260821-02：调试模式按需启用 WebSocket 网络监视器
+
+- 日期：2026-08-21
+- 来源：用户需求；需要在真机上直接确认三条浏览器 WebSocket 通道和流量是否符合预期，同时明确未开启时不能为调试增加运行开销。
+- 影响模块：终端调试设置和右上角 overlay；新增 `runtime/static/terminal_network_monitor.js`；Fast/Queue 物理 WebSocket 的可选统计接入。
+- 需求现象：浏览器开发者工具在部分移动 WebView 中不可用，现场无法直观看到两条 Fast 与一条 Queue 是否启用、当前 MB/s 和本页监视期间累计 MB；若把统计监听做成常驻逻辑，又会反过来增加被诊断设备的消息处理开销。
+- 实施方案：调试选项新增默认关闭的“网络监视器”，开启后才动态 import 独立模块、挂载当前物理 WebSocket、包装其 `send()`/`close()` 并监听接收消息，每秒采样一次。面板显示容器目标的“直连通道 1 / 直连通道 2 / 队列通道”，`client:` 目标显示三条直连通道，状态覆盖未启用、连接中、已启用、关闭中和异常；当前接收/发送/合计流量使用十进制 MB/s，累计流量使用十进制 MB。Queue 只统计一次物理帧，不按逻辑 pane 重复累计。关闭监视器或调试模式后立即清除采样 timer、移除事件监听、恢复原始 WebSocket 方法并释放累计状态。
+- 调试总控：调试模式关闭时保留 FPS、性能任务、错误日志和网络监视器子开关的持久化偏好，但停止对应 RAF、采样 timer、性能采集、console/window 错误监听、设备心跳和在线设备刷新，并关闭在线设备窗口；重新开启时按保存偏好恢复。只有“允许移动端启用远程桌面”的授权状态独立于总控，关闭调试模式不得清除或禁用该授权。
+- 开销边界：主入口不静态 import 监视器，Service Worker 不预缓存该模块；未开启时不下载模块、不安装 WebSocket 消息监听、不包装 `send()`、不累计字节且不运行采样 timer。浏览器只能观察应用层 WebSocket payload，统计值不包含不可见的 WebSocket/TCP/TLS 协议头。
+- Guard：新增 `terminal_network_monitor_test.mjs`，覆盖 UTF-8/二进制字节、`2 Fast + 1 Queue`、三直连、MB 换算和 dispose 后停止统计并恢复 socket；新增 `TestTerminalNetworkMonitorBehavior` 与 `TestRuntimeTerminalNetworkMonitorIsOptIn`，固定默认关闭、动态 import、禁止 Service Worker 预取、Queue 物理帧单次统计及可拆卸探针；更新 `TestRuntimeDebugModeControlsDebugTools`，固定调试总控停止全部调试运行功能且不清除移动端远程桌面授权。
+- 验证结果：`node --check` 通过 `main.js`、Service Worker、Queue connection 和网络监视器模块；Node Cache v2、实例加载、Kitty Graphics、resize、Fast scheduler、Queue connection 与网络监视器行为测试 68/68 通过；`go test ./... -count=1`、`go test -race ./... -count=1`、Ghostty 资源校验和 `git diff --check` 通过。无头 Chrome 在全新 browser context 验证默认关闭时不请求 `terminal_network_monitor.js`，开启后显示“直连通道 1 / 直连通道 2 / 队列通道”，关闭调试总控后网络/FPS/性能/日志面板全部关闭且 console 捕获恢复，同时远程桌面授权和子开关偏好保留。1280×800 桌面和 390×844 移动 viewport 均无面板或文字溢出。当前本地 Provider 无 LightOS account header，无法建立真实终端 WebSocket，因此真实 MB/s、累计 MB 和连接状态变化仍需在目标设备验证。
+- 禁止复现：不得把网络监视器改成主入口静态依赖、Service Worker 预缓存或常驻定时器；不得在开关关闭时监听每条 WebSocket message/send；不得把 Queue 逻辑转发次数计为物理网络流量；不得把 payload 统计宣称为包含协议头的真实链路流量；不得让任何调试采集、窗口或轮询在调试总控关闭后继续运行，也不得因此清除移动端远程桌面授权。
+
+#### 2026-08-21 通道流量拆分
+
+- 现象：网络监视器只展示三条物理 WebSocket 的连接状态，以及所有通道合计后的实时流量和累计流量，无法判断具体是哪一条直连通道或队列通道产生了网络开销。
+- 根因：采集模块已经为每条物理通道独立维护收发字节和采样速率，但 UI 只消费了顶层合计字段，没有展示通道级快照。
+- 实施方案：通道快照补充各自的合计字节和合计速率；每条通道在状态下方分别显示当前流量、已使用流量，以及接收/发送的实时和累计明细。底部保留所有通道合计，采样周期、物理 socket 监听和按需动态加载机制不变。
+- 回归 guard：Node 行为测试断言三条通道的收发、实时和累计数据彼此隔离；Go 静态 guard 固定通道级合计字段与展示样式。监视器未启用或调试总控关闭时仍不得加载模块、监听 socket 或启动采样 timer。
+- 验证结果：`node --check`、网络监视器 Node 行为测试 4/4、完整 `go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 均通过。无头 Chromium 在 1280×800 与 390×844 视口确认三条通道明细完整显示，面板 `scrollWidth === clientWidth` 且 `scrollHeight === clientHeight`，无文字或容器溢出。
