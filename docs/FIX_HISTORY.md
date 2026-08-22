@@ -58,7 +58,7 @@
 ### 终端历史与渲染
 
 - LightOS 实例终端历史以 persistent agent 保存的原始 PTY 字节为可信来源；浏览器渲染状态不是历史权威。
-- 容器实例的单个 WebShell 页面最多维持 3 条浏览器终端 WebSocket：2 条当前活动 tab 的 pane 专属 Fast 连接，以及在两个 Fast 都完成各自启动 replay 和最终首帧后才允许首次创建的 1 条 Queue 复用连接。Queue 只服务当前 tab 其余可见 pane；后台 tab 不进入 Queue。已创建的 Queue 不因普通输出、瞬态 Canvas render pending 或 Fast 槽位优先级交接而关闭；新增成员仍等待两个 Fast 回到启动就绪状态。Queue 的 `CONNECTING`、`OPEN`、`CLOSING` 都占用第三个物理连接槽，真实物理 close 确认前不得创建替代 Queue。`client:` target 暂不使用 Queue，继续保留最多 3 条直连。
+- 容器实例的单个 WebShell 页面最多维持 3 条浏览器终端 WebSocket：2 条当前活动 tab 的 pane 专属 Fast 连接，以及在两个 Fast 都完成各自启动 replay 和最终首帧后才允许首次创建的 1 条 Queue 复用连接。无用户操作的冷启动须按当前布局的视觉顺序分配 Fast 1、Fast 2 和 Queue FIFO；首次 Queue 候选已交接后才恢复运行期交互/LRU 优先级。Queue 只服务当前 tab 其余可见 pane；后台 tab 不进入 Queue。已创建的 Queue 不因普通输出、瞬态 Canvas render pending 或 Fast 槽位优先级交接而关闭；新增成员仍等待两个 Fast 回到启动就绪状态。Queue 的 `CONNECTING`、`OPEN`、`CLOSING` 都占用第三个物理连接槽，真实物理 close 确认前不得创建替代 Queue。`client:` target 暂不使用 Queue，继续保留最多 3 条直连。
 - Queue 复用只发生在浏览器与 Provider 之间。Provider 为每个 Queue pane 复用现有 agent attach、持续 drain 上游并按 pane 公平轮转；persistent agent 不修改，继续维护全部 PTY、任务、历史和 cursor。普通用户输入只允许经 Fast，点击或输入 Queue pane 时先提升到 Fast；同一 pane 任意时刻只能由一个有效 channel generation 写入 Ghostty。
 - 历史流使用 `history_generation` 和绝对 byte cursor 表示范围。服务端根据本地范围选择 `snapshot`、`delta` 或 `current`，所有 chunk 必须连续。
 - 容器实例使用 Cache API v2 保存按账号 scope、完整 selector、workspace generation、tab、pane 和 history generation 隔离的不可变 PTY 字节块，并以 commit-last manifest 暴露已持久化 cursor。缓存无效时可以丢弃并从 agent 重建，但不能把不连续缓存拼接到新 generation。
@@ -870,3 +870,15 @@ git diff --check
 - 回归 guard：`TestRuntimeTerminalTopologyControllerOwnsFastQueueHandoff` 固定物理状态迁移、退避到期重试、replay 隔离及 logical synchronize 不得触碰 physical backoff。
 - 验证结果：`node --check runtime/static/main.js runtime/static/terminal_topology_controller.js runtime/static/terminal_queue_connection.js runtime/static/terminal_network_monitor.js`、Node 行为测试 60/60、`go test ./... -count=1`、`go test -race ./... -count=1` 与 `git diff --check` 均通过。真实目标实例仍需验证一次 Queue 物理断开后的退避、自动重连及全部 logical pane 自动恢复。
 - 禁止复现：不得从 replay complete、逻辑流增删、Queue FIFO、pane 重试或普通 reconcile 修改 Queue physical reconnect attempts；不得让 logical pane 调度取消或替代物理 transport 的退避定时器。
+
+### LCMD-20260821-08：冷启动窗口顺序与视觉布局不一致
+
+- 日期：2026-08-21
+- 来源：32 分屏真机复测；首次打开时直连与 Queue pane 的加载顺序看起来随机，服务端最后活动的 pane 会抢占左上窗口。
+- 影响模块：`runtime/static/main.js` 的活动 tab 布局测量，以及 `runtime/static/terminal_topology_controller.js` 的 Fast/Queue 冷启动候选排序。
+- 错误现象：冷启动候选优先按保存的 active pane、历史交互、输出时间和服务端创建顺序选择。`PaneIDs` 是创建顺序而不是布局视觉顺序，因此两个直连与 Queue FIFO 不会按用户正在看的第一行从左到右加载。
+- 根因：运行期交互优先级被直接复用于没有用户操作的首轮初始化，控制器没有接收冻结的视觉位置序列。
+- 实施方案：当前 tab 全部可见 pane 完成有效 fit 与 `getBoundingClientRect()` 位置确认后，前端按 top、left、布局树顺序和 pane ID 生成稳定视觉序列。一个拓扑 epoch 仅首次启用此序列：视觉第一个和第二个 pane 依次成为直连通道 1、2；两个最终首帧完成后，剩余 pane 以同一序列加入 Queue FIFO。Queue 首次候选会带 `initialization` 标记交给运行时；在其排入 Queue microtask 前，普通 refresh 的活动/LRU 候选不得覆盖该标记快照。首次候选已实际交接后永久退出冷启动排序，继续沿用已有用户交互/LRU 提升规则。Cache API 继续保持尽力命中，单 pane 缓存未命中或超时即时回退 snapshot，不成为全局初始化门禁。
+- 回归 guard：`terminal_topology_controller_test.mjs` 覆盖 stored active pane 不得抢占视觉首个 pane、直连 1/2 与 Queue FIFO 的连续视觉次序、普通 refresh 生成独立运行期候选但不得替换首轮标记快照，以及 Queue 启动后不重新进入冷启动排序；Go 静态 guard 固定几何排序、首次候选保护和控制器启动边界。
+- 验证结果：`node --check runtime/static/main.js runtime/static/terminal_topology_controller.js runtime/static/terminal_queue_connection.js runtime/static/terminal_network_monitor.js`、Node 行为测试 61/61、`go test ./... -count=1`、`go test -race ./... -count=1` 与 `git diff --check` 均通过。仍需在目标设备以 12、32 分屏确认首次打开的实际首帧严格按第一行从左到右、再依次进入后续视觉位置；缓存命中继续保持尽力而为，不阻塞首帧。
+- 禁止复现：不得用 `activePaneID`、历史输出或服务端 `PaneIDs` 替代没有用户操作时的冷启动视觉次序；不得在运行期普通 refresh 重新启用冷启动排序；不得为等待全量缓存命中阻塞任一 Fast 或 Queue pane 的建立。

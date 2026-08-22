@@ -3410,6 +3410,13 @@ func TestRuntimeTerminalTopologyControllerOwnsFastQueueHandoff(t *testing.T) {
 		"setPhase(\"fast_a_starting\", reason);",
 		"setPhase(\"fast_b_starting\", reason);",
 		"const startQueueTransport = (reason) => {",
+		"const compareInitializationPanes = (left, right) => {",
+		"const initializationCandidates = () => Array.from(panes.values())",
+		"const candidatesForCurrentPhase = () => (",
+		"if (!initializationOrderReady) {",
+		"initializationOrderingActive = false;",
+		"initializationOrderCaptured = false;",
+		"initialization: initializationOrderingActive,",
 		"const fastRendered = (pane, { eventEpoch = epoch, attemptID = 0 } = {}) => {",
 		"const promote = (pane, { reason = \"user_interaction\" } = {}) => {",
 		"reason: \"promote_to_fast\",",
@@ -3422,13 +3429,33 @@ func TestRuntimeTerminalTopologyControllerOwnsFastQueueHandoff(t *testing.T) {
 	if strings.Contains(source, "fast_bootstrap_wait") {
 		t.Fatal("container topology must not release a Fast lease from a global bootstrap reconcile")
 	}
+	if !strings.Contains(source, "const terminalTopologyVisualOrder = (tab, panes) => {") {
+		t.Fatal("container topology must derive a visual cold-start order from measured pane geometry")
+	}
+	for _, want := range []string{
+		"const terminalTopologyLayoutPaneOrder = (node, paneOrder = []) => {",
+		"const rect = pane?.shellEl?.getBoundingClientRect?.();",
+		"entry.pane.initializationOrder = index + 1;",
+		"const { orderedPanes, ready: initializationOrderReady } = terminalTopologyVisualOrder(tab, currentPanes);",
+		"initializationOrderReady,",
+		"let terminalQueuePendingCandidateOrder = null;",
+		"initialization: initialization === true,",
+		"initialization: command.initialization === true,",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("terminal visual cold-start order guard missing %q", want)
+		}
+	}
 
 	queueReconcile := sourceBetween(t, source,
 		"const reconcileTerminalQueue = () => {",
-		"scheduleTerminalQueueSync = () => {")
+		"scheduleTerminalQueueSync = ({")
 	for _, want := range []string{
 		"scheduleUnmeasuredTerminalQueuePanes();",
 		"if (!terminalTopologyController?.isQueueAllowed() || !terminalQueueConnection)",
+		"const pendingCandidateOrder = terminalQueuePendingCandidateOrder;",
+		"pendingCandidateOrder?.epoch === terminalQueueTopologyEpoch",
+		"const currentCandidateSet = new Set(currentCandidates);",
 		"const desired = new Set(candidates);",
 		"detachTerminalQueueSession(pane, \"queue_not_needed\");",
 	} {
@@ -3481,8 +3508,18 @@ func TestRuntimeTerminalTopologyControllerOwnsFastQueueHandoff(t *testing.T) {
 		t.Fatal("queue physical reconnect state must not be mutated from logical pane replay")
 	}
 	queueSyncBlock := sourceBetween(t, source,
-		"  scheduleTerminalQueueSync = () => {",
+		"  scheduleTerminalQueueSync = ({",
 		"  recycleTerminalQueueSession = (session, reason, { immediate = false } = {}) => {")
+	for _, want := range []string{
+		"initialization = false,",
+		"const candidateEpoch = Number(epoch || 0);",
+		"terminalQueuePendingCandidateOrder.initialization !== true",
+		"initialization: initialization === true,",
+	} {
+		if !strings.Contains(queueSyncBlock, want) {
+			t.Fatalf("queue initialization order guard missing %q", want)
+		}
+	}
 	if strings.Contains(queueSyncBlock, "terminalQueueReconnectTimer") || strings.Contains(queueSyncBlock, "terminalQueueReconnectAttempts") {
 		t.Fatal("logical Queue synchronization must not alter physical transport backoff")
 	}

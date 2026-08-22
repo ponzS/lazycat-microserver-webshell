@@ -683,6 +683,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   let terminalQueueTopologyEpoch = 0;
   let terminalQueueTopologyAttemptID = 0;
   let terminalQueuePendingTopologyStart = null;
+  let terminalQueuePendingCandidateOrder = null;
   let terminalQueueSyncScheduled = false;
   let terminalQueueReconnectTimer = 0;
   let terminalQueueReconnectAttempts = 0;
@@ -9614,6 +9615,56 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     ));
   };
 
+  const terminalTopologyLayoutPaneOrder = (node, paneOrder = []) => {
+    if (!node) {
+      return paneOrder;
+    }
+    if (node.type === "leaf") {
+      const paneID = String(node.paneId || "").trim();
+      if (paneID) {
+        paneOrder.push(paneID);
+      }
+      return paneOrder;
+    }
+    for (const child of node.children || []) {
+      terminalTopologyLayoutPaneOrder(child, paneOrder);
+    }
+    return paneOrder;
+  };
+
+  const terminalTopologyVisualOrder = (tab, panes) => {
+    const layoutOrder = new Map(terminalTopologyLayoutPaneOrder(tab?.layout)
+      .map((paneID, index) => [paneID, index]));
+    const measured = [];
+    for (const pane of panes) {
+      const rect = pane?.shellEl?.getBoundingClientRect?.();
+      if (
+        Number(pane?.measuredFitGeneration || 0) <= 0
+        || !rect
+        || rect.width <= 0
+        || rect.height <= 0
+      ) {
+        return { orderedPanes: panes, ready: false };
+      }
+      measured.push({
+        pane,
+        top: rect.top,
+        left: rect.left,
+        layoutOrder: layoutOrder.get(pane.id) ?? Number.MAX_SAFE_INTEGER,
+      });
+    }
+    measured.sort((left, right) => (
+      left.top - right.top
+      || left.left - right.left
+      || left.layoutOrder - right.layoutOrder
+      || String(left.pane.id).localeCompare(String(right.pane.id))
+    ));
+    measured.forEach((entry, index) => {
+      entry.pane.initializationOrder = index + 1;
+    });
+    return { orderedPanes: measured.map((entry) => entry.pane), ready: measured.length > 0 };
+  };
+
   const scheduleTerminalTopologyMeasurementPass = (tab) => {
     if (!tab || tab.id !== activeTabId) {
       return;
@@ -9650,12 +9701,14 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return false;
     }
     const tab = tabs.get(activeTabId);
-    const panes = terminalTopologyPanesForActiveTab();
+    const currentPanes = terminalTopologyPanesForActiveTab();
+    const { orderedPanes, ready: initializationOrderReady } = terminalTopologyVisualOrder(tab, currentPanes);
     terminalTopologyController.refresh({
       targetName: activeName,
       tabID: tab?.id || "",
-      panes,
+      panes: orderedPanes,
       activePane: interactionSession || tab?.panes.get(tab?.activePaneId) || null,
+      initializationOrderReady,
       online: navigator.onLine !== false,
       reason,
     });
@@ -17557,19 +17610,6 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return randomID || `${String(session?.id || "pane")}-${generation}-${Date.now()}`;
   };
 
-  const activeTerminalQueueCandidates = () => {
-    if (isClientInstanceName(activeName) || !terminalTopologyController?.isQueueAllowed()) {
-      return [];
-    }
-    return terminalTopologyController.queueCandidates().filter((pane) => (
-      !pane.closed
-      && pane.name === activeName
-      && pane.tabId === activeTabId
-      && Number(pane.measuredFitGeneration || 0) > 0
-      && !terminalConnectionScheduler?.currentLease(pane)
-    ));
-  };
-
   const scheduleUnmeasuredTerminalQueuePanes = () => {
     const tab = tabs.get(activeTabId);
     if (!tab) {
@@ -17908,7 +17948,22 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!terminalTopologyController?.isQueueAllowed() || !terminalQueueConnection) {
       return;
     }
-    const candidates = activeTerminalQueueCandidates();
+    const pendingCandidateOrder = terminalQueuePendingCandidateOrder;
+    terminalQueuePendingCandidateOrder = null;
+    const currentCandidates = terminalTopologyController.queueCandidates();
+    const currentCandidateSet = new Set(currentCandidates);
+    const candidates = (
+      pendingCandidateOrder?.epoch === terminalQueueTopologyEpoch
+        ? pendingCandidateOrder.panes
+        : currentCandidates
+    ).filter((pane) => (
+      currentCandidateSet.has(pane)
+      && !pane.closed
+      && pane.name === activeName
+      && pane.tabId === activeTabId
+      && Number(pane.measuredFitGeneration || 0) > 0
+      && !terminalConnectionScheduler?.currentLease(pane)
+    ));
     const desired = new Set(candidates);
     for (const tab of tabs.values()) {
       for (const pane of tab.panes.values()) {
@@ -17924,7 +17979,28 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
   };
 
-  scheduleTerminalQueueSync = () => {
+  scheduleTerminalQueueSync = ({
+    candidates = null,
+    epoch = terminalQueueTopologyEpoch,
+    initialization = false,
+  } = {}) => {
+    if (Array.isArray(candidates)) {
+      const candidateEpoch = Number(epoch || 0);
+      // The Queue-open command hands off the frozen visual startup order. A
+      // normal refresh may run before this microtask, but must not replace it.
+      if (
+        initialization === true
+        || !terminalQueuePendingCandidateOrder
+        || terminalQueuePendingCandidateOrder.epoch !== candidateEpoch
+        || terminalQueuePendingCandidateOrder.initialization !== true
+      ) {
+        terminalQueuePendingCandidateOrder = {
+          epoch: candidateEpoch,
+          initialization: initialization === true,
+          panes: [...candidates],
+        };
+      }
+    }
     if (disposed || terminalQueueSyncScheduled) {
       return;
     }
@@ -18181,7 +18257,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         }
         return;
       case "sync-queue-candidates":
-        scheduleTerminalQueueSync();
+        scheduleTerminalQueueSync({
+          candidates: command.panes,
+          epoch: command.epoch,
+          initialization: command.initialization === true,
+        });
         return;
       default:
         return;

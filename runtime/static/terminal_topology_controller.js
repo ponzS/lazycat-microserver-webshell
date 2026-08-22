@@ -22,6 +22,14 @@ const comparePanes = (left, right, activePaneID) => {
     || left.id.localeCompare(right.id);
 };
 
+const compareInitializationPanes = (left, right) => {
+  const leftOrder = asFiniteNumber(left.initializationOrder) || Number.MAX_SAFE_INTEGER;
+  const rightOrder = asFiniteNumber(right.initializationOrder) || Number.MAX_SAFE_INTEGER;
+  return leftOrder - rightOrder
+    || left.order - right.order
+    || left.id.localeCompare(right.id);
+};
+
 const normalizePane = (pane, order) => ({
   id: normalizeID(pane?.id),
   ref: pane,
@@ -31,6 +39,7 @@ const normalizePane = (pane, order) => ({
   lastUserInteractionAt: asFiniteNumber(pane?.lastUserInteractionAt),
   lastBecameVisibleAt: asFiniteNumber(pane?.lastBecameVisibleAt),
   lastOutputAt: asFiniteNumber(pane?.lastOutputAt ?? pane?.lastTerminalOutputAt),
+  initializationOrder: asFiniteNumber(pane?.initializationOrder),
   order,
   state: "awaiting_measurement",
 });
@@ -59,6 +68,9 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
   let fastSlots = [null, null];
   let queue = { state: "closed", attemptID: 0 };
   let pendingPromotion = null;
+  let initializationOrderReady = false;
+  let initializationOrderingActive = false;
+  let initializationOrderCaptured = false;
 
   const command = (type, payload = {}) => {
     onCommand({ type, epoch, ...payload });
@@ -97,6 +109,14 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
     .filter((record) => paneIsUsable(record) && record.measured)
     .sort((left, right) => comparePanes(left, right, activePaneID));
 
+  const initializationCandidates = () => Array.from(panes.values())
+    .filter((record) => paneIsUsable(record) && record.measured)
+    .sort(compareInitializationPanes);
+
+  const candidatesForCurrentPhase = () => (
+    initializationOrderingActive ? initializationCandidates() : measuredCandidates()
+  );
+
   const hasPendingMeasurements = () => Array.from(panes.values())
     .some((record) => paneIsUsable(record) && !record.measured);
 
@@ -133,10 +153,10 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
       return [];
     }
     const fast = new Set(currentFastRecords().map((assignment) => assignment.pane.id));
-    return measuredCandidates().filter((record) => !fast.has(record.id) && pendingPromotion?.target?.id !== record.id);
+    return candidatesForCurrentPhase().filter((record) => !fast.has(record.id) && pendingPromotion?.target?.id !== record.id);
   };
 
-  const syncQueueCandidates = (reason = "") => {
+  const syncQueueCandidates = (reason = "", { initialization = false } = {}) => {
     if (queue.state !== "open") {
       return;
     }
@@ -147,6 +167,7 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
     command("sync-queue-candidates", {
       panes: candidates.map((record) => record.ref),
       paneIDs: candidates.map((record) => record.id),
+      initialization: initialization === true,
       reason: String(reason || ""),
     });
   };
@@ -167,15 +188,21 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
       return;
     }
     setWaitingStates();
-    const candidates = measuredCandidates();
+    if (!initializationOrderReady) {
+      setPhase("awaiting_measurement", reason);
+      return;
+    }
+    const candidates = candidatesForCurrentPhase();
     const first = fastSlots[0];
     if (!first) {
       const activeRecord = panes.get(activePaneID) || null;
-      if (activeRecord && paneIsUsable(activeRecord) && !activeRecord.measured) {
+      if (!initializationOrderingActive && activeRecord && paneIsUsable(activeRecord) && !activeRecord.measured) {
         setPhase("awaiting_measurement", reason);
         return;
       }
-      const firstCandidate = activeRecord?.measured ? activeRecord : candidates[0];
+      const firstCandidate = initializationOrderingActive
+        ? candidates[0]
+        : activeRecord?.measured ? activeRecord : candidates[0];
       if (firstCandidate) {
         setPhase("fast_a_starting", reason);
         startFast(0, firstCandidate, reason);
@@ -200,6 +227,9 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
       // A one-pane tab is already fully initialized. If additional panes have
       // not measured yet, keep the Fast gate closed instead of creating Queue.
       setPhase(hasPendingMeasurements() ? "fast_a_ready" : "running", reason);
+      if (!hasPendingMeasurements()) {
+        initializationOrderingActive = false;
+      }
       if (queue.state === "open") {
         syncQueueCandidates(reason);
       }
@@ -219,6 +249,7 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
     if (queue.state === "open") {
       syncQueueCandidates(reason);
     }
+    initializationOrderingActive = false;
   };
 
   const stopCurrentTopology = (reason) => {
@@ -249,7 +280,15 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
     pendingPromotion = null;
   };
 
-  const refresh = ({ targetName: nextTargetName, tabID: nextTabID, panes: nextPanes = [], activePane = null, online: nextOnline = true, reason = "refresh" } = {}) => {
+  const refresh = ({
+    targetName: nextTargetName,
+    tabID: nextTabID,
+    panes: nextPanes = [],
+    activePane = null,
+    initializationOrderReady: nextInitializationOrderReady = false,
+    online: nextOnline = true,
+    reason = "refresh",
+  } = {}) => {
     const normalizedTarget = normalizeID(nextTargetName);
     const normalizedTab = normalizeID(nextTabID);
     const contextChanged = normalizedTarget !== targetName || normalizedTab !== tabID;
@@ -259,9 +298,19 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
       epoch += 1;
       targetName = normalizedTarget;
       tabID = normalizedTab;
+      initializationOrderReady = false;
+      initializationOrderingActive = false;
+      initializationOrderCaptured = false;
     }
     online = nextOnlineState;
     activePaneID = normalizeID(typeof activePane === "object" ? activePane?.id : activePane);
+    if (nextInitializationOrderReady === true) {
+      initializationOrderReady = true;
+      if (!initializationOrderCaptured) {
+        initializationOrderCaptured = true;
+        initializationOrderingActive = true;
+      }
+    }
 
     const previous = panes;
     panes = new Map();
@@ -273,6 +322,8 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
       const prior = previous.get(id);
       const record = normalizePane(pane, prior?.order || nextPaneOrder++);
       record.state = prior?.state || record.state;
+      record.initializationOrder = asFiniteNumber(pane?.initializationOrder)
+        || asFiniteNumber(prior?.initializationOrder);
       panes.set(id, record);
     }
     for (let index = 0; index < fastSlots.length; index += 1) {
@@ -383,7 +434,10 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
     }
     queue.state = "open";
     setPhase("running", "queue_transport_opened");
-    syncQueueCandidates("queue_transport_opened");
+    syncQueueCandidates("queue_transport_opened", {
+      initialization: initializationOrderingActive,
+    });
+    initializationOrderingActive = false;
     return true;
   };
 
@@ -454,6 +508,9 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
     activePaneID,
     online,
     phase,
+    initializationOrderReady,
+    initializationOrderingActive,
+    initializationOrderCaptured,
     fastSlots: fastSlots.map((slot) => slot && ({
       paneID: slot.pane.id,
       slot: slot.slot,
