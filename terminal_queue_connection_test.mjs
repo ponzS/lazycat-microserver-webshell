@@ -88,30 +88,30 @@ test.beforeEach(() => {
   FakeWebSocket.instances = [];
 });
 
-test("queue creation is gated by both physical fast channels", () => {
+test("queue creation is gated by the single physical Fast channel", () => {
   assert.equal(terminalQueueGateAllowsCreation({
     fastReadyStates: ["ready"],
     queueCandidateCount: 10,
   }), false);
   assert.equal(terminalQueueGateAllowsCreation({
-    fastReadyStates: ["ready", "starting"],
+    fastReadyStates: ["starting"],
     queueCandidateCount: 10,
   }), false);
   assert.equal(terminalQueueGateAllowsCreation({
-    fastReadyStates: ["ready", "open"],
+    fastReadyStates: ["ready"],
     queueCandidateCount: 10,
   }), false);
   assert.equal(terminalQueueGateAllowsCreation({
-    fastReadyStates: ["open", "open"],
+    fastReadyStates: ["open"],
     queueCandidateCount: 0,
   }), false);
   assert.equal(terminalQueueGateAllowsCreation({
-    fastReadyStates: ["open", "open"],
+    fastReadyStates: ["open"],
     queueCandidateCount: 10,
     queueClosing: true,
   }), false);
   assert.equal(terminalQueueGateAllowsCreation({
-    fastReadyStates: ["open", "open"],
+    fastReadyStates: ["open"],
     queueCandidateCount: 10,
   }), true);
 });

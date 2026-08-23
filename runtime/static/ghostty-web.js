@@ -2704,9 +2704,15 @@ class IA {
    * Reset terminal state
    */
   reset() {
-    this.assertOpen(), this.wasmTerm && this.wasmTerm.free();
-    const A = this.buildWasmConfig();
-    this.wasmTerm = this.ghostty.createTerminal(this.cols, this.rows, A), this.renderer.clear(), this.currentTitle = "", this.requestRender({ full: !0 });
+    this.assertOpen();
+    const A = this.buildWasmConfig(), B = this.wasmTerm, g = this.ghostty.createTerminal(this.cols, this.rows, A);
+    this.wasmTerm = g;
+    try {
+      B && B.free();
+    } catch (E) {
+      console.warn("ghostty-web: previous terminal cleanup failed after reset", E);
+    }
+    this.renderer.clear(), this.currentTitle = "", this.requestRender({ full: !0 });
   }
   /**
    * Focus terminal input

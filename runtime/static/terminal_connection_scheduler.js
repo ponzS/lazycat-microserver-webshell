@@ -190,6 +190,31 @@ export const createTerminalConnectionScheduler = ({
         }
         active = activeRecords();
       }
+
+      // A pane parked by preemption must be allowed to reclaim the only Fast
+      // slot when the higher-priority replacement disappears. Without this
+      // idle-pool recovery, the final surviving pane remains parked forever
+      // and pending input eventually expires even though no lease is active.
+      const hasNonParkedDemand = records.values().some((record) => (
+        !record.disposed
+        && !record.parkedByPreempt
+        && !record.retryTimer
+        && demandIsCurrent(record)
+      ));
+      if (active.length === 0 && !hasNonParkedDemand) {
+        for (const record of records.values()) {
+          if (
+            record.parkedByPreempt
+            && !record.disposed
+            && !record.lease
+            && !record.retryTimer
+            && demandIsCurrent(record)
+          ) {
+            record.parkedByPreempt = false;
+            record.status = "queued";
+          }
+        }
+      }
       let queued = eligibleQueuedRecords();
       while (active.length < safeCapacity && queued.length > 0) {
         grant(queued.shift());

@@ -1209,6 +1209,7 @@ func handleAgentAttachControlMessage(conn *websocket.Conn, writeMu *sync.Mutex, 
 					Rows:        message.Rows,
 					PixelWidth:  message.PixelWidth,
 					PixelHeight: message.PixelHeight,
+					ResizeEpoch: message.ResizeEpoch,
 				}
 				if payload, err := json.Marshal(resizeMessage); err == nil {
 					_ = writeAgentFrame(stdin, agentFrameResize, payload)

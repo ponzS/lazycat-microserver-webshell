@@ -1063,10 +1063,10 @@ body.split-resize-active * {
   grid-template-rows: auto minmax(0, 1fr);
   gap: 5px;
   padding: 6px 7px;
-  border: 1px solid color-mix(in srgb, #fca5a5 46%, transparent);
+  border: 1px solid color-mix(in srgb, #22d3ee 42%, transparent);
   border-radius: 6px;
-  background: color-mix(in srgb, #450a0a 88%, var(--terminal-bg));
-  color: #fee2e2;
+  background: color-mix(in srgb, #062c33 88%, var(--terminal-bg));
+  color: color-mix(in srgb, #cffafe 92%, var(--terminal-fg));
   font: 600 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   letter-spacing: 0;
   pointer-events: auto;
@@ -1097,7 +1097,7 @@ body.split-resize-active * {
 .debug-log-clear {
   min-height: 22px;
   padding: 2px 7px;
-  border: 1px solid rgba(254, 202, 202, 0.42);
+  border: 1px solid color-mix(in srgb, #cffafe 42%, transparent);
   border-radius: 4px;
   background: transparent;
   color: inherit;
@@ -1109,7 +1109,7 @@ body.split-resize-active * {
 .debug-log-copy:focus-visible,
 .debug-log-clear:hover,
 .debug-log-clear:focus-visible {
-  background: rgba(254, 202, 202, 0.16);
+  background: color-mix(in srgb, #22d3ee 16%, transparent);
   outline: none;
 }
 
@@ -1129,17 +1129,38 @@ body.split-resize-active * {
   overflow-wrap: anywhere;
 }
 
+.debug-log-entry-error {
+  grid-template-columns: max-content max-content minmax(0, 1fr);
+}
+
 .debug-log-entry-time {
-  color: rgba(254, 202, 202, 0.62);
+  color: color-mix(in srgb, #cffafe 62%, transparent);
   font-variant-numeric: tabular-nums;
 }
 
-.debug-log-entry-warn {
-  color: #fde68a;
+.debug-log-entry-level {
+  display: inline-flex;
+  align-items: center;
+  align-self: start;
+  min-height: 15px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  white-space: nowrap;
 }
 
-.debug-log-entry-error {
+.debug-log-entry-level-error {
+  border-color: color-mix(in srgb, #ef4444 58%, transparent);
+  background: color-mix(in srgb, #7f1d1d 48%, transparent);
   color: #fecaca;
+}
+
+.debug-log-entry-message {
+  min-width: 0;
+  color: inherit;
 }
 
 .terminal-composition-preview {

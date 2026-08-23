@@ -586,6 +586,63 @@ export const createTerminalCacheV2 = ({
     return store.delete(manifestURL(identity));
   });
 
+  // Preview images are derived UI state. Keep history chunks for a pane that
+  // is still known to the workspace, but remove previews whose pane no longer
+  // exists so the overview cannot resurrect stale cards after restore.
+  const cleanupOrphanedPreviews = ({ workspaceIdentity, paneIdentities = [] } = {}) => runMutation(async () => {
+    const workspace = {
+      cacheProtocolVersion: Number(workspaceIdentity?.cacheProtocolVersion),
+      cacheScopeID: String(workspaceIdentity?.cacheScopeID || "").trim(),
+      selector: String(workspaceIdentity?.selector || "").trim(),
+      workspaceGeneration: String(workspaceIdentity?.workspaceGeneration || "").trim(),
+    };
+    if (
+      workspace.cacheProtocolVersion !== cacheSchemaVersion
+      || !workspace.cacheScopeID
+      || !workspace.selector
+      || !workspace.workspaceGeneration
+    ) {
+      return { removedPreviews: 0 };
+    }
+    const livePaneKeys = new Set((Array.isArray(paneIdentities) ? paneIdentities : []).map((identity) => {
+      const tabID = String(identity?.tabID ?? identity?.tab_id ?? "").trim();
+      const paneID = String(identity?.paneID ?? identity?.pane_id ?? "").trim();
+      return tabID && paneID ? `${tabID}\u0000${paneID}` : "";
+    }).filter(Boolean));
+    const store = await cache();
+    const keys = typeof store.keys === "function" ? await store.keys() : [];
+    const manifestKeys = keys
+      .map((request) => String(request?.url || request || ""))
+      .filter((url) => url.startsWith(cacheRootURL) && url.endsWith("/manifest"));
+    let removedPreviews = 0;
+    for (const manifestKey of manifestKeys) {
+      const response = await store.match(manifestKey);
+      if (!response) {
+        continue;
+      }
+      let manifest;
+      try {
+        manifest = normalizeManifest(await response.json());
+      } catch (error) {
+        continue;
+      }
+      if (
+        manifest.cacheProtocolVersion !== workspace.cacheProtocolVersion
+        || manifest.cacheScopeID !== workspace.cacheScopeID
+        || manifest.selector !== workspace.selector
+        || manifest.workspaceGeneration !== workspace.workspaceGeneration
+        || !manifest.preview
+        || livePaneKeys.has(`${manifest.tabID}\u0000${manifest.paneID}`)
+      ) {
+        continue;
+      }
+      await store.delete(previewURL(manifest, manifest.preview.checkpointCursor));
+      await putManifest(store, { ...manifest, preview: null, updatedAt: Date.now() });
+      removedPreviews += 1;
+    }
+    return { removedPreviews };
+  });
+
   const touch = (sourceIdentity) => runMutation(async () => {
     const manifest = await loadManifest(sourceIdentity);
     if (!manifest) {
@@ -669,6 +726,7 @@ export const createTerminalCacheV2 = ({
     available,
     append,
     cleanup,
+    cleanupOrphanedPreviews,
     compact,
     deletePane,
     identityMatches,

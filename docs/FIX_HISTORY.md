@@ -58,7 +58,7 @@
 ### 终端历史与渲染
 
 - LightOS 实例终端历史以 persistent agent 保存的原始 PTY 字节为可信来源；浏览器渲染状态不是历史权威。
-- 容器实例的单个 WebShell 页面最多维持 3 条页面级浏览器终端 WebSocket：直连通道 1、直连通道 2 和共享队列通道。tab 与 pane 统一为逻辑调度对象；切换 tab、Fast LRU 交接和 Queue 成员替换只更新逻辑 stream，不关闭健康物理 transport。首次初始化须按全局视觉顺序串行分配 Fast 1、Fast 2 和 Queue FIFO；两个 Fast 未完成启动首帧前绝不能创建 Queue。Queue 的 `CONNECTING`、`OPEN`、`CLOSING` 都占用物理连接槽，真实物理 close 确认前不得创建替代 transport。`client:` target 暂不使用 Queue，继续保留最多 3 条直连。
+- 容器实例的单个 WebShell 页面最多维持 2 条页面级浏览器终端 WebSocket：1 条 Fast 直连通道和 1 条共享 Queue 通道。tab 与 pane 统一为逻辑调度对象；切换 tab、Fast 交接和 Queue 成员替换只更新逻辑 stream，不关闭健康物理 transport。首次初始化须按全局视觉顺序串行分配 Fast 和 Queue FIFO；Fast 未完成启动首帧前绝不能创建 Queue。Queue 的 `CONNECTING`、`OPEN`、`CLOSING` 都占用物理连接槽，真实物理 close 确认前不得创建替代 transport。`client:` target 暂不使用 Queue，继续保留其独立的直连调度。
 - Fast 与 Queue 复用只发生在浏览器与 Provider 之间。Provider 为每个逻辑 pane 复用现有 agent attach、持续 drain 上游并按 pane 公平轮转；persistent agent 不修改，继续维护全部 PTY、任务、历史和 cursor。Fast transport 每条只绑定一个 pane 并允许普通输入，Queue 普通输入仍需先提升到 Fast；同一 pane 任意时刻只能由一个有效 channel generation 写入 Ghostty。后台 tab 的 Queue pane 在 replay/cursor 连续后即可释放 FIFO，不得等待不可测量 Canvas 阻塞后续 pane。
 - 历史流使用 `history_generation` 和绝对 byte cursor 表示范围。服务端根据本地范围选择 `snapshot`、`delta` 或 `current`，所有 chunk 必须连续。
 - 容器实例使用 Cache API v2 保存按账号 scope、完整 selector、workspace generation、tab、pane 和 history generation 隔离的不可变 PTY 字节块，并以 commit-last manifest 暴露已持久化 cursor。缓存无效时可以丢弃并从 agent 重建，但不能把不连续缓存拼接到新 generation。
@@ -898,3 +898,85 @@ git diff --check
 - 回归 guard：`terminal_topology_controller_test.mjs` 覆盖跨 tab 全局 Queue、tab 切换不发 `stop-queue-transport`、target 切换才重置物理 transport、Fast 失败留在同一 slot、Queue 物理失败只重试一条 transport；`terminal_queue_test.go` 覆盖 Fast broker 单订阅和普通输入；`runtime_shortcuts_test.go` 固定页面级 `transport_role`、全局视觉排序和稳定 monitor socket；Node 60/60、Go 全量测试和 `git diff --check` 通过。
 - 待验证：尚未在目标 Android WebView、Lazycat WKWebView 和桌面浏览器进行多 tab、32 pane、主动断网/恢复和高频输出真机验收。
 - 禁止复现：不得恢复 `terminalQueueTabID` 或用活动 tab 变化关闭三条物理 WebSocket；不得把后台 pane 的不可测量 Canvas 作为 Queue FIFO 的唯一结算条件；不得让 Fast 复用 transport 接受超过一个逻辑 pane；不得让单 pane 失败从重试队列消失。
+
+### LCMD-20260823-02：resize 后旧尺寸字节进入新网格
+
+- 日期：2026-08-23
+- 来源：用户现场反馈；WebShell 调整窗口大小后出现字符位置错乱、乱码、旧行，新 tab 或 tab 选项偶尔显示旧内容。
+- 影响模块：`workspace.go`、`agent.go`、`agent_runtime.go` 的 PTY resize/attach 输出顺序；`runtime/static/main.js` 的尺寸同步、presentation hold、输入就绪和历史回放门禁；`workspace_test.go`、`runtime_shortcuts_test.go`。
+- 错误现象：浏览器先切换 Ghostty 字符网格，resize 控制随后异步到达 Provider/agent；PTY 输出没有几何 epoch，前端也把最近测量值直接当作服务端已应用尺寸。resize 与持续 TUI 输出交错时，旧尺寸下的输出可能按新网格解析；presentation hold 或历史回放期间又可能把未确认的画面当作当前帧。
+- 根因：同一 pane 的字节已经有 pane/channel 归属，但没有 resize geometry 归属。`channel_generation` 只能防止 Fast/Queue 迟到通道写错 session，不能证明输出属于哪一个 PTY 尺寸；请求、PTY 应用和 Canvas 呈现也没有独立状态。
+- 实施方案：
+  - `terminalControlMessage` 增加字符串 `resize_epoch`；pane 维护单调的 `resizeEpoch`，resize 请求由 `resizeMu` 串行处理，旧 epoch 拒绝、同 epoch 同尺寸幂等、冲突返回 `resize-error`。
+  - PTY `Setsize`、`resize-applied` 控制帧和后续输出广播共享 `outputMu` 有序边界；同一 pane 的 ACK 在后续二进制输出前进入客户端队列，并广播给当前 attach clients。
+  - 历史启动帧声明 `resize_protocol=epoch-v1` 并携带当前 epoch/尺寸；未声明的旧 agent 或 `client:` 终端明确降级为 legacy，不让浏览器永久等待 ACK。
+  - 浏览器拆分 requested/applied/presented resize epoch，发送 resize 后不再提前更新 `serverCols/serverRows`；ACK 前保持旧画面并锁定普通输入，ACK 后执行 full render，只有 render 成功才推进 `presentedResizeEpoch` 和 `renderReady`。迟到或不匹配 ACK 不得推进当前 pane。
+  - Queue 保持已有 `channel_generation` 和有序文本/二进制 relay；resize epoch 不替代通道 generation。历史 resize timeline、geometry fingerprint 和跨设备 owner/lease 本轮不伪造，仍按方案文档的 `geometry_unknown`/后续阶段处理。
+- Guard：新增 `TestTerminalPaneResizeEpochIsMonotonicIdempotentAndOrdered`，覆盖成功 ACK、后续输出顺序、重复 epoch 幂等、旧 epoch 拒绝和冲突；新增 `TestRuntimeResizeEpochAckGuard`，固定浏览器 epoch、ACK 门禁、presented epoch 和不可提前提交 hold；既有 Queue/Fast、历史、Cache v2 和 Canvas guard 继续生效。
+- 验证结果：`node --check runtime/static/main.js`、`go test ./...`、`go test -race ./...`、`git diff --check` 通过。尚未完成真实桌面/WebView 持续 TUI 输出与拖拽 resize 验收，历史 geometry timeline 和跨设备 owner/lease 仍需后续阶段实施。
+- 禁止复现：不得把 `lastSentCols/lastSentRows` 或 `requested` 状态当作 PTY 已应用尺寸；不得在 ACK 前解锁普通输入、推进 presented epoch 或提交新的 presentation frame；不得让旧 epoch resize 回退 PTY；不得把 `channel_generation` 当作 `resize_epoch`；旧 agent 不支持 epoch 时不得静默伪装成强一致模式。
+
+### LCMD-20260823-03：历史回放 reset 门禁与 Queue 逻辑重试退避
+
+- 日期：2026-08-23
+- 来源：真机日志显示 Queue 物理通道保持 `physical=1`，但逻辑 pane 因 `terminal reset failed` 反复关闭；多个 pane 同时失败时红点/黑屏无法自行恢复。
+- 根因：历史回放 reset 错误地要求 `measuredFitGeneration > 0`，把尚未完成可见 DOM 测量误判为运行时不可用；Queue logical close 后立即重新进入候选，缺少 pane 级退避和失败状态清理，容易在同一事件循环反复重建逻辑流。
+- 实施方案：历史回放只要求 Ghostty runtime、当前 target 和已知逻辑尺寸，隐藏 pane 可以先完成 replay，Canvas fit 仍由激活/可测量阶段负责；记录 `terminal_size_unavailable`、`runtime_reset_failed` 等明确失败原因并写入诊断日志。Queue pane 增加独立指数退避（500ms 起、最大 10s），退避期间排除候选、显示红色重试状态，计时器到期后由事件驱动重新入队；逻辑失败不关闭物理 Queue，物理 close 后清理 `queueConnectPending/queueTaskState`，成功 replay 清零 pane 退避。
+- 初始化门禁：Queue 物理 WebSocket 只有在 Fast A/B 的物理连接和逻辑 replay 都 ready 后创建，严格保持 `Fast A -> Fast B -> Queue`。
+- 回归 guard：更新拓扑 Node 测试，固定 Fast 逻辑 ready 前不得创建 Queue；Queue 连接/物理连接测试和完整 Go 静态 guard 继续覆盖单物理连接、多逻辑 pane、失败后自动恢复及无永久黑屏路径。
+- 验证结果：`node --check runtime/static/main.js runtime/static/terminal_topology_controller.js`、`node --test terminal_queue_connection_test.mjs terminal_topology_controller_test.mjs`（31/31）、`go test ./... -count=1` 和 `git diff --check` 通过。仍需目标 Android/WebView 真机验证断网恢复、cache-v2 reset 失败和 32 分屏全部自动重试。
+- 禁止复现：不得再以 `measuredFitGeneration` 作为隐藏 pane 历史回放硬门禁；不得让 Queue logical 失败同步重置物理退避或立即无限重连；不得让任一 Fast 物理 OPEN 在逻辑 replay 未 ready 前启动 Queue；任何可恢复 close/error 都必须最终回到灰色等待、红色退避或 ready，不能永久黑屏。
+
+### LCMD-20260823-04：普通容器拓扑收敛为一条直连加一条队列
+
+- 日期：2026-08-23
+- 来源：用户要求进一步降低移动端/WebView 的长连接和初始化复杂度，去掉第二条直连通道。
+- 实施方案：普通容器目标的页面级物理拓扑改为 `Fast -> Queue`，Fast scheduler 容量从 2 降为 1；当前活动或正在操作的 pane 独占唯一 Fast 槽位，其他 tab/pane 通过同一条 Queue WebSocket 的逻辑 stream 复用。Queue 物理创建只等待唯一 Fast pane 的物理 OPEN 和逻辑 replay ready；Queue pane 的缓存优先、FIFO、独立退避和物理连接保活规则不变。网络监视器的 multiplexed 布局只展示“直连通道 1”和“队列通道”。
+- 兼容边界：`client:` 独立目标不使用 Queue，继续使用其原有直连 scheduler；本次不把两种传输模型强行合并。
+- 回归 guard：拓扑测试覆盖单 Fast 完成后才创建 Queue、tab 切换只替换一个 Fast 逻辑绑定、物理 Queue 失败不影响唯一 Fast；网络监视器测试覆盖普通容器仅显示一个直连通道和一个队列通道。Go 静态 guard 固定容量为 1、单 Fast 槽位和 `Fast -> Queue` 阶段。
+- 验证结果：Node 拓扑、网络监视器和 scheduler 测试 40/40 通过；`go test ./... -count=1` 通过。仍需目标 Android/WebView 真机验证 1 条 Fast + 1 条 Queue 下的 32 分屏、tab 切换、Fast 提升和断网恢复。
+- 禁止复现：普通容器不得重新创建 Fast B、第二条 Fast 物理 WebSocket或在监视器中显示不存在的直连通道 2；不能因为减少 Fast 数量而取消 Queue pane 的自动重试、缓存优先或永久黑屏保护。
+
+### LCMD-20260823-05：单 Fast 语义与终端总览预览持久化
+
+- 日期：2026-08-23
+- 来源：用户要求明确单通道语义，并修复重新打开终端后总览预览为空的问题。
+- 实施方案：普通容器拓扑统一命名为 `Fast -> Queue`，不再使用 `Fast A/Fast B` 阶段或语义。冷启动按全局稳定视觉顺序将第一个 pane 分配给 Fast，其余 pane 按 Queue FIFO 逐个初始化；用户聚焦 pane 时只替换唯一 Fast 的逻辑绑定，不新增物理连接。
+- 预览持久化：每次 pane 的稳定渲染和历史缓存提交后继续以去抖方式捕获终端画面并写入 Cache API v2；后台 Queue pane 即使没有可见 Canvas fit，只要 replay、终端尺寸和缓存 cursor 已就绪，也走独立预览捕获门禁，不需要切换 tab。预览保存成功后刷新总览预览状态。workspace state 应用完成后，以当前有效 tab/pane 集合核对同一 workspace 的缓存 manifest，仅删除已不存在 pane 的预览对象，保留仍存在 pane 的历史字节缓存，避免冷启动时总览只能显示“无预览”。
+- 回归 guard：拓扑阶段只允许 `fast_starting`/`fast_ready` 和 `Fast -> Queue`；Cache v2 测试覆盖孤儿预览删除不影响 live pane 和历史 chunks；运行时 guard 固定单 Fast 槽位、单 Fast 物理连接、Queue FIFO 初始化和预览清理调用。
+- 禁止复现：不得恢复 `Fast A/Fast B` 或第二条普通直连；不得要求用户点击 pane 才开始初始化或生成总览预览；不得为了清理预览删除仍存在 pane 的历史缓存；不得让预览持久化阻塞 Queue 初始化。
+
+### LCMD-20260823-06：网络监视器与调试日志视觉语义统一
+
+- 日期：2026-08-23
+- 来源：用户反馈；普通容器只有一条 Fast 直连通道，但监视器仍显示“直连通道 1”，调试日志窗口整体红色导致普通信息和警告看起来像错误。
+- 影响模块：`runtime/static/main.js`、`runtime/static/terminal_network_monitor.js`、`runtime/static/style.css` 及网络监视器静态/行为 guard。
+- 实施方案：普通容器的 multiplexed 监视器标签统一为“直连通道”，`client:` 三条独立直连标签保持编号兼容。调试日志窗口复用网络监视器的青色边框、背景、正文和按钮配色；信息、警告和错误正文均保持中性色，只有错误行在正文前插入红色“错误”标签，不再用整行红色表达级别。
+- 回归 guard：网络监视器 Node 测试固定普通布局只显示“直连通道 / 队列通道”，直接目标仍显示三条编号通道；Go 静态 guard 固定普通标签、青色面板调色板和错误标签 DOM/CSS，同时禁止旧的整面板红色背景。
+- 验证结果：`node --check` 通过 `main.js` 和网络监视器模块；网络监视器 Node 行为测试 6/6、全部 Node 用例 92/92、`go test ./... -count=1`、`go test -race ./... -count=1` 与 `git diff --check` 均通过。真实设备只需确认日志长文本滚动和错误标签在窄屏不溢出。
+- 禁止复现：普通容器不得恢复“直连通道 1”或不存在的第二条普通直连；不得让 `warn`/`info` 日志使用红色或黄色整行样式；错误突出必须通过独立标签完成，不能把整个日志面板渲染成错误态。
+
+### LCMD-20260823-07：终端总览预览不能只依赖当前 tab
+
+- 日期：2026-08-23
+- 来源：用户反馈；终端总览只显示当前正在查看 tab 的预览，其他 tab 没有预览或保持“无预览”。
+- 根因：后台 tab 的总览绘制优先使用隐藏 pane 的 live canvas，而缓存预览准备只在 pane 尚未 render-ready 时触发；同时首次截图必须等待 3 秒无输出并进入 idle 回调，Queue 持续输出时该任务可能一直被取消或延后。回放完成后 `historyCacheSnapshot` 会被清空，但 `historyCacheLoaded` 仍为 true，导致总览预览读取无法再次加载 manifest。
+- 实施方案：普通容器后台 tab 的卡片始终优先使用身份校验后的 Cache API v2 预览，当前 tab 才优先使用有效 live canvas；`client:` 没有 Cache API v2 时保留有效 live canvas 回退。总览预览通过独立的 `loadPaneTabOverviewPreviewManifest` 按当前 pane identity 重新读取 manifest，不依赖一次性的 `historyCacheSnapshot`。每个 Queue pane 完成 replay 后立即安排一次首个预览捕获，不等待输出静默窗口；后续输出继续采用原有延迟和 idle 节流，保持截图开销受控。总览关闭时也持续准备所有 tab 的缓存预览，打开总览不再临时从当前 tab 开始准备。
+- 回归 guard：`TestRuntimeContainerCacheV2AndPWAContract` 固定后台 tab 缓存准备、独立 manifest 读取、当前 tab live canvas 选择、全局预览准备和 Queue replay 后立即捕获；已有 Cache v2 身份匹配测试继续防止跨 pane/跨 workspace 预览串用。
+- 验证结果：`node --check runtime/static/main.js`、全部 Node 用例 92/92、Cache v2 行为测试 12/12、`go test ./... -count=1`、`go test -race ./... -count=1` 与 `git diff --check` 均通过。目标设备需确认多 tab 总览中每个卡片都有对应历史画面，且持续输出时预览最终会更新。
+- 禁止复现：不得用隐藏 tab 的 live canvas 代替其持久化预览；不得把 3 秒静默窗口作为后台 tab 首个预览的硬门禁；不得只在总览打开后才开始准备非当前 tab 的预览。
+
+### 2026-08-23 Queue transport cleanup after workspace removal
+
+- Fixed topology reconciliation so a Queue physical connection is stopped as soon as the workspace has no non-Fast pane candidates.
+- This closes the retained `keepAliveWhenEmpty` transport after tabs/panes are removed, allowing the surviving pane to reclaim Fast without waiting for a stale Queue generation.
+- Added regression coverage for pruning all Queue panes and for a promoted Fast pane being removed before the parked Fast pane is reassigned.
+
+### 2026-08-23 Single-pane Fast recovery and intentional close semantics
+
+- Fixed `session_closed` Queue logical closes being treated as retryable network failures. Destroyed panes now close with the terminal already marked closed, so they cannot re-enter Queue retry or keep a stale logical stream alive.
+- When a higher-priority pane disappears and no other active/non-parked demand remains, a preempted surviving pane automatically reclaims the single Fast slot. This prevents the last session from staying parked until pending input expires.
+- Closing a tab now explicitly re-runs connection-demand reconciliation, allowing the topology to close Queue when only one Fast pane remains and to start Queue again when a new pane is added.
+- If the final surviving pane was on Queue, the topology first promotes it to Fast and only then closes the Queue physical transport; a one-pane workspace therefore never intentionally keeps both channels enabled.
+- Diagnostic details identify the three hierarchy levels explicitly: `会话`, `tab`, and `分屏`.
+- Regression coverage now includes idle-pool Fast recovery and keeps Queue open during Fast replacement when other panes still exist.

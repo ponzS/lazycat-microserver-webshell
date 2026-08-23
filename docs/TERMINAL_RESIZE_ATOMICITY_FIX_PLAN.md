@@ -405,3 +405,14 @@ presentation committed: resize_epoch, presented_epoch, replay_generation
 2. 若 resize epoch 或 geometry timeline 成为稳定协议，更新 `AGENTS.md` 的架构基线和长期 guard。
 3. 若 Queue 协议字段发生变化，同步更新 [WEBSOCKET_CONNECTION_MULTIPLEXING_PLAN.md](WEBSOCKET_CONNECTION_MULTIPLEXING_PLAN.md) 和独立 protocol spec。
 4. 发布前确认静态资源、Service Worker、WASM、字体和 LPK 内容寻址版本均已更新并通过构建校验。
+
+## 13. 本轮执行状态（2026-08-23）
+
+已完成阶段 1 的兼容最小闭环及阶段 2 的前端呈现门禁：
+
+- 服务端/agent 支持字符串 `resize_epoch`、单调校验、重复幂等、冲突/过期错误、`resize-applied` ACK，以及 ACK 与后续输出的有序发送边界。
+- 历史启动帧声明 `resize_protocol=epoch-v1` 并携带当前几何；旧 agent 或 `client:` 目标缺少声明时，浏览器进入明确 legacy 模式，不永久等待 ACK。
+- 浏览器区分 requested/applied/presented epoch；ACK 前不更新 server size、不解锁普通输入、不提交新 presentation frame，ACK 后必须经过 full render 才推进 presented。
+- 增加 Go 协议/顺序测试和浏览器静态 guard；`go test ./...`、`go test -race ./...`、`node --check` 和 `git diff --check` 已通过。
+
+尚未完成的阶段保持原计划：PTY 历史 resize timeline、Cache v2 geometry metadata、跨 PC/手机尺寸 owner/lease，以及真实桌面/WebView 持续输出验收。当前实现不能把原始历史字节跨多种尺寸严格重建的能力表述为已解决。

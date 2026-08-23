@@ -566,7 +566,7 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 				switch message.Type {
 				case "resize":
 					if message.Cols > 0 && message.Rows > 0 {
-						_ = pane.resizeWithPixels(message.Cols, message.Rows, message.PixelWidth, message.PixelHeight)
+						_ = pane.applyResize(message, client)
 					}
 				case "theme":
 					pane.updateTerminalThemeColors(message.Foreground, message.Background, message.Cursor)
@@ -660,6 +660,7 @@ func runAgentAttachClient(socketPath, selector, accountID, paneID string, cols, 
 func writeAgentHistoryReplay(w io.Writer, identity terminalReplayIdentity, history paneHistorySnapshot, allowGeneratedInput bool) bool {
 	start := map[string]any{
 		"type":                  "history-replay-start",
+		"resize_protocol":       "epoch-v1",
 		"selector":              identity.selector,
 		"pane_id":               identity.paneID,
 		"allow_generated_input": allowGeneratedInput,
@@ -669,6 +670,11 @@ func writeAgentHistoryReplay(w io.Writer, identity terminalReplayIdentity, histo
 		"sync_mode":             history.syncMode,
 		"delta_from_cursor":     strconv.FormatUint(history.deltaFrom, 10),
 		"delta_to_cursor":       strconv.FormatUint(history.deltaTo, 10),
+		"resize_epoch":          formatTerminalResizeEpoch(history.resizeEpoch),
+		"cols":                  history.cols,
+		"rows":                  history.rows,
+		"pixel_width":           history.pixelWidth,
+		"pixel_height":          history.pixelHeight,
 	}
 	if identity.cacheProtocolVersion == terminalCacheProtocolVersion && identity.cacheScopeID != "" && identity.workspaceGeneration != "" && identity.tabID != "" {
 		start["cache_protocol_version"] = terminalCacheProtocolVersion

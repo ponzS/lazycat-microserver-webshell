@@ -91,6 +91,8 @@ type terminalPane struct {
 
 	mu                         sync.Mutex
 	writeMu                    sync.Mutex
+	resizeMu                   sync.Mutex
+	outputMu                   sync.Mutex
 	cmd                        *exec.Cmd
 	ptyFile                    *os.File
 	clients                    map[*paneClient]struct{}
@@ -101,6 +103,7 @@ type terminalPane struct {
 	rows                       int
 	pixelWidth                 int
 	pixelHeight                int
+	resizeEpoch                uint64
 	tty                        string
 	busy                       bool
 	command                    string
@@ -148,13 +151,18 @@ type paneHistory struct {
 }
 
 type paneHistorySnapshot struct {
-	chunks     [][]byte
-	generation string
-	syncMode   string
-	serverBase uint64
-	serverEnd  uint64
-	deltaFrom  uint64
-	deltaTo    uint64
+	chunks      [][]byte
+	generation  string
+	syncMode    string
+	serverBase  uint64
+	serverEnd   uint64
+	deltaFrom   uint64
+	deltaTo     uint64
+	resizeEpoch uint64
+	cols        int
+	rows        int
+	pixelWidth  int
+	pixelHeight int
 }
 
 type historySyncRequest struct {
@@ -231,12 +239,32 @@ type terminalControlMessage struct {
 	Rows        int    `json:"rows"`
 	PixelWidth  int    `json:"pixel_width,omitempty"`
 	PixelHeight int    `json:"pixel_height,omitempty"`
+	ResizeEpoch string `json:"resize_epoch,omitempty"`
 	Data        string `json:"data"`
 	Blocked     bool   `json:"blocked,omitempty"`
 	Generated   bool   `json:"generated,omitempty"`
 	Foreground  string `json:"foreground,omitempty"`
 	Background  string `json:"background,omitempty"`
 	Cursor      string `json:"cursor,omitempty"`
+}
+
+func parseTerminalResizeEpoch(value string) (uint64, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	epoch, err := strconv.ParseUint(value, 10, 64)
+	if err != nil || epoch == 0 {
+		return 0, false
+	}
+	return epoch, true
+}
+
+func formatTerminalResizeEpoch(epoch uint64) string {
+	if epoch == 0 {
+		return ""
+	}
+	return strconv.FormatUint(epoch, 10)
 }
 
 func newWorkspaceManager(rootDir string) *workspaceManager {
@@ -494,18 +522,25 @@ func handleTerminalControlMessage(pane *terminalPane, payload []byte, client *pa
 			if message.Generated {
 				_ = pane.writeGeneratedInput([]byte(message.Data))
 			} else {
-				_ = pane.writeInputWithDimensions(
-					[]byte(message.Data),
-					message.Cols,
-					message.Rows,
-					message.PixelWidth,
-					message.PixelHeight,
-				)
+				if message.ResizeEpoch != "" {
+					if err := pane.applyResize(message, client); err != nil {
+						return true
+					}
+					_ = pane.writeInputWithDimensions([]byte(message.Data), 0, 0, 0, 0)
+				} else {
+					_ = pane.writeInputWithDimensions(
+						[]byte(message.Data),
+						message.Cols,
+						message.Rows,
+						message.PixelWidth,
+						message.PixelHeight,
+					)
+				}
 			}
 		}
 	case "resize":
 		if message.Cols > 0 && message.Rows > 0 {
-			_ = pane.resizeWithPixels(message.Cols, message.Rows, message.PixelWidth, message.PixelHeight)
+			_ = pane.applyResize(message, client)
 		}
 	case "theme":
 		pane.updateTerminalThemeColors(message.Foreground, message.Background, message.Cursor)
@@ -1422,8 +1457,9 @@ func (p *terminalPane) appendOutput(data []byte) {
 		return
 	}
 	chunks := makeHistoryChunks(filtered)
+	p.outputMu.Lock()
+	defer p.outputMu.Unlock()
 	var clients []*paneClient
-
 	p.mu.Lock()
 	if !p.exited {
 		for _, chunk := range chunks {
@@ -2245,10 +2281,20 @@ func (p *terminalPane) attachClient(syncRequest historySyncRequest) (paneHistory
 	}
 	history := p.history.snapshot()
 	history.generation = p.historyGeneration
+	history.resizeEpoch = p.resizeEpoch
+	history.cols = p.cols
+	history.rows = p.rows
+	history.pixelWidth = p.pixelWidth
+	history.pixelHeight = p.pixelHeight
 	history.syncMode = "snapshot"
 	if !syncRequest.forceSnapshot && syncRequest.hasRange && syncRequest.generation == p.historyGeneration && syncRequest.localEnd >= p.history.base && syncRequest.localEnd <= p.history.end {
 		history = p.history.snapshotFrom(syncRequest.localEnd)
 		history.generation = p.historyGeneration
+		history.resizeEpoch = p.resizeEpoch
+		history.cols = p.cols
+		history.rows = p.rows
+		history.pixelWidth = p.pixelWidth
+		history.pixelHeight = p.pixelHeight
 		history.syncMode = "delta"
 		if syncRequest.localEnd == p.history.end {
 			history.syncMode = "current"
@@ -2400,6 +2446,12 @@ func (p *terminalPane) resize(cols, rows int) error {
 }
 
 func (p *terminalPane) resizeWithPixels(cols, rows, pixelWidth, pixelHeight int) error {
+	p.resizeMu.Lock()
+	defer p.resizeMu.Unlock()
+	return p.resizeWithPixelsUnlocked(cols, rows, pixelWidth, pixelHeight)
+}
+
+func (p *terminalPane) resizeWithPixelsUnlocked(cols, rows, pixelWidth, pixelHeight int) error {
 	cols = normalizeCols(cols)
 	rows = normalizeRows(rows)
 	pixelWidth = normalizeTerminalPixelDimension(pixelWidth)
@@ -2415,22 +2467,162 @@ func (p *terminalPane) resizeWithPixels(cols, rows, pixelWidth, pixelHeight int)
 		p.mu.Unlock()
 		return nil
 	}
+	ptyFile := p.ptyFile
+	exited := p.exited
 	p.cols = cols
 	p.rows = rows
 	p.pixelWidth = pixelWidth
 	p.pixelHeight = pixelHeight
-	ptyFile := p.ptyFile
-	exited := p.exited
 	p.mu.Unlock()
 	if exited || ptyFile == nil {
 		return nil
 	}
-	return pty.Setsize(ptyFile, &pty.Winsize{
+	if err := pty.Setsize(ptyFile, &pty.Winsize{
 		Cols: uint16(cols),
 		Rows: uint16(rows),
 		X:    uint16(pixelWidth),
 		Y:    uint16(pixelHeight),
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *terminalPane) applyResize(message terminalControlMessage, source *paneClient) error {
+	epoch, hasEpoch := parseTerminalResizeEpoch(message.ResizeEpoch)
+	if !hasEpoch {
+		if strings.TrimSpace(message.ResizeEpoch) != "" {
+			p.enqueueResizeError(source, 0, "invalid_resize_epoch")
+			return errors.New("invalid resize epoch")
+		}
+		p.resizeMu.Lock()
+		defer p.resizeMu.Unlock()
+		p.mu.Lock()
+		legacyEpoch := p.resizeEpoch
+		p.mu.Unlock()
+		if legacyEpoch == 0 {
+			return p.resizeWithPixelsUnlocked(message.Cols, message.Rows, message.PixelWidth, message.PixelHeight)
+		}
+		p.outputMu.Lock()
+		if err := p.resizeWithPixelsUnlocked(message.Cols, message.Rows, message.PixelWidth, message.PixelHeight); err != nil {
+			p.outputMu.Unlock()
+			p.enqueueResizeError(source, legacyEpoch, "pty_resize_failed")
+			return err
+		}
+		p.mu.Lock()
+		legacyEpoch++
+		p.resizeEpoch = legacyEpoch
+		cols, rows := p.cols, p.rows
+		pixelWidth, pixelHeight := p.pixelWidth, p.pixelHeight
+		clients := make([]*paneClient, 0, len(p.clients))
+		for client := range p.clients {
+			clients = append(clients, client)
+		}
+		p.mu.Unlock()
+		p.enqueueResizeApplied(legacyEpoch, cols, rows, pixelWidth, pixelHeight, clients)
+		p.outputMu.Unlock()
+		return nil
+	}
+
+	p.resizeMu.Lock()
+	defer p.resizeMu.Unlock()
+
+	p.mu.Lock()
+	currentEpoch := p.resizeEpoch
+	currentCols := p.cols
+	currentRows := p.rows
+	currentPixelWidth := p.pixelWidth
+	currentPixelHeight := p.pixelHeight
+	p.mu.Unlock()
+
+	cols := normalizeCols(message.Cols)
+	rows := normalizeRows(message.Rows)
+	pixelWidth := normalizeTerminalPixelDimension(message.PixelWidth)
+	pixelHeight := normalizeTerminalPixelDimension(message.PixelHeight)
+	if pixelWidth == 0 {
+		pixelWidth = currentPixelWidth
+	}
+	if pixelHeight == 0 {
+		pixelHeight = currentPixelHeight
+	}
+	if epoch < currentEpoch {
+		p.enqueueResizeError(source, epoch, "stale_resize_epoch")
+		return errors.New("stale resize epoch")
+	}
+	if epoch == currentEpoch && (cols != currentCols || rows != currentRows || pixelWidth != currentPixelWidth || pixelHeight != currentPixelHeight) {
+		p.enqueueResizeError(source, epoch, "resize_epoch_conflict")
+		return errors.New("resize epoch conflict")
+	}
+	p.outputMu.Lock()
+	if err := p.resizeWithPixelsUnlocked(cols, rows, pixelWidth, pixelHeight); err != nil {
+		p.outputMu.Unlock()
+		p.enqueueResizeError(source, epoch, "pty_resize_failed")
+		return err
+	}
+	p.mu.Lock()
+	p.resizeEpoch = epoch
+	currentCols = p.cols
+	currentRows = p.rows
+	currentPixelWidth = p.pixelWidth
+	currentPixelHeight = p.pixelHeight
+	clients := make([]*paneClient, 0, len(p.clients))
+	for client := range p.clients {
+		clients = append(clients, client)
+	}
+	p.mu.Unlock()
+	p.enqueueResizeApplied(epoch, currentCols, currentRows, currentPixelWidth, currentPixelHeight, clients)
+	p.outputMu.Unlock()
+	return nil
+}
+
+func (p *terminalPane) enqueueResizeApplied(epoch uint64, cols, rows, pixelWidth, pixelHeight int, clients []*paneClient) {
+	payload, err := json.Marshal(map[string]any{
+		"type":         "resize-applied",
+		"selector":     p.selector,
+		"pane_id":      p.id,
+		"resize_epoch": formatTerminalResizeEpoch(epoch),
+		"cols":         cols,
+		"rows":         rows,
+		"pixel_width":  pixelWidth,
+		"pixel_height": pixelHeight,
 	})
+	if err != nil {
+		return
+	}
+	for _, client := range clients {
+		client.enqueue(paneOutbound{messageType: websocket.TextMessage, payload: payload})
+	}
+}
+
+func (p *terminalPane) enqueueResizeError(client *paneClient, epoch uint64, reason string) {
+	if client == nil {
+		return
+	}
+	p.mu.Lock()
+	currentEpoch := p.resizeEpoch
+	cols := p.cols
+	rows := p.rows
+	pixelWidth := p.pixelWidth
+	pixelHeight := p.pixelHeight
+	p.mu.Unlock()
+	payload, err := json.Marshal(map[string]any{
+		"type":          "resize-error",
+		"selector":      p.selector,
+		"pane_id":       p.id,
+		"resize_epoch":  formatTerminalResizeEpoch(epoch),
+		"applied_epoch": formatTerminalResizeEpoch(currentEpoch),
+		"cols":          cols,
+		"rows":          rows,
+		"pixel_width":   pixelWidth,
+		"pixel_height":  pixelHeight,
+		"reason":        reason,
+		"retryable":     reason == "pty_resize_failed",
+	})
+	if err == nil {
+		p.outputMu.Lock()
+		client.enqueue(paneOutbound{messageType: websocket.TextMessage, payload: payload})
+		p.outputMu.Unlock()
+	}
 }
 
 func (p *terminalPane) close() {

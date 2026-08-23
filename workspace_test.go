@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/gorilla/websocket"
 	"lcmd-webshell/internal/pkg/fonts"
 )
 
@@ -2122,6 +2123,70 @@ func TestTerminalPaneResizeAppliesPixelSizeToPTY(t *testing.T) {
 	}
 	if size.Cols != 111 || size.Rows != 57 || size.X != 888 || size.Y != 912 {
 		t.Fatalf("PTY size = %+v, want 111x57 cells and 888x912 pixels", size)
+	}
+}
+
+func TestTerminalPaneResizeEpochIsMonotonicIdempotentAndOrdered(t *testing.T) {
+	ptyFile, ttyFile, err := pty.Open()
+	if err != nil {
+		t.Fatalf("pty.Open returned error: %v", err)
+	}
+	defer ptyFile.Close()
+	defer ttyFile.Close()
+	client := &paneClient{send: make(chan paneOutbound, 8), done: make(chan struct{})}
+	pane := &terminalPane{
+		id:       "pane-epoch",
+		selector: "demo@owner",
+		ptyFile:  ptyFile,
+		cols:     80,
+		rows:     24,
+		clients:  map[*paneClient]struct{}{client: {}},
+	}
+
+	resize := terminalControlMessage{Type: "resize", ResizeEpoch: "10", Cols: 111, Rows: 57, PixelWidth: 888, PixelHeight: 912}
+	if err := pane.applyResize(resize, client); err != nil {
+		t.Fatalf("first epoch resize returned error: %v", err)
+	}
+	assertResizeControlMessage(t, <-client.send, "resize-applied", "10")
+	pane.appendOutput([]byte("after-resize"))
+	output := <-client.send
+	if output.messageType != websocket.BinaryMessage || string(output.payload) != "after-resize" {
+		t.Fatalf("output after resize ACK = type %d payload %q", output.messageType, output.payload)
+	}
+
+	if err := pane.applyResize(resize, client); err != nil {
+		t.Fatalf("duplicate epoch resize returned error: %v", err)
+	}
+	assertResizeControlMessage(t, <-client.send, "resize-applied", "10")
+
+	if err := pane.applyResize(terminalControlMessage{Type: "resize", ResizeEpoch: "9", Cols: 80, Rows: 24}, client); err == nil {
+		t.Fatal("stale epoch resize should return an error")
+	}
+	assertResizeControlMessage(t, <-client.send, "resize-error", "9")
+
+	if err := pane.applyResize(terminalControlMessage{Type: "resize", ResizeEpoch: "10", Cols: 80, Rows: 24}, client); err == nil {
+		t.Fatal("conflicting epoch resize should return an error")
+	}
+	assertResizeControlMessage(t, <-client.send, "resize-error", "10")
+
+	pane.mu.Lock()
+	defer pane.mu.Unlock()
+	if pane.resizeEpoch != 10 || pane.cols != 111 || pane.rows != 57 {
+		t.Fatalf("resize state = epoch %d size %dx%d, want epoch 10 size 111x57", pane.resizeEpoch, pane.cols, pane.rows)
+	}
+}
+
+func assertResizeControlMessage(t *testing.T, outbound paneOutbound, expectedType, expectedEpoch string) {
+	t.Helper()
+	if outbound.messageType != websocket.TextMessage {
+		t.Fatalf("resize control message type = %d, want websocket text", outbound.messageType)
+	}
+	var message map[string]any
+	if err := json.Unmarshal(outbound.payload, &message); err != nil {
+		t.Fatalf("decode resize control message: %v", err)
+	}
+	if message["type"] != expectedType || message["resize_epoch"] != expectedEpoch {
+		t.Fatalf("resize control message = %#v, want type=%q epoch=%q", message, expectedType, expectedEpoch)
 	}
 }
 

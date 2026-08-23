@@ -33,6 +33,40 @@ func TestTerminalResizeSchedulerBehavior(t *testing.T) {
 	}
 }
 
+func TestRuntimeResizeEpochAckGuard(t *testing.T) {
+	source, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	mainSource := string(source)
+	for _, want := range []string{
+		"const normalizeTerminalResizeEpoch = (value) => {",
+		"const resizeEpochSupported = pane.resizeEpochSupported !== false;",
+		"resize_epoch: resizeEpoch",
+		"pane.resizeAckPending = resizeEpochSupported;",
+		"case \"resize-applied\":",
+		"case \"resize-error\":",
+		"session.appliedResizeEpoch = epoch;",
+		"if (session.resizeAckPending) {",
+		"!session.resizeAckPending",
+		"session.presentedResizeEpoch === session.appliedResizeEpoch",
+		"const resizeProtocol = String(message.resize_protocol || \"\").trim();",
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime resize epoch ACK guard missing %q", want)
+		}
+	}
+	resizeBlock := sourceBetween(t, mainSource,
+		"const resizePane = (pane, {",
+		"const paneResizeScheduler = createTerminalResizeScheduler({")
+	if !strings.Contains(resizeBlock, "shouldCommitAfterHold && !pane.resizeAckPending") {
+		t.Fatal("resize presentation must not commit before resize ACK")
+	}
+	if !strings.Contains(resizeBlock, "!shouldCommitAfterHold && !pane.resizeAckPending") {
+		t.Fatal("resize presentation must not settle before resize ACK")
+	}
+}
+
 func TestTerminalNetworkMonitorBehavior(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -109,6 +143,23 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`const terminalCacheV2ReplayTimeoutMs = 2 * 1000;`,
 		`const terminalCacheV2CompactionTargetBytes = 1 * 1024 * 1024;`,
 		`prepareTabOverviewCachePreviews`,
+		`String(pane.historyGeneration || "").trim() !== String(prepared.historyGeneration || "").trim()`,
+		`pane.tabId !== activeTabId || !pane.renderReady || !pane.hasPresentedFrame`,
+		`const liveFrame = pane?.renderReady && pane?.hasPresentedFrame ? liveCanvas : null;`,
+		`scheduleWorkspaceTabOverviewCachePreviews();`,
+		`const loadPaneTabOverviewPreviewManifest = async (pane) => {`,
+		`terminalCacheV2.loadManifest(expected)`,
+		`Terminal cache overview manifest read timed out.`,
+		`const sessionCanCaptureCacheV2Preview = (session) => {`,
+		`scheduleSessionCacheV2PreviewCapture(session, { immediate: true });`,
+		`const allowRecentOutput = session.cacheV2PreviewCaptureAllowRecentOutput === true;`,
+		`const scheduleSessionCacheV2PreviewCapture = (session, { immediate = false } = {}) => {`,
+		`session.cacheV2PreviewCaptureAllowRecentOutput = immediate;`,
+		`session.connectionChannel !== "queue"`,
+		`const scheduleTerminalCacheV2OrphanPreviewCleanup = () => {`,
+		`terminalCacheV2.cleanupOrphanedPreviews({`,
+		`clearSessionCacheV2OverviewPreview(session);`,
+		`scheduleTabOverviewRender();`,
 		`sessionCacheV2OverviewPreviewMatches`,
 		`[terminal-cache-v2] overview preview load failed`,
 		`applySessionCacheV2ServerSnapshot`,
@@ -366,10 +417,9 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		"const preparePaneTabOverviewPreview = (pane) => {",
 		"const drawTabOverviewFallback = (ctx, x, y, width, height, colors) => {")
 	for _, want := range []string{
-		`const snapshot = await prepareSessionHistoryCache(pane);`,
 		`terminalCacheV2.identityMatches(expected, snapshot, { requireHistory: true })`,
 		`const preview = await terminalCacheV2.loadPreview(snapshot);`,
-		`pane.historyCacheSnapshot !== snapshot`,
+		`String(pane.historyGeneration || "").trim() !== String(snapshot.historyGeneration || "").trim()`,
 		`sessionCacheV2OverviewPreviewMatches(pane, prepared)`,
 	} {
 		if !strings.Contains(overviewBlock, want) {
@@ -380,7 +430,9 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		"const drawPaneOverviewPreview = (ctx, pane, x, y, width, height, colors) => {",
 		"const drawLayoutOverviewPreview = (ctx, tab, node, x, y, width, height, colors) => {")
 	for _, want := range []string{
-		`pane?.renderReady && pane?.hasPresentedFrame ? liveCanvas : cachedPreview`,
+		`const liveFrame = pane?.renderReady && pane?.hasPresentedFrame ? liveCanvas : null;`,
+		`pane?.tabId === activeTabId`,
+		`!sessionUsesTerminalCacheV2(pane) ? liveFrame : null`,
 		`sessionCacheV2OverviewPreviewMatches(pane, pane?.cacheV2OverviewPreview)`,
 	} {
 		if !strings.Contains(drawOverviewBlock, want) {
@@ -2752,6 +2804,21 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 			t.Fatalf("runtime terminal replay mode guard missing %q", want)
 		}
 	}
+	resetReplayBlock := sourceBetween(t, mainSource,
+		"  const resetTerminalForHistoryReplay = (session) => {",
+		"  const requestSessionHistoryReplay = (session) => {")
+	for _, want := range []string{
+		"terminalPaneHasKnownSize(session)",
+		`session.lastHistoryResetFailureReason = "terminal_size_unavailable";`,
+		`session.lastHistoryResetFailureReason = "runtime_reset_failed";`,
+	} {
+		if !strings.Contains(resetReplayBlock, want) {
+			t.Fatalf("hidden terminal history replay guard missing %q", want)
+		}
+	}
+	if strings.Contains(resetReplayBlock, "measuredFitGeneration || 0) <= 0") {
+		t.Fatal("hidden pane history replay must not require a visible DOM fit generation")
+	}
 	for _, forbidden := range []string{
 		"initialFitResetDone",
 		"scheduleTerminalFullRenderWatchdog",
@@ -2971,8 +3038,11 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"const terminalCacheV2PreviewDelayMs = 3000;",
 		"performance.now() - Number(session.lastTerminalOutputAt || 0) < terminalCacheV2PreviewDelayMs",
 		"window.requestIdleCallback(capture, { timeout: 1500 })",
+		"await terminalCacheV2.savePreview(identity, session.historyGeneration, cursor, blob, {",
+		"clearSessionCacheV2OverviewPreview(session);",
+		"scheduleTabOverviewRender();",
 	} {
-		if !strings.Contains(mainSource, want) {
+		if !strings.Contains(previewBlock, want) && !strings.Contains(mainSource, want) {
 			t.Fatalf("cache preview must stay outside the active output render path: missing %q", want)
 		}
 	}
@@ -3263,7 +3333,7 @@ func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
 		`import { createTerminalTopologyController } from "./terminal_topology_controller.js";`,
 		"createTerminalQueueConnection,",
 		"createTerminalQueueStartupLatch,",
-		"const terminalFastWebSocketCapacity = 2;",
+		"const terminalFastWebSocketCapacity = 1;",
 		"const terminalClientDirectWebSocketCapacity = 3;",
 		"const terminalQueueStartupDeadlineMs = 40 * 1000;",
 		"const requestSessionConnection = (session, {",
@@ -3276,7 +3346,7 @@ func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
 		"terminalConnectionScheduler.setCapacity(",
 		"terminalConnectionScheduler = createTerminalConnectionScheduler({",
 		"let terminalQueueClosingPromise = null;",
-		"let terminalFastConnections = [null, null];",
+		"let terminalFastConnections = [null];",
 		"const ensureTerminalFastConnection = (slot, targetName) => {",
 		"terminalFastConnections.forEach((connection, slot) => {",
 		"case \"reset-fast-transports\":",
@@ -3324,6 +3394,8 @@ func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
 	}
 	for _, want := range []string{
 		"export const terminalQueueProtocolVersion = 1;",
+		"fastCapacity = 1,",
+		"single physical Fast transport",
 		"export const createTerminalQueueStartupLatch = ({",
 		"const queueBinaryMagic = \"LCQ1\";",
 		"export const createTerminalQueueConnection = ({",
@@ -3422,8 +3494,9 @@ func TestRuntimeTerminalTopologyControllerOwnsFastQueueHandoff(t *testing.T) {
 	for _, want := range []string{
 		"export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) => {",
 		"const startFast = (slot, record, reason) => {",
-		"setPhase(\"fast_a_starting\", reason);",
-		"setPhase(\"fast_b_starting\", reason);",
+		"setPhase(\"fast_starting\", reason);",
+		"setPhase(\"fast_ready\", \"fast_rendered\");",
+		"const fastLogicalPrerequisiteReady = () => (",
 		"const startQueueTransport = (reason) => {",
 		"const compareInitializationPanes = (left, right) => {",
 		"const initializationCandidates = () => Array.from(panes.values())",
@@ -3444,6 +3517,9 @@ func TestRuntimeTerminalTopologyControllerOwnsFastQueueHandoff(t *testing.T) {
 	}
 	if strings.Contains(source, "fast_bootstrap_wait") {
 		t.Fatal("container topology must not release a Fast lease from a global bootstrap reconcile")
+	}
+	if strings.Contains(controllerSource, "fast_a_") || strings.Contains(controllerSource, "fast_b_") {
+		t.Fatal("container topology phases must use the single Fast semantic")
 	}
 	if !strings.Contains(source, "const terminalTopologyVisualOrder = (tab, panes) => {") {
 		t.Fatal("container topology must derive a visual cold-start order from measured pane geometry")
@@ -3520,6 +3596,12 @@ func TestRuntimeTerminalTopologyControllerOwnsFastQueueHandoff(t *testing.T) {
 			t.Fatalf("queue physical reconnect guard missing %q", want)
 		}
 	}
+	if strings.Contains(queueTransportBlock, `scheduleTerminalTransportRecovery("queue_transport_closed")`) {
+		t.Fatal("Queue physical close must not reset the global Fast/Queue topology")
+	}
+	if !strings.Contains(queueTransportBlock, `terminalTopologyController?.queueTransportClosed({`) {
+		t.Fatal("Queue physical close must stay on the Queue-only retry path")
+	}
 	if strings.Contains(queueTransportBlock, "session.replayComplete") {
 		t.Fatal("queue physical reconnect state must not be mutated from logical pane replay")
 	}
@@ -3538,6 +3620,26 @@ func TestRuntimeTerminalTopologyControllerOwnsFastQueueHandoff(t *testing.T) {
 	}
 	if strings.Contains(queueSyncBlock, "terminalQueueReconnectTimer") || strings.Contains(queueSyncBlock, "terminalQueueReconnectAttempts") {
 		t.Fatal("logical Queue synchronization must not alter physical transport backoff")
+	}
+	for _, want := range []string{
+		"const scheduleTerminalQueuePaneRetry = (session, reason, { immediate = false } = {}) => {",
+		"terminalQueuePaneRetryBaseDelayMs",
+		"terminalQueuePaneRetryMaxDelayMs",
+		"session.queueRetryTimer = window.setTimeout(() => {",
+		"&& !pane.queueRetryTimer",
+		"clearTerminalQueuePaneRetry(session, { resetAttempts: true });",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("queue logical pane retry guard missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"assignments.every((assignment) => assignment.physicalReady === true)",
+		"&& fastLogicalPrerequisiteReady()",
+	} {
+		if !strings.Contains(controllerSource, want) {
+			t.Fatalf("Queue physical serial startup guard missing %q", want)
+		}
 	}
 }
 
@@ -3707,6 +3809,7 @@ func TestRuntimeTerminalNetworkMonitorIsOptIn(t *testing.T) {
 		"const networkMonitorStorageKey = `${storagePrefix}.networkMonitor`;",
 		`let networkMonitorEnabled = window.localStorage.getItem(networkMonitorStorageKey) === "true";`,
 		"const terminalNetworkMonitorShouldRun = () => debugModeEnabled && networkMonitorEnabled && !disposed;",
+		`: ["直连通道", "队列通道"]`,
 		`terminalNetworkMonitorModulePromise ||= import("./terminal_network_monitor.js");`,
 		"terminalNetworkMonitor.attachSocket(socket, { kind: \"fast\", slot });",
 		"terminalNetworkMonitor.attachSocket(queueSocket, { kind: \"queue\" });",
@@ -3740,6 +3843,7 @@ func TestRuntimeTerminalNetworkMonitorIsOptIn(t *testing.T) {
 		"sentBytesPerSecond",
 		"totalBytes: channel.receivedBytes + channel.sentBytes",
 		"bytesPerSecond: channel.receivedBytesPerSecond + channel.sentBytesPerSecond",
+		`return channel.index === 2 ? "队列通道" : "直连通道";`,
 	} {
 		if !strings.Contains(monitorSource, want) {
 			t.Fatalf("terminal network monitor module guard missing %q", want)
@@ -3755,9 +3859,26 @@ func TestRuntimeTerminalNetworkMonitorIsOptIn(t *testing.T) {
 		".terminal-network-monitor-channel-detail {",
 		".terminal-network-monitor-summary {",
 		"font-variant-numeric: tabular-nums;",
+		".debug-log-panel {",
+		"border: 1px solid color-mix(in srgb, #22d3ee 42%, transparent);",
+		"background: color-mix(in srgb, #062c33 88%, var(--terminal-bg));",
+		".debug-log-entry-level-error {",
+		".debug-log-entry-message {",
 	} {
 		if !strings.Contains(styleSource, want) {
 			t.Fatalf("runtime terminal network monitor style guard missing %q", want)
+		}
+	}
+	if strings.Contains(styleSource, "background: color-mix(in srgb, #450a0a 88%, var(--terminal-bg));") {
+		t.Fatal("debug log panel must use the network monitor palette instead of an all-red background")
+	}
+	for _, want := range []string{
+		`const level = entry.level === "error" ? document.createElement("span") : null;`,
+		`level.textContent = "错误";`,
+		`row.append(time);`,
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime debug log error-label guard missing %q", want)
 		}
 	}
 }

@@ -70,10 +70,14 @@ export const createTerminalNetworkMonitor = ({
     if (currentLayout === "direct") {
       return `直连通道 ${channel.index + 1}`;
     }
-    return channel.index === 2 ? "队列通道" : `直连通道 ${channel.index + 1}`;
+    return channel.index === 2 ? "队列通道" : "直连通道";
   };
 
-  const totals = () => channels.reduce((result, channel) => ({
+  const visibleChannels = () => currentLayout === "direct"
+    ? channels
+    : [channels[0], channels[2]];
+
+  const totals = () => visibleChannels().reduce((result, channel) => ({
     receivedBytes: result.receivedBytes + channel.receivedBytes,
     sentBytes: result.sentBytes + channel.sentBytes,
   }), { receivedBytes: 0, sentBytes: 0 });
@@ -82,7 +86,7 @@ export const createTerminalNetworkMonitor = ({
     const total = totals();
     return {
       layout: currentLayout,
-      channels: channels.map((channel) => ({
+      channels: visibleChannels().map((channel) => ({
         index: channel.index,
         label: channelLabel(channel),
         kind: channel.kind,

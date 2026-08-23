@@ -352,6 +352,37 @@ test("cache-v2 cleanup retains protected manifests and removes expired or orphan
   assert.ok(result.removedEntries >= 2);
 });
 
+test("cache-v2 removes only stale overview previews for panes absent from the live workspace", async () => {
+  const cacheStorage = new MemoryCacheStorage();
+  const cache = createTerminalCacheV2({ cacheStorage, baseURL: "https://example.test/" });
+  const live = identity({ paneID: "pane-live" });
+  const stale = identity({ paneID: "pane-stale" });
+  for (const item of [live, stale]) {
+    await cache.reset(item, "history-a", 0n);
+    await cache.append(item, "history-a", [{
+      startCursor: 0n,
+      endCursor: 1n,
+      data: new Uint8Array([1]),
+    }]);
+    await cache.savePreview(item, "history-a", 1n, new Blob([new Uint8Array([9])], { type: "image/png" }), {
+      width: 100,
+      height: 50,
+      cols: 10,
+      rows: 5,
+      devicePixelRatio: 1,
+    });
+  }
+
+  const result = await cache.cleanupOrphanedPreviews({
+    workspaceIdentity: identity(),
+    paneIdentities: [live],
+  });
+  assert.equal(result.removedPreviews, 1);
+  assert.ok(await cache.loadPreview(await cache.loadManifest(live)));
+  assert.equal(await cache.loadPreview(await cache.loadManifest(stale)), null);
+  assert.ok(await cache.readChunks(await cache.loadManifest(stale), () => {}));
+});
+
 test("cache-v2 stale pane deletion cannot remove a replacement history generation", async () => {
   const cacheStorage = new MemoryCacheStorage();
   const cache = createTerminalCacheV2({ cacheStorage, baseURL: "https://example.test/" });

@@ -10,14 +10,14 @@ const socketClosing = 2;
 const socketClosed = 3;
 
 export const terminalQueueGateAllowsCreation = ({
-  fastCapacity = 2,
+  fastCapacity = 1,
   fastReadyStates = [],
   queueCandidateCount = 0,
   queueClosing = false,
 } = {}) => {
   const requiredFast = Math.max(1, Math.floor(Number(fastCapacity) || 0));
   const states = Array.from(fastReadyStates || [], (state) => String(state || ""));
-  // Queue creation is gated by the two physical Fast transports. A logical
+  // Queue creation is gated by the single physical Fast transport. A logical
   // pane may still be finishing replay or an invisible Canvas commit after
   // its transport is open, and that must not block the physical Queue slot.
   return !queueClosing

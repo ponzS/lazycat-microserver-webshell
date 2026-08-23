@@ -183,6 +183,24 @@ test("preempted sessions become parked without backoff", () => {
   assert.equal(harness.timers.size, 0);
 });
 
+test("the only surviving preempted session reclaims the Fast slot when the active lease closes", () => {
+  const harness = createHarness({ capacity: 1 });
+  harness.scheduler.setGeneration(1);
+  const survivor = session("survivor");
+  const replacement = session("replacement");
+  harness.scheduler.register(survivor);
+  harness.scheduler.register(replacement);
+  harness.scheduler.request(survivor, demand(4));
+  harness.scheduler.request(replacement, demand(0));
+  const closingLease = harness.disconnections[0].lease.leaseID;
+  harness.scheduler.notifyClosed(survivor, 1);
+  assert.equal(harness.scheduler.currentLease(replacement)?.leaseID, 2);
+  harness.scheduler.unregister(replacement, "session_closed");
+  harness.scheduler.notifyClosed(replacement, closingLease + 1, { reason: "session_closed" });
+  assert.equal(harness.connections.at(-1).session, survivor);
+  assert.equal(harness.scheduler.snapshot().sessions.find(({ session: item }) => item === survivor).status, "connecting");
+});
+
 test("a pane reactivated before its preempt close immediately queues again", () => {
   const harness = createHarness({ capacity: 1 });
   harness.scheduler.setGeneration(1);

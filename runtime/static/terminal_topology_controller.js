@@ -83,8 +83,8 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
   let nextAttemptID = 1;
   let nextPaneOrder = 1;
   let panes = new Map();
-  let fastSlots = [null, null];
-  let pendingReplacements = [null, null];
+  let fastSlots = [null];
+  let pendingReplacements = [null];
   let queue = { state: "closed", attemptID: 0 };
   let initializationOrderReady = false;
   let initializationOrderingActive = false;
@@ -209,11 +209,47 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
     return workspacePanes().some((record) => !fastIDs.has(record.id));
   };
 
+  const queueHasWorkspaceCandidates = () => {
+    const fastIDs = currentFastPaneIDs();
+    return workspacePanes().some((record) => !fastIDs.has(record.id));
+  };
+
   const maybeStartQueueTransport = (reason) => {
     if (queue.state !== "closed" || !queuePhysicalPrerequisiteReady()) {
       return false;
     }
     return startQueueTransport(reason);
+  };
+
+  const stopQueueTransportIfUnneeded = (reason) => {
+    if (queue.state !== "starting" && queue.state !== "open") {
+      return false;
+    }
+    // Queue may remain open while the Fast logical binding is being
+    // replaced. Only the absence of every non-Fast workspace pane warrants a
+    // physical Queue shutdown; Fast readiness is a startup gate, not a close
+    // gate.
+    if (queueHasWorkspaceCandidates()) {
+      return false;
+    }
+    const previousQueue = queue;
+    queue = { state: "closed", attemptID: 0 };
+    command("stop-queue-transport", {
+      attemptID: previousQueue.attemptID,
+      reason: String(reason || "queue_not_needed"),
+    });
+    // A Queue transport may be stopping while the surviving Fast pane is
+    // still being promoted. Keep the phase descriptive so a subsequent
+    // refresh can continue the normal Fast -> Queue bootstrap path.
+    if (phase === "queue_starting") {
+      setPhase(
+        currentFastAssignments().some((assignment) => assignment?.state !== "ready")
+          ? "fast_starting"
+          : "running",
+        reason,
+      );
+    }
+    return true;
   };
 
   const setWaitingStates = () => {
@@ -261,15 +297,20 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
     return true;
   };
 
-  // Physical Fast OPEN is a separate prerequisite from a pane's final
-  // presentation. A hidden/background pane may not produce a Canvas frame,
-  // but it must not prevent the third physical transport from starting.
+  // Queue is created after the single Fast logical pane has completed replay
+  // and its physical socket is OPEN. The bootstrap contract is Fast -> Queue.
   const queuePhysicalPrerequisiteReady = () => {
     const assignments = currentFastAssignments();
     return assignments.length === fastSlots.length
       && assignments.every((assignment) => assignment.physicalReady === true)
+      && fastLogicalPrerequisiteReady()
       && workspacePanes().some((record) => !currentFastPaneIDs().has(record.id));
   };
+
+  const fastLogicalPrerequisiteReady = () => (
+    fastSlots.length === 1
+      && fastSlots.every((assignment) => assignment?.state === "ready")
+  );
 
   const requestSlotReplacement = (slot, target, reason) => {
     const assignment = fastSlots[slot];
@@ -365,7 +406,7 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
     const first = fastSlots[0];
     if (!first) {
       if (candidates[0]) {
-        setPhase("fast_a_starting", reason);
+        setPhase("fast_starting", reason);
         startFast(0, candidates[0], reason);
       } else {
         setPhase("awaiting_measurement", reason);
@@ -373,24 +414,7 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
       return;
     }
     if (first.state !== "ready") {
-      setPhase("fast_a_starting", reason);
-      return;
-    }
-    const second = fastSlots[1];
-    if (!second) {
-      const candidate = candidates.find((record) => record.id !== first.pane.id);
-      if (candidate) {
-        setPhase("fast_b_starting", reason);
-        startFast(1, candidate, reason);
-        return;
-      }
-      setPhase("running", reason);
-      initializationOrderingActive = false;
-      maybeStartQueueTransport(reason);
-      return;
-    }
-    if (second.state !== "ready") {
-      setPhase("fast_b_starting", reason);
+      setPhase("fast_starting", reason);
       return;
     }
     if (maybeStartQueueTransport(reason)) {
@@ -427,22 +451,22 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
 
   const resetTopology = (reason) => {
     stopCurrentTopology(reason);
-    fastSlots = [null, null];
-    pendingReplacements = [null, null];
+    fastSlots = [null];
+    pendingReplacements = [null];
     queue = { state: "closed", attemptID: 0 };
   };
 
   // A physical transport failure invalidates every logical stream bound to
-  // it.  Keep the pane registry, but discard all assignments and force the
-  // next refresh through the deterministic Fast A -> Fast B -> Queue path.
+  // it. Keep the pane registry, but discard all assignments and force the
+  // next refresh through the deterministic Fast -> Queue path.
   const transportFailure = (reason = "transport_failure") => {
     if (!targetName) {
       return false;
     }
     stopCurrentTopology(reason);
     epoch += 1;
-    fastSlots = [null, null];
-    pendingReplacements = [null, null];
+    fastSlots = [null];
+    pendingReplacements = [null];
     queue = { state: "closed", attemptID: 0 };
     setPhase(online ? "idle" : "suspended", reason);
     initializationOrderingActive = initializationOrderReady;
@@ -541,6 +565,12 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
       }
     }
 
+    // Queue intentionally keeps its physical socket alive when its last
+    // logical stream closes. Reconcile removals before considering startup so
+    // a workspace reduced to only its Fast pane cannot retain a stale Queue
+    // transport or leave the next pane waiting behind it.
+    stopQueueTransportIfUnneeded(reason);
+
     // Physical Fast OPEN can happen while workspace restoration is still
     // adding panes. Re-evaluate it after every refresh so a missed OPEN event
     // cannot leave Queue permanently disabled until a tab switch.
@@ -558,6 +588,11 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
     } else {
       driveBootstrap(reason);
     }
+    // Fast assignment changes can make a previously queued-only workspace
+    // eligible for the single-pane topology immediately. Re-run the close
+    // gate after reconciliation so a sole pane does not leave Queue enabled
+    // merely because it was still queued at the start of this refresh.
+    stopQueueTransportIfUnneeded(reason);
     return snapshot();
   };
 
@@ -607,7 +642,7 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
       maybeStartQueueTransport("fast_rendered");
       syncQueueCandidates("fast_rendered");
     } else {
-      setPhase(assignment.slot === 0 ? "fast_a_ready" : "fast_b_ready", "fast_rendered");
+      setPhase("fast_ready", "fast_rendered");
       driveBootstrap("fast_rendered");
     }
     return true;
@@ -631,9 +666,13 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
     if (eventEpoch !== epoch) {
       return false;
     }
-    const record = paneByRefOrID(pane);
+    // A workspace refresh removes closed panes from the registry before the
+    // asynchronous WebSocket close event arrives. Match the assignment by
+    // its stable pane ID so that close confirmation can still release the
+    // physical Fast slot and promote the surviving pane.
+    const paneID = normalizeID(typeof pane === "object" ? pane?.id : pane);
     const slot = fastSlots.findIndex((assignment) => (
-      assignment?.pane.id === record?.id && assignment.attemptID === Number(attemptID)
+      assignment?.pane.id === paneID && assignment.attemptID === Number(attemptID)
     ));
     if (slot < 0) {
       return false;
@@ -652,6 +691,7 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
     } else {
       driveBootstrap("fast_stopped");
     }
+    stopQueueTransportIfUnneeded(reason || "fast_stopped");
     syncQueueCandidates(reason || "fast_stopped");
     return true;
   };
@@ -661,9 +701,13 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
       return false;
     }
     queue.state = "open";
-    setPhase("running", "queue_transport_opened");
-    syncQueueCandidates("queue_transport_opened", { initialization: initializationOrderingActive });
-    initializationOrderingActive = false;
+    if (fastLogicalPrerequisiteReady()) {
+      setPhase("running", "queue_transport_opened");
+      syncQueueCandidates("queue_transport_opened", { initialization: initializationOrderingActive });
+      initializationOrderingActive = false;
+    } else {
+      setPhase("fast_starting", "queue_transport_opened");
+    }
     return true;
   };
 
@@ -704,6 +748,10 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
       return false;
     }
     assignment.physicalReady = false;
+    if (assignment.state === "ready") {
+      assignment.state = "starting";
+      setPaneState(assignment.pane, "retrying", "fast_transport_closed");
+    }
     return true;
   };
 
@@ -745,7 +793,7 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
     return true;
   };
 
-  const isQueueAllowed = () => queue.state === "open";
+  const isQueueAllowed = () => queue.state === "open" && fastLogicalPrerequisiteReady();
 
   const snapshot = () => ({
     epoch,
@@ -788,6 +836,7 @@ export const createTerminalTopologyController = ({ onCommand = () => {} } = {}) 
     transportFailure,
     promote,
     paneState,
+    fastPane: (slot) => fastSlots[Math.floor(Number(slot))]?.pane.ref || null,
     queueCandidates: () => queueCandidates().map((record) => record.ref),
     isQueueAllowed,
     snapshot,

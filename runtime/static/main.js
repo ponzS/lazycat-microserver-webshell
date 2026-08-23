@@ -414,11 +414,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const maxQueuedInputBytes = 16 * 1024 * 1024;
   const terminalWebSocketPingIntervalMs = 10 * 1000;
   const terminalWebSocketConnectTimeoutMs = 12 * 1000;
-  const terminalFastWebSocketCapacity = 2;
+  const terminalFastWebSocketCapacity = 1;
   const terminalClientDirectWebSocketCapacity = 3;
   const terminalConnectionInteractionPriorityMs = 1200;
   const terminalQueueReconnectBaseDelayMs = 500;
   const terminalQueueReconnectMaxDelayMs = 10 * 1000;
+  const terminalQueuePaneRetryBaseDelayMs = 500;
+  const terminalQueuePaneRetryMaxDelayMs = 10 * 1000;
   const terminalQueueStartupDeadlineMs = 40 * 1000;
   const deviceHeartbeatIntervalMs = 1500;
   const deviceListRefreshIntervalMs = 500;
@@ -676,11 +678,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   let terminalConnectionSchedulerState = null;
   let terminalConnectionDemandGeneration = 0;
   let terminalTopologyController = null;
-  let terminalFastConnections = [null, null];
-  let terminalFastClosingPromises = [null, null];
-  let terminalFastExpectedCloseReasons = ["", ""];
+  let terminalFastConnections = [null];
+  let terminalFastClosingPromises = [null];
+  let terminalFastExpectedCloseReasons = [""];
   let terminalFastTargetName = "";
-  let terminalFastPhysicalReadyStates = [WebSocket.CLOSED, WebSocket.CLOSED];
+  let terminalFastPhysicalReadyStates = [WebSocket.CLOSED];
   let terminalQueueConnection = null;
   let terminalQueueClosingPromise = null;
   let terminalQueueTargetName = "";
@@ -693,8 +695,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   let terminalQueueReconnectAttempts = 0;
   let terminalQueuePhysicalReadyState = WebSocket.CLOSED;
   let terminalQueueExpectedCloseReason = "";
+  let terminalQueuePhysicalKeepAliveTimer = 0;
   let terminalTransportRecoveryScheduled = false;
   let terminalTransportRecoveryRunning = false;
+  let terminalTransportRecoveryPendingReason = "";
+  let terminalTransportRecoveryRetryTimer = 0;
   let terminalQueueChannelGeneration = 0;
   let terminalFastChannelGeneration = 0;
   let scheduleTerminalQueueSync = () => {};
@@ -740,6 +745,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   let workspaceRefreshRetryInFlight = false;
   let workspaceRefreshRetryContext = null;
   let tabOverviewCachePreparationScheduled = false;
+  let terminalCacheV2OrphanPreviewCleanupScheduled = false;
   let deployRestartDialogOpen = false;
   let currentServerRevision = "";
   let activeWorkspaceCacheV2Identity = null;
@@ -1075,7 +1081,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const emptyTerminalNetworkMonitorState = () => ({
     channels: (isClientInstanceName(activeName)
       ? ["直连通道 1", "直连通道 2", "直连通道 3"]
-      : ["直连通道 1", "直连通道 2", "队列通道"]
+      : ["直连通道", "队列通道"]
     ).map((label, index) => ({
       index,
       label,
@@ -1257,10 +1263,19 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       const time = document.createElement("time");
       time.className = "debug-log-entry-time";
       time.textContent = entry.time;
+      const level = entry.level === "error" ? document.createElement("span") : null;
+      if (level) {
+        level.className = "debug-log-entry-level debug-log-entry-level-error";
+        level.textContent = "错误";
+      }
       const message = document.createElement("span");
       message.className = "debug-log-entry-message";
       message.textContent = entry.message;
-      row.append(time, message);
+      row.append(time);
+      if (level) {
+        row.append(level);
+      }
+      row.append(message);
       debugLogList.appendChild(row);
     }
     debugLogList.scrollTop = debugLogList.scrollHeight;
@@ -4119,6 +4134,50 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       historyGeneration: String(historyGeneration || "").trim(),
     };
   };
+
+  const scheduleTerminalCacheV2OrphanPreviewCleanup = () => {
+    if (
+      terminalCacheV2OrphanPreviewCleanupScheduled
+      || disposed
+      || !terminalCacheV2.available
+      || !activeWorkspaceCacheV2Identity
+      || isClientInstanceName(activeName)
+    ) {
+      return;
+    }
+    terminalCacheV2OrphanPreviewCleanupScheduled = true;
+    const cleanup = () => {
+      terminalCacheV2OrphanPreviewCleanupScheduled = false;
+      if (disposed || !activeWorkspaceCacheV2Identity) {
+        return;
+      }
+      const paneIdentities = [];
+      for (const tab of tabs.values()) {
+        for (const pane of tab.panes.values()) {
+          if (pane.closed || pane.name !== activeName) {
+            continue;
+          }
+          paneIdentities.push({ tabID: tab.id, paneID: pane.id });
+        }
+      }
+      terminalCacheV2.cleanupOrphanedPreviews({
+        workspaceIdentity: activeWorkspaceCacheV2Identity,
+        paneIdentities,
+      }).then((result) => {
+        if (Number(result?.removedPreviews || 0) > 0) {
+          appendDebugLog("info", "终端总览预览已清理", `移除 ${result.removedPreviews} 个已不存在会话的预览`);
+          scheduleTabOverviewRender();
+        }
+      }).catch((error) => {
+        appendDebugWarning("终端总览预览清理失败", error?.message || String(error));
+      });
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      window.requestIdleCallback(cleanup, { timeout: 2000 });
+    } else {
+      window.setTimeout(cleanup, 0);
+    }
+  };
   const sessionHasTerminalCacheV2Protocol = (session) => Boolean(
     session
     && !session.closed
@@ -6694,11 +6753,30 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!term || typeof term.reset !== "function") {
       return false;
     }
-    term.reset();
-    syncTerminalRuntimeReferences(session);
-    clearTerminalRuntimeBuffer(session);
-    clearTerminalCanvasPixels(session);
-    return true;
+    try {
+      term.reset();
+      syncTerminalRuntimeReferences(session);
+      clearTerminalRuntimeBuffer(session);
+      clearTerminalCanvasPixels(session);
+      return true;
+    } catch (error) {
+      // A reset must never destroy the only usable terminal instance. The
+      // Ghostty runtime can be kept alive and cleared in place when creating
+      // a replacement WASM terminal fails temporarily.
+      appendDebugWarning("终端运行时重置失败，降级清理后继续", `${session.name}/${session.id}: ${error?.message || String(error)}`);
+      try {
+        if (typeof term.clear === "function") {
+          term.clear();
+        } else if (!clearTerminalRuntimeBuffer(session)) {
+          return false;
+        }
+        clearTerminalCanvasPixels(session);
+        return true;
+      } catch (fallbackError) {
+        appendDebugError("终端运行时清理失败", `${session.name}/${session.id}: ${fallbackError?.message || String(fallbackError)}`);
+        return false;
+      }
+    }
   };
 
   const terminalCacheV2ThemeFingerprint = () => JSON.stringify({
@@ -6871,10 +6949,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const panePresentationIsCurrent = (session) => Boolean(
     session
     && session.renderReady
+    && !session.resizeAckPending
     && Number(session.measuredFitGeneration || 0) > 0
     && session.presentedFitGeneration === session.measuredFitGeneration
     && session.presentedReplayGeneration === session.terminalReplayGeneration
     && session.presentedContentGeneration === session.terminalContentGeneration
+    && (!session.appliedResizeEpoch || session.presentedResizeEpoch === session.appliedResizeEpoch)
   );
 
   const markPaneSyncPending = (session) => {
@@ -6910,6 +6990,14 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     ) {
       return;
     }
+    if (session.resizeAckPending) {
+      return;
+    }
+    const requestedResizeEpoch = normalizeTerminalResizeEpoch(session.requestedResizeEpoch);
+    const appliedResizeEpoch = normalizeTerminalResizeEpoch(session.appliedResizeEpoch);
+    if (session.resizeEpochSupported === true && requestedResizeEpoch && requestedResizeEpoch !== appliedResizeEpoch) {
+      return;
+    }
     if (session.pendingRenderContentGeneration === session.terminalContentGeneration) {
       session.presentedContentGeneration = session.terminalContentGeneration;
     }
@@ -6927,6 +7015,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.fullRenderPending = false;
     session.presentedFitGeneration = session.measuredFitGeneration;
     session.presentedReplayGeneration = session.terminalReplayGeneration;
+    session.presentedResizeEpoch = normalizeTerminalResizeEpoch(session.appliedResizeEpoch)
+      || normalizeTerminalResizeEpoch(session.requestedResizeEpoch)
+      || session.presentedResizeEpoch;
     session.hasPresentedFrame = true;
     session.shellEl.dataset.hasPresentedFrame = "true";
     if (session.presentationCommitPending && session.resizePresentationHold) {
@@ -6936,6 +7027,79 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!session.renderReady && !session.resizePresentationHold) {
       setPaneRenderReady(session, true);
     }
+  };
+
+  const handleTerminalResizeApplied = (session, message) => {
+    if (!session || session.closed) {
+      return;
+    }
+    const epoch = normalizeTerminalResizeEpoch(message?.resize_epoch);
+    if (!epoch) {
+      return;
+    }
+    session.resizeEpochSupported = true;
+    const requestedEpoch = normalizeTerminalResizeEpoch(session.requestedResizeEpoch);
+    const appliedEpoch = normalizeTerminalResizeEpoch(session.appliedResizeEpoch);
+    if (appliedEpoch && BigInt(epoch) < BigInt(appliedEpoch)) {
+      return;
+    }
+    session.appliedResizeEpoch = epoch;
+    session.serverCols = Math.max(0, Math.floor(Number(message.cols) || 0));
+    session.serverRows = Math.max(0, Math.floor(Number(message.rows) || 0));
+    session.serverPixelWidth = Math.max(0, Math.floor(Number(message.pixel_width) || 0));
+    session.serverPixelHeight = Math.max(0, Math.floor(Number(message.pixel_height) || 0));
+    const appliedGeometryMatchesLocal = dimensionsEqualTerminalSize(session, {
+      cols: session.serverCols,
+      rows: session.serverRows,
+    });
+    if (!requestedEpoch || epoch === requestedEpoch || BigInt(epoch) > BigInt(requestedEpoch)) {
+      session.resizeAckPending = false;
+      session.sizeClaimRequired = !dimensionsEqualTerminalSize(session, {
+        cols: session.serverCols,
+        rows: session.serverRows,
+      });
+      if (requestedEpoch && BigInt(epoch) > BigInt(requestedEpoch) && !appliedGeometryMatchesLocal) {
+        session.sizeClaimRequired = true;
+        if (session.replayComplete && isPaneVisibleForSizing(session)) {
+          resizePane(session, { forceSizeSync: true, hideUntilRender: true });
+        }
+        return;
+      }
+      if (session.replayComplete && session.resizePresentationHold) {
+        requestPaneFullRender(session);
+      } else if (session.replayComplete && !panePresentationIsCurrent(session)) {
+        renderPaneFullNow(session);
+      }
+      if (session.replayComplete && !session.resizePresentationHold && !session.fullRenderPending && session.hasPresentedFrame) {
+        setPaneRenderReady(session, true);
+      }
+    }
+  };
+
+  const handleTerminalResizeError = (session, message) => {
+    if (!session || session.closed) {
+      return;
+    }
+    const epoch = normalizeTerminalResizeEpoch(message?.resize_epoch);
+    const requestedEpoch = normalizeTerminalResizeEpoch(session.requestedResizeEpoch);
+    if (epoch && requestedEpoch && epoch !== requestedEpoch) {
+      return;
+    }
+    session.resizeAckPending = false;
+    session.sizeClaimRequired = true;
+    if (session.resizePresentationHold) {
+      session.resizePresentationHold = false;
+      session.presentationCommitPending = false;
+      if (session.hasPresentedFrame) {
+        setPaneRenderReady(session, false);
+      }
+    }
+    console.warn("[terminal-resize] resize rejected", {
+      name: session.name,
+      pane: session.id,
+      epoch,
+      reason: message?.reason || "",
+    });
   };
 
   const requestPaneFullRender = (session) => {
@@ -7371,6 +7535,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!pane || !prepared?.identity || !prepared.image || !prepared.historyGeneration) {
       return false;
     }
+    if (String(pane.historyGeneration || "").trim() !== String(prepared.historyGeneration || "").trim()) {
+      return false;
+    }
     const expected = sessionTerminalCacheV2Identity(pane, prepared.historyGeneration);
     try {
       return Boolean(
@@ -7406,6 +7573,30 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
   };
 
+  const loadPaneTabOverviewPreviewManifest = async (pane) => {
+    const historyGeneration = String(pane?.historyGeneration || "").trim();
+    if (!historyGeneration || !sessionUsesTerminalCacheV2(pane)) {
+      return null;
+    }
+    const expected = sessionTerminalCacheV2Identity(pane, historyGeneration);
+    if (!expected) {
+      return null;
+    }
+    const snapshot = await withTerminalCacheTimeout(
+      terminalCacheV2.loadManifest(expected),
+      terminalCacheV2ManifestTimeoutMs,
+      "Terminal cache overview manifest read timed out.",
+    );
+    if (
+      !snapshot
+      || snapshot.historyGeneration !== historyGeneration
+      || !terminalCacheV2.identityMatches(expected, snapshot, { requireHistory: true })
+    ) {
+      return null;
+    }
+    return snapshot;
+  };
+
   const preparePaneTabOverviewPreview = (pane) => {
     if (!sessionUsesTerminalCacheV2(pane) || pane.closed) {
       return Promise.resolve(null);
@@ -7420,7 +7611,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     const previewSeq = pane.cacheV2OverviewPreviewSeq;
     let previewPromise = null;
     previewPromise = (async () => {
-      const snapshot = await prepareSessionHistoryCache(pane);
+      // The replay path intentionally clears historyCacheSnapshot after it
+      // becomes authoritative. Overview loading must read its own manifest
+      // instead of using that one-shot replay state.
+      const snapshot = await loadPaneTabOverviewPreviewManifest(pane);
       const expected = snapshot
         ? sessionTerminalCacheV2Identity(pane, snapshot.historyGeneration)
         : null;
@@ -7439,7 +7633,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       if (
         pane.closed
         || pane.cacheV2OverviewPreviewSeq !== previewSeq
-        || pane.historyCacheSnapshot !== snapshot
+        || String(pane.historyGeneration || "").trim() !== String(snapshot.historyGeneration || "").trim()
         || !sessionUsesTerminalCacheV2(pane)
       ) {
         image?.close?.();
@@ -7476,7 +7670,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
 
   const prepareTabOverviewCachePreviews = (tab) => {
     for (const pane of tab?.panes?.values?.() || []) {
-      if (!pane.renderReady || !pane.hasPresentedFrame) {
+      // Hidden tabs must keep an identity-checked cached image ready. Their
+      // live canvas may be stale, detached, or never have received a visible
+      // frame, while the active tab can continue to use its live canvas.
+      if (pane.tabId !== activeTabId || !pane.renderReady || !pane.hasPresentedFrame) {
         preparePaneTabOverviewPreview(pane);
       }
     }
@@ -7523,10 +7720,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     ctx.fillRect(x, y, width, height);
 
     const liveCanvas = pane?.term?.canvas || pane?.term?.element?.querySelector?.("canvas");
+    const liveFrame = pane?.renderReady && pane?.hasPresentedFrame ? liveCanvas : null;
     const cachedPreview = sessionCacheV2OverviewPreviewMatches(pane, pane?.cacheV2OverviewPreview)
       ? pane.cacheV2OverviewPreview.image
       : null;
-    const source = pane?.renderReady && pane?.hasPresentedFrame ? liveCanvas : cachedPreview;
+    const source = pane?.tabId === activeTabId
+      ? liveFrame || cachedPreview
+      : cachedPreview || (!sessionUsesTerminalCacheV2(pane) ? liveFrame : null);
     if (source?.width > 0 && source?.height > 0) {
       try {
         const scale = Math.min(width / source.width, height / source.height);
@@ -8088,6 +8288,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   });
 
   const scheduleTabOverviewRender = () => {
+    // Keep every tab's cached preview warm even while the overview is closed;
+    // opening it must not make background tabs wait for a new preparation pass.
+    scheduleWorkspaceTabOverviewCachePreviews();
     if (!isTabOverviewOpen() || tabOverviewRenderFrame) {
       return;
     }
@@ -9559,6 +9762,26 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return Math.floor(Number(dimensions.cols) || 0) === cols && Math.floor(Number(dimensions.rows) || 0) === rows;
   };
 
+  const normalizeTerminalResizeEpoch = (value) => {
+    const text = String(value ?? "").trim();
+    return /^\d+$/.test(text) && text !== "0" ? text : "";
+  };
+
+  const nextTerminalResizeEpoch = (pane) => {
+    const previous = normalizeTerminalResizeEpoch(pane?.requestedResizeEpoch)
+      || normalizeTerminalResizeEpoch(pane?.appliedResizeEpoch)
+      || "0";
+    let next;
+    try {
+      const previousValue = BigInt(previous);
+      const clockValue = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+      next = clockValue > previousValue ? clockValue : previousValue + 1n;
+    } catch (error) {
+      next = BigInt(Date.now()) * 1000n;
+    }
+    return String(next);
+  };
+
   const sendTerminalSize = (pane, { force = false } = {}) => {
     if (pane?.socket?.readyState !== WebSocket.OPEN) {
       return false;
@@ -9577,22 +9800,31 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     })) {
       return false;
     }
+    const resizeEpochSupported = pane.resizeEpochSupported !== false;
+    const resizeEpoch = resizeEpochSupported ? nextTerminalResizeEpoch(pane) : "";
     pane.lastSentCols = cols;
     pane.lastSentRows = rows;
     pane.lastSentPixelWidth = pixelWidth;
     pane.lastSentPixelHeight = pixelHeight;
-    pane.serverCols = cols;
-    pane.serverRows = rows;
-    pane.serverPixelWidth = pixelWidth;
-    pane.serverPixelHeight = pixelHeight;
-    pane.sizeClaimRequired = false;
-    pane.socket.send(JSON.stringify({
-      type: "resize",
-      cols,
-      rows,
-      pixel_width: pixelWidth,
-      pixel_height: pixelHeight,
-    }));
+    pane.requestedResizeEpoch = resizeEpoch;
+    pane.requestedCols = cols;
+    pane.requestedRows = rows;
+    pane.requestedPixelWidth = pixelWidth;
+    pane.requestedPixelHeight = pixelHeight;
+    pane.resizeAckPending = resizeEpochSupported;
+    try {
+      pane.socket.send(JSON.stringify({
+        type: "resize",
+        cols,
+        rows,
+        pixel_width: pixelWidth,
+        pixel_height: pixelHeight,
+        ...(resizeEpochSupported ? { resize_epoch: resizeEpoch } : {}),
+      }));
+    } catch (error) {
+      pane.resizeAckPending = false;
+      return false;
+    }
     return true;
   };
 
@@ -10106,13 +10338,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       }
       sendTerminalSize(pane, { force: forceSizeSync });
       updateMobileSelectionHandles(pane);
-      if (shouldCommitAfterHold) {
+      if (shouldCommitAfterHold && !pane.resizeAckPending) {
         requestPaneFullRender(pane);
         commitTerminalPresentationNow(pane);
       } else if (forceFullRender || fitGenerationChanged || hideUntilRender || pane.fullRenderPending || !pane.hasPresentedFrame) {
         renderPaneFullNow(pane);
       }
-      if (shouldSettlePresentation && !shouldCommitAfterHold) {
+      if (shouldSettlePresentation && !shouldCommitAfterHold && !pane.resizeAckPending) {
         pane.resizePresentationHold = false;
         if (!pane.fullRenderPending && pane.hasPresentedFrame) {
           setPaneRenderReady(pane, true);
@@ -12338,10 +12570,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       pane.processCommandLine = paneState.command_line || "";
       pane.cwd = paneState.cwd || pane.cwd || "";
       pane.activityCheckedAt = Number(paneState.activity_checked_at || 0);
-      pane.serverCols = Math.max(0, Math.floor(Number(paneState.cols) || 0));
-      pane.serverRows = Math.max(0, Math.floor(Number(paneState.rows) || 0));
-      pane.serverPixelWidth = Math.max(0, Math.floor(Number(paneState.pixel_width) || 0));
-      pane.serverPixelHeight = Math.max(0, Math.floor(Number(paneState.pixel_height) || 0));
+      if (!pane.resizeAckPending) {
+        pane.serverCols = Math.max(0, Math.floor(Number(paneState.cols) || 0));
+        pane.serverRows = Math.max(0, Math.floor(Number(paneState.rows) || 0));
+        pane.serverPixelWidth = Math.max(0, Math.floor(Number(paneState.pixel_width) || 0));
+        pane.serverPixelHeight = Math.max(0, Math.floor(Number(paneState.pixel_height) || 0));
+      }
       const localSize = terminalSize(pane);
       pane.sizeClaimRequired = terminalSizeDiffersFromServer({
         cols: localSize.cols,
@@ -12553,6 +12787,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     for (const tab of tabs.values()) {
       for (const pane of tab.panes.values()) {
         if (!pane.closed) {
+          clearTerminalQueuePaneRetry(pane);
           pane.shellEl.dataset.connection = "offline";
         }
       }
@@ -14629,8 +14864,24 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       && session.socket?.readyState === WebSocket.OPEN
       && session.connectionChannel === "fast"
       && !session.connectionLeaseClosing
+      && !session.resizeAckPending
       && terminalConnectionScheduler?.currentLease(session)?.leaseID === session.connectionLeaseID
     )
+  );
+
+  const isSessionGeneratedInputReady = (session) => (
+    Boolean(
+      session?.replayComplete
+      && session.shellEl?.dataset.previewReady !== "true"
+      && session.socket?.readyState === WebSocket.OPEN
+      && session.connectionChannel === "fast"
+      && !session.connectionLeaseClosing
+      && terminalConnectionScheduler?.currentLease(session)?.leaseID === session.connectionLeaseID
+    )
+  );
+
+  const terminalLocationDescription = (session) => (
+    `会话=${String(session?.name || "unknown")}, tab=${String(session?.tabId || "unknown")}, 分屏=${String(session?.id || "unknown")}`
   );
 
   const clearPendingInputExpiry = (session) => {
@@ -14660,13 +14911,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       }
       session.pendingInput = [];
       session.pendingInputSize = 0;
-      appendDebugError("终端输入等待连接超时", `${session.name}/${session.id}, 10 秒内未恢复`);
+      appendDebugError("终端输入等待连接超时", `${terminalLocationDescription(session)}, 10 秒内未恢复`);
       showToast("终端连接恢复超时，未发送的输入已丢弃。");
     }, terminalPendingInputMaxWaitMs);
   };
 
   const sendSessionInputChunk = (session, data, { generated = false } = {}) => {
-    if (!data || !isSessionInputReady(session)) {
+    if (!data || !(generated ? isSessionGeneratedInputReady(session) : isSessionInputReady(session))) {
       return false;
     }
     const { cols, rows, pixelWidth, pixelHeight } = terminalSize(session);
@@ -14678,6 +14929,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       payload.rows = rows;
       payload.pixel_width = pixelWidth;
       payload.pixel_height = pixelHeight;
+      const resizeEpoch = normalizeTerminalResizeEpoch(session.appliedResizeEpoch);
+      if (resizeEpoch) {
+        payload.resize_epoch = resizeEpoch;
+      }
     }
     try {
       session.socket.send(JSON.stringify(payload));
@@ -14802,7 +15057,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       discardSessionInputBuffers(session);
       return;
     }
-    if (!data || !isSessionInputReady(session) || !checkSessionConnectionHealth(session, { connect: true })) {
+    if (!data || !(generated ? isSessionGeneratedInputReady(session) : isSessionInputReady(session)) || !checkSessionConnectionHealth(session, { connect: true })) {
       return;
     }
     if (!generated && shouldSuppressGeneratedTerminalInput(session, data)) {
@@ -15925,16 +16180,40 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }, "image/png");
   });
 
+  const sessionCanCaptureCacheV2Preview = (session) => {
+    if (panePresentationIsCurrent(session)) {
+      return true;
+    }
+    if (
+      !session
+      || session.closed
+      || session.connectionChannel !== "queue"
+      || !session.replayComplete
+      || session.resizeAckPending
+      || session.cacheV2WarmReplayActive
+    ) {
+      return false;
+    }
+    const canvas = session.term?.canvas || session.term?.renderer?.getCanvas?.();
+    const { cols, rows } = terminalSize(session);
+    return canvas instanceof HTMLCanvasElement
+      && canvas.width > 0
+      && canvas.height > 0
+      && cols > 0
+      && rows > 0;
+  };
+
   const captureSessionCacheV2Preview = async (session, captureSeq) => {
+    const allowRecentOutput = session.cacheV2PreviewCaptureAllowRecentOutput === true;
     if (
       !sessionUsesTerminalCacheV2(session)
       || session.cacheV2PreviewCaptureSeq !== captureSeq
       || !session.replayComplete
-      || !session.renderReady
+      || !sessionCanCaptureCacheV2Preview(session)
       || !session.historyStateReady
       || !session.historyGeneration
       || session.outputQueueSize > 0
-      || performance.now() - Number(session.lastTerminalOutputAt || 0) < terminalCacheV2PreviewDelayMs
+      || (!allowRecentOutput && performance.now() - Number(session.lastTerminalOutputAt || 0) < terminalCacheV2PreviewDelayMs)
     ) {
       return;
     }
@@ -15943,10 +16222,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (
       !sessionUsesTerminalCacheV2(session)
       || session.cacheV2PreviewCaptureSeq !== captureSeq
-      || !panePresentationIsCurrent(session)
+      || !sessionCanCaptureCacheV2Preview(session)
       || session.persistedHistoryCursor !== cursor
       || session.outputQueueSize > 0
-      || performance.now() - Number(session.lastTerminalOutputAt || 0) < terminalCacheV2PreviewDelayMs
+      || (!allowRecentOutput && performance.now() - Number(session.lastTerminalOutputAt || 0) < terminalCacheV2PreviewDelayMs)
     ) {
       return;
     }
@@ -15967,9 +16246,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       || session.cacheV2PreviewCaptureSeq !== captureSeq
       || !session.replayComplete
       || !session.historyStateReady
-      || !panePresentationIsCurrent(session)
+      || !sessionCanCaptureCacheV2Preview(session)
       || session.outputQueueSize > 0
-      || performance.now() - Number(session.lastTerminalOutputAt || 0) < terminalCacheV2PreviewDelayMs
+      || (!allowRecentOutput && performance.now() - Number(session.lastTerminalOutputAt || 0) < terminalCacheV2PreviewDelayMs)
       || session.appliedHistoryCursor !== cursor
       || session.persistedHistoryCursor !== cursor
       || canvas.width !== width
@@ -15989,9 +16268,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       devicePixelRatio,
       themeFingerprint,
     });
+    clearSessionCacheV2OverviewPreview(session);
+    scheduleTabOverviewRender();
   };
 
-  const scheduleSessionCacheV2PreviewCapture = (session) => {
+  const scheduleSessionCacheV2PreviewCapture = (session, { immediate = false } = {}) => {
     if (!sessionUsesTerminalCacheV2(session) || session.closed) {
       return;
     }
@@ -16005,6 +16286,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     const captureSeq = Number(session.cacheV2PreviewCaptureSeq || 0) + 1;
     session.cacheV2PreviewCaptureSeq = captureSeq;
+    session.cacheV2PreviewCaptureAllowRecentOutput = immediate;
+    const delay = immediate ? 0 : terminalCacheV2PreviewDelayMs;
     session.cacheV2PreviewCaptureTimer = window.setTimeout(() => {
       session.cacheV2PreviewCaptureTimer = 0;
       const capture = () => {
@@ -16017,12 +16300,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
           });
         });
       };
-      if (typeof window.requestIdleCallback === "function") {
+      if (!immediate && typeof window.requestIdleCallback === "function") {
         session.cacheV2PreviewCaptureIdle = window.requestIdleCallback(capture, { timeout: 1500 });
       } else {
         window.setTimeout(capture, 0);
       }
-    }, terminalCacheV2PreviewDelayMs);
+    }, delay);
   };
 
   const scheduleSessionCacheV2Compaction = (session) => {
@@ -16293,11 +16576,18 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.allowGeneratedInputDuringReplay = false;
     clearAttachReadyTimer(session);
     if (Number(session.reconnectAttempts || 0) > 0) {
-      appendDebugLog("info", "终端连接已恢复", `${session.name}/${session.id}`);
+      appendDebugLog("info", "终端连接已恢复", terminalLocationDescription(session));
     }
     session.reconnectAttempts = 0;
     session.connectionRetrying = false;
     session.shellEl.dataset.connection = "open";
+    if (session.connectionChannel === "queue") {
+      clearTerminalQueuePaneRetry(session, { resetAttempts: true });
+      session.queueTaskState = "ready";
+    }
+    if (session.tabId === activeTabId && tabs.get(activeTabId)?.activePaneId === session.id) {
+      hideStartupErrorPanel();
+    }
     if (session.connectionChannel === "fast") {
       terminalConnectionScheduler?.notifyReplayReady(session, Number(session.connectionLeaseID || 0));
       // A Fast pane assigned from a background tab has no visible Canvas
@@ -16309,6 +16599,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       }
     } else if (session.connectionChannel === "queue") {
       scheduleTerminalQueueSync();
+      // Queue panes in inactive tabs may never receive a visible Canvas fit.
+      // They still have a replayed terminal and can produce a persisted
+      // overview preview without being promoted or marked render-ready.
+      scheduleSessionCacheV2PreviewCapture(session, { immediate: true });
       if (session.tabId !== activeTabId || !isPaneMeasurable(session)) {
         // Hidden tabs still own a live logical stream, but must not hold the
         // global Queue FIFO on a Canvas frame that cannot be measured yet.
@@ -16584,6 +16878,21 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return String(data?.error || "").trim();
   };
 
+  const invalidateSessionStartupError = (session, { hidePanel = false } = {}) => {
+    if (!session) {
+      return;
+    }
+    session.startupErrorRequestID = Number(session.startupErrorRequestID || 0) + 1;
+    session.startupErrorShown = false;
+    if (
+      hidePanel
+      && session.tabId === activeTabId
+      && tabs.get(activeTabId)?.activePaneId === session.id
+    ) {
+      hideStartupErrorPanel();
+    }
+  };
+
   const writeSessionWebShellError = (session, message) => {
     const text = String(message || "").trim();
     if (!text || !session || session.closed || !isCurrentInstanceSession(session)) {
@@ -16592,7 +16901,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (isRetryableTerminalTransportError(text)) {
       session.connectionRetrying = true;
       session.shellEl.dataset.connection = navigator.onLine === false ? "offline" : "reconnecting";
-      appendDebugWarning("终端网络错误将自动重试", `${session.name}/${session.id}: ${text}`);
+      appendDebugWarning("终端网络错误将自动重试", `${terminalLocationDescription(session)}: ${text}`);
       return;
     }
     showStartupErrorPanel(text);
@@ -16618,6 +16927,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       || normalized.includes("terminal queue connection close")
       || normalized.includes("terminal queue connection closed")
       || normalized.includes("terminal queue websocket error")
+      || normalized.includes("queue_transport_closed")
+      || normalized.includes("queue transport closed")
+      || normalized.includes("fast_1_closed")
+      || normalized.includes("fast_2_closed")
+      || normalized.includes("transport_recovery")
+      || normalized.includes("queue_keepalive_failed")
       || normalized.includes("websocket connection failed")
       || normalized.includes("websocket closed before terminal attached")
       || normalized.includes("websocket reconnect failed")
@@ -16632,12 +16947,18 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!session || session.closed || !isCurrentInstanceSession(session)) {
       return;
     }
+    const requestID = Number(session.startupErrorRequestID || 0) + 1;
+    session.startupErrorRequestID = requestID;
     let message = "";
     try {
       message = await readAgentStartupError(session.name);
     } catch (error) {
     }
-    if (session.closed || !isCurrentInstanceSession(session)) {
+    if (
+      session.closed
+      || !isCurrentInstanceSession(session)
+      || Number(session.startupErrorRequestID || 0) !== requestID
+    ) {
       return;
     }
     if (message) {
@@ -16705,12 +17026,23 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   );
 
   const resetTerminalForHistoryReplay = (session) => {
-    if (
-      !session?.term
-      || session.closed
-      || session.name !== activeName
-      || Number(session.measuredFitGeneration || 0) <= 0
-    ) {
+    if (!session?.term) {
+      if (session) {
+        session.lastHistoryResetFailureReason = "missing_terminal";
+      }
+      return false;
+    }
+    if (session.closed) {
+      session.lastHistoryResetFailureReason = "session_closed";
+      return false;
+    }
+    if (session.name !== activeName) {
+      session.lastHistoryResetFailureReason = "target_changed";
+      return false;
+    }
+    if (!terminalPaneHasKnownSize(session)) {
+      session.lastHistoryResetFailureReason = "terminal_size_unavailable";
+      appendDebugWarning("终端历史回放等待尺寸", `${terminalLocationDescription(session)}: terminal_size_unavailable`);
       return false;
     }
     return measurePerformanceTask("history replay", () => {
@@ -16727,12 +17059,16 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       session.term.targetViewportY = 0;
       try {
         if (!resetTerminalRuntimeState(session)) {
+          session.lastHistoryResetFailureReason = "runtime_reset_failed";
           return false;
         }
         cancelPendingTerminalRender(session.term);
         session.initialRuntimeResetDone = true;
         session.replayFitGeneration = session.measuredFitGeneration;
+        session.lastHistoryResetFailureReason = "";
       } catch (error) {
+        session.lastHistoryResetFailureReason = "history_replay_reset_exception";
+        appendDebugWarning("终端历史回放重置异常", `${terminalLocationDescription(session)}: ${error?.message || String(error)}`);
         return false;
       }
       resetTerminalHostViewport(session, { clean: true });
@@ -16823,7 +17159,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       pane: session.id,
       error: error?.message || String(error),
     });
-    appendDebugError("终端连接建立失败", `${session.name}/${session.id}: ${error?.message || String(error)}`);
+    appendDebugError("终端连接建立失败", `${terminalLocationDescription(session)}: ${error?.message || String(error)}`);
     showSessionStartupError(session, "WebSocket reconnect failed.");
     scheduleReconnect(session, { allowHidden });
   };
@@ -17021,14 +17357,17 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   };
 
   const scheduleTerminalTransportRecovery = (reason = "transport_failure") => {
+    const normalizedReason = String(reason || "transport_failure");
     if (
       disposed
       || navigator.onLine === false
       || isClientInstanceName(activeName)
-      || terminalTransportRecoveryScheduled
-      || terminalTransportRecoveryRunning
     ) {
       return false;
+    }
+    if (terminalTransportRecoveryScheduled || terminalTransportRecoveryRunning) {
+      terminalTransportRecoveryPendingReason = normalizedReason;
+      return true;
     }
     terminalTransportRecoveryScheduled = true;
     queueMicrotask(async () => {
@@ -17042,10 +17381,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         return;
       }
       terminalTransportRecoveryRunning = true;
-      appendDebugWarning("终端物理通道异常，正在恢复", String(reason || "transport_failure"));
+      appendDebugWarning("终端物理通道异常，正在恢复", normalizedReason);
       try {
-        terminalConnectionScheduler?.invalidateTransport?.(String(reason || "transport_failure"));
-        if (!terminalTopologyController?.transportFailure(String(reason || "transport_failure"))) {
+        terminalConnectionScheduler?.invalidateTransport?.(normalizedReason);
+        if (!terminalTopologyController?.transportFailure(normalizedReason)) {
           return;
         }
         // The controller's reset command closes all old physical sockets. Do
@@ -17058,10 +17397,30 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         }
       } catch (error) {
         appendDebugError("终端物理通道恢复失败", error?.message || String(error));
-        // A later visibility/focus/online event can safely retry the same
-        // recovery path; never leave the topology marked as permanently dead.
+        if (
+          !disposed
+          && navigator.onLine !== false
+          && activeName
+          && !isClientInstanceName(activeName)
+          && !terminalTransportRecoveryRetryTimer
+        ) {
+          terminalTransportRecoveryRetryTimer = window.setTimeout(() => {
+            terminalTransportRecoveryRetryTimer = 0;
+            scheduleTerminalTransportRecovery("transport_recovery_retry");
+          }, 1000);
+        }
       } finally {
         terminalTransportRecoveryRunning = false;
+        const pendingReason = terminalTransportRecoveryPendingReason;
+        terminalTransportRecoveryPendingReason = "";
+        if (
+          pendingReason
+          && !disposed
+          && navigator.onLine !== false
+          && terminalPhysicalTopologyNeedsRecovery()
+        ) {
+          scheduleTerminalTransportRecovery(pendingReason);
+        }
       }
     });
     return true;
@@ -17073,21 +17432,16 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return false;
     }
     const fastUnavailable = (topology.fastSlots || []).some((assignment) => {
-      if (!assignment || (assignment.state !== "ready" && topology.phase !== "running")) {
+      if (!assignment || assignment.state !== "ready") {
         return false;
       }
       const observedState = terminalFastConnections[assignment.slot]?.snapshot?.().physicalReadyState
         ?? terminalFastPhysicalReadyStates[assignment.slot];
       return observedState === WebSocket.CLOSED || !terminalFastConnections[assignment.slot];
     });
-    const queueExpected = topology.queue?.state === "open"
-      || (topology.queue?.state === "starting" && terminalQueueReconnectAttempts > 0);
-    const observedQueueState = terminalQueueConnection?.snapshot?.().physicalReadyState
-      ?? terminalQueuePhysicalReadyState;
-    const queueUnavailable = queueExpected
-      && observedQueueState === WebSocket.CLOSED
-      && !terminalQueueClosingPromise;
-    return fastUnavailable || queueUnavailable;
+    // Queue has its own physical backoff/reconnect loop. It must never be
+    // promoted to a page-wide topology reset by visibility or focus events.
+    return fastUnavailable;
   };
 
   const closeTerminalFastTransports = (reason = "context_changed") => {
@@ -17136,6 +17490,59 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return true;
     }
     return false;
+  };
+
+  const retryTerminalFastAssignment = (slot, reason = "fast_transport_closed") => {
+    const normalizedSlot = Math.floor(Number(slot));
+    const topology = terminalTopologyController?.snapshot();
+    const assignment = topology?.fastSlots?.[normalizedSlot];
+    const session = terminalTopologyController?.fastPane(normalizedSlot);
+    if (
+      !assignment
+      || !session
+      || session.closed
+      || session.name !== activeName
+      || navigator.onLine === false
+      || disposed
+    ) {
+      return false;
+    }
+    const retryReason = String(reason || `fast_${normalizedSlot + 1}_closed`);
+    invalidateSessionStartupError(session, { hidePanel: true });
+    session.connectionRetrying = true;
+    session.shellEl.dataset.connection = "reconnecting";
+    terminalTopologyController?.fastTransportClosed({
+      eventEpoch: topology.epoch,
+      slot: normalizedSlot,
+      attemptID: assignment.attemptID,
+    });
+    terminalTopologyController?.fastFailed(session, {
+      eventEpoch: topology.epoch,
+      attemptID: assignment.attemptID,
+      reason: retryReason,
+    });
+    const lease = terminalConnectionScheduler?.currentLease(session);
+    if (lease) {
+      terminalConnectionScheduler.notifyFailure(
+        session,
+        lease.leaseID,
+        new Error(retryReason),
+      );
+    }
+    terminalConnectionScheduler?.request(session, {
+      priority: normalizedSlot,
+      generation: topology.epoch,
+      reason: retryReason,
+      allowHidden: true,
+      lastUserInteractionAt: Number(session.lastUserInteractionAt || 0),
+      lastBecameVisibleAt: Number(session.lastBecameVisibleAt || 0),
+      lastOutputAt: Number(session.lastTerminalOutputAt || 0),
+    });
+    appendDebugWarning(
+      `终端直连通道 ${normalizedSlot + 1} 将独立重试`,
+      `${session.name}/${session.id}: ${retryReason}`,
+    );
+    return true;
   };
 
   const ensureTerminalFastConnection = (slot, targetName) => {
@@ -17189,7 +17596,22 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         if (state.physicalReadyState === WebSocket.CLOSED) {
           const expectedReason = terminalFastExpectedCloseReasons[normalizedSlot];
           if (!intentionalTerminalTransportCloseReasons.has(expectedReason)) {
-            scheduleTerminalTransportRecovery(`fast_${normalizedSlot + 1}_closed`);
+            const session = terminalTopologyController?.fastPane(normalizedSlot);
+            invalidateSessionStartupError(session, { hidePanel: true });
+            // Do not wait indefinitely for a wrapper Promise if the browser
+            // fails to deliver its final close notification. The identity
+            // check prevents this fallback from racing a replacement socket.
+            queueMicrotask(() => {
+              if (
+                terminalFastConnections[normalizedSlot] !== connection
+                || connection.snapshot().physicalReadyState !== WebSocket.CLOSED
+              ) {
+                return;
+              }
+              terminalFastConnections[normalizedSlot] = null;
+              terminalFastPhysicalReadyStates[normalizedSlot] = WebSocket.CLOSED;
+              retryTerminalFastAssignment(normalizedSlot, `fast_${normalizedSlot + 1}_closed`);
+            });
           }
         }
       },
@@ -17206,12 +17628,17 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       connection.snapshot().physicalReadyState,
     );
     Promise.resolve(connection.closed).finally(() => {
+      const unexpectedClose = terminalFastConnections[normalizedSlot] === connection
+        && !intentionalTerminalTransportCloseReasons.has(terminalFastExpectedCloseReasons[normalizedSlot]);
       if (terminalFastConnections[normalizedSlot] === connection) {
         terminalFastConnections[normalizedSlot] = null;
         terminalFastPhysicalReadyStates[normalizedSlot] = WebSocket.CLOSED;
       }
       if (terminalNetworkMonitor) {
         syncTerminalNetworkMonitorSockets();
+      }
+      if (unexpectedClose) {
+        retryTerminalFastAssignment(normalizedSlot, `fast_${normalizedSlot + 1}_closed`);
       }
     });
     return connection;
@@ -17419,7 +17846,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!cacheV2WarmReplayStarted) {
       hideSessionTerminalPreview(session);
     }
-    session.startupErrorShown = false;
+    invalidateSessionStartupError(session);
     session.shellEl.dataset.connection = sessionConnectingState(session);
     currentSocket.binaryType = "arraybuffer";
     startSocketConnectTimer(session, currentSocket);
@@ -17471,6 +17898,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     };
 
     const rejectHistorySync = (reason) => {
+      const resetFailureReason = session.lastHistoryResetFailureReason;
+      if (resetFailureReason && /reset/i.test(String(reason)) && /failed|exception/i.test(String(reason))) {
+        reason = `${reason} (${resetFailureReason})`;
+      }
       session.resetOnNextReplay = true;
       session.historyStateReady = false;
       session.historyProtocolActive = false;
@@ -17562,18 +17993,47 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
               });
             }
             switch (message.type) {
+              case "resize-applied":
+                if (!validateReplayMessage(message)) {
+                  rejectMismatchedReplay(message);
+                  return;
+                }
+                handleTerminalResizeApplied(session, message);
+                return;
+              case "resize-error":
+                if (!validateReplayMessage(message)) {
+                  rejectMismatchedReplay(message);
+                  return;
+                }
+                handleTerminalResizeError(session, message);
+                return;
               case "history-replay-start":
                 if (!validateReplayMessage(message)) {
                   rejectMismatchedReplay(message);
                   return;
                 }
                 session.agentPreparing = false;
+                const resizeProtocol = String(message.resize_protocol || "").trim();
+                if (resizeProtocol === "epoch-v1") {
+                  session.resizeEpochSupported = true;
+                } else if (session.resizeEpochSupported !== true) {
+                  session.resizeEpochSupported = false;
+                  session.resizeAckPending = false;
+                }
                 const historyGeneration = String(message.history_generation || "").trim();
                 const syncMode = String(message.sync_mode || "").trim();
                 const serverBaseCursor = parseHistoryCursor(message.server_base_cursor);
                 const serverEndCursor = parseHistoryCursor(message.server_end_cursor);
                 const deltaFromCursor = parseHistoryCursor(message.delta_from_cursor);
                 const deltaToCursor = parseHistoryCursor(message.delta_to_cursor);
+                const replayResizeEpoch = normalizeTerminalResizeEpoch(message.resize_epoch);
+                if (replayResizeEpoch && !session.resizeAckPending) {
+                  session.appliedResizeEpoch = replayResizeEpoch;
+                  session.serverCols = Math.max(0, Math.floor(Number(message.cols) || 0));
+                  session.serverRows = Math.max(0, Math.floor(Number(message.rows) || 0));
+                  session.serverPixelWidth = Math.max(0, Math.floor(Number(message.pixel_width) || 0));
+                  session.serverPixelHeight = Math.max(0, Math.floor(Number(message.pixel_height) || 0));
+                }
                 const modernHistoryProtocol = Boolean(historyGeneration && syncMode);
                 if (!modernHistoryProtocol) {
                   session.historyProtocolActive = false;
@@ -17901,9 +18361,17 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         "tab_priority_changed",
         "context_changed",
       ].includes(schedulerCloseReason);
-      console[intentionallyParked ? "info" : "warn"]("[client-terminal] websocket close", {
+      const intentionallyClosed = [
+        "session_closed",
+        "tab_or_target_removed",
+        "page_disposed",
+      ].includes(schedulerCloseReason);
+      const intentionalTransportClose = intentionallyParked || intentionallyClosed;
+      console[intentionalTransportClose ? "info" : "warn"]("[client-terminal] websocket close", {
         name: session.name,
+        tab: session.tabId,
         pane: session.id,
+        scope: "session/tab/pane",
         code: event.code,
         reason: event.reason || "",
         wasClean: event.wasClean,
@@ -17916,19 +18384,31 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         startupErrorShown: session.startupErrorShown,
         exitExpected: session.exitExpected === true,
       });
-      if (!intentionallyParked) {
-        appendDebugWarning("终端 WebSocket 已断开", `${session.name}/${session.id}, code=${event.code}, ${event.reason || "无原因"}`);
+      if (!intentionalTransportClose) {
+        appendDebugWarning("终端 WebSocket 已断开", `${terminalLocationDescription(session)}, code=${event.code}, ${event.reason || "无原因"}`);
       }
       const nextConnectionState = intentionallyParked
         ? schedulerCloseReason === "promote_to_fast" ? "connecting" : "parked"
-        : schedulerCloseReason === "network_offline"
+        : intentionallyClosed
+          ? "closed"
+          : schedulerCloseReason === "network_offline"
           ? "offline"
-          : schedulerCloseReason === "session_closed" || schedulerCloseReason === "tab_or_target_removed" || schedulerCloseReason === "page_disposed"
-            ? "closed"
-            : "reconnecting";
+          : "reconnecting";
+      const retryableTransportClose = !intentionallyClosed && (channel === "queue"
+        || isRetryableTerminalTransportError(schedulerCloseReason)
+        || isRetryableTerminalTransportError(event.reason));
+      if (retryableTransportClose) {
+        invalidateSessionStartupError(session, { hidePanel: true });
+      }
       detachSessionSocket(session, currentSocket, { connection: nextConnectionState });
       if (channel === "queue") {
         settleTerminalQueueStartup(session, "cancelled");
+        session.queueConnectPending = false;
+        session.queueTaskState = intentionallyParked
+          ? "idle"
+          : intentionallyClosed
+            ? "closed"
+            : "retrying";
       }
       session.connectionLeaseClosing = false;
       session.connectionLeaseCloseReason = "";
@@ -17948,7 +18428,14 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       }
       if (channel === "queue") {
         if (!session.closed && terminalTopologyController?.isQueueAllowed()) {
-          scheduleTerminalQueueSync();
+          if (intentionallyParked) {
+            scheduleTerminalQueueSync();
+          } else if (!intentionallyClosed) {
+            scheduleTerminalQueuePaneRetry(
+              session,
+              `${terminalLocationDescription(session)}: ${schedulerCloseReason || event.reason || "queue_transport_closed"}`,
+            );
+          }
         }
         return;
       }
@@ -17962,7 +18449,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
           wasClean: event.wasClean,
         });
       }
-      if (!intentionallyParked) {
+      if (!intentionalTransportClose) {
         notifyTerminalTopologyFastFailed(session, leaseID, schedulerCloseReason || "server_close");
       }
       // The physical close callback will reset the entire topology. Do not
@@ -17973,13 +18460,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         notifyTerminalTopologyFastStopped(session, leaseID, schedulerCloseReason || "server_close");
       }
       if (intentionallyParked) {
-        appendDebugLog("info", "终端连接已停放", `${session.name}/${session.id}, lease=${leaseID}`);
+        appendDebugLog("info", "终端连接已停放", `${terminalLocationDescription(session)}, lease=${leaseID}`);
         return;
       }
       if (session.exitExpected || session.closed || schedulerCloseReason === "tab_or_target_removed" || schedulerCloseReason === "page_disposed") {
         return;
       }
-      if (!session.startupErrorShown) {
+      if (!retryableTransportClose && !fastPhysicalTransportLost && !session.startupErrorShown) {
         session.startupErrorShown = true;
         showSessionStartupError(session, event.reason || "WebSocket closed before terminal attached.");
       }
@@ -18005,7 +18492,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       session.connectionRetrying = true;
       session.shellEl.dataset.connection = "reconnecting";
       flushSessionOutput(session);
-      if (!session.startupErrorShown) {
+      if (!isRetryableTerminalTransportError(event.message || "WebSocket connection failed.") && !session.startupErrorShown) {
         session.startupErrorShown = true;
         showSessionStartupError(session, "WebSocket connection failed.");
       }
@@ -18074,11 +18561,67 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return true;
   }
 
+  const clearTerminalQueuePaneRetry = (session, { resetAttempts = false } = {}) => {
+    if (!session) {
+      return;
+    }
+    if (session.queueRetryTimer) {
+      window.clearTimeout(session.queueRetryTimer);
+      session.queueRetryTimer = 0;
+    }
+    session.queueRetryAt = 0;
+    if (resetAttempts) {
+      session.queueRetryAttempts = 0;
+    }
+  };
+
+  const scheduleTerminalQueuePaneRetry = (session, reason, { immediate = false } = {}) => {
+    if (disposed || !session || session.closed || !isCurrentInstanceSession(session)) {
+      return false;
+    }
+    if (navigator.onLine === false) {
+      clearTerminalQueuePaneRetry(session);
+      session.shellEl.dataset.connection = "offline";
+      return false;
+    }
+    if (session.queueRetryTimer) {
+      return true;
+    }
+    session.queueRetryAttempts = Math.min(20, Number(session.queueRetryAttempts || 0) + 1);
+    const delay = immediate
+      ? terminalQueuePaneRetryBaseDelayMs
+      : Math.min(
+        terminalQueuePaneRetryMaxDelayMs,
+        terminalQueuePaneRetryBaseDelayMs * (2 ** Math.min(session.queueRetryAttempts - 1, 8)),
+      );
+    session.queueRetryAt = Date.now() + delay;
+    session.queueTaskState = "retrying";
+    session.connectionRetrying = true;
+    session.shellEl.dataset.connection = "reconnecting";
+    session.queueRetryTimer = window.setTimeout(() => {
+      session.queueRetryTimer = 0;
+      session.queueRetryAt = 0;
+      if (disposed || session.closed || !isCurrentInstanceSession(session)) {
+        return;
+      }
+      scheduleTerminalQueueSync();
+    }, delay);
+    appendDebugWarning(
+      "终端队列会话将在重试",
+      `${terminalLocationDescription(session)}, 第 ${session.queueRetryAttempts} 次, ${delay}ms 后: ${reason}`,
+    );
+    return true;
+  };
+
   const detachTerminalQueueSession = (session, reason = "queue_not_needed") => {
     if (!session || session.connectionChannel !== "queue") {
       return false;
     }
     session.connectionQueueCloseReason = reason;
+    const retrying = reason === "queue_retry" || reason === "queue_transport_closed";
+    if (!retrying) {
+      clearTerminalQueuePaneRetry(session, { resetAttempts: true });
+    }
     if (reason === "promote_to_fast") {
       // Replacing a logical Queue stream with a Fast stream is an intentional
       // priority handoff, not a network retry. Clear stale Queue retry state
@@ -18087,9 +18630,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       session.reconnectPending = false;
       session.shellEl.dataset.connection = "connecting";
     }
+    if (retrying) {
+      session.connectionRetrying = true;
+      session.shellEl.dataset.connection = "reconnecting";
+    }
     settleTerminalQueueStartup(session, "cancelled");
     session.queueConnectPending = false;
-    session.queueTaskState = "idle";
+    session.queueTaskState = retrying ? "retrying" : "idle";
     const socket = session.socket;
     if (socket) {
       try {
@@ -18101,6 +18648,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       }
     } else {
       session.connectionChannel = "";
+      session.connectionChannelGeneration = 0;
       session.queueStreamID = "";
     }
     return true;
@@ -18121,6 +18669,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (terminalQueueReconnectTimer) {
       window.clearTimeout(terminalQueueReconnectTimer);
       terminalQueueReconnectTimer = 0;
+    }
+    if (terminalQueuePhysicalKeepAliveTimer) {
+      window.clearInterval(terminalQueuePhysicalKeepAliveTimer);
+      terminalQueuePhysicalKeepAliveTimer = 0;
     }
     // An intentional transport shutdown must not delay the next topology epoch.
     resetTerminalQueuePhysicalReconnectBackoff();
@@ -18146,6 +18698,31 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       terminalQueueClosingPromise = closingPromise;
       connection.close(4001, reason);
     }
+  };
+
+  const startTerminalQueuePhysicalKeepAlive = (connection) => {
+    if (terminalQueuePhysicalKeepAliveTimer) {
+      window.clearInterval(terminalQueuePhysicalKeepAliveTimer);
+      terminalQueuePhysicalKeepAliveTimer = 0;
+    }
+    if (!connection) {
+      return;
+    }
+    terminalQueuePhysicalKeepAliveTimer = window.setInterval(() => {
+      if (terminalQueueConnection !== connection || connection.snapshot().physicalReadyState !== WebSocket.OPEN) {
+        return;
+      }
+      const socket = connection.getPhysicalSocket?.();
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      try {
+        socket.send(JSON.stringify({ type: "queue-ping" }));
+      } catch (error) {
+        appendDebugWarning("终端队列通道保活失败，准备独立重试", error?.message || String(error));
+        connection.close(4001, "queue_keepalive_failed");
+      }
+    }, 10 * 1000);
   };
 
   const ensureTerminalQueueConnection = () => {
@@ -18209,13 +18786,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
           terminalQueueConnection = null;
           terminalQueueTargetName = "";
           recordTerminalQueuePhysicalReconnectFailure();
-          const recoveryInFlight = terminalTransportRecoveryScheduled || terminalTransportRecoveryRunning;
           const expectedReason = terminalQueueExpectedCloseReason;
           terminalQueueExpectedCloseReason = "";
-          if (!recoveryInFlight && !intentionalTerminalTransportCloseReasons.has(expectedReason)) {
-            scheduleTerminalTransportRecovery("queue_transport_closed");
-          }
-          if (!terminalTransportRecoveryScheduled && !terminalTransportRecoveryRunning) {
+          // Queue is an independent physical transport. Its failure must not
+          // invalidate healthy Fast sockets or advance the global topology
+          // epoch. The controller keeps the Queue candidates and starts one
+          // backoff-controlled Queue replacement for this same epoch.
+          if (!intentionalTerminalTransportCloseReasons.has(expectedReason)) {
             terminalTopologyController?.queueTransportClosed({
               eventEpoch,
               attemptID,
@@ -18233,6 +18810,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       },
     });
     terminalQueueConnection = connection;
+    startTerminalQueuePhysicalKeepAlive(connection);
     return connection;
   };
 
@@ -18285,6 +18863,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       !session
       || session.closed
       || session.queueConnectPending
+      || session.queueRetryTimer
       || session.socket
       || terminalConnectionScheduler?.currentLease(session)
       || !terminalQueueConnection
@@ -18298,7 +18877,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.connectionChannelGeneration = generation;
     session.connectionQueueCloseReason = "";
     session.queueStreamID = terminalQueueStreamID(session, generation);
-    session.connectionRetrying = Number(session.reconnectAttempts || 0) > 0;
+    session.connectionRetrying = Number(session.reconnectAttempts || 0) > 0
+      || Number(session.queueRetryAttempts || 0) > 0;
     session.queueTaskState = "queued";
     session.shellEl.dataset.connection = sessionConnectingState(session);
     const queueConnect = terminalQueueCachePreparationQueue.enqueue(async () => {
@@ -18339,6 +18919,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         session.connectionRetrying = true;
         session.shellEl.dataset.connection = "reconnecting";
         detachTerminalQueueSession(session, "queue_retry");
+        scheduleTerminalQueuePaneRetry(session, outcome || "queue_startup_failed");
         appendDebugWarning("终端队列 pane 正在重同步", `${session.name}/${session.id}: ${outcome}`);
       }
       return outcome;
@@ -18353,13 +18934,14 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       }
       if (outcome !== "cancelled") {
         session.queueTaskState = "retrying";
+        scheduleTerminalQueuePaneRetry(session, outcome || "queue_startup_failed");
       }
     }).catch((error) => {
       appendDebugError("终端队列连接建立失败", `${session.name}/${session.id}: ${error?.message || String(error)}`);
       if (queueStartupIsCurrent(session, generation)) {
         session.queueTaskState = "retrying";
         detachTerminalQueueSession(session, "queue_retry");
-        scheduleTerminalQueueSync();
+        scheduleTerminalQueuePaneRetry(session, error?.message || "queue_connect_failed");
       }
     }).finally(() => {
       if (queueStartupIsCurrent(session, generation)) {
@@ -18393,6 +18975,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       && !pane.closed
       && pane.name === activeName
       && sessionHasTerminalConnectionSize(pane)
+      && !pane.queueRetryTimer
       && !terminalConnectionScheduler?.currentLease(pane)
     ));
     const desired = new Set(candidates);
@@ -18446,7 +19029,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.connectionRetrying = true;
     session.shellEl.dataset.connection = "reconnecting";
     detachTerminalQueueSession(session, "queue_retry");
-    scheduleTerminalQueueSync();
+    scheduleTerminalQueuePaneRetry(session, reason, { immediate });
     appendDebugWarning("终端队列 pane 正在重同步", `${session.name}/${session.id}: ${reason}`);
     return true;
   };
@@ -18454,6 +19037,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   terminalConnectionScheduler = createTerminalConnectionScheduler({
     capacity: terminalFastWebSocketCapacity,
     connect: async (session, lease) => {
+      clearTerminalQueuePaneRetry(session, { resetAttempts: true });
       detachTerminalQueueSession(session, "promote_to_fast");
       session.connectionChannel = "fast";
       const fastUsesMultiplexedTransport = !isClientInstanceName(session.name);
@@ -18472,7 +19056,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       appendDebugLog(
         "info",
         "终端连接租约已分配",
-        `${session.name}/${session.id}, lease=${lease.leaseID}, P${lease.priority}`,
+        `${terminalLocationDescription(session)}, lease=${lease.leaseID}, P${lease.priority}`,
       );
       try {
         const started = await connectSession(session, {
@@ -18514,7 +19098,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         appendDebugLog(
           "info",
           "终端连接租约被抢占",
-          `${session.name}/${session.id}, lease=${lease.leaseID}`,
+          `${terminalLocationDescription(session)}, lease=${lease.leaseID}`,
         );
       } else if (reason === "network_offline") {
         session.shellEl.dataset.connection = "offline";
@@ -18870,6 +19454,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       queueConnectPending: false,
       queueTaskState: "idle",
       queueStartupWaiter: null,
+      queueRetryTimer: 0,
+      queueRetryAttempts: 0,
+      queueRetryAt: 0,
+      lastHistoryResetFailureReason: "",
+      startupErrorRequestID: 0,
       topologyMeasurementFrame: 0,
       topologyMeasurementAttempts: 0,
       lastUserInteractionAt: 0,
@@ -18946,6 +19535,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       cacheV2PreviewCaptureTimer: 0,
       cacheV2PreviewCaptureIdle: 0,
       cacheV2PreviewCaptureSeq: 0,
+      cacheV2PreviewCaptureAllowRecentOutput: false,
       lastTerminalOutputAt: 0,
       cacheV2OverviewPreview: null,
       cacheV2OverviewPreviewPromise: null,
@@ -18978,6 +19568,15 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       presentedContentGeneration: 0,
       presentedFitGeneration: 0,
       presentedReplayGeneration: 0,
+      requestedResizeEpoch: "",
+      appliedResizeEpoch: "",
+      presentedResizeEpoch: "",
+      requestedCols: 0,
+      requestedRows: 0,
+      requestedPixelWidth: 0,
+      requestedPixelHeight: 0,
+      resizeEpochSupported: null,
+      resizeAckPending: false,
       renderReady: false,
       presentationPending: true,
       fullRenderPending: false,
@@ -19715,6 +20314,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         resizeActiveTabForCurrentDevice();
         connectPendingSessionsForTab(nextActiveTab, { allowHidden: true });
       });
+      // The workspace list is authoritative only after it has been applied.
+      // Defer orphan preview cleanup until this point so a cold restore cannot
+      // delete previews for panes that are still being materialized.
+      scheduleTerminalCacheV2OrphanPreviewCleanup();
       return true;
     } finally {
       clearRestartTabForReload();
@@ -20049,8 +20652,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return;
     }
     flushSessionHistoryCacheWrites(pane);
-    detachTerminalQueueSession(pane, "session_closed");
+    // Mark the logical pane closed before closing either transport. Queue's
+    // logical close is synchronous, so the close handler must never schedule
+    // a retry for a pane that is being intentionally destroyed.
     pane.closed = true;
+    detachTerminalQueueSession(pane, "session_closed");
     terminalConnectionScheduler?.unregister(pane, "session_closed");
     pane.pendingInput = [];
     pane.pendingInputSize = 0;
@@ -20072,6 +20678,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     clearReconnectTimer(pane);
     clearSessionConnectionTimers(pane);
+    clearTerminalQueuePaneRetry(pane, { resetAttempts: true });
     if (pane.topologyMeasurementFrame) {
       window.cancelAnimationFrame(pane.topologyMeasurementFrame);
       pane.topologyMeasurementFrame = 0;
@@ -20089,6 +20696,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       pane.cacheV2PreviewCaptureIdle = 0;
     }
     pane.cacheV2PreviewCaptureSeq = Number(pane.cacheV2PreviewCaptureSeq || 0) + 1;
+    pane.cacheV2PreviewCaptureAllowRecentOutput = false;
     pane.cacheV2WarmReplaySeq = Number(pane.cacheV2WarmReplaySeq || 0) + 1;
     pane.cacheV2WarmReplayActive = false;
     pane.cacheV2WarmReplayReady = false;
@@ -20195,6 +20803,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     updateEmptyState();
     scheduleTabOverviewRender();
+    if (!applyingWorkspaceState) {
+      syncTerminalConnectionDemands({ reason: "tab_closed" });
+    }
   };
 
   const closeOtherTabs = (tabId) => {
