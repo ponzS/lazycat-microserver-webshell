@@ -188,7 +188,18 @@ export const createTerminalNetworkMonitor = ({
     }
     const normalizedKind = kind === "queue" ? "queue" : "fast";
     const channel = availableChannel(normalizedKind, slot);
-    if (!channel) {
+    const requestedSlot = slot === null || slot === undefined ? -1 : Math.floor(Number(slot));
+    const requestedChannel = requestedSlot >= 0 && requestedSlot < channels.length
+      ? channels[requestedSlot]
+      : null;
+    if (!channel && requestedChannel?.socket && requestedChannel.socket !== socket) {
+      const previous = attachments.get(requestedChannel.socket);
+      if (previous) {
+        releaseAttachment(previous, { emitChange: false });
+      }
+    }
+    const targetChannel = channel || requestedChannel;
+    if (!targetChannel || targetChannel.socket) {
       return null;
     }
     const hadOwnSend = Object.prototype.hasOwnProperty.call(socket, "send");
@@ -197,7 +208,7 @@ export const createTerminalNetworkMonitor = ({
     const originalClose = socket.close;
     const attachment = {
       socket,
-      channel,
+      channel: targetChannel,
       listeners: [],
       wrappedSend: null,
       wrappedClose: null,
@@ -208,10 +219,10 @@ export const createTerminalNetworkMonitor = ({
       handle: null,
     };
     const setState = (state) => {
-      if (attachments.get(socket) !== attachment || channel.state === state) {
+      if (attachments.get(socket) !== attachment || targetChannel.state === state) {
         return;
       }
-      channel.state = state;
+      targetChannel.state = state;
       emit();
     };
     const addListener = (type, listener) => {
@@ -220,7 +231,7 @@ export const createTerminalNetworkMonitor = ({
     };
     const wrappedSend = function sendWithNetworkMeasurement(payload) {
       const result = Reflect.apply(originalSend, this, [payload]);
-      channel.sentBytes += terminalNetworkPayloadBytes(payload);
+      targetChannel.sentBytes += terminalNetworkPayloadBytes(payload);
       return result;
     };
     const wrappedClose = function closeWithNetworkMeasurement(...args) {
@@ -231,19 +242,19 @@ export const createTerminalNetworkMonitor = ({
     attachment.wrappedClose = wrappedClose;
     socket.send = wrappedSend;
     socket.close = wrappedClose;
-    channel.socket = socket;
-    channel.kind = normalizedKind;
-    channel.state = stateFromReadyState(socket.readyState);
+    targetChannel.socket = socket;
+    targetChannel.kind = normalizedKind;
+    targetChannel.state = stateFromReadyState(socket.readyState);
     addListener("open", () => setState("open"));
     addListener("message", (event) => {
-      channel.receivedBytes += terminalNetworkPayloadBytes(event?.data);
+      targetChannel.receivedBytes += terminalNetworkPayloadBytes(event?.data);
     });
     addListener("error", () => setState("error"));
     addListener("close", () => releaseAttachment(attachment));
     attachment.handle = {
       detach: () => releaseAttachment(attachment),
       get index() {
-        return channel.index;
+        return targetChannel.index;
       },
     };
     attachments.set(socket, attachment);

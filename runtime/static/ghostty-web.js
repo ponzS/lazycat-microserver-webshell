@@ -2643,13 +2643,13 @@ class IA {
     }
     var g;
     const C = this.wasmTerm.getScrollbackGeneration(), I = this.viewportY || 0, D = this.scrollAnimationFrame ? this.targetViewportY || 0 : I, i = I <= 0.01 && D <= 0.01;
-    if (this.wasmTerm.write(A), this.processTerminalResponses(), typeof A == "string" && A.includes("\x07") ? this.bellEmitter.fire() : A instanceof Uint8Array && A.includes(7) && this.bellEmitter.fire(), (g = this.linkDetector) == null || g.invalidateCache(), i)
+    if (this.wasmTerm.write(A), this.renderFullNextFrame = !0, this.processTerminalResponses(), typeof A == "string" && A.includes("\x07") ? this.bellEmitter.fire() : A instanceof Uint8Array && A.includes(7) && this.bellEmitter.fire(), (g = this.linkDetector) == null || g.invalidateCache(), i)
       this.scrollToBottom();
     else {
       const w = this.getScrollbackLength(), s = this.wasmTerm.getScrollbackGeneration(), N = s - C >>> 0, F = Math.max(0, Math.min(w, I + N)), S = Math.max(0, Math.min(w, D + N));
       (F !== this.viewportY || S !== this.targetViewportY) && (this.viewportY = F, this.targetViewportY = S, this.scrollEmitter.fire(Math.floor(this.viewportY))), w > 0 && this.showScrollbar();
     }
-    this.requestRender({ throttle: !0 }), typeof A == "string" && A.includes("\x1B]") && this.checkForTitleChange(A), B && requestAnimationFrame(B);
+    this.requestRender({ full: !0 }), typeof A == "string" && A.includes("\x1B]") && this.checkForTitleChange(A), B && requestAnimationFrame(B);
   }
   /**
    * Write data with newline

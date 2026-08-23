@@ -125,3 +125,21 @@ test("multiplexed Fast sockets can bind to stable controller slots", () => {
   assert.equal(state.channels[0].label, "直连通道 1");
   assert.equal(state.channels[1].label, "直连通道 2");
 });
+
+test("stable monitor slots replace a closing socket without losing channel counters", () => {
+  let now = 0;
+  const monitor = createTerminalNetworkMonitor({ now: () => now });
+  const oldSocket = new FakeWebSocket(1);
+  const newSocket = new FakeWebSocket(1);
+  monitor.attachSocket(oldSocket, { kind: "fast", slot: 0 });
+  oldSocket.send("old");
+  monitor.attachSocket(newSocket, { kind: "fast", slot: 0 });
+  newSocket.send("new");
+  newSocket.dispatch("message", { data: new Uint8Array([1, 2]).buffer });
+  now = 1000;
+  const state = monitor.sample();
+  assert.equal(state.channels[0].active, true);
+  assert.equal(state.channels[0].totalBytes, 8);
+  assert.equal(state.channels[0].sentBytes, 6);
+  assert.equal(state.channels[0].receivedBytes, 2);
+});

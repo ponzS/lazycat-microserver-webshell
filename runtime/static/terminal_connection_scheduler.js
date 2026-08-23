@@ -383,6 +383,7 @@ export const createTerminalConnectionScheduler = ({
       "demand_released",
       "capacity_reduced",
       "background_tab_parked",
+      "tab_priority_changed",
     ].includes(closingReason)) {
       const resumedBeforePreemptClosed = Boolean(
         closingReason === "scheduler_preempt"
@@ -396,6 +397,31 @@ export const createTerminalConnectionScheduler = ({
     }
     reconcile();
     return true;
+  };
+
+  // A physical multiplexed socket can take every logical stream down at
+  // once. Clear those leases as a batch without calling disconnect again on
+  // already-closed logical sockets; the topology owner will request fresh
+  // leases after it creates the next physical transport generation.
+  const invalidateTransport = (reason = "network_failure") => {
+    let invalidated = false;
+    for (const record of records.values()) {
+      if (!record.lease) {
+        continue;
+      }
+      record.lease = null;
+      record.lastError = new Error(String(reason || "network_failure"));
+      invalidated = true;
+      if (record.demand && !record.disposed && online) {
+        scheduleBackoff(record);
+      } else {
+        record.status = record.disposed ? "disposed" : "parked";
+      }
+    }
+    if (invalidated) {
+      reconcile();
+    }
+    return invalidated;
   };
 
   const unregister = (session, reason = "session_closed") => {
@@ -475,6 +501,7 @@ export const createTerminalConnectionScheduler = ({
     notifyReplayReady,
     notifyFailure,
     notifyClosed,
+    invalidateTransport,
     currentLease,
     snapshot,
   };

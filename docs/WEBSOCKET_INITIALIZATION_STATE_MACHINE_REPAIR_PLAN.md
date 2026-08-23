@@ -2,9 +2,9 @@
 
 状态：已实施，待目标设备真机验收。
 
-本文记录目标设备在单 tab、32 分屏下的初始化失败修复方案，补充 [连接复用总体方案](WEBSOCKET_CONNECTION_MULTIPLEXING_PLAN.md)。浏览器端初始化的状态归属和迁移规则以本文为准，优先于首版实现说明。
+本文记录目标设备在单 tab、32 分屏及多 tab 场景下的初始化失败修复方案，补充 [连接复用总体方案](WEBSOCKET_CONNECTION_MULTIPLEXING_PLAN.md)。浏览器端初始化的状态归属和迁移规则以本文为准，优先于首版实现说明。
 
-实施状态（2026-08-21）：浏览器已引入 `TerminalTopologyController` 作为容器目标 Fast/Queue 拓扑的唯一所有者；Queue physical transport 支持空 logical stream 保活，Queue pane 启动使用有限 latch 结算，未测量 pane 通过有限布局确认链自动进入初始化。自动化验证已覆盖严格 Fast A -> Fast B -> Queue 顺序、32 pane、延迟测量、陈旧回调、Fast 提升、Queue FIFO 超时和稳定监视器 slot。尚未完成目标 Android WebView、Lazycat WKWebView 与桌面浏览器的 3/12/32 分屏实机验收。
+实施状态（2026-08-23）：浏览器已引入页面级 `TerminalTopologyController` 作为容器目标 Fast/Queue 拓扑的唯一所有者；两条 Fast transport 也使用 Provider 复用协议并保持单 pane 逻辑绑定，Queue physical transport 支持空 logical stream 保活，Queue pane 启动使用有限 latch 结算，后台 tab pane 在 replay/cursor 连续后不等待不可测量 Canvas，未测量 pane 通过有限布局确认链自动进入初始化。自动化验证已覆盖严格 Fast A -> Fast B -> Queue 顺序、跨 tab 全局 FIFO、tab 切换不重建物理 transport、32 pane、延迟测量、陈旧回调、Fast 提升、Queue FIFO 超时和稳定监视器 slot。尚未完成目标 Android WebView、Lazycat WKWebView 与桌面浏览器的 3/12/32 分屏实机验收。
 
 ## 1. 已确认边界
 
@@ -13,7 +13,7 @@
 - 点击某个 pane 后，它可以快速升入直连通道、回放、渲染并接受输入，说明基础 WebSocket、缓存、回放和渲染链路本身可用。
 - 首次初始化时，直连通道 1/2 会在已启用、已关闭、连接中之间反复切换；这是浏览器真实关闭，不是监视器单纯显示错误。
 - 32 个可见 pane 时，只有少数 Queue pane 达到首帧，后续 pane 可以永久黑屏，且直到点击前都没有独立的连接状态。
-- persistent agent 保持不变。浏览器最多保留两条直连物理 WebSocket 和一条队列物理 WebSocket；不引入 HTTP 轮询或周期性重建 pane WebSocket。
+- persistent agent 保持不变。浏览器最多保留两条页面级直连物理 WebSocket 和一条页面级队列物理 WebSocket；tab 切换只替换逻辑 stream，不引入 HTTP 轮询或周期性重建 pane WebSocket。
 
 ## 2. 根因
 
@@ -40,7 +40,7 @@
 ## 3. 不变量
 
 1. 浏览器终端物理 WebSocket 始终不超过 3 条：直连通道 1、直连通道 2、队列通道。
-2. 首次初始化严格为 `Fast A -> Fast B -> Queue`。Fast A 未完成当前最终呈现前不能启动 Fast B；两个 Fast 未完成前不能创建 Queue、提交订阅或开始 Queue 本地缓存任务。
+2. 首次初始化严格为 `Fast A -> Fast B -> Queue`。Fast A 未完成当前逻辑启动前不能启动 Fast B；两个 Fast 物理 socket 均确认 `OPEN` 且工作区存在第三个 pane 后，才能创建 Queue、提交订阅或开始 Queue 本地缓存任务。后台 Fast pane 的不可见 Canvas 首帧不属于 Queue 物理启动前置条件。
 3. Fast 启动失败只重试当前阶段和当前 pane，不能跳过阶段或静默替换其他 pane。
 4. Queue 已运行后，普通输出、一次 render pending 或 Fast 槽位交接都不能关闭 Queue 物理 WebSocket。
 5. 单个 Queue pane 失败只影响其逻辑流，不得关闭其他逻辑流或 Queue 物理 WebSocket。
@@ -51,16 +51,16 @@
 
 ## 4. 目标 Controller
 
-新增仅在浏览器端运行的 `TerminalTopologyController`。它是 Fast lease、Queue 物理传输、Queue 逻辑成员和启动阶段迁移的唯一所有者。
+新增仅在浏览器端运行的 `TerminalTopologyController`。它是 Fast lease、两条 Fast 逻辑绑定、Queue 物理传输、Queue 逻辑成员和启动阶段迁移的唯一所有者。
 
 ### 4.1 Context
 
-每个当前 target/tab context 包含：
+每个当前 target 页面包含：
 
-- `epoch`：仅在 target 或活动 tab 变化时递增。
+- `epoch`：仅在 target 变化、离线或页面重置时递增；活动 tab 变化不重建物理 transport。
 - `phase`：`idle`、`awaiting_measurement`、`fast_a_starting`、`fast_a_ready`、`fast_b_starting`、`fast_b_ready`、`queue_starting`、`running`、`suspended`。
 - 两个稳定 Fast slot：pane ID、lease ID、启动 attempt ID 和状态。
-- 一个 Queue transport：物理 socket 状态和 transport attempt ID。
+- 两个 Fast transport 和一个 Queue transport：物理 socket 状态、transport attempt ID 以及当前逻辑绑定。
 - 每 pane 启动记录：状态、channel generation、Queue attempt、重试次数和最后状态原因。
 
 WebSocket、Cache API、resize、Ghostty render、超时和用户操作的回调必须携带 epoch/attempt ID。不匹配当前记录的旧回调直接丢弃，不能改变连接拓扑。
@@ -85,7 +85,7 @@ resize、render、健康检查、`setActivePane` 和回放处理不能再直接�
 | --- | --- | --- | --- |
 | `awaiting_measurement` | 活动 pane 可测量 | 分配并启动 Fast A | 启动 Fast B 或 Queue |
 | `fast_a_starting` | Fast A 当前最终呈现 | 分配并启动 Fast B | 因后续测量释放 Fast A |
-| `fast_b_starting` | Fast B 当前最终呈现 | 创建 Queue transport 并入队 Queue pane | Fast B 首帧前启动 Queue |
+| `fast_b_starting` | 两个 Fast 物理 socket 均 `OPEN` 且存在额外 pane | 创建 Queue transport 并入队 Queue pane | 第二个 Fast 物理 socket `OPEN` 前启动 Queue |
 | `queue_starting` | Queue 物理传输 ready | 运行 Queue 启动 FIFO | 创建第二条 Queue socket |
 | `running` | 普通输出或 render pending | 保持现有拓扑 | 重建 Fast 或 Queue |
 
@@ -108,7 +108,7 @@ Queue 启动 worker 的缓存 manifest 访问和 warm replay 并发度恒为 1�
 1. 校验 controller epoch 和可测量尺寸。
 2. 读取、校验 Cache API v2 manifest，并完成串行 warm replay 准备。
 3. 在已运行的 Queue 物理 WebSocket 上创建或加入该 pane 的逻辑流。
-4. 等待该 pane 的回放和最终渲染结果。
+4. 活动 tab pane 等待回放和最终渲染；后台 tab pane 在 replay/cursor 连续后结算，待激活时再按当前尺寸提交最终 Canvas。
 5. 所有路径只结算一次，并释放 worker。
 
 worker 使用分阶段 deadline，不使用轮询。缓存无进度、attach、replay 或 render 超时只把当前 pane 移入 `retrying`，移除它的逻辑流，并把重试追加到已排队 pane 之后；下一任务立即开始。任何超时都不得遗留未结算 waiter。
@@ -132,7 +132,7 @@ host 确实不可测量时，pane 保持灰点和明确等待状态；一旦可�
 1. 请求提升为 Fast A。
 2. controller 选择唯一 LRU Fast 受害者，保留另一条 Fast。
 3. 仅废弃被提升 pane 的 Queue 逻辑 generation。
-4. 确认受害者 Fast 物理 close 后，用释放的 slot 建立被提升 pane 的 Fast，并等待其当前回放/渲染 generation。
+4. 关闭受害者的旧 Fast logical stream，在同一条仍保持开启的物理 transport 上绑定被提升 pane，并等待其当前回放/渲染 generation。
 5. Queue 物理传输和其他 Queue 逻辑流持续运行；被淘汰 Fast pane 通过新逻辑 generation 在合适时加入 Queue。
 
 任何 focus、pointer、renderer 或健康检查回调都不得绕过 controller 独立执行交接。
@@ -161,7 +161,7 @@ host 确实不可测量时，pane 保持灰点和明确等待状态；一旦可�
 
 ## 10. 自动化覆盖
 
-- 32 pane 且测量顺序随机：Fast A 完整 ready 前 Fast B 不启动；Fast B 完整 ready 前 Queue 不启动；物理 WebSocket 不超过 3。
+- 32 pane 且测量顺序随机：Fast A 逻辑启动完成前 Fast B 不启动；两个 Fast 物理 socket `OPEN` 前 Queue 不启动；物理 WebSocket 不超过 3。
 - Fast bootstrap 期间反复 render/resize/replay 回调：不存在 `fast_bootstrap_wait` close 和 slot 抖动。
 - Queue 第 5 个 pane 永不发出最终 render：它超时，pane 6 继续启动；pane 5 独立重试，Queue 物理传输不关闭。
 - 延迟测量 pane 不点击也能进入 ready；不可测量期间显示灰色等待状态。
@@ -171,6 +171,6 @@ host 确实不可测量时，pane 保持灰点和明确等待状态；一旦可�
 
 ## 11. 真机验收
 
-在目标设备用单 tab 的 3、12、32 分屏测试。初始化期间禁止任何操作，顺序必须可观察为：Fast A ready、Fast B ready、再开始 Queue。
+在目标设备用单 tab 的 3、12、32 分屏测试。初始化期间禁止任何操作，顺序必须可观察为：Fast A 启动、Fast B 启动、两个 Fast 物理通道启用后开始 Queue；后台 pane 的不可见 Canvas 不得让 Queue 长时间保持未启用。
 
 验收要求：每个可测量 pane 都达到首帧，或处于可诊断的重试/错误状态；禁止无状态黑屏。点击 Queue pane 最多替换一条 Fast；直连 1、直连 2 和 Queue 不得一起重连。全程物理终端 WebSocket 不超过 3 条。

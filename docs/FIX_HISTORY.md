@@ -58,8 +58,8 @@
 ### 终端历史与渲染
 
 - LightOS 实例终端历史以 persistent agent 保存的原始 PTY 字节为可信来源；浏览器渲染状态不是历史权威。
-- 容器实例的单个 WebShell 页面最多维持 3 条浏览器终端 WebSocket：2 条当前活动 tab 的 pane 专属 Fast 连接，以及在两个 Fast 都完成各自启动 replay 和最终首帧后才允许首次创建的 1 条 Queue 复用连接。无用户操作的冷启动须按当前布局的视觉顺序分配 Fast 1、Fast 2 和 Queue FIFO；首次 Queue 候选已交接后才恢复运行期交互/LRU 优先级。Queue 只服务当前 tab 其余可见 pane；后台 tab 不进入 Queue。已创建的 Queue 不因普通输出、瞬态 Canvas render pending 或 Fast 槽位优先级交接而关闭；新增成员仍等待两个 Fast 回到启动就绪状态。Queue 的 `CONNECTING`、`OPEN`、`CLOSING` 都占用第三个物理连接槽，真实物理 close 确认前不得创建替代 Queue。`client:` target 暂不使用 Queue，继续保留最多 3 条直连。
-- Queue 复用只发生在浏览器与 Provider 之间。Provider 为每个 Queue pane 复用现有 agent attach、持续 drain 上游并按 pane 公平轮转；persistent agent 不修改，继续维护全部 PTY、任务、历史和 cursor。普通用户输入只允许经 Fast，点击或输入 Queue pane 时先提升到 Fast；同一 pane 任意时刻只能由一个有效 channel generation 写入 Ghostty。
+- 容器实例的单个 WebShell 页面最多维持 3 条页面级浏览器终端 WebSocket：直连通道 1、直连通道 2 和共享队列通道。tab 与 pane 统一为逻辑调度对象；切换 tab、Fast LRU 交接和 Queue 成员替换只更新逻辑 stream，不关闭健康物理 transport。首次初始化须按全局视觉顺序串行分配 Fast 1、Fast 2 和 Queue FIFO；两个 Fast 未完成启动首帧前绝不能创建 Queue。Queue 的 `CONNECTING`、`OPEN`、`CLOSING` 都占用物理连接槽，真实物理 close 确认前不得创建替代 transport。`client:` target 暂不使用 Queue，继续保留最多 3 条直连。
+- Fast 与 Queue 复用只发生在浏览器与 Provider 之间。Provider 为每个逻辑 pane 复用现有 agent attach、持续 drain 上游并按 pane 公平轮转；persistent agent 不修改，继续维护全部 PTY、任务、历史和 cursor。Fast transport 每条只绑定一个 pane 并允许普通输入，Queue 普通输入仍需先提升到 Fast；同一 pane 任意时刻只能由一个有效 channel generation 写入 Ghostty。后台 tab 的 Queue pane 在 replay/cursor 连续后即可释放 FIFO，不得等待不可测量 Canvas 阻塞后续 pane。
 - 历史流使用 `history_generation` 和绝对 byte cursor 表示范围。服务端根据本地范围选择 `snapshot`、`delta` 或 `current`，所有 chunk 必须连续。
 - 容器实例使用 Cache API v2 保存按账号 scope、完整 selector、workspace generation、tab、pane 和 history generation 隔离的不可变 PTY 字节块，并以 commit-last manifest 暴露已持久化 cursor。缓存无效时可以丢弃并从 agent 重建，但不能把不连续缓存拼接到新 generation。
 - 容器页面从网络 workspace 响应取得完整账号 scope、selector、workspace、tab 和 pane 身份后，以 8 块滚动预读窗口从 Cache API 读取该精确身份下的 PTY 字节。历史区间和恢复期间排队的实时字节通过 Ghostty 专用 replay 写入完整解析，但不调度中间 Canvas render；WASM 输入缓冲区按实例复用。只有服务端 replay complete、cursor 连续、实时队列追平、fit 当前且最终 full render 成功后才显示；新增缓存字节的持久化在后台完成，不阻塞最终 Canvas。第一批字节不是首帧。窗口、字体、主题变化和跨设备单击恢复尺寸仅在确认 cols/rows 或 canvas backing store 变化后使用 presentation hold 保留旧帧；这些操作复用当前内存终端状态，不进入历史 replay 写入。hold 覆盖期间 Ghostty 继续按正常节流渲染，当前状态的 full render 成功后立即替换，不等待 PTY 输出安静，也不重新回放历史。切换 tab 前保存有效帧，激活后用当前状态的 full render 替换，不能显示黑屏。
@@ -97,7 +97,7 @@
 | 工作区恢复 | 最后 selector/tab 持久恢复；用户明确返回首页时清除恢复意图 | 超过 30 秒、WebView 重载、无效 URL、浏览器前进后退 |
 | 设置 | PATCH 只更新显式字段，保留其他设置；null 与空值语义稳定 | 字体、scrollback、line height、移动/桌面快捷键 |
 | 客户端终端 | 浏览器不可见票据和服务凭据；每次连接前重新验证可见性 | 下线、过期票据、403/401、Device API 失败、附件代理 |
-| 浏览器连接池 | 容器页面最多 2 Fast + 1 Queue；首次创建 Queue 前两条 Fast 都完成启动首帧，运行中的 Queue 不因普通 render 状态或一次优先级交接重建；物理 close 确认前不得复用 slot | 首次进入、12 分屏、Fast `CONNECTING/CLOSING`、点击提升、tab 切换、Queue 断线/重连 |
+| 浏览器连接池 | 容器页面最多 2 Fast + 1 Queue；首次创建 Queue 前两条 Fast 都完成启动首帧，tab 切换和优先级交接只替换逻辑 stream，物理 close 确认前不得复用 slot | 首次进入、多 tab/32 分屏、Fast `CONNECTING/CLOSING`、点击提升、tab 切换、Queue 断线/重连 |
 | 依赖边界 | 不引入 `tmux`、`xterm.js` 或其改名/复制实现 | Go/npm/构建依赖、脚本、vendor、示例代码迁入 |
 
 ## 验证基线
@@ -882,3 +882,19 @@ git diff --check
 - 回归 guard：`terminal_topology_controller_test.mjs` 覆盖 stored active pane 不得抢占视觉首个 pane、直连 1/2 与 Queue FIFO 的连续视觉次序、普通 refresh 生成独立运行期候选但不得替换首轮标记快照，以及 Queue 启动后不重新进入冷启动排序；Go 静态 guard 固定几何排序、首次候选保护和控制器启动边界。
 - 验证结果：`node --check runtime/static/main.js runtime/static/terminal_topology_controller.js runtime/static/terminal_queue_connection.js runtime/static/terminal_network_monitor.js`、Node 行为测试 61/61、`go test ./... -count=1`、`go test -race ./... -count=1` 与 `git diff --check` 均通过。仍需在目标设备以 12、32 分屏确认首次打开的实际首帧严格按第一行从左到右、再依次进入后续视觉位置；缓存命中继续保持尽力而为，不阻塞首帧。
 - 禁止复现：不得用 `activePaneID`、历史输出或服务端 `PaneIDs` 替代没有用户操作时的冷启动视觉次序；不得在运行期普通 refresh 重新启用冷启动排序；不得为等待全量缓存命中阻塞任一 Fast 或 Queue pane 的建立。
+
+### LCMD-20260823-01：tab 切换重建物理连接与后台 Queue 队首阻塞
+
+- 日期：2026-08-23
+- 来源：用户确认切换已打开 tab 时网络监视器显示直连通道未启用、灰点重新出现，并要求 tab 与 pane 统一使用页面级三通道模型。
+- 错误现象：旧拓扑把 `tabID` 作为物理连接上下文。切 tab 会关闭两条 Fast 和 Queue，再重新创建；实际终端可能仍显示旧 Canvas，但连接确实被重建。后台 tab pane 不能加入 Queue，隐藏 pane 的 Canvas 首帧又可能不可测量，导致全局初始化或 Queue FIFO 长时间等待，失败后需要点击才能恢复。网络监视器按临时 pane socket 附着，旧 socket 占槽时新 socket 可能漏记。
+- 根因：物理 transport 生命周期和逻辑 pane 绑定耦合；Fast 只有单 pane URL，无法在不断开 socket 的情况下换绑；Queue 连接与活动 tab 绑定；Queue startup latch 把不可见 pane 的最终 Canvas 当成 FIFO 结算条件；监视器没有按稳定 slot 替换旧附着。
+- 实施方案：
+  1. Provider 为 `transport_role=fast` 提供同一版本化复用协议，Fast broker 最多一个逻辑订阅并允许普通输入；Queue broker 继续多路公平轮转和输入限制，persistent agent 与 PTY 生命周期不变。
+  2. 浏览器页面级维护 2 个稳定 Fast transport 和 1 个稳定 Queue transport。controller 的 epoch 只在 target、离线或页面重置时变化；tab 切换只发送新的逻辑订阅集合，健康物理 WebSocket 不关闭。
+  3. 全部 tab/pane 展平为全局初始化顺序：活动 tab 视觉顺序优先，其余 tab 按工作区顺序加入 Queue。Fast 失败保留原 slot 并由 scheduler 退避重试，Queue 逻辑失败释放 FIFO 后重新入队，任何可恢复错误都不能永久黑屏。
+  4. 后台 Queue pane 在 replay、cursor 连续后即可结算启动任务，不等待不可测量 Canvas；激活 tab 时复用内存终端状态执行当前尺寸 full render。
+  5. 网络监视器直接绑定三个稳定 physical transport；同一稳定 slot 发现新 socket 时先替换旧附着，保留累计流量。
+- 回归 guard：`terminal_topology_controller_test.mjs` 覆盖跨 tab 全局 Queue、tab 切换不发 `stop-queue-transport`、target 切换才重置物理 transport、Fast 失败留在同一 slot、Queue 物理失败只重试一条 transport；`terminal_queue_test.go` 覆盖 Fast broker 单订阅和普通输入；`runtime_shortcuts_test.go` 固定页面级 `transport_role`、全局视觉排序和稳定 monitor socket；Node 60/60、Go 全量测试和 `git diff --check` 通过。
+- 待验证：尚未在目标 Android WebView、Lazycat WKWebView 和桌面浏览器进行多 tab、32 pane、主动断网/恢复和高频输出真机验收。
+- 禁止复现：不得恢复 `terminalQueueTabID` 或用活动 tab 变化关闭三条物理 WebSocket；不得把后台 pane 的不可测量 Canvas 作为 Queue FIFO 的唯一结算条件；不得让 Fast 复用 transport 接受超过一个逻辑 pane；不得让单 pane 失败从重试队列消失。

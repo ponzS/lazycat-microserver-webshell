@@ -17,10 +17,13 @@ export const terminalQueueGateAllowsCreation = ({
 } = {}) => {
   const requiredFast = Math.max(1, Math.floor(Number(fastCapacity) || 0));
   const states = Array.from(fastReadyStates || [], (state) => String(state || ""));
+  // Queue creation is gated by the two physical Fast transports. A logical
+  // pane may still be finishing replay or an invisible Canvas commit after
+  // its transport is open, and that must not block the physical Queue slot.
   return !queueClosing
     && Math.floor(Number(queueCandidateCount) || 0) > 0
     && states.length === requiredFast
-    && states.every((state) => state === "ready");
+    && states.every((state) => state === "open");
 };
 
 export const createTerminalQueueTaskQueue = () => {
@@ -442,6 +445,10 @@ export const createTerminalQueueConnection = ({
         reason: String(event.reason || "terminal queue connection closed"),
         wasClean: event.wasClean === true,
       });
+      // The close event is the authoritative physical transport transition.
+      // Emit it after logical streams are notified so the owner can discard
+      // stale topology leases and create a fresh connection instance.
+      emitState();
       resolveFinalClose();
     });
   };

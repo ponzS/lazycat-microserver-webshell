@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -14,6 +15,12 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+type terminalQueueTestWriteCloser struct {
+	*bytes.Buffer
+}
+
+func (writer terminalQueueTestWriteCloser) Close() error { return nil }
 
 func TestTerminalQueueBinaryFrameCarriesLogicalStreamAndCursor(t *testing.T) {
 	header := terminalQueueBinaryHeader{
@@ -106,7 +113,7 @@ func TestTerminalQueueWriterUsesFixedRoundTargetAndVisitsOtherPanes(t *testing.T
 	var order []string
 	var callbackErr error
 	var first *terminalQueuePaneStream
-	broker := newTerminalQueueBroker(ctx, agentScope{}, "", func(messageType int, payload []byte) error {
+	broker := newTerminalQueueBroker(ctx, agentScope{}, "", "queue", func(messageType int, payload []byte) error {
 		if messageType != websocket.TextMessage {
 			orderMu.Lock()
 			callbackErr = fmt.Errorf("message type = %d, want text", messageType)
@@ -174,7 +181,7 @@ func TestTerminalQueueWriterEmitsOneRenderBoundaryAfterBinaryTurn(t *testing.T) 
 	var mu sync.Mutex
 	var messageTypes []int
 	var controlType string
-	broker := newTerminalQueueBroker(ctx, agentScope{}, "", func(messageType int, payload []byte) error {
+	broker := newTerminalQueueBroker(ctx, agentScope{}, "", "queue", func(messageType int, payload []byte) error {
 		mu.Lock()
 		defer mu.Unlock()
 		messageTypes = append(messageTypes, messageType)
@@ -230,7 +237,7 @@ func TestTerminalQueueWriterEmitsOneRenderBoundaryAfterBinaryTurn(t *testing.T) 
 }
 
 func TestTerminalQueueRejectsOrdinaryInput(t *testing.T) {
-	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "", func(int, []byte) error { return nil })
+	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "", "queue", func(int, []byte) error { return nil })
 	stream := &terminalQueuePaneStream{
 		broker:       broker,
 		subscription: terminalQueueSubscription{PaneID: "pane-1", StreamID: "s1", ChannelGeneration: 1},
@@ -247,6 +254,35 @@ func TestTerminalQueueRejectsOrdinaryInput(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("ordinary queue input must be rejected")
+	}
+}
+
+func TestTerminalFastTransportAllowsOneOrdinaryInputStream(t *testing.T) {
+	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "", "fast", func(int, []byte) error { return nil })
+	var stdin bytes.Buffer
+	stream := &terminalQueuePaneStream{
+		broker:       broker,
+		subscription: terminalQueueSubscription{PaneID: "pane-1", StreamID: "s1", ChannelGeneration: 1},
+		stdin:        terminalQueueTestWriteCloser{Buffer: &stdin},
+		active:       true,
+	}
+	broker.streams["pane-1"] = stream
+	control, _ := json.Marshal(terminalControlMessage{Type: "input", Data: "pwd\n"})
+	err := broker.handlePaneControl(terminalQueueClientMessage{
+		Type:              "pane-control",
+		PaneID:            "pane-1",
+		StreamID:          "s1",
+		ChannelGeneration: 1,
+		Control:           control,
+	})
+	if err != nil {
+		t.Fatalf("ordinary fast input rejected: %v", err)
+	}
+	if stdin.Len() == 0 {
+		t.Fatal("ordinary fast input was not forwarded to the agent")
+	}
+	if broker.maxSubscriptions != 1 || !broker.allowOrdinaryInput {
+		t.Fatalf("fast broker policy = max %d, ordinary=%v", broker.maxSubscriptions, broker.allowOrdinaryInput)
 	}
 }
 

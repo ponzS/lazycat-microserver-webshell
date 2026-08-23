@@ -88,7 +88,7 @@ test.beforeEach(() => {
   FakeWebSocket.instances = [];
 });
 
-test("queue creation is forbidden until both fast channels finish presentation", () => {
+test("queue creation is gated by both physical fast channels", () => {
   assert.equal(terminalQueueGateAllowsCreation({
     fastReadyStates: ["ready"],
     queueCandidateCount: 10,
@@ -102,16 +102,16 @@ test("queue creation is forbidden until both fast channels finish presentation",
     queueCandidateCount: 10,
   }), false);
   assert.equal(terminalQueueGateAllowsCreation({
-    fastReadyStates: ["ready", "ready"],
+    fastReadyStates: ["open", "open"],
     queueCandidateCount: 0,
   }), false);
   assert.equal(terminalQueueGateAllowsCreation({
-    fastReadyStates: ["ready", "ready"],
+    fastReadyStates: ["open", "open"],
     queueCandidateCount: 10,
     queueClosing: true,
   }), false);
   assert.equal(terminalQueueGateAllowsCreation({
-    fastReadyStates: ["ready", "ready"],
+    fastReadyStates: ["open", "open"],
     queueCandidateCount: 10,
   }), true);
 });
@@ -447,6 +447,23 @@ test("closing the final logical stream keeps the queue slot occupied until physi
   physical.readyState = FakeWebSocket.CLOSED;
   await Promise.resolve();
   assert.equal(closed, true);
+});
+
+test("physical close emits the final closed transport state", async () => {
+  const states = [];
+  const connection = createTerminalQueueConnection({
+    url: "ws://example/ws?mode=queue",
+    WebSocketImpl: SlowCloseWebSocket,
+    onStateChange: (state) => states.push(state),
+  });
+  connection.open(subscription("pane-1"));
+  const physical = FakeWebSocket.instances[0];
+  physical.emit("open");
+  physical.emit("close", { code: 1006, reason: "network failure", wasClean: false });
+  physical.readyState = FakeWebSocket.CLOSED;
+  await Promise.resolve();
+  assert.equal(states.at(-1).physicalReadyState, FakeWebSocket.CLOSED);
+  assert.equal(connection.snapshot().logicalCount, 0);
 });
 
 test("binary decoder rejects truncated frames", () => {

@@ -1,6 +1,6 @@
 # WebSocket 三通道复用方案与执行计划
 
-状态：首版代码已实现，自动化回归收口中，真实多设备压力验收待完成。本文同时作为实现基线和剩余验收计划，历史架构约束见 [FIX_HISTORY.md](FIX_HISTORY.md)。
+状态：页面级三 transport 复用已实施，自动化回归通过，真实多设备压力验收待完成。本文同时作为实现基线和剩余验收计划，历史架构约束见 [FIX_HISTORY.md](FIX_HISTORY.md)。
 
 最后更新：2026-08-21
 
@@ -11,7 +11,7 @@
 本方案限制的是**浏览器到 Provider 的物理 WebSocket 数量**，不是服务端会话数量：
 
 - 浏览器任何时候最多使用 3 条终端 WebSocket。
-- 其中 2 条是 pane 专属高速通道，1 条是当前 tab 的共享队列通道。
+- 其中 2 条是页面级、单 pane 逻辑绑定的直连通道，1 条是页面级共享队列通道。
 - persistent agent 继续维护全部 PTY、进程、终端历史、cursor 和工作区；浏览器端通道切换、后台 tab、队列积压或网络断开都不得停止任务。
 - 队列通道是持续的 WebSocket 多路复用流，不是 HTTP 轮询，也不是频繁关闭、重建 pane WebSocket 的轮询方案。
 - 不修改 persistent agent。本方案需要扩展的是 Provider 的 WebSocket 中转层和浏览器协议。
@@ -62,15 +62,15 @@ Provider 内部为队列成员维持的 agent attach 数量可以高于 3；这�
 
 ### 4.1 范围
 
-队列成员只来自当前活动 tab 中当前布局可见的 pane。切走 tab 后，旧 tab 的队列订阅立即撤销；切入 tab 后，新 tab 的可见 pane 立即成为候选。
+tab 与 pane 统一进入同一个页面级调度集合。队列成员可以来自任意 tab；切换 tab 只发送新的完整逻辑订阅集合，不撤销旧 tab 的会话维护，也不关闭 Queue 物理 WebSocket。
 
-高速候选默认也限定为当前活动 tab 的可见 pane，避免后台 tab 占用本应服务当前画面的高速容量。当前输入/指针交互 pane 始终优先；第二个高速名额按当前 tab 内的最近交互时间选择。以后若需要跨 tab 保留高速 pane，必须作为独立产品决策，不能隐式改变此默认规则。
+高速候选默认优先当前活动 tab 的前两个 pane；当前输入/指针交互 pane 始终优先，第二个高速名额按稳定视觉顺序和最近交互时间选择。tab 切换只改变两条直连的逻辑绑定，物理连接继续复用。
 
 ### 4.2 分配
 
-- **首次创建的硬性前置条件：两个高速通道未完成各自本轮启动首帧时，绝对不能创建队列通道。** 第一次创建 Queue WebSocket、启动 Queue broker、发送首个 `replace-subscriptions` 或让任何 pane 首次进入队列，都必须建立在 `Fast A` 和 `Fast B` 各自的 PTY/history replay、追平、尺寸校验和最终 full render 完成之后。WebSocket `open`、租约 `leased` 或仅完成 socket 建立均不算就绪。
-- 页面首次打开或切换 tab 时严格串行：先启动并完整就绪 `Fast A`，再启动并完整就绪 `Fast B`，最后才允许创建 Queue WebSocket。若当前 tab 有至少两个可见 pane，第二个高速名额即使没有明确的最近交互记录，也按稳定顺序选择 `Fast B`；当前 tab 少于两个可见 pane 时不创建 Queue。
-- 初始阶段 Fast A 或 Fast B 的连接、回放、渲染或重试尚未完成时，后续阶段不得启动。Queue 已经存在后，普通 PTY 输出、一次 Canvas render pending、尺寸校验或下一帧内容 generation 推进不得撤销任何物理通道或 Queue 订阅；这些只是运行期画面状态，不能重新解释为启动失败。Fast 的真实 socket 失败仍由该 pane 的独立重试状态机处理；在它恢复前不添加新的 Queue 成员，但已存在的 Queue 流保持运行。
+- **首次创建的硬性前置条件：两个高速物理通道必须先确认 `OPEN`。** Fast A 仍先完成当前逻辑启动并稳定分配 Fast B；Fast B 的物理 socket 确认 `OPEN` 且工作区存在第三个 pane 后，才允许创建 Queue WebSocket、启动 Queue broker 和提交首个 `replace-subscriptions`。后台 tab 或不可见 pane 没有 Canvas 首帧时，不得阻塞 Queue 物理通道；其 replay/最终画面继续由各自逻辑任务独立完成。
+- 页面首次打开或切换 tab 时保持直连优先：先启动并完成 Fast A 的逻辑启动，再分配 Fast B，随后在两个 Fast 物理连接均 `OPEN` 后创建 Queue WebSocket。若当前工作区少于三个 pane，不创建 Queue；当前 tab 少于两个可见 pane 时，Fast B 可按全局稳定顺序补位。
+- 初始阶段 Fast A 或 Fast B 的真实 socket 仍由各自状态机重试；Queue 物理创建只依赖两个 Fast 物理 `OPEN` 和第三个 pane，不依赖后台 Canvas 回调。Queue 已经存在后，普通 PTY 输出、一次 Canvas render pending、尺寸校验或下一帧内容 generation 推进不得撤销任何物理通道或 Queue 订阅。
 - `Fast A`：当前正在输入、鼠标操作或刚被显式选中的 pane。它必须立即取得 pane 专属连接。
 - `Fast B`：当前 tab 中除 `Fast A` 外最近使用的 pane；无候选时空闲。
 - `Queue`：当前 tab 中其余可见 pane。只有一个成员时，它仍是持续实时流，效果等同第三条专属连接。
@@ -205,16 +205,16 @@ Provider 按 pane 保存尚未写入 Queue WebSocket 的有界数据和 cursor�
 
 ### 阶段 2：浏览器 2 Fast + 1 Queue 调度器
 
-状态：已完成首版。实现位于 `runtime/static/terminal_connection_scheduler.js`、`terminal_queue_connection.js` 和 `main.js`。
+状态：已实施页面级 transport 版本。实现位于 `runtime/static/terminal_connection_scheduler.js`、`terminal_queue_connection.js`、`terminal_topology_controller.js`、Provider `terminal_queue.go` 和 `main.js`。
 
-1. 将现有最多 3 个 pane 专属租约改造为 2 个 `fast` 租约加 1 个 `queue` 租约，Queue 本身只占一个浏览器连接 slot。
-2. 调度器严格按 `Fast A -> Fast B -> Queue` 串行启动。每一个 Fast 必须完成 PTY/history replay、追平、尺寸校验和最终 full render；两个 Fast 均 presentation ready 后，才允许创建 Queue WebSocket 和发送 `replace-subscriptions`。当前 tab 少于两个可见 pane 时永远不创建 Queue。
-3. 当前 tab 布局变化、焦点、输入和 tab 切换驱动 `replace-subscriptions`，而非创建多个浏览器连接。
+1. 将现有最多 3 个 pane 专属租约改造为 2 个稳定 `fast` transport 加 1 个稳定 `queue` transport，三条物理连接均按页面 target 生命周期管理。
+2. 调度器按 `Fast A -> Fast B -> Queue` 的物理顺序启动。Fast A 先完成逻辑启动，Fast B 随后分配；两个 Fast 物理 socket 均确认 `OPEN` 且存在第三个 pane 后，才创建 Queue WebSocket和发送 `replace-subscriptions`。后台 Fast pane 的 Canvas 首帧不阻塞 Queue；当前工作区少于三个 pane 时永远不创建 Queue。
+3. 当前 tab 布局变化、焦点、输入和 tab 切换驱动三条 transport 的 `replace-subscriptions`，而非创建或销毁物理连接。
 4. 将 Queue frame 路由到对应 session，并让每个 pane 独立维护 `stream_id`、`channel_generation` 和已应用 cursor。
 5. 队列数据走 `writeReplay()`/受控 flush，轮次完成再请求最终 full render；高速数据保持现有实时写入路径。
 6. 保持 Cache API v2、输入锁、last-known-good canvas、连接状态点和调试日志语义。
 
-完成标准：同一 tab 的 12 pane 场景中，浏览器 Network 面板稳定不超过 3 条终端 WebSocket；非高速但可见 pane 不经点击也持续显示新内容。
+完成标准：跨多个 tab 的 12 pane 场景中，浏览器 Network 面板稳定不超过 3 条终端 WebSocket；非高速 pane 不经点击也持续初始化并显示新内容；切 tab 不触发三条物理连接重建。
 
 ### 阶段 3：可靠交接与压力保护
 

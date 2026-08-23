@@ -21,7 +21,8 @@ import (
 
 const (
 	terminalQueueProtocolVersion  = 1
-	terminalQueueMaxSubscriptions = 64
+	terminalQueueMaxSubscriptions = 1024
+	terminalFastMaxSubscriptions  = 1
 	terminalQueuePaneBufferLimit  = 4 << 20
 	terminalQueueRoundByteBudget  = 256 << 10
 	terminalQueueRoundTimeBudget  = 8 * time.Millisecond
@@ -117,11 +118,14 @@ type terminalQueuePaneStream struct {
 }
 
 type terminalQueueBroker struct {
-	ctx          context.Context
-	cancel       context.CancelFunc
-	scope        agentScope
-	clientID     string
-	writeMessage func(int, []byte) error
+	ctx                context.Context
+	cancel             context.CancelFunc
+	scope              agentScope
+	clientID           string
+	transportRole      string
+	maxSubscriptions   int
+	allowOrdinaryInput bool
+	writeMessage       func(int, []byte) error
 
 	mu        sync.Mutex
 	streams   map[string]*terminalQueuePaneStream
@@ -143,6 +147,14 @@ func (s *pluginServer) attachPersistentPaneQueue(w http.ResponseWriter, r *http.
 	}
 	if isClientTarget(selector) {
 		http.Error(w, "queue websocket is not supported for client targets", http.StatusBadRequest)
+		return nil
+	}
+	transportRole := strings.TrimSpace(r.URL.Query().Get("transport_role"))
+	if transportRole == "" {
+		transportRole = "queue"
+	}
+	if transportRole != "queue" && transportRole != "fast" {
+		http.Error(w, "unsupported terminal transport role", http.StatusBadRequest)
 		return nil
 	}
 	if err := s.authorizeInstanceSelector(r.Context(), selector); err != nil {
@@ -210,7 +222,7 @@ func (s *pluginServer) attachPersistentPaneQueue(w http.ResponseWriter, r *http.
 	if clientID == "" {
 		clientID = strings.TrimSpace(r.URL.Query().Get("client"))
 	}
-	broker := newTerminalQueueBroker(context.Background(), scope, clientID, writeMessage)
+	broker := newTerminalQueueBroker(context.Background(), scope, clientID, transportRole, writeMessage)
 	defer broker.close()
 	go broker.runWriter()
 
@@ -271,17 +283,28 @@ func (s *pluginServer) attachPersistentPaneQueue(w http.ResponseWriter, r *http.
 	}
 }
 
-func newTerminalQueueBroker(ctx context.Context, scope agentScope, clientID string, writer func(int, []byte) error) *terminalQueueBroker {
+func newTerminalQueueBroker(ctx context.Context, scope agentScope, clientID, transportRole string, writer func(int, []byte) error) *terminalQueueBroker {
 	brokerCtx, cancel := context.WithCancel(ctx)
+	role := strings.TrimSpace(transportRole)
+	if role != "fast" {
+		role = "queue"
+	}
+	maxSubscriptions := terminalQueueMaxSubscriptions
+	if role == "fast" {
+		maxSubscriptions = terminalFastMaxSubscriptions
+	}
 	return &terminalQueueBroker{
-		ctx:          brokerCtx,
-		cancel:       cancel,
-		scope:        normalizeAgentScope(scope.Selector, scope.AccountID),
-		clientID:     strings.TrimSpace(clientID),
-		writeMessage: writer,
-		streams:      make(map[string]*terminalQueuePaneStream),
-		wake:         make(chan struct{}, 1),
-		done:         make(chan struct{}),
+		ctx:                brokerCtx,
+		cancel:             cancel,
+		scope:              normalizeAgentScope(scope.Selector, scope.AccountID),
+		clientID:           strings.TrimSpace(clientID),
+		transportRole:      role,
+		maxSubscriptions:   maxSubscriptions,
+		allowOrdinaryInput: role == "fast",
+		writeMessage:       writer,
+		streams:            make(map[string]*terminalQueuePaneStream),
+		wake:               make(chan struct{}, 1),
+		done:               make(chan struct{}),
 	}
 }
 
@@ -466,8 +489,12 @@ func validateTerminalQueueSubscription(subscription terminalQueueSubscription) (
 }
 
 func (b *terminalQueueBroker) replaceSubscriptions(subscriptions []terminalQueueSubscription, terminalScrollback int) error {
-	if len(subscriptions) > terminalQueueMaxSubscriptions {
-		return fmt.Errorf("too many queue subscriptions: %d", len(subscriptions))
+	maxSubscriptions := b.maxSubscriptions
+	if maxSubscriptions <= 0 {
+		maxSubscriptions = terminalQueueMaxSubscriptions
+	}
+	if len(subscriptions) > maxSubscriptions {
+		return fmt.Errorf("too many %s subscriptions: %d", b.transportRole, len(subscriptions))
 	}
 	type desiredStream struct {
 		subscription terminalQueueSubscription
@@ -608,13 +635,16 @@ func (b *terminalQueueBroker) handlePaneControl(message terminalQueueClientMessa
 		stream.enqueueControl(map[string]any{"type": "pong"})
 		return nil
 	case "input":
-		if !control.Generated {
+		if !control.Generated && !b.allowOrdinaryInput {
 			return errors.New("ordinary input requires a fast terminal channel")
 		}
 		if control.Data == "" {
 			return nil
 		}
-		return stream.writeAgentFrame(agentFrameGeneratedInput, []byte(control.Data))
+		if control.Generated {
+			return stream.writeAgentFrame(agentFrameGeneratedInput, []byte(control.Data))
+		}
+		return stream.writeAgentFrame(agentFrameInput, []byte(control.Data))
 	case "resize", "theme":
 		return stream.writeAgentFrame(agentFrameResize, message.Control)
 	case "input_lock":

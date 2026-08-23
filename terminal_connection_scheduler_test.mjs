@@ -271,6 +271,23 @@ test("late callbacks from an old lease are ignored", () => {
   assert.equal(harness.scheduler.currentLease(pane).leaseID, secondLease);
 });
 
+test("physical transport invalidation clears leases without disconnecting dead sockets", () => {
+  const harness = createHarness({ capacity: 2 });
+  harness.scheduler.setGeneration(1);
+  const panes = [session("pane-1"), session("pane-2")];
+  panes.forEach((pane) => {
+    harness.scheduler.register(pane);
+    harness.scheduler.request(pane, demand(1));
+  });
+  assert.equal(harness.scheduler.snapshot().activeCount, 2);
+  assert.equal(harness.scheduler.invalidateTransport("network_resume"), true);
+  assert.equal(harness.disconnections.length, 0);
+  assert.equal(harness.scheduler.snapshot().activeCount, 0);
+  assert.equal(harness.timers.size, 2);
+  harness.runTimers();
+  assert.equal(harness.connections.length, 4);
+});
+
 test("unregister clears demand and retry timers", () => {
   const harness = createHarness({ capacity: 1 });
   harness.scheduler.setGeneration(1);

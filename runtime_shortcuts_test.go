@@ -269,8 +269,8 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 	historyRangeIndex := strings.Index(mainSource, `const historyConnectRange = sessionHistoryRangeForConnect(session);`)
 	warmStartIndex := strings.Index(mainSource, `const cacheV2WarmReplayStarted = cacheV2WarmSnapshot`)
 	fastSocketStartIndex := strings.Index(mainSource, `currentSocket = new WebSocket(socketUrl.toString());`)
-	queueSocketStartIndex := strings.Index(mainSource, `currentSocket = terminalQueueConnection.open({`)
-	if historyRangeIndex < 0 || warmStartIndex < 0 || fastSocketStartIndex < 0 || queueSocketStartIndex < 0 || historyRangeIndex > warmStartIndex || warmStartIndex > fastSocketStartIndex || warmStartIndex > queueSocketStartIndex {
+	multiplexedSocketStartIndex := strings.Index(mainSource, `currentSocket = multiplexedConnection.open({`)
+	if historyRangeIndex < 0 || warmStartIndex < 0 || fastSocketStartIndex < 0 || multiplexedSocketStartIndex < 0 || historyRangeIndex > warmStartIndex || warmStartIndex > fastSocketStartIndex || warmStartIndex > multiplexedSocketStartIndex {
 		t.Fatal("cache-v2 byte replay must start from the validated local range before WebSocket construction")
 	}
 	cacheV2ReplayBlock := sourceBetween(t, mainSource,
@@ -2444,8 +2444,9 @@ func TestRuntimeWebSocketURLUsesWebSocketProtocols(t *testing.T) {
 		`url.protocol !== "ws:" && url.protocol !== "wss:"`,
 		`const socketUrl = webSocketURL("./ws");`,
 		`currentSocket = new WebSocket(socketUrl.toString());`,
-		`currentSocket = terminalQueueConnection.open({`,
+		`currentSocket = multiplexedConnection.open({`,
 		`socketURL.searchParams.set("mode", "queue");`,
+		`socketUrl.searchParams.set("transport_role", channel);`,
 	}
 	for _, want := range wantSnippets {
 		if !strings.Contains(source, want) {
@@ -2663,7 +2664,10 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"const fullRenderRequested = term.renderFullNextFrame === true;",
 		"term.renderFullNextFrame = fullRenderRequested;",
 		"return term.renderNow(true) !== false;",
-		"const schedulePaneFullRenderValidation = (session) => {",
+		"const schedulePaneFullRenderValidation = (session, { forceHistory = false } = {}) => {",
+		"const scrollbackLength = Math.max(0, Number(session.term?.getScrollbackLength?.() || 0));",
+		"if (forceHistory && sameReplay && scrollbackLength > 0) {",
+		"renderPaneFullNow(session);",
 		"!panePresentationIsCurrent(session)",
 		"const installTerminalCanvasRecovery = (session) => {",
 		"canvas.addEventListener(\"contextlost\", handleContextLost);",
@@ -2730,6 +2734,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"((replayOutput || suppressRender) && !replayWriter)",
 		"|| (!replayOutput && !suppressRender && deferHiddenPaneRender(session))",
 		"cancelPendingTerminalRender(session.term);",
+		"schedulePaneFullRenderValidation(session, { forceHistory: true });",
 		"schedulePaneFullRenderValidation(session);",
 	}
 	for _, want := range mainSnippets {
@@ -2786,7 +2791,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"writeReplay(A)",
 		"this.renderSuppressionDepth += 1",
 		"this.renderSuppressionDepth > 0",
-		"this.requestRender({ throttle: !0 })",
+		"this.renderFullNextFrame = !0",
 		"this.renderThrottleTimer = void 0",
 		"this.lastRenderAt = performance.now()",
 		"async function oA(A)",
@@ -3149,6 +3154,9 @@ func TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard(t *testing.T) 
 		"session.connectionRetrying = false;",
 		"session.shellEl.dataset.connection = \"offline\";",
 		"session.shellEl.dataset.connection = \"reconnecting\";",
+		"if (reason === \"promote_to_fast\") {",
+		"session.connectionRetrying = false;",
+		"session.reconnectPending = false;",
 		"\"终端连接将在重试\"",
 		"appendDebugError(\"终端连接建立失败\"",
 		"const debugLogStorageKey = `${storagePrefix}.debugLog`;",
@@ -3268,6 +3276,10 @@ func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
 		"terminalConnectionScheduler.setCapacity(",
 		"terminalConnectionScheduler = createTerminalConnectionScheduler({",
 		"let terminalQueueClosingPromise = null;",
+		"let terminalFastConnections = [null, null];",
+		"const ensureTerminalFastConnection = (slot, targetName) => {",
+		"terminalFastConnections.forEach((connection, slot) => {",
+		"case \"reset-fast-transports\":",
 		"if (terminalQueueClosingPromise) {",
 		"const closingPromise = Promise.resolve(connection.closed).finally(() => {",
 		"const startPendingTerminalTopologyQueueTransport = ({ afterBackoff = false } = {}) => {",
@@ -3330,6 +3342,9 @@ func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
 	}
 	if strings.Contains(mainSource, `schedulerCloseReason === "queue_resync"`) {
 		t.Fatal("runtime must not retain the obsolete queue_resync close reason")
+	}
+	if strings.Contains(mainSource, "terminalQueueTabID") {
+		t.Fatal("page-level Queue transport must not be bound to an active tab")
 	}
 	if strings.Contains(mainSource, `fast_presentation_lost`) {
 		t.Fatal("ordinary presentation invalidation must not release or rebuild fast/queue channels")
@@ -3412,14 +3427,15 @@ func TestRuntimeTerminalTopologyControllerOwnsFastQueueHandoff(t *testing.T) {
 		"const startQueueTransport = (reason) => {",
 		"const compareInitializationPanes = (left, right) => {",
 		"const initializationCandidates = () => Array.from(panes.values())",
-		"const candidatesForCurrentPhase = () => (",
+		"const activeTabCandidates = () => Array.from(panes.values())",
+		"const reconcileRuntimeFast = (reason) => {",
 		"if (!initializationOrderReady) {",
 		"initializationOrderingActive = false;",
 		"initializationOrderCaptured = false;",
-		"initialization: initializationOrderingActive,",
+		"initialization: initializationOrderingActive",
 		"const fastRendered = (pane, { eventEpoch = epoch, attemptID = 0 } = {}) => {",
 		"const promote = (pane, { reason = \"user_interaction\" } = {}) => {",
-		"reason: \"promote_to_fast\",",
+		"requestSlotReplacement(victim.slot, target, \"promote_to_fast\");",
 		"if (eventEpoch !== epoch)",
 	} {
 		if !strings.Contains(controllerSource, want) {
@@ -3436,7 +3452,7 @@ func TestRuntimeTerminalTopologyControllerOwnsFastQueueHandoff(t *testing.T) {
 		"const terminalTopologyLayoutPaneOrder = (node, paneOrder = []) => {",
 		"const rect = pane?.shellEl?.getBoundingClientRect?.();",
 		"entry.pane.initializationOrder = index + 1;",
-		"const { orderedPanes, ready: initializationOrderReady } = terminalTopologyVisualOrder(tab, currentPanes);",
+		"const { orderedPanes, ready: initializationOrderReady } = terminalTopologyGlobalOrder();",
 		"initializationOrderReady,",
 		"let terminalQueuePendingCandidateOrder = null;",
 		"initialization: initialization === true,",
@@ -3692,7 +3708,7 @@ func TestRuntimeTerminalNetworkMonitorIsOptIn(t *testing.T) {
 		`let networkMonitorEnabled = window.localStorage.getItem(networkMonitorStorageKey) === "true";`,
 		"const terminalNetworkMonitorShouldRun = () => debugModeEnabled && networkMonitorEnabled && !disposed;",
 		`terminalNetworkMonitorModulePromise ||= import("./terminal_network_monitor.js");`,
-		"terminalNetworkMonitor.attachSocket(pane.socket, { kind: \"fast\", slot });",
+		"terminalNetworkMonitor.attachSocket(socket, { kind: \"fast\", slot });",
 		"terminalNetworkMonitor.attachSocket(queueSocket, { kind: \"queue\" });",
 		"terminalNetworkMonitor?.dispose();",
 		"window.clearInterval(terminalNetworkMonitorSampleTimer);",
@@ -4332,7 +4348,7 @@ func TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs(t *testing.T) {
 		"const scheduleTabResize = (tab, options = {}, scheduleOptions = {}) => {",
 		"const paneResizeScheduler = createTerminalResizeScheduler({",
 		"if (allowHidden && Number(session.measuredFitGeneration || 0) > 0) {",
-		"Number(session.measuredFitGeneration || 0) <= 0 ||",
+		"!sessionHasTerminalConnectionSize(session) ||",
 		"const scheduleVisibleTabResize = (tab, { immediate = false } = {}) => {",
 		"scheduleTabResize(tab, options, { immediate: true });",
 		"tab.resizeFrame = window.requestAnimationFrame(() => {",
