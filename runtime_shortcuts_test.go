@@ -3343,6 +3343,9 @@ func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
 		"case \"start-fast\":",
 		"case \"start-queue-transport\":",
 		"case \"sync-queue-candidates\":",
+		"const acknowledgeTerminalTopologyFastStop = (command, reason) => {",
+		"terminalTopologyController?.fastStopped(pane, {",
+		"terminalConnectionScheduler?.release(session, \"session_closed\")",
 		"terminalConnectionScheduler.setCapacity(",
 		"terminalConnectionScheduler = createTerminalConnectionScheduler({",
 		"let terminalQueueClosingPromise = null;",
@@ -3369,12 +3372,21 @@ func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
 		"terminalConnectionScheduler?.currentLease(session)?.leaseID === session.connectionLeaseID",
 		"const maxParkedPendingInputBytes = 256 * 1024;",
 		"const terminalPendingInputMaxWaitMs = 10 * 1000;",
+		"const pausePendingInputExpiry = (session) => {",
+		"const resumePendingInputExpiry = (session) => {",
+		"pendingInputExpiryToken",
+		"pendingInputExpiryLeaseID",
+		"pendingInputExpiryGeneration",
+		"pendingInputExpiryPaused",
 		"schedulePendingInputExpiry(session);",
-		`appendDebugError("终端输入等待连接超时"`,
+		"A current lease that is still replaying or waiting for its resize ACK",
 	} {
 		if !strings.Contains(mainSource, want) {
 			t.Fatalf("runtime terminal connection scheduler guard missing %q", want)
 		}
+	}
+	if strings.Contains(mainSource, `appendDebugError("终端输入等待连接超时"`) {
+		t.Fatal("pending input expiry must not discard input while a lease is still recovering")
 	}
 	if count := strings.Count(mainSource, "connectSession(session,"); count != 2 {
 		t.Fatalf("connectSession must only be called by fast lease and queue logical stream callbacks, count=%d", count)

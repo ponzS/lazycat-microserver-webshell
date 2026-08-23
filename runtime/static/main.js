@@ -14890,29 +14890,103 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       session.pendingInputExpiryTimer = 0;
     }
     if (session) {
+      session.pendingInputExpiryToken = Number(session.pendingInputExpiryToken || 0) + 1;
+      session.pendingInputExpiryLeaseID = 0;
+      session.pendingInputExpiryGeneration = 0;
+      session.pendingInputExpiryPaused = false;
       session.pendingInputQueuedAt = 0;
     }
   };
 
-  const schedulePendingInputExpiry = (session) => {
-    if (!session || session.pendingInputExpiryTimer || session.pendingInputSize <= 0) {
+  const pausePendingInputExpiry = (session) => {
+    if (!session || session.pendingInputSize <= 0) {
       return;
     }
+    if (session.pendingInputExpiryTimer) {
+      window.clearTimeout(session.pendingInputExpiryTimer);
+      session.pendingInputExpiryTimer = 0;
+    }
+    session.pendingInputExpiryToken = Number(session.pendingInputExpiryToken || 0) + 1;
+    session.pendingInputExpiryLeaseID = 0;
+    session.pendingInputExpiryGeneration = 0;
+    session.pendingInputExpiryPaused = true;
+    session.pendingInputQueuedAt = 0;
+  };
+
+  const resumePendingInputExpiry = (session) => {
+    if (!session || session.closed || session.pendingInputSize <= 0) {
+      return;
+    }
+    session.pendingInputExpiryPaused = false;
+    schedulePendingInputExpiry(session);
+  };
+
+  const schedulePendingInputExpiry = (session) => {
+    if (
+      !session
+      || session.pendingInputExpiryTimer
+      || session.pendingInputSize <= 0
+      || session.pendingInputExpiryPaused
+    ) {
+      return;
+    }
+    const lease = terminalConnectionScheduler?.currentLease(session);
+    const leaseID = Number(lease?.leaseID || session.connectionLeaseID || 0);
+    if (
+      !leaseID
+      || session.connectionLeaseClosing
+      || session.connectionChannel !== "fast"
+    ) {
+      session.pendingInputExpiryPaused = true;
+      return;
+    }
+    const generation = Number(session.connectionChannelGeneration || 0);
+    const expiryToken = Number(session.pendingInputExpiryToken || 0) + 1;
+    session.pendingInputExpiryToken = expiryToken;
+    session.pendingInputExpiryLeaseID = leaseID;
+    session.pendingInputExpiryGeneration = generation;
     session.pendingInputQueuedAt = Date.now();
     session.pendingInputExpiryTimer = window.setTimeout(() => {
+      if (session.pendingInputExpiryToken !== expiryToken) {
+        return;
+      }
       session.pendingInputExpiryTimer = 0;
       session.pendingInputQueuedAt = 0;
       if (session.closed || session.pendingInputSize <= 0) {
+        return;
+      }
+      const currentLease = terminalConnectionScheduler?.currentLease(session);
+      const currentLeaseID = Number(currentLease?.leaseID || session.connectionLeaseID || 0);
+      const expectedLeaseID = Number(session.pendingInputExpiryLeaseID || leaseID);
+      const expectedGeneration = Number(session.pendingInputExpiryGeneration || generation);
+      const leaseStillCurrent = currentLeaseID === expectedLeaseID
+        && session.connectionLeaseID === expectedLeaseID
+        && Number(session.connectionChannelGeneration || 0) === expectedGeneration
+        && !session.connectionLeaseClosing
+        && session.connectionChannel === "fast";
+      if (!leaseStillCurrent) {
+        session.pendingInputExpiryLeaseID = 0;
+        session.pendingInputExpiryGeneration = 0;
+        session.pendingInputExpiryPaused = true;
         return;
       }
       if (isSessionInputReady(session)) {
         flushPendingInput(session);
         return;
       }
-      session.pendingInput = [];
-      session.pendingInputSize = 0;
-      appendDebugError("终端输入等待连接超时", `${terminalLocationDescription(session)}, 10 秒内未恢复`);
-      showToast("终端连接恢复超时，未发送的输入已丢弃。");
+      // A current lease that is still replaying or waiting for its resize ACK
+      // is not a terminal failure. Keep the user's input and let the normal
+      // health/retry path finish the handoff instead of dropping it at the
+      // deadline. The timer is re-armed against this exact lease.
+      checkSessionConnectionHealth(session, {
+        connect: true,
+        force: true,
+        allowHidden: true,
+      });
+      session.pendingInputExpiryLeaseID = 0;
+      session.pendingInputExpiryGeneration = 0;
+      session.pendingInputExpiryPaused = true;
+      resumePendingInputExpiry(session);
     }, terminalPendingInputMaxWaitMs);
   };
 
@@ -18367,6 +18441,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         "page_disposed",
       ].includes(schedulerCloseReason);
       const intentionalTransportClose = intentionallyParked || intentionallyClosed;
+      pausePendingInputExpiry(session);
       console[intentionalTransportClose ? "info" : "warn"]("[client-terminal] websocket close", {
         name: session.name,
         tab: session.tabId,
@@ -19052,6 +19127,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       session.connectionLeaseID = lease.leaseID;
       session.connectionLeaseClosing = false;
       session.connectionLeaseCloseReason = "";
+      resumePendingInputExpiry(session);
       session.shellEl.dataset.connection = sessionConnectingState(session);
       appendDebugLog(
         "info",
@@ -19070,6 +19146,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         }
       } catch (error) {
         if (terminalConnectionScheduler?.currentLease(session)?.leaseID === lease.leaseID) {
+          pausePendingInputExpiry(session);
           session.connectionRetrying = true;
           session.shellEl.dataset.connection = navigator.onLine === false ? "offline" : "reconnecting";
           notifyTerminalTopologyFastFailed(session, lease.leaseID, error?.message || "fast_connect_failed");
@@ -19084,6 +19161,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       }
       session.connectionLeaseClosing = true;
       session.connectionLeaseCloseReason = reason;
+      // A scheduler handoff closes only the logical Fast stream. Keep queued
+      // user input alive while the replacement lease replays its history.
+      pausePendingInputExpiry(session);
       clearSessionConnectionTimers(session);
       if (
         reason === "scheduler_preempt"
@@ -19214,6 +19294,23 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }) || false;
   };
 
+  // Topology refresh can remove a pane before the asynchronous logical Fast
+  // close callback arrives. A closed pane still owns an assignment in the
+  // topology controller until this command is acknowledged; silently
+  // returning here would strand the only Fast slot on a deleted pane.
+  const acknowledgeTerminalTopologyFastStop = (command, reason) => {
+    const pane = command?.pane || command?.paneID;
+    const attemptID = Number(command?.attemptID || 0);
+    if (!pane || !attemptID) {
+      return false;
+    }
+    return terminalTopologyController?.fastStopped(pane, {
+      eventEpoch: Number(command.epoch || 0),
+      attemptID,
+      reason: String(reason || command.reason || "session_closed"),
+    }) || false;
+  };
+
   const handleTerminalTopologyCommand = (command) => {
     if (!command || isClientInstanceName(activeName) || disposed) {
       return;
@@ -19234,6 +19331,16 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
           || session.closed
           || session.name !== activeName
         ) {
+          if (session) {
+            terminalConnectionScheduler?.release(
+              session,
+              session.closed ? "session_closed" : "tab_or_target_removed",
+            );
+          }
+          acknowledgeTerminalTopologyFastStop(
+            command,
+            session?.closed ? "session_closed" : "tab_or_target_removed",
+          );
           return;
         }
         session.topologyEpoch = command.epoch;
@@ -19259,6 +19366,15 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       case "stop-fast": {
         const session = command.pane;
         if (!session || session.closed) {
+          if (session) {
+            terminalConnectionScheduler?.release(session, "session_closed");
+          }
+          acknowledgeTerminalTopologyFastStop(command, "session_closed");
+          return;
+        }
+        if (session.name !== activeName) {
+          terminalConnectionScheduler?.release(session, "tab_or_target_removed");
+          acknowledgeTerminalTopologyFastStop(command, "tab_or_target_removed");
           return;
         }
         const lease = terminalConnectionScheduler.currentLease(session);
@@ -19479,6 +19595,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       pendingInputSize: 0,
       pendingInputExpiryTimer: 0,
       pendingInputQueuedAt: 0,
+      pendingInputExpiryToken: 0,
+      pendingInputExpiryLeaseID: 0,
+      pendingInputExpiryGeneration: 0,
+      pendingInputExpiryPaused: false,
       inputBuffer: "",
       inputBufferSize: 0,
       inputFlushTimer: 0,

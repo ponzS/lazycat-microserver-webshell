@@ -407,6 +407,58 @@ test("a sole Queue pane is promoted to Fast before Queue is closed", () => {
   assert.equal(commandsFor(commands, "stop-queue-transport").length, 1);
 });
 
+test("a closed Fast pane cannot strand the slot during rapid workspace pruning", () => {
+  const panes = Array.from({ length: 8 }, (_, index) => pane(`pane-${index + 1}`, {
+    initializationOrder: index + 1,
+  }));
+  const { controller, commands } = bootstrap({ panes });
+  finishBootstrap(controller, commands);
+
+  for (let iteration = 0; iteration < panes.length - 1; iteration += 1) {
+    const currentFast = controller.snapshot().fastSlots[0];
+    const removed = panes.find((item) => item.id === currentFast?.paneID);
+    assert.ok(removed, "the current Fast pane must be present before pruning");
+    removed.closed = true;
+    const remaining = panes.filter((item) => !item.closed);
+    controller.refresh({
+      targetName: "instance-a",
+      tabID: "tab-a",
+      panes: remaining,
+      activePane: remaining[0],
+      initializationOrderReady: true,
+      reason: "rapid_workspace_prune",
+    });
+
+    const stop = commandsFor(commands, "stop-fast").at(-1);
+    assert.equal(stop.paneID, removed.id);
+    assert.equal(controller.fastStopped(stop.paneID, {
+      eventEpoch: stop.epoch,
+      attemptID: stop.attemptID,
+      reason: "pane_removed",
+    }), true);
+    assert.notEqual(controller.snapshot().fastSlots[0]?.paneID, removed.id);
+    assert.equal(controller.snapshot().fastSlots[0]?.state, "starting");
+
+    const replacement = commandsFor(commands, "start-fast").at(-1);
+    assert.ok(replacement, "a surviving pane must be assigned to Fast immediately");
+    controller.fastTransportOpened({
+      eventEpoch: replacement.epoch,
+      slot: replacement.slot,
+      attemptID: replacement.attemptID,
+    });
+    controller.fastRendered(replacement.pane, {
+      eventEpoch: replacement.epoch,
+      attemptID: replacement.attemptID,
+    });
+    if (controller.snapshot().queue.state === "starting") {
+      const queue = commandsFor(commands, "start-queue-transport").at(-1);
+      controller.queueTransportOpened({ eventEpoch: queue.epoch, attemptID: queue.attemptID });
+    }
+  }
+  assert.equal(controller.snapshot().fastSlots[0]?.paneID, "pane-8");
+  assert.equal(controller.snapshot().queue.state, "closed");
+});
+
 test("Queue physical failure starts one transport retry and keeps pane candidates", () => {
   const panes = [pane("one", { initializationOrder: 1 }), pane("two", { initializationOrder: 2 }), pane("three", { initializationOrder: 3 })];
   const { controller, commands } = bootstrap({ panes });

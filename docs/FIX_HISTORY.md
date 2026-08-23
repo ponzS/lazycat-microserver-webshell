@@ -980,3 +980,21 @@ git diff --check
 - If the final surviving pane was on Queue, the topology first promotes it to Fast and only then closes the Queue physical transport; a one-pane workspace therefore never intentionally keeps both channels enabled.
 - Diagnostic details identify the three hierarchy levels explicitly: `会话`, `tab`, and `分屏`.
 - Regression coverage now includes idle-pool Fast recovery and keeps Queue open during Fast replacement when other panes still exist.
+
+### 2026-08-23 Fast lease handoff must not expire queued input
+
+- 来源：用户现场日志；唯一 Fast lease 在 `tab-1/pane-1` 与 `tab-18/pane-19` 之间切换后，`pane-1` 报告“终端输入等待连接超时”，局部终端无法继续输入。
+- 根因：Fast 抢占只关闭逻辑 stream，物理 Fast/Queue transport 仍然健康；但 pane 的待发送输入使用了一个与 lease 无关的一次性 10 秒计时器。输入在旧 lease 上排队后，主动抢占、缓存准备和新 lease 回放继续消耗旧计时窗口，旧 timer 可能在新 stream ready 前清空输入。旧 timer 的迟到回调也没有校验当前 lease 或 channel generation。
+- 实施方案：待发送输入超时现在绑定当前 `leaseID` 和 `connectionChannelGeneration`，并使用 token 防止旧回调修改新状态。Fast 逻辑 stream 被主动停放或连接异常时暂停计时；新 lease 分配后重新开始计时。当前 lease 仍在缓存准备、历史回放或 resize ACK 阶段时，不再丢弃用户输入，而是触发既有连接健康检查并继续等待正常重试/回放完成；回放 ready 后由统一 flush 路径发送并清理计时器。
+- 回归 guard：`runtime_shortcuts_test.go` 固定 lease-bound token、暂停/恢复函数、generation 校验以及“恢复中的当前 lease 不得清空输入”；Node scheduler/topology tests 继续覆盖 Fast 抢占、快速 tab 切换、关闭确认和 Queue 物理连接保持。`node --check` 和 61 项连接/拓扑相关 Node 测试通过。
+- 验证结果：`node --check runtime/static/main.js`、`node --test terminal_connection_scheduler_test.mjs terminal_topology_controller_test.mjs terminal_queue_connection_test.mjs terminal_network_monitor_test.mjs`、`go test ./...`、`git diff --check` 通过。尚未完成真实设备上 A→B→A tab 快速切换、两个分屏连续输入和慢回放场景验证。
+- 禁止复现：不得让逻辑 Fast 抢占沿用旧 lease 的输入超时；不得让迟到 timer 清空新 lease 的输入；不得把缓存/回放未完成直接视为永久失败；物理 transport 未关闭时不得触发页面级连接池重建。
+
+### 2026-08-24 Closed Fast pane must release its topology slot
+
+- 来源：用户现场日志；频繁创建和关闭 tab 后，Queue 仍保持物理连接，但部分终端永久无法输入，刷新页面才恢复。
+- 根因：`disposePane()` 先将 pane 标记为 closed，拓扑刷新随后为已删除的 Fast pane 发出 `stop-fast`。运行时命令处理以 `session.closed` 为由直接返回，没有发送 `fastStopped` 确认；控制器因此一直保留已删除 pane 的 Fast assignment，后续 pane 只能停留在 Queue。Queue 可以输出但普通输入需要 Fast，最终表现为局部终端卡死。
+- 实施方案：`start-fast`/`stop-fast` 遇到已关闭或已切换目标的 pane 时，先幂等释放残留 scheduler lease，再使用命令携带的 `epoch`、`attemptID` 和 `paneID` 确认拓扑 assignment 已停止。物理逻辑流仍由 scheduler 的 close 回调完成真正释放，替换请求会在连接安全关闭后继续，不会重复创建物理 WebSocket。
+- 回归 guard：拓扑 Node 测试覆盖连续删除当前 Fast pane 直到只剩最后一个 pane、重新分配存活 pane，并确认最终单 pane 状态不会保留 Queue；Go 静态 guard 固定关闭 pane 命令确认边界。
+- 验证结果：相关 78 项终端 Node 测试、`go test ./... -count=1`、`go test -race ./...`、`node --check` 和 `git diff --check` 通过。仓库级 `node --test` 额外收集 `ghostty-web` 的 Bun/TypeScript 测试，当前 Node 运行器不支持 `bun:` 协议且缺少其构建模块，因此该命令有 19 项环境性失败，不涉及本次终端代码。
+- 禁止复现：不得因 pane 已 closed 而丢弃 `stop-fast`/`start-fast` 确认；不得让已删除 pane 出现在 `fastSlots`；不得以刷新页面作为恢复 Fast 槽位的必要条件；物理 transport 未关闭时不得重建整页连接池。
