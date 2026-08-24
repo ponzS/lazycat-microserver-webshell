@@ -47,6 +47,26 @@ func TestRuntimeResizeEpochAckGuard(t *testing.T) {
 		"case \"resize-applied\":",
 		"case \"resize-error\":",
 		"session.appliedResizeEpoch = epoch;",
+		"const canDeferLocalResize = Boolean(",
+		"const terminalResizeOutputQuietMs = 120;",
+		"const terminalResizeOutputMaxHoldMs = 800;",
+		"pane.resizeFenceActive = true;",
+		"pane.resizeFenceTarget = {",
+		"sendTerminalSize(pane, {",
+		"dimensions: targetDimensions,",
+		"const applyTerminalResizeFence = (session) => {",
+		"flushSessionOutput(session, { force: true });",
+		"session.term.resize(target.cols, target.rows);",
+		"const scheduleResizeOutputSettle = (session, { reason = \"resize_ack\" } = {}) => {",
+		"const finishResizeOutputSettle = (session, reason = \"quiet\") => {",
+		"session.resizeOutputSettleActive = true;",
+		"resize_output_settle_start",
+		"resize_output_settle_complete",
+		"const resizeOutputSettleActive = session.resizeOutputSettleActive === true;",
+		"const suppressRender = (deferRender || resizeOutputSettleActive) && !replayOutput;",
+		"replayOutput ? \"write_replay\" : \"write_suppressed\"",
+		"reason: \"legacy_resize\"",
+		"session.term.writeReplay(data);",
 		"if (session.resizeAckPending) {",
 		"!session.resizeAckPending",
 		"session.presentedResizeEpoch === session.appliedResizeEpoch",
@@ -64,6 +84,82 @@ func TestRuntimeResizeEpochAckGuard(t *testing.T) {
 	}
 	if !strings.Contains(resizeBlock, "!shouldCommitAfterHold && !pane.resizeAckPending") {
 		t.Fatal("resize presentation must not settle before resize ACK")
+	}
+	if !strings.Contains(resizeBlock, "const resizeOutputSettlePending = pane.resizeOutputSettleActive === true;") ||
+		!strings.Contains(resizeBlock, "!resizeOutputSettlePending") {
+		t.Fatal("resize presentation must remain hidden while post-ACK PTY output settles")
+	}
+	applyIndex := strings.Index(mainSource, "const applyTerminalResizeFence = (session) => {")
+	settleIndex := strings.Index(mainSource, "scheduleResizeOutputSettle(session)")
+	if applyIndex < 0 || settleIndex < 0 || applyIndex > settleIndex {
+		t.Fatal("resize ACK must enter the bounded output settle barrier before the final render")
+	}
+	writeIndex := strings.Index(mainSource, "const suppressRender = (deferRender || resizeOutputSettleActive) && !replayOutput;")
+	if writeIndex < 0 || writeIndex < strings.Index(mainSource, "const writeSessionOutput = (") {
+		t.Fatal("resize output must be render-suppressed while the settle barrier is active")
+	}
+}
+
+func TestRuntimeTerminalMultiplexedIdentityGate(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+	for _, want := range []string{
+		"const validateTerminalChannelMessageIdentity = (event, messageType = \"\", isBinary = false) => {",
+		"const metadata = event?.queueMetadata;",
+		"const expectedStreamID = String(",
+		"channel === \"queue\" ? session.queueStreamID : session.fastStreamID",
+		"return !isBinary && messageType === \"agent-preparing\";",
+		"const rejectMismatchedChannelMessage = (event, messageType) => {",
+		"session.resetOnNextReplay = true;",
+		"beginTerminalPresentationHold(session);",
+		"Terminal multiplexed message identity validation failed.",
+		"if (!validateTerminalChannelMessageIdentity(event, message.type, false)) {",
+		"if (!validateTerminalChannelMessageIdentity(event, \"\", true)) {",
+		"rejectMismatchedChannelMessage(event, message.type);",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime multiplexed terminal identity guard missing %q", want)
+		}
+	}
+	messageBlock := sourceBetween(t, source,
+		"currentSocket.addEventListener(\"message\", (event) => {",
+		"currentSocket.addEventListener(\"close\", (event) => {")
+	controlIndex := strings.Index(messageBlock, "validateTerminalChannelMessageIdentity(event, message.type, false)")
+	binaryIndex := strings.Index(messageBlock, "validateTerminalChannelMessageIdentity(event, \"\", true)")
+	switchIndex := strings.Index(messageBlock, "switch (message.type)")
+	binaryReplayIndex := strings.Index(messageBlock, "if (!session.replayVerified && !session.replayComplete) {")
+	if controlIndex < 0 || binaryIndex < 0 || switchIndex < 0 || binaryReplayIndex < 0 {
+		t.Fatal("multiplexed terminal identity gate must cover control and binary messages")
+	}
+	if controlIndex > switchIndex || binaryIndex > binaryReplayIndex {
+		t.Fatal("multiplexed terminal identity must be checked before control dispatch or binary replay handling")
+	}
+}
+
+func TestRuntimeTerminalDiagnosticTimelineGuard(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+	for _, want := range []string{
+		"const recordTerminalSessionEvent = (session, type, details = {}) => {",
+		"channelGeneration: Number(session.connectionChannelGeneration || 0),",
+		"attachGeneration: Number(session.terminalReplayGeneration || 0),",
+		"receivedCursor: session.receivedHistoryCursor?.toString?.() || \"\",",
+		"if (timeline.length > 96) {",
+		"recordTerminalSessionEvent(pane, \"resize_request\",",
+		"recordTerminalSessionEvent(session, \"resize_applied\",",
+		"recordTerminalSessionEvent(session, \"history_replay_start\",",
+		"recordTerminalSessionEvent(session, \"history_replay_complete\",",
+		"recordTerminalSessionEvent(session, \"full_render_complete\");",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime terminal diagnostic timeline missing %q", want)
+		}
 	}
 }
 
@@ -2715,7 +2811,9 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"session.pendingRenderContentGeneration = session.terminalContentGeneration;",
 		"const fullRenderRequested = term.renderFullNextFrame === true;",
 		"term.renderFullNextFrame = fullRenderRequested;",
-		"return term.renderNow(true) !== false;",
+		"const rendered = term.renderNow(true) !== false;",
+		"recordTerminalSessionEvent(session, \"full_render_failed\");",
+		"return rendered;",
 		"const schedulePaneFullRenderValidation = (session, { forceHistory = false } = {}) => {",
 		"const scrollbackLength = Math.max(0, Number(session.term?.getScrollbackLength?.() || 0));",
 		"if (forceHistory && sameReplay && scrollbackLength > 0) {",
@@ -4163,7 +4261,7 @@ func TestRuntimeTerminalSizeClaimSurvivesCrossClientResize(t *testing.T) {
 
 	for _, want := range []string{
 		`from "./terminal_size_sync.js";`,
-		`const sendTerminalSize = (pane, { force = false } = {}) => {`,
+		`const sendTerminalSize = (pane, { force = false, dimensions = null } = {}) => {`,
 		`shouldSendTerminalSize({`,
 		`const claimTerminalSize = (pane) => {`,
 		`const claimTerminalSizeForCurrentDevice = (pane) => {`,

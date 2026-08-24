@@ -440,6 +440,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const terminalReplayWriteBatchBytes = 1 * 1024 * 1024;
   const terminalResizeThrottleMs = 80;
   const terminalResizeSettleMs = 120;
+  const terminalResizeOutputQuietMs = 120;
+  const terminalResizeOutputMaxHoldMs = 800;
   const terminalFullRenderValidationMs = 80;
   const terminalOutputQueueSoftLimitBytes = 1 * 1024 * 1024;
   const terminalOutputMeasureChunkChars = 32 * 1024;
@@ -1418,6 +1420,40 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     if (metrics?.counters && typeof metrics.counters === "object") {
       metrics.counters[name] = Math.max(Number(metrics.counters[name]) || 0, Number(value) || 0);
+    }
+  };
+
+  const recordTerminalSessionEvent = (session, type, details = {}) => {
+    if (!session) {
+      return;
+    }
+    const timeline = Array.isArray(session.terminalEventTimeline)
+      ? session.terminalEventTimeline
+      : [];
+    session.terminalEventTimeline = timeline;
+    timeline.push({
+      at: Math.round(performanceTaskNow()),
+      type: String(type || "unknown"),
+      channelGeneration: Number(session.connectionChannelGeneration || 0),
+      attachGeneration: Number(session.terminalReplayGeneration || 0),
+      historyGeneration: String(session.historyGeneration || ""),
+      resizeEpoch: normalizeTerminalResizeEpoch(session.appliedResizeEpoch)
+        || normalizeTerminalResizeEpoch(session.requestedResizeEpoch),
+      receivedCursor: session.receivedHistoryCursor?.toString?.() || "",
+      appliedCursor: session.appliedHistoryCursor?.toString?.() || "",
+      presentedCursor: session.presentedHistoryCursor?.toString?.() || "",
+      ...details,
+    });
+    if (timeline.length > 96) {
+      timeline.splice(0, timeline.length - 96);
+    }
+    if (debugLogEnabled) {
+      appendDebugLog(
+        "info",
+        `终端事件 ${String(type || "unknown")}`,
+        `${session.name}/${session.id}`,
+        { dedupeKey: `terminal-event:${session.id}:${String(type || "unknown")}` },
+      );
     }
   };
 
@@ -6872,6 +6908,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     session.presentationCommitPending = false;
     session.resizePresentationHold = true;
+    recordTerminalSessionEvent(session, "presentation_hold");
     if (session.hasPresentedFrame && !session.terminalFrameHeld) {
       holdSessionTerminalFrame(session);
     }
@@ -7020,6 +7057,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       || session.presentedResizeEpoch;
     session.hasPresentedFrame = true;
     session.shellEl.dataset.hasPresentedFrame = "true";
+    session.presentedHistoryCursor = session.appliedHistoryCursor;
+    recordTerminalSessionEvent(session, "full_render_complete");
     if (session.presentationCommitPending && session.resizePresentationHold) {
       session.presentationCommitPending = false;
       session.resizePresentationHold = false;
@@ -7027,6 +7066,134 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!session.renderReady && !session.resizePresentationHold) {
       setPaneRenderReady(session, true);
     }
+  };
+
+  const clearTerminalResizeFence = (session) => {
+    if (!session) {
+      return null;
+    }
+    const target = session.resizeFenceTarget;
+    session.resizeFenceActive = false;
+    session.resizeFenceTarget = null;
+    return target;
+  };
+
+  const clearResizeOutputSettle = (session) => {
+    if (!session) {
+      return;
+    }
+    if (session.resizeOutputSettleTimer) {
+      window.clearTimeout(session.resizeOutputSettleTimer);
+    }
+    session.resizeOutputSettleTimer = 0;
+    session.resizeOutputSettleActive = false;
+    session.resizeOutputSettleStartedAt = 0;
+    session.resizeOutputSettleDeadline = 0;
+    session.resizeOutputSettleToken = Number(session.resizeOutputSettleToken || 0) + 1;
+  };
+
+  const finishResizeOutputSettle = (session, reason = "quiet") => {
+    if (!session || session.closed || !session.resizeOutputSettleActive) {
+      return false;
+    }
+    clearResizeOutputSettle(session);
+    recordTerminalSessionEvent(session, "resize_output_settle_complete", { reason });
+    // Entries received during the barrier retain suppressRender=true, so this
+    // drain parses them in order without exposing intermediate TUI redraws.
+    flushSessionOutput(session, { force: true });
+    if (session.closed || session.name !== activeName) {
+      return false;
+    }
+    requestPaneFullRender(session);
+    if (session.hasPresentedFrame && session.resizePresentationHold) {
+      commitTerminalPresentationNow(session);
+    } else {
+      renderPaneFullNow(session);
+    }
+    return true;
+  };
+
+  const scheduleResizeOutputSettle = (session, { reason = "resize_ack" } = {}) => {
+    if (!session || session.closed || !session.replayComplete) {
+      return false;
+    }
+    const now = performanceTaskNow();
+    if (!session.resizeOutputSettleActive) {
+      session.resizeOutputSettleActive = true;
+      session.resizeOutputSettleStartedAt = now;
+      session.resizeOutputSettleDeadline = now + terminalResizeOutputMaxHoldMs;
+      recordTerminalSessionEvent(session, "resize_output_settle_start", { reason });
+    }
+    if (session.resizeOutputSettleTimer) {
+      window.clearTimeout(session.resizeOutputSettleTimer);
+    }
+    const token = Number(session.resizeOutputSettleToken || 0) + 1;
+    session.resizeOutputSettleToken = token;
+    const remaining = Math.max(0, session.resizeOutputSettleDeadline - now);
+    const delay = Math.min(terminalResizeOutputQuietMs, remaining);
+    session.resizeOutputSettleTimer = window.setTimeout(() => {
+      session.resizeOutputSettleTimer = 0;
+      if (
+        session.closed
+        || !session.resizeOutputSettleActive
+        || Number(session.resizeOutputSettleToken || 0) !== token
+      ) {
+        return;
+      }
+      const deadlineReached = performanceTaskNow() >= session.resizeOutputSettleDeadline;
+      finishResizeOutputSettle(session, deadlineReached ? "max_hold" : "quiet");
+    }, delay);
+    return true;
+  };
+
+  const applyTerminalResizeFence = (session) => {
+    if (!session || session.closed || !session.resizeFenceActive || !session.resizeFenceTarget) {
+      return false;
+    }
+    const target = session.resizeFenceTarget;
+    // The ACK is ordered after all output produced before Setsize. Drain that
+    // output while the terminal still has its old geometry, then switch the
+    // local grid. Bytes received after this event belong to the new epoch.
+    flushSessionOutput(session, { force: true });
+    try {
+      session.term.resize(target.cols, target.rows);
+      restoreTerminalViewport(session.term, target.viewport);
+      recordTerminalSessionEvent(session, "term_resize", {
+        cols: target.cols,
+        rows: target.rows,
+        deferredUntilAck: true,
+      });
+    } catch (error) {
+      session.lastHistoryResetFailureReason = "resize_fence_apply_failed";
+      clearTerminalResizeFence(session);
+      console.warn("[terminal-resize] deferred local resize failed", {
+        name: session.name,
+        pane: session.id,
+        cols: target.cols,
+        rows: target.rows,
+        error: error?.message || String(error),
+      });
+      return false;
+    }
+    clearTerminalResizeFence(session);
+    session.activationFitPending = false;
+    session.measuredFitGeneration = Number(session.measuredFitGeneration || 0) + 1;
+    resetTerminalHostViewport(session, { clean: true });
+    positionTerminalInput(session);
+    syncTerminalViewportPan(session);
+    updateMobileSelectionHandles(session);
+    if (session.replayComplete) {
+      setPaneRenderReady(session, false);
+    }
+    if (!scheduleResizeOutputSettle(session)) {
+      requestPaneFullRender(session);
+      if (session.hasPresentedFrame && session.resizePresentationHold) {
+        commitTerminalPresentationNow(session);
+      } else {
+        renderPaneFullNow(session);
+      }
+    }
+    return true;
   };
 
   const handleTerminalResizeApplied = (session, message) => {
@@ -7048,6 +7215,28 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.serverRows = Math.max(0, Math.floor(Number(message.rows) || 0));
     session.serverPixelWidth = Math.max(0, Math.floor(Number(message.pixel_width) || 0));
     session.serverPixelHeight = Math.max(0, Math.floor(Number(message.pixel_height) || 0));
+    recordTerminalSessionEvent(session, "resize_applied", {
+      appliedResizeEpoch: epoch,
+      cols: session.serverCols,
+      rows: session.serverRows,
+    });
+    const resizeFenceTarget = session.resizeFenceTarget;
+    const resizeFenceMatchesAck = Boolean(
+      session.resizeFenceActive
+      && resizeFenceTarget
+      && resizeFenceTarget.cols === session.serverCols
+      && resizeFenceTarget.rows === session.serverRows
+      && (!resizeFenceTarget.pixelWidth || !session.serverPixelWidth || resizeFenceTarget.pixelWidth === session.serverPixelWidth)
+      && (!resizeFenceTarget.pixelHeight || !session.serverPixelHeight || resizeFenceTarget.pixelHeight === session.serverPixelHeight)
+    );
+    if (resizeFenceMatchesAck) {
+      applyTerminalResizeFence(session);
+    } else if (session.resizeFenceActive && requestedEpoch && epoch === requestedEpoch) {
+      // The server accepted this epoch with a different geometry (for
+      // example, another owner won a size claim). Do not apply the stale
+      // local target; the normal size-claim path will issue a fresh fence.
+      clearTerminalResizeFence(session);
+    }
     const appliedGeometryMatchesLocal = dimensionsEqualTerminalSize(session, {
       cols: session.serverCols,
       rows: session.serverRows,
@@ -7087,6 +7276,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     session.resizeAckPending = false;
     session.sizeClaimRequired = true;
+    clearResizeOutputSettle(session);
+    clearTerminalResizeFence(session);
+    recordTerminalSessionEvent(session, "resize_error", {
+      resizeErrorEpoch: epoch,
+      reason: String(message?.reason || ""),
+    });
     if (session.resizePresentationHold) {
       session.resizePresentationHold = false;
       session.presentationCommitPending = false;
@@ -7110,6 +7305,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.pendingRenderFitGeneration = session.measuredFitGeneration;
     session.pendingRenderReplayGeneration = session.terminalReplayGeneration;
     session.pendingRenderContentGeneration = session.terminalContentGeneration;
+    recordTerminalSessionEvent(session, "full_render_request");
     session.term.requestRender?.({ full: true });
   };
 
@@ -7163,7 +7359,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.pendingRenderReplayGeneration = session.terminalReplayGeneration;
     session.pendingRenderContentGeneration = session.terminalContentGeneration;
     term.renderFullNextFrame = false;
-    return term.renderNow(true) !== false;
+    recordTerminalSessionEvent(session, "full_render_start");
+    const rendered = term.renderNow(true) !== false;
+    if (!rendered) {
+      recordTerminalSessionEvent(session, "full_render_failed");
+    }
+    return rendered;
   };
 
   const clearPaneFullRenderValidation = (session) => {
@@ -9782,11 +9983,15 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return String(next);
   };
 
-  const sendTerminalSize = (pane, { force = false } = {}) => {
+  const sendTerminalSize = (pane, { force = false, dimensions = null } = {}) => {
     if (pane?.socket?.readyState !== WebSocket.OPEN) {
       return false;
     }
-    const { cols, rows, pixelWidth, pixelHeight } = terminalSize(pane);
+    const currentSize = terminalSize(pane);
+    const cols = Math.max(0, Math.floor(Number(dimensions?.cols) || currentSize.cols));
+    const rows = Math.max(0, Math.floor(Number(dimensions?.rows) || currentSize.rows));
+    const pixelWidth = Math.max(0, Math.floor(Number(dimensions?.pixelWidth) || currentSize.pixelWidth));
+    const pixelHeight = Math.max(0, Math.floor(Number(dimensions?.pixelHeight) || currentSize.pixelHeight));
     if (!shouldSendTerminalSize({
       cols,
       rows,
@@ -9825,6 +10030,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       pane.resizeAckPending = false;
       return false;
     }
+    recordTerminalSessionEvent(pane, "resize_request", {
+      requestedResizeEpoch: resizeEpoch,
+      cols,
+      rows,
+    });
     return true;
   };
 
@@ -10287,6 +10497,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       const canvasBefore = terminalCanvasSize(pane);
       const canvasNeedsResize = !terminalCanvasMatchesExpectedSize(pane, fittedDimensions);
       const dimensionsWillChange = !dimensionsEqualTerminalSize(pane, fittedDimensions) || canvasNeedsResize;
+      const targetCanvas = pane.term?.renderer?.canvasSize?.(fittedDimensions.cols, fittedDimensions.rows);
+      const targetDimensions = {
+        cols: fittedDimensions.cols,
+        rows: fittedDimensions.rows,
+        pixelWidth: Math.max(0, Math.floor(Number(targetCanvas?.pixelWidth) || 0)),
+        pixelHeight: Math.max(0, Math.floor(Number(targetCanvas?.pixelHeight) || 0)),
+      };
       const shouldHoldFrame = dimensionsWillChange && pane.hasPresentedFrame;
       if (shouldHoldFrame) {
         beginTerminalPresentationHold(pane);
@@ -10294,11 +10511,52 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         pane.resizePresentationHold = true;
       }
       const shouldCommitAfterHold = pane.resizePresentationHold && pane.hasPresentedFrame;
+      const resizeOutputSettlePending = pane.resizeOutputSettleActive === true;
       if (shouldHoldFrame && !pane.terminalFrameHeld) {
         holdSessionTerminalFrame(pane);
       }
       if (hideUntilRender || shouldHoldFrame || pane.resizePresentationHold) {
         setPaneRenderReady(pane, false);
+      }
+
+      // Once a live, epoch-aware socket is attached, keep the local terminal
+      // on the old geometry until the server ACK arrives. This creates a real
+      // boundary for PTY bytes: output already ordered before the ACK is
+      // parsed by the old grid, and output after it is parsed by the new grid.
+      const canDeferLocalResize = Boolean(
+        dimensionsWillChange
+        && pane.replayComplete
+        && pane.socket?.readyState === WebSocket.OPEN
+        && pane.resizeEpochSupported !== false
+      );
+      if (canDeferLocalResize) {
+        clearResizeOutputSettle(pane);
+        flushSessionOutput(pane, { force: true });
+        pane.resizeFenceActive = true;
+        pane.resizeFenceTarget = {
+          ...targetDimensions,
+          viewport,
+        };
+        const sent = sendTerminalSize(pane, {
+          force: true,
+          dimensions: targetDimensions,
+        });
+        if (sent) {
+          recordTerminalSessionEvent(pane, "resize_fence_wait", {
+            cols: targetDimensions.cols,
+            rows: targetDimensions.rows,
+          });
+          return {
+            ok: true,
+            measurable: true,
+            pending: true,
+            cols: sizeBefore.cols,
+            rows: sizeBefore.rows,
+            sizeChanged: false,
+            canvasChanged: false,
+          };
+        }
+        clearTerminalResizeFence(pane);
       }
       try {
         if (dimensionsWillChange) {
@@ -10336,15 +10594,32 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       if (fitGenerationChanged && pane.replayComplete) {
         setPaneRenderReady(pane, false);
       }
-      sendTerminalSize(pane, { force: forceSizeSync });
+      const sentTerminalSize = sendTerminalSize(pane, { force: forceSizeSync, dimensions: targetDimensions });
       updateMobileSelectionHandles(pane);
-      if (shouldCommitAfterHold && !pane.resizeAckPending) {
+      if (
+        sentTerminalSize
+        && dimensionsWillChange
+        && pane.replayComplete
+        && pane.resizeEpochSupported === false
+        && scheduleResizeOutputSettle(pane, { reason: "legacy_resize" })
+      ) {
+        return {
+          ok: true,
+          measurable: true,
+          pending: true,
+          cols: sizeAfter.cols,
+          rows: sizeAfter.rows,
+          sizeChanged,
+          canvasChanged,
+        };
+      }
+      if (shouldCommitAfterHold && !pane.resizeAckPending && !resizeOutputSettlePending) {
         requestPaneFullRender(pane);
         commitTerminalPresentationNow(pane);
       } else if (forceFullRender || fitGenerationChanged || hideUntilRender || pane.fullRenderPending || !pane.hasPresentedFrame) {
         renderPaneFullNow(pane);
       }
-      if (shouldSettlePresentation && !shouldCommitAfterHold && !pane.resizeAckPending) {
+      if (shouldSettlePresentation && !shouldCommitAfterHold && !pane.resizeAckPending && !resizeOutputSettlePending) {
         pane.resizePresentationHold = false;
         if (!pane.fullRenderPending && pane.hasPresentedFrame) {
           setPaneRenderReady(pane, true);
@@ -10392,6 +10667,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const cancelScheduledPaneResize = (pane) => {
     paneResizeScheduler.cancel(pane);
     if (pane) {
+      clearResizeOutputSettle(pane);
       pane.presentationCommitPending = false;
       pane.resizePresentationHold = false;
     }
@@ -16559,6 +16835,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     const replayWriter = (replayOutput || suppressRender) && typeof session.term.writeReplay === "function";
     try {
+      if (replayWriter) {
+        recordTerminalSessionEvent(session, replayOutput ? "write_replay" : "write_suppressed", {
+          bytes: terminalOutputByteLength(data),
+          reason: replayOutput ? "history_replay" : "resize_output_settle",
+        });
+      }
       recordTerminalRuntimeMetric("terminalOutputBatches");
       recordTerminalRuntimeMetric("terminalOutputBytes", terminalOutputByteLength(data));
       measurePerformanceTask("terminal write", () => {
@@ -16860,7 +17142,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     // Output chunks carry replay state because the replay-complete control frame can arrive before the next paint.
     const replayOutput = !session.replayComplete;
-    const suppressRender = deferRender && !replayOutput;
+    const resizeOutputSettleActive = session.resizeOutputSettleActive === true;
+    if (resizeOutputSettleActive) {
+      scheduleResizeOutputSettle(session, { reason: "output_received" });
+    }
+    const suppressRender = (deferRender || resizeOutputSettleActive) && !replayOutput;
     const allowGeneratedInput = replayOutput && session.allowGeneratedInputDuringReplay === true;
     const outputChunkBytes = replayOutput
       ? terminalReplayWriteBatchBytes
@@ -17068,6 +17354,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!session || session.socket !== currentSocket) {
       return false;
     }
+    clearResizeOutputSettle(session);
     session.socket = null;
     session.replayComplete = false;
     session.replayVerified = false;
@@ -17120,6 +17407,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return false;
     }
     return measurePerformanceTask("history replay", () => {
+      clearResizeOutputSettle(session);
+      recordTerminalSessionEvent(session, "history_replay_reset");
       discardSessionOutputBuffers(session);
       markPaneSyncPending(session);
       session.replayComplete = false;
@@ -17155,6 +17444,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!session?.term || session.closed || session.name !== activeName) {
       return;
     }
+    clearResizeOutputSettle(session);
     session.resetOnNextReplay = true;
     session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
     session.cacheV2WarmReplayActive = false;
@@ -17861,6 +18151,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       localBaseCursor: historyConnectRange?.baseCursor?.toString?.() || "",
       localEndCursor: historyConnectRange?.endCursor?.toString?.() || "",
     });
+    recordTerminalSessionEvent(session, "socket_connect", {
+      channel,
+      streamID: channel === "queue" ? session.queueStreamID : session.fastStreamID,
+    });
     let currentSocket;
     if (usesMultiplexedTransport) {
       const multiplexedConnection = channel === "queue"
@@ -17950,6 +18244,34 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return selector === session.name && paneID === session.id;
     };
 
+    // Multiplexed transports already route frames by logical stream, but keep
+    // a second identity gate at the terminal owner. This protects against a
+    // stale callback or a malformed relay writing another pane into this
+    // Ghostty instance after the logical stream has been replaced.
+    const validateTerminalChannelMessageIdentity = (event, messageType = "", isBinary = false) => {
+      if (!usesMultiplexedTransport) {
+        return true;
+      }
+      const metadata = event?.queueMetadata;
+      if (!metadata) {
+        // The physical Queue state broadcast is intentionally fan-out and has
+        // no pane identity. Every pane may consume only this one control.
+        return !isBinary && messageType === "agent-preparing";
+      }
+      const paneID = String(metadata.paneID || metadata.pane_id || "").trim();
+      const streamID = String(metadata.streamID || metadata.stream_id || "").trim();
+      const generation = Math.floor(Number(metadata.channelGeneration || metadata.channel_generation || 0));
+      const expectedStreamID = String(
+        channel === "queue" ? session.queueStreamID : session.fastStreamID,
+      ).trim();
+      return paneID === session.id
+        && streamID !== ""
+        && streamID === expectedStreamID
+        && Number.isSafeInteger(generation)
+        && generation > 0
+        && generation === Math.floor(Number(channelGeneration || 0));
+    };
+
     const rejectMismatchedReplay = (message) => {
       const selector = String(message?.selector || "").trim() || "unknown";
       const paneID = String(message?.pane_id || message?.paneId || "").trim() || "unknown";
@@ -17969,6 +18291,32 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       appendDebugError("终端回放身份校验失败", `${selector}/${paneID}`);
       console.warn(`Rejected terminal replay for ${selector}/${paneID}; expected ${session.name}/${session.id}.`);
       closeSessionSocketForReconnect(session, currentSocket, "Terminal replay identity validation failed.");
+    };
+
+    const rejectMismatchedChannelMessage = (event, messageType) => {
+      const metadata = event?.queueMetadata || {};
+      const paneID = String(metadata.paneID || metadata.pane_id || "unknown").trim() || "unknown";
+      const streamID = String(metadata.streamID || metadata.stream_id || "unknown").trim() || "unknown";
+      session.resetOnNextReplay = true;
+      session.replayComplete = false;
+      session.replayVerified = false;
+      session.replayCompletionPending = false;
+      discardSessionOutputBuffers(session);
+      // Keep the last valid frame visible while the current logical stream is
+      // replaced. The wrong frame must never be allowed to turn into a black
+      // screen while the session is resynchronizing.
+      beginTerminalPresentationHold(session);
+      console.warn("[client-terminal] rejected multiplexed terminal message", {
+        name: session.name,
+        pane: session.id,
+        messageType,
+        receivedPane: paneID,
+        receivedStream: streamID,
+        expectedStream: session.connectionChannel === "queue" ? session.queueStreamID : session.fastStreamID,
+        expectedGeneration: channelGeneration,
+      });
+      appendDebugError("终端会话消息身份不匹配", `${session.name}/${session.id}: ${messageType}`);
+      closeSessionSocketForReconnect(session, currentSocket, "Terminal multiplexed message identity validation failed.");
     };
 
     const rejectHistorySync = (reason) => {
@@ -18045,6 +18393,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         try {
           const message = JSON.parse(event.data);
           if (message && typeof message.type === "string") {
+            if (!validateTerminalChannelMessageIdentity(event, message.type, false)) {
+              rejectMismatchedChannelMessage(event, message.type);
+              return;
+            }
             if (
               socketDebug.textMessages <= 8
               || message.type === "history-replay-start"
@@ -18086,6 +18438,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
                   rejectMismatchedReplay(message);
                   return;
                 }
+                recordTerminalSessionEvent(session, "history_replay_start", {
+                  syncMode: String(message.sync_mode || ""),
+                });
                 session.agentPreparing = false;
                 const resizeProtocol = String(message.resize_protocol || "").trim();
                 if (resizeProtocol === "epoch-v1") {
@@ -18300,6 +18655,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
                   }
                 }
                 markSessionCacheV2RecoveryMetric(session, "historyReplayCompleteAt");
+                recordTerminalSessionEvent(session, "history_replay_complete", {
+                  cursor: message.history_cursor || "",
+                });
                 if (session.cacheV2ServerSnapshotPending) {
                   applySessionCacheV2ServerSnapshot(session, currentSocket, rejectHistorySync);
                   return;
@@ -18371,6 +18729,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       if (event.data instanceof ArrayBuffer) {
         socketDebug.binaryMessages += 1;
         socketDebug.binaryBytes += event.data.byteLength;
+        if (!validateTerminalChannelMessageIdentity(event, "", true)) {
+          rejectMismatchedChannelMessage(event, "binary-output");
+          return;
+        }
         if (socketDebug.binaryMessages <= 8) {
           console.info("[client-terminal] websocket binary message", {
             name: session.name,
@@ -18422,6 +18784,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       if (session.socket !== currentSocket || (channel === "fast" && session.connectionLeaseID !== leaseID)) {
         return;
       }
+      recordTerminalSessionEvent(session, "socket_close", {
+        channel,
+        code: Number(event.code || 0),
+        wasClean: event.wasClean === true,
+      });
       const schedulerCloseReason = channel === "queue"
         ? String(session.connectionQueueCloseReason || "")
         : String(session.connectionLeaseCloseReason || "");
@@ -19101,6 +19468,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!session || session.connectionChannel !== "queue") {
       return false;
     }
+    recordTerminalSessionEvent(session, "queue_recycle", { reason: String(reason || "") });
     session.connectionRetrying = true;
     session.shellEl.dataset.connection = "reconnecting";
     detachTerminalQueueSession(session, "queue_retry");
@@ -19667,6 +20035,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       receivedHistoryCursor: 0n,
       appliedHistoryCursor: 0n,
       persistedHistoryCursor: 0n,
+      presentedHistoryCursor: 0n,
       historyReplayTargetCursor: 0n,
       serverBaseCursor: 0n,
       suppressGeneratedTerminalInputUntil: 0,
@@ -19691,6 +20060,14 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       requestedResizeEpoch: "",
       appliedResizeEpoch: "",
       presentedResizeEpoch: "",
+      resizeFenceActive: false,
+      resizeFenceTarget: null,
+      resizeOutputSettleActive: false,
+      resizeOutputSettleTimer: 0,
+      resizeOutputSettleStartedAt: 0,
+      resizeOutputSettleDeadline: 0,
+      resizeOutputSettleToken: 0,
+      terminalEventTimeline: [],
       requestedCols: 0,
       requestedRows: 0,
       requestedPixelWidth: 0,

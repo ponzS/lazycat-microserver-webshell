@@ -998,3 +998,39 @@ git diff --check
 - 回归 guard：拓扑 Node 测试覆盖连续删除当前 Fast pane 直到只剩最后一个 pane、重新分配存活 pane，并确认最终单 pane 状态不会保留 Queue；Go 静态 guard 固定关闭 pane 命令确认边界。
 - 验证结果：相关 78 项终端 Node 测试、`go test ./... -count=1`、`go test -race ./...`、`node --check` 和 `git diff --check` 通过。仓库级 `node --test` 额外收集 `ghostty-web` 的 Bun/TypeScript 测试，当前 Node 运行器不支持 `bun:` 协议且缺少其构建模块，因此该命令有 19 项环境性失败，不涉及本次终端代码。
 - 禁止复现：不得因 pane 已 closed 而丢弃 `stop-fast`/`start-fast` 确认；不得让已删除 pane 出现在 `fastSlots`；不得以刷新页面作为恢复 Fast 槽位的必要条件；物理 transport 未关闭时不得重建整页连接池。
+
+### 2026-08-24：多路复用终端消息增加会话所有者二次门禁
+
+- 来源：终端历史串会话修复方案执行；需要把“传输层已路由”与“终端实例允许写入”明确分成两道边界。
+- 错误风险：Queue/Fast 多路复用层虽然按 `pane_id`、`stream_id` 和 `channel_generation` 路由消息，但主终端处理器此前只依赖 `currentSocket` 和连接状态。若旧逻辑流的迟到回调、错误 relay 或异步消息绕过传输层路由，仍可能进入当前 Ghostty 的控制或二进制输出路径。
+- 根因：会话身份校验没有在最终写入者处形成统一的硬门禁；`queueMetadata` 只用于传输层分发，没有在 `connectSession` 的消息处理闭包中再次核对当前 pane 的 stream/generation。
+- 实施方案：为多路复用连接增加 `validateTerminalChannelMessageIdentity`。控制帧和二进制帧在进入 replay、resize、输出和完成处理前，必须匹配当前 session 的 pane、stream 和 channel generation；唯一允许无 pane 元数据的消息是物理 Queue 广播的 `agent-preparing`。不匹配时走当前 session 的身份拒绝和重连路径，先保留身份匹配的 last-known-good 帧并锁定呈现，再丢弃当前输出；不能写入 Ghostty，也不能修改其他 pane。
+- Guard：`TestRuntimeTerminalMultiplexedIdentityGate` 固定控制帧和二进制帧都经过最终写入者门禁，并要求身份拒绝进入 presentation hold；`terminal_queue_connection_test.mjs` 固定二进制事件携带精确的 pane/stream/generation/cursor 元数据，并继续验证不同 pane 不互相收帧。
+- 验证结果：`node --check runtime/static/main.js`、`node --test terminal_queue_connection_test.mjs`（16/16）、连接/拓扑相关 Node 测试（74/74）、`go test ./... -count=1`、相关 Go guard 和 `git diff --check` 通过。
+- 禁止复现：不得只依赖 Queue connection 的 map 路由；不得在缺少或不匹配 `queueMetadata` 时把多路复用二进制数据写入当前终端；不得把物理广播控制误当作某个 pane 的历史或 PTY 字节。
+
+### 2026-08-24：resize 本地网格延后到服务端 ACK 后切换
+
+- 来源：继续处理 resize 后旧尺寸字节进入新网格的问题；仅有 `resize_epoch` ACK 和 presentation hold 仍不能阻止本地终端在 ACK 前改变解析网格。
+- 错误现象：resize/字体/分屏尺寸变化时，服务端 resize 尚未应用，前端 Ghostty 已切换到新 cols/rows；此前已到达或正在排队的 PTY 字节随后按新网格解析，持续 TUI 下可能出现错位、旧行和类似 replay 的视觉变化。
+- 根因：请求尺寸、PTY 应用尺寸和本地 Ghostty 网格在同一 `resizePane` 调用中被推进；presentation hold 只隐藏画面，不能修正终端模型已经使用错误几何解析字节的问题。
+- 实施方案：活动且已完成 replay 的 epoch-aware 连接在检测到几何变化后创建 `resizeFenceTarget`，先强制排空当前输出，再发送带目标几何的 resize 请求，但暂不调用本地 `term.resize`。ACK 按 WebSocket/Provider 输出顺序到达后，先在旧网格处理 ACK 前已排队字节，再一次性应用目标网格、恢复 viewport、请求 full render，并由既有 presentation hold 在完整帧成功后提交。迟到 ACK、竞争 owner 的不同几何或 resize error 不会应用过期 target；无 epoch 的旧 agent/client 继续走 legacy 路径。
+- Guard：`TestRuntimeResizeEpochAckGuard` 固定 defer fence、目标几何发送、ACK 后排空和本地 resize 顺序；既有 `TestRuntimeTerminalCanvasResidueGuard`、resize scheduler、Queue/Fast 和历史 cursor guard 继续覆盖呈现与连接边界。
+- 验证结果：`node --check runtime/static/main.js`、相关 Go guard、Queue/连接 Node 测试、完整 `go test ./... -count=1`、`go test -race ./...` 和 `git diff --check` 通过；真实设备上的持续 TUI resize、字号变化和快速切 tab 仍需安装包后完成视觉验收。
+- 禁止复现：不得在 epoch-aware resize ACK 前调用本地 `term.resize`；不得把请求尺寸当作已应用尺寸；不得在旧阶段输出未排空前提交新网格；不得让无 epoch 的 legacy 连接永久等待 ACK。
+
+### 2026-08-24：resize 后 PTY 实时重绘增加有界呈现屏障
+
+- 来源：设备验收发现 resize/字号变化后仍可看到全屏 TUI 从顶部逐批重绘到底部；该路径不是历史字节反向顺序问题，而是 resize ACK 后的实时 PTY 输出走普通 `term.write()` 并按帧提交。
+- 根因：resize fence 在 ACK 后立即执行 full render，但应用收到 `SIGWINCH` 后产生的后续实时重绘会在 presentation hold 解除后分批可见；`writeReplay()` 只覆盖真正 history replay 或显式 suppressRender 的输出。
+- 实施方案：ACK 后进入 `resize_output_settle` 状态，默认等待 120ms 输出静默，最长 800ms。屏障期间 PTY 字节仍严格按正序解析，并通过 `writeReplay()` 抑制中间 Canvas；诊断时间线将这类写入记为 `write_suppressed`，与真正历史回放的 `write_replay` 区分。静默或到达上限后强制排空队列、执行一次 full render，再原子解除 presentation hold。断线、历史 resync、resize error 和取消 resize 时清理 timer 与屏障。
+- 性能边界：不复制或反向重放字节，只增加一个有界 timer 和同一 session 的暂存队列；正常 resize 最多增加一个短暂呈现等待，持续输出不会无限等待。
+- Guard：`TestRuntimeResizeEpochAckGuard` 固定 ACK 后进入 settle barrier、settle 期间 `suppressRender` 和最终 full render 的顺序。
+- 待现场验收：持续 `watch`/全屏 TUI、快速拖拽窗口和反复调整字号，确认只看到旧帧到最终帧的切换，不出现逐批滚屏；同时确认真正 history replay 仍只产生一次最终帧。
+
+### 2026-08-24：增加终端会话事件时间线
+
+- 来源：需要在设备现场区分实时 PTY 重绘、真正 history replay、身份拒绝重连和 Canvas full-render 缺口，避免再次只根据画面推断根因。
+- 实施方案：每个 pane 保存最多 96 条短事件，记录 `channel/attach/history generation`、resize epoch、received/applied/presented cursor 和事件名。覆盖 resize request/applied、resize fence、term resize、history replay start/reset/write/complete、socket connect/close、Queue recycle、presentation hold 和 full-render request/start/failed/complete。默认不记录 PTY 内容、命令、账号隐私或票据；开启调试日志时只输出 pane 定位和事件名。
+- Guard：`TestRuntimeTerminalDiagnosticTimelineGuard` 固定时间线字段、96 条上限以及 resize、replay 和 full-render 关键事件入口。
+- 验证结果：`node --check runtime/static/main.js`、Node 终端测试、Go 全量测试和 `git diff --check` 通过；事件时间线仍需在真实设备复现一次 resize/live redraw 与 replay 对比现场。

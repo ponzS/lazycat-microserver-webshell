@@ -241,6 +241,13 @@ test("pane controls and binary cursor frames route only to the matching logical 
   assert.equal(firstMessages.length, 0);
   assert.equal(secondMessages.length, 2);
   assert.deepEqual(Array.from(new Uint8Array(secondMessages[1].data)), [1, 2, 3]);
+  assert.deepEqual(secondMessages[1].queueMetadata, {
+    paneID: "pane-2",
+    streamID: "stream-pane-2-1",
+    channelGeneration: 1,
+    startCursor: 10n,
+    endCursor: 13n,
+  });
 });
 
 test("cursor discontinuity becomes a retryable logical connection error", async () => {
