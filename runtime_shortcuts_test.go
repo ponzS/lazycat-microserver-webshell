@@ -100,6 +100,46 @@ func TestRuntimeResizeEpochAckGuard(t *testing.T) {
 	}
 }
 
+func TestRuntimeCrossClientResizeDoesNotAutoReclaim(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+	for _, want := range []string{
+		`const sendTerminalSize = (pane, { force = false, dimensions = null, claim = false } = {}) => {`,
+		`...(claim ? { claim: true } : {}),`,
+		`const applyObservedTerminalResize = (session, message) => {`,
+		`const remoteEpoch = Boolean(requestedEpoch && BigInt(epoch) > BigInt(requestedEpoch));`,
+		`applyObservedTerminalResize(session, message);`,
+		`claimSize: true,`,
+		`suppressTerminalResizeSend`,
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("cross-client resize ownership guard missing %q", want)
+		}
+	}
+	ackBlock := sourceBetween(t, source,
+		`const handleTerminalResizeApplied = (session, message) => {`,
+		`const handleTerminalResizeError = (session, message) => {`,
+	)
+	remoteIndex := strings.Index(ackBlock, `const remoteEpoch = Boolean(`)
+	applyIndex := strings.Index(ackBlock, `applyObservedTerminalResize(session, message);`)
+	if remoteIndex < 0 || applyIndex < remoteIndex {
+		t.Fatal("remote resize ACK must be adopted locally before any later handling")
+	}
+	if strings.Contains(ackBlock[remoteIndex:applyIndex], `resizePane(session, { forceSizeSync: true`) {
+		t.Fatal("remote resize ACK must not automatically reclaim the local device size")
+	}
+	workspaceData, err := os.ReadFile("workspace.go")
+	if err != nil {
+		t.Fatalf("ReadFile(workspace.go) error = %v", err)
+	}
+	if !strings.Contains(string(workspaceData), `resize_owner_active`) || !strings.Contains(string(workspaceData), `!message.Claim`) {
+		t.Fatal("server resize owner guard is missing")
+	}
+}
+
 func TestRuntimeTerminalMultiplexedIdentityGate(t *testing.T) {
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {
@@ -4261,20 +4301,20 @@ func TestRuntimeTerminalSizeClaimSurvivesCrossClientResize(t *testing.T) {
 
 	for _, want := range []string{
 		`from "./terminal_size_sync.js";`,
-		`const sendTerminalSize = (pane, { force = false, dimensions = null } = {}) => {`,
+		`const sendTerminalSize = (pane, { force = false, dimensions = null, claim = false } = {}) => {`,
 		`shouldSendTerminalSize({`,
-		`const claimTerminalSize = (pane) => {`,
+		`const claimTerminalSize = (pane, { force = false } = {}) => {`,
 		`const claimTerminalSizeForCurrentDevice = (pane) => {`,
 		`forceSizeSync: true,`,
 		`settlePresentation: true,`,
-		`sendTerminalSize(pane, { force: true });`,
+		`sendTerminalSize(pane, { force: true, claim: true });`,
 		`pane.serverCols = Math.max(0, Math.floor(Number(paneState.cols) || 0));`,
 		`pane.serverRows = Math.max(0, Math.floor(Number(paneState.rows) || 0));`,
 		`pane.serverPixelWidth = Math.max(0, Math.floor(Number(paneState.pixel_width) || 0));`,
 		`pane.serverPixelHeight = Math.max(0, Math.floor(Number(paneState.pixel_height) || 0));`,
 		`pane.sizeClaimRequired = terminalSizeDiffersFromServer({`,
 		`resizePane(session, { forceSizeSync: true });`,
-		`prepareMouseInput: () => claimTerminalSize(session),`,
+		`prepareMouseInput: () => claimTerminalSize(session, { force: true }),`,
 		`const claimCurrentDeviceTerminalSize = (event) => {`,
 		`claimTerminalSizeForCurrentDevice(session);`,
 		`shell.addEventListener("pointerdown", claimCurrentDeviceTerminalSize, { capture: true, passive: true });`,

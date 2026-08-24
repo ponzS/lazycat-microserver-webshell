@@ -61,12 +61,14 @@ test("rapid resize requests coalesce and preserve the trailing final resize", ()
     forceFullRender: false,
     hideUntilRender: true,
     forceSizeSync: false,
+    claimSize: false,
   });
 
   harness.advance(20);
   harness.scheduler.schedule(pane, { forceFullRender: true });
   harness.advance(40);
   harness.scheduler.schedule(pane, { forceSizeSync: true });
+  harness.scheduler.schedule(pane, { claimSize: true });
   assert.equal(harness.calls.length, 1);
   assert.equal(harness.frames.size, 0);
 
@@ -78,6 +80,7 @@ test("rapid resize requests coalesce and preserve the trailing final resize", ()
     forceFullRender: true,
     hideUntilRender: true,
     forceSizeSync: true,
+    claimSize: true,
   });
 });
 
@@ -97,6 +100,7 @@ test("immediate resize cancels stale scheduled work and applies the latest optio
     forceFullRender: true,
     hideUntilRender: true,
     forceSizeSync: false,
+    claimSize: false,
   });
 
   harness.runFrames();
@@ -117,6 +121,19 @@ test("a lone resize still receives a settled trailing commit", () => {
   assert.equal(harness.calls.length, 2);
   assert.deepEqual(harness.calls[1].context, { settled: true });
   assert.deepEqual(harness.calls[1].options, harness.calls[0].options);
+});
+
+test("a resize claim survives scheduler coalescing", () => {
+  const harness = createHarness();
+  const pane = {};
+
+  harness.scheduler.schedule(pane, { claimSize: true });
+  harness.runFrames();
+  harness.advance(120);
+
+  assert.equal(harness.calls.length, 2);
+  assert.equal(harness.calls[0].options.claimSize, true);
+  assert.equal(harness.calls[1].options.claimSize, true);
 });
 
 test("cancel drops pending resize work", () => {

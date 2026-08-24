@@ -2143,7 +2143,7 @@ func TestTerminalPaneResizeEpochIsMonotonicIdempotentAndOrdered(t *testing.T) {
 		clients:  map[*paneClient]struct{}{client: {}},
 	}
 
-	resize := terminalControlMessage{Type: "resize", ResizeEpoch: "10", Cols: 111, Rows: 57, PixelWidth: 888, PixelHeight: 912}
+	resize := terminalControlMessage{Type: "resize", ResizeEpoch: "10", Cols: 111, Rows: 57, PixelWidth: 888, PixelHeight: 912, Claim: true}
 	if err := pane.applyResize(resize, client); err != nil {
 		t.Fatalf("first epoch resize returned error: %v", err)
 	}
@@ -2158,6 +2158,12 @@ func TestTerminalPaneResizeEpochIsMonotonicIdempotentAndOrdered(t *testing.T) {
 		t.Fatalf("duplicate epoch resize returned error: %v", err)
 	}
 	assertResizeControlMessage(t, <-client.send, "resize-applied", "10")
+
+	passive := terminalControlMessage{Type: "resize", ResizeEpoch: "11", Cols: 52, Rows: 24, PixelWidth: 416, PixelHeight: 384}
+	if err := pane.applyResize(passive, client); err == nil {
+		t.Fatal("passive resize from another device should not displace the active owner")
+	}
+	assertResizeControlMessageReason(t, <-client.send, "resize-error", "11", "resize_owner_active")
 
 	if err := pane.applyResize(terminalControlMessage{Type: "resize", ResizeEpoch: "9", Cols: 80, Rows: 24}, client); err == nil {
 		t.Fatal("stale epoch resize should return an error")
@@ -2190,6 +2196,20 @@ func assertResizeControlMessage(t *testing.T, outbound paneOutbound, expectedTyp
 	}
 }
 
+func assertResizeControlMessageReason(t *testing.T, outbound paneOutbound, expectedType, expectedEpoch, expectedReason string) {
+	t.Helper()
+	if outbound.messageType != websocket.TextMessage {
+		t.Fatalf("resize control message type = %d, want websocket text", outbound.messageType)
+	}
+	var message map[string]any
+	if err := json.Unmarshal(outbound.payload, &message); err != nil {
+		t.Fatalf("decode resize control message: %v", err)
+	}
+	if message["type"] != expectedType || message["resize_epoch"] != expectedEpoch || message["reason"] != expectedReason {
+		t.Fatalf("resize control message = %#v, want type=%q epoch=%q reason=%q", message, expectedType, expectedEpoch, expectedReason)
+	}
+}
+
 func TestTerminalControlInputAppliesClientSize(t *testing.T) {
 	pane, reader, cleanup := newTerminalQueryTestPane(t)
 	defer cleanup()
@@ -2205,6 +2225,28 @@ func TestTerminalControlInputAppliesClientSize(t *testing.T) {
 	pane.mu.Unlock()
 	if cols != 41 || rows != 18 || pane.pixelWidth != 328 || pane.pixelHeight != 288 {
 		t.Fatalf("pane size = %dx%d, want 41x18", cols, rows)
+	}
+	assertTerminalQueryOutput(t, pane, reader, "mobile")
+}
+
+func TestTerminalControlInputCannotPassivelyResizeOwnedPane(t *testing.T) {
+	pane, reader, cleanup := newTerminalQueryTestPane(t)
+	defer cleanup()
+	pane.cols = 120
+	pane.rows = 32
+	pane.pixelWidth = 960
+	pane.pixelHeight = 640
+	pane.resizeEpoch = 10
+
+	if !handleTerminalControlMessage(pane, []byte(`{"type":"input","data":"mobile","cols":41,"rows":18,"pixel_width":328,"pixel_height":288}`), nil) {
+		t.Fatal("input control message should keep the connection open")
+	}
+	pane.mu.Lock()
+	cols, rows := pane.cols, pane.rows
+	pixelWidth, pixelHeight := pane.pixelWidth, pane.pixelHeight
+	pane.mu.Unlock()
+	if cols != 120 || rows != 32 || pixelWidth != 960 || pixelHeight != 640 {
+		t.Fatalf("passive input resize changed owned pane to %dx%d %dx%d", cols, rows, pixelWidth, pixelHeight)
 	}
 	assertTerminalQueryOutput(t, pane, reader, "mobile")
 }

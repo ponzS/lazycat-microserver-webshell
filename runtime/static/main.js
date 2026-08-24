@@ -7155,6 +7155,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     // output while the terminal still has its old geometry, then switch the
     // local grid. Bytes received after this event belong to the new epoch.
     flushSessionOutput(session, { force: true });
+    session.suppressTerminalResizeSend = true;
     try {
       session.term.resize(target.cols, target.rows);
       restoreTerminalViewport(session.term, target.viewport);
@@ -7164,6 +7165,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         deferredUntilAck: true,
       });
     } catch (error) {
+      session.suppressTerminalResizeSend = false;
       session.lastHistoryResetFailureReason = "resize_fence_apply_failed";
       clearTerminalResizeFence(session);
       console.warn("[terminal-resize] deferred local resize failed", {
@@ -7175,6 +7177,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       });
       return false;
     }
+    session.suppressTerminalResizeSend = false;
     clearTerminalResizeFence(session);
     session.activationFitPending = false;
     session.measuredFitGeneration = Number(session.measuredFitGeneration || 0) + 1;
@@ -7194,6 +7197,28 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       }
     }
     return true;
+  };
+
+  const applyObservedTerminalResize = (session, message) => {
+    if (!session || session.closed) {
+      return false;
+    }
+    const cols = Math.max(1, Math.floor(Number(message?.cols) || 0));
+    const rows = Math.max(1, Math.floor(Number(message?.rows) || 0));
+    if (cols <= 0 || rows <= 0) {
+      return false;
+    }
+    clearResizeOutputSettle(session);
+    flushSessionOutput(session, { force: true });
+    session.resizeFenceActive = true;
+    session.resizeFenceTarget = {
+      cols,
+      rows,
+      pixelWidth: Math.max(0, Math.floor(Number(message?.pixel_width) || 0)),
+      pixelHeight: Math.max(0, Math.floor(Number(message?.pixel_height) || 0)),
+      viewport: captureTerminalViewport(session.term),
+    };
+    return applyTerminalResizeFence(session);
   };
 
   const handleTerminalResizeApplied = (session, message) => {
@@ -7241,19 +7266,29 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       cols: session.serverCols,
       rows: session.serverRows,
     });
+    const remoteEpoch = Boolean(requestedEpoch && BigInt(epoch) > BigInt(requestedEpoch));
+    if (remoteEpoch) {
+      session.requestedResizeEpoch = epoch;
+      session.requestedCols = session.serverCols;
+      session.requestedRows = session.serverRows;
+      session.requestedPixelWidth = session.serverPixelWidth;
+      session.requestedPixelHeight = session.serverPixelHeight;
+    }
+    if (remoteEpoch && !appliedGeometryMatchesLocal) {
+      // A resize applied by another device is an observation, not an
+      // invitation to send this device's geometry back. Adopt the shared PTY
+      // size locally and wait for explicit user interaction before claiming.
+      session.resizeAckPending = false;
+      session.sizeClaimRequired = true;
+      applyObservedTerminalResize(session, message);
+      return;
+    }
     if (!requestedEpoch || epoch === requestedEpoch || BigInt(epoch) > BigInt(requestedEpoch)) {
       session.resizeAckPending = false;
       session.sizeClaimRequired = !dimensionsEqualTerminalSize(session, {
         cols: session.serverCols,
         rows: session.serverRows,
       });
-      if (requestedEpoch && BigInt(epoch) > BigInt(requestedEpoch) && !appliedGeometryMatchesLocal) {
-        session.sizeClaimRequired = true;
-        if (session.replayComplete && isPaneVisibleForSizing(session)) {
-          resizePane(session, { forceSizeSync: true, hideUntilRender: true });
-        }
-        return;
-      }
       if (session.replayComplete && session.resizePresentationHold) {
         requestPaneFullRender(session);
       } else if (session.replayComplete && !panePresentationIsCurrent(session)) {
@@ -7276,6 +7311,23 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     session.resizeAckPending = false;
     session.sizeClaimRequired = true;
+    if (String(message?.reason || "").trim() === "resize_owner_active") {
+      const appliedEpoch = normalizeTerminalResizeEpoch(message?.applied_epoch);
+      if (appliedEpoch) {
+        session.appliedResizeEpoch = appliedEpoch;
+        session.requestedResizeEpoch = appliedEpoch;
+      }
+      session.serverCols = Math.max(0, Math.floor(Number(message?.cols) || 0));
+      session.serverRows = Math.max(0, Math.floor(Number(message?.rows) || 0));
+      session.serverPixelWidth = Math.max(0, Math.floor(Number(message?.pixel_width) || 0));
+      session.serverPixelHeight = Math.max(0, Math.floor(Number(message?.pixel_height) || 0));
+      session.requestedCols = session.serverCols;
+      session.requestedRows = session.serverRows;
+      session.requestedPixelWidth = session.serverPixelWidth;
+      session.requestedPixelHeight = session.serverPixelHeight;
+      applyObservedTerminalResize(session, message);
+      return;
+    }
     clearResizeOutputSettle(session);
     clearTerminalResizeFence(session);
     recordTerminalSessionEvent(session, "resize_error", {
@@ -9983,7 +10035,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return String(next);
   };
 
-  const sendTerminalSize = (pane, { force = false, dimensions = null } = {}) => {
+  const sendTerminalSize = (pane, { force = false, dimensions = null, claim = false } = {}) => {
     if (pane?.socket?.readyState !== WebSocket.OPEN) {
       return false;
     }
@@ -10024,6 +10076,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         rows,
         pixel_width: pixelWidth,
         pixel_height: pixelHeight,
+        ...(claim ? { claim: true } : {}),
         ...(resizeEpochSupported ? { resize_epoch: resizeEpoch } : {}),
       }));
     } catch (error) {
@@ -10038,16 +10091,19 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return true;
   };
 
-  const claimTerminalSize = (pane) => {
+  const claimTerminalSize = (pane, { force = false } = {}) => {
     if (!pane || pane.closed) {
       return false;
     }
     const now = performance.now();
     const lastClaimAt = Number(pane.lastSizeClaimAt || 0);
-    if (!pane.sizeClaimRequired && lastClaimAt > 0 && now - lastClaimAt < terminalSizeClaimIntervalMs) {
+    if (!force && !pane.sizeClaimRequired) {
       return false;
     }
-    const sent = sendTerminalSize(pane, { force: true });
+    if (!force && lastClaimAt > 0 && now - lastClaimAt < terminalSizeClaimIntervalMs) {
+      return false;
+    }
+    const sent = sendTerminalSize(pane, { force: true, claim: true });
     if (sent) {
       pane.lastSizeClaimAt = now;
     }
@@ -10463,6 +10519,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     forceFullRender = false,
     hideUntilRender = false,
     forceSizeSync = false,
+    claimSize = false,
     settlePresentation,
   } = {}) => {
     if (!pane || pane.closed) {
@@ -10540,6 +10597,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         const sent = sendTerminalSize(pane, {
           force: true,
           dimensions: targetDimensions,
+          claim: claimSize,
         });
         if (sent) {
           recordTerminalSessionEvent(pane, "resize_fence_wait", {
@@ -10594,7 +10652,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       if (fitGenerationChanged && pane.replayComplete) {
         setPaneRenderReady(pane, false);
       }
-      const sentTerminalSize = sendTerminalSize(pane, { force: forceSizeSync, dimensions: targetDimensions });
+      const sentTerminalSize = sendTerminalSize(pane, {
+        force: forceSizeSync,
+        dimensions: targetDimensions,
+        claim: claimSize,
+      });
       updateMobileSelectionHandles(pane);
       if (
         sentTerminalSize
@@ -10809,14 +10871,15 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return false;
     }
     if (!isPaneVisibleForSizing(pane)) {
-      return claimTerminalSize(pane);
+      return claimTerminalSize(pane, { force: true });
     }
     const fit = resizePane(pane, {
       forceSizeSync: true,
+      claimSize: true,
       settlePresentation: true,
     });
     if (!fit.ok) {
-      return claimTerminalSize(pane);
+      return claimTerminalSize(pane, { force: true });
     }
     pane.lastSizeClaimAt = now;
     return true;
@@ -10840,9 +10903,19 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       if (session.closed || session.tabId !== activeTabId) {
         return;
       }
+      const rect = session.terminalHost.getBoundingClientRect?.();
+      const width = Math.max(0, Math.round(Number(rect?.width) || 0));
+      const height = Math.max(0, Math.round(Number(rect?.height) || 0));
+      const hadObservedGeometry = Number(session.lastObservedHostWidth || 0) > 0
+        && Number(session.lastObservedHostHeight || 0) > 0;
+      const geometryChanged = width !== Number(session.lastObservedHostWidth || 0)
+        || height !== Number(session.lastObservedHostHeight || 0);
+      session.lastObservedHostWidth = width;
+      session.lastObservedHostHeight = height;
       schedulePaneResize(session, {
         forceFullRender: !panePresentationIsCurrent(session) || !session.hasPresentedFrame,
         hideUntilRender: !panePresentationIsCurrent(session),
+        claimSize: hadObservedGeometry && geometryChanged,
       });
     });
     observer.observe(session.terminalHost);
@@ -14857,7 +14930,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       clearSelectionIfTapOutside: (touch) => clearMobileSelectionIfTapOutside(session, touch),
       hasSelection: () => Boolean(session.term?.hasSelection?.() || session.selectAllBufferActive),
       consumeKeyboardClaim: (event) => mobileKeyboardClaimedTouchEnds.delete(event),
-      prepareMouseInput: () => claimTerminalSize(session),
+      prepareMouseInput: () => claimTerminalSize(session, { force: true }),
       rowHeight: () => {
         const renderer = session.term?.renderer;
         return Math.max(
@@ -14952,7 +15025,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       clearSelectionIfTapOutside: (touch) => clearMobileSelectionIfTapOutside(session, touch),
       hasSelection: () => Boolean(session.term?.hasSelection?.() || session.selectAllBufferActive),
       consumeKeyboardClaim: (event) => mobileKeyboardClaimedTouchEnds.delete(event),
-      prepareMouseInput: () => claimTerminalSize(session),
+      prepareMouseInput: () => claimTerminalSize(session, { force: true }),
       rowHeight: () => {
         const renderer = session.term?.renderer;
         return Math.max(
@@ -20074,6 +20147,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       requestedPixelHeight: 0,
       resizeEpochSupported: null,
       resizeAckPending: false,
+      suppressTerminalResizeSend: false,
+      lastObservedHostWidth: 0,
+      lastObservedHostHeight: 0,
       renderReady: false,
       presentationPending: true,
       fullRenderPending: false,
@@ -20171,6 +20247,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       resetTerminalHostViewport(session, { clean: true });
       positionTerminalInput(session);
       updateMobileSelectionHandles(session);
+      if (session.suppressTerminalResizeSend) {
+        return;
+      }
       sendTerminalSize(session);
     });
     term.onTitleChange((title) => {

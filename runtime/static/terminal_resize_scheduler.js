@@ -3,6 +3,7 @@ const normalizeResizeOptions = (options = {}) => ({
   forceFullRender: options.forceFullRender === true,
   hideUntilRender: options.hideUntilRender === true,
   forceSizeSync: options.forceSizeSync === true,
+  claimSize: options.claimSize === true,
 });
 
 const mergeResizeOptions = (current, next) => {
@@ -15,6 +16,7 @@ const mergeResizeOptions = (current, next) => {
     forceFullRender: current.forceFullRender || normalized.forceFullRender,
     hideUntilRender: current.hideUntilRender || normalized.hideUntilRender,
     forceSizeSync: current.forceSizeSync || normalized.forceSizeSync,
+    claimSize: current.claimSize || normalized.claimSize,
   };
 };
 

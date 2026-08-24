@@ -1034,3 +1034,13 @@ git diff --check
 - 实施方案：每个 pane 保存最多 96 条短事件，记录 `channel/attach/history generation`、resize epoch、received/applied/presented cursor 和事件名。覆盖 resize request/applied、resize fence、term resize、history replay start/reset/write/complete、socket connect/close、Queue recycle、presentation hold 和 full-render request/start/failed/complete。默认不记录 PTY 内容、命令、账号隐私或票据；开启调试日志时只输出 pane 定位和事件名。
 - Guard：`TestRuntimeTerminalDiagnosticTimelineGuard` 固定时间线字段、96 条上限以及 resize、replay 和 full-render 关键事件入口。
 - 验证结果：`node --check runtime/static/main.js`、Node 终端测试、Go 全量测试和 `git diff --check` 通过；事件时间线仍需在真实设备复现一次 resize/live redraw 与 replay 对比现场。
+
+### 2026-08-24：多设备 resize 互相抢占导致分辨率闪烁
+
+- 来源：用户回归反馈；PC 与移动端同时打开同一 WebShell 时，所有设备的终端画面持续在移动端和 PC 分辨率之间闪烁。
+- 错误现象：一台设备发送 resize 后，另一台设备收到更大的 `resize-applied`。旧前端把该远端尺寸差异当成本机必须立即 reclaim 的信号，随后再次发送本机尺寸；两个客户端不断交替成为 PTY 最后写入者，导致 Ghostty 网格、PTY `Winsize` 和全屏 TUI 重绘在两种分辨率间来回切换。
+- 根因：共享 PTY 的最后写入尺寸没有区分“被动观察”与“用户主动 claim”。`resize_epoch` 解决了同一连接的顺序，却没有提供跨设备所有权语义；服务端也接受任意新 epoch 的被动 resize，因此前端的自动回抢形成反馈环。
+- 实施方案：resize 控制帧增加可选 `claim` 字段。已有 resize owner 时，服务端拒绝没有 `claim` 的新 epoch，并返回 `resize_owner_active` 及当前应用尺寸；显式窗口/分屏尺寸变化、点击终端、鼠标输入和移动端触摸 claim 路径才发送 `claim: true`。前端收到远端 ACK 或 `resize_owner_active` 后把共享尺寸作为本地观察值，使用 resize fence 更新 Ghostty，但不自动把本机尺寸写回；应用远端尺寸时抑制 `term.onResize` 的二次发送。旧客户端的 input+尺寸兼容路径只允许与当前 owner 尺寸一致，不会因为每次输入触发错误或改写 PTY。
+- 回归 guard：`TestRuntimeCrossClientResizeDoesNotAutoReclaim` 固定前端远端 ACK 不得调用自动 reclaim、服务端必须存在 owner guard；扩展 `TestTerminalPaneResizeEpochIsMonotonicIdempotentAndOrdered` 固定被动新 epoch 返回 `resize_owner_active` 且不改变 owner 尺寸；`TestTerminalControlInputCannotPassivelyResizeOwnedPane` 防止旧 input+尺寸路径绕过 owner guard；`terminal_resize_scheduler_test.mjs` 固定 `claimSize` 在节流合并后仍保留。新增 `scripts/test-multi-device-resize.sh`，执行定向 Go 测试、运行时语法检查、resize scheduler 测试和 `git diff --check`。
+- 验证结果：`./scripts/test-multi-device-resize.sh` 通过；覆盖测试固定 resize ACK、owner 拒绝和本地远端尺寸应用顺序。真实桌面浏览器、Android WebView 和 Lazycat iOS 宿主仍需用 PC+移动端同时持续输出场景验收。
+- 禁止复现：不得把远端尺寸差异自动转换为本机 claim；不得让无 `claim` 的新 epoch 覆盖已有 owner；不得在本地应用远端尺寸时由 `term.onResize` 再发 resize；显式用户交互仍必须先 claim 当前设备尺寸。
