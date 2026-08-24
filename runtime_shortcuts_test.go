@@ -140,6 +140,76 @@ func TestRuntimeCrossClientResizeDoesNotAutoReclaim(t *testing.T) {
 	}
 }
 
+func TestRuntimeTabActivationPresentationRecoveryGuard(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+	for _, want := range []string{
+		"const deferPanePresentation = (session, reason = \"hidden\") => {",
+		"const retryPendingPaneResize = (session, reason) => {",
+		"const ensurePanePresentation = (session, {",
+		"session.resizeFenceActive || session.resizeAckPending || session.resizeOutputSettleActive",
+		"reason: \"history_replay_complete\"",
+		"reason: \"queue_turn_complete\"",
+		"schedulePanePresentationFrame(pane, \"tab_activated\")",
+		"reason: \"resize_applied\"",
+		"reason: \"resize_error\"",
+		"terminalPresentationResizeRetryMs",
+		"lastResizeRequestAt",
+		"presentationValidationAttempts",
+		"const schedulePanePresentationFrame = (session, reason = \"presentation_frame\") => {",
+		"schedulePanePresentationFrame(session, geometryChanged ? \"resize_observer_geometry\" : \"resize_observer\")",
+		"schedulePanePresentationFrame(session, \"render_callback\")",
+		"const terminalPresentationValidationMaxMs = 250;",
+		"const terminalFullRenderValidationMs = 32;",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime tab presentation recovery guard missing %q", want)
+		}
+	}
+
+	ensureBlock := sourceBetween(t, source,
+		"const ensurePanePresentation = (session, {",
+		"const clearPaneFullRenderValidation = (session) => {")
+	if !strings.Contains(ensureBlock, "!isPaneVisibleForSizing(session) || !isPaneMeasurable(session)") ||
+		!strings.Contains(ensureBlock, "deferPanePresentation(session") {
+		t.Fatal("hidden replay completion must defer presentation until the pane is visible and measurable")
+	}
+	if !strings.Contains(ensureBlock, "retryPendingPaneResize(session, reason);") ||
+		!strings.Contains(ensureBlock, "schedulePaneResize(session, {") {
+		t.Fatal("visible presentation recovery must wait for resize ACKs and re-enter the resize scheduler")
+	}
+	if strings.Contains(ensureBlock, "session.term.resize(") || strings.Contains(ensureBlock, "claim: true") {
+		t.Fatal("presentation recovery must not bypass the resize fence or automatically claim another device's size")
+	}
+	retryBlock := sourceBetween(t, source,
+		"const retryPendingPaneResize = (session, reason) => {",
+		"const ensurePanePresentation = (session, {")
+	if strings.Contains(retryBlock, "claim:") {
+		t.Fatal("a presentation timeout must retry resize passively and never replay a stale explicit claim")
+	}
+	if strings.Contains(source, "const terminalPresentationValidationMaxMs = 1000;") {
+		t.Fatal("tab presentation validation must not retain the one-second fallback delay")
+	}
+
+	replayBlock := sourceBetween(t, source,
+		"const finishSessionHistoryReplayIfReady = (session) => {",
+		"const discardSessionOutputBuffers = (session) => {")
+	if !strings.Contains(replayBlock, "ensurePanePresentation(session, {") ||
+		strings.Contains(replayBlock, "renderPaneFullNow(session);") {
+		t.Fatal("history replay completion must use the visibility-aware presentation gate")
+	}
+
+	queueTurnBlock := sourceBetween(t, source,
+		`case "queue-turn-complete":`,
+		`case "agent-preparing":`)
+	if !strings.Contains(queueTurnBlock, "ensurePanePresentation(session, {") {
+		t.Fatal("Queue turn completion must use the same final presentation gate")
+	}
+}
+
 func TestRuntimeTerminalMultiplexedIdentityGate(t *testing.T) {
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {
@@ -2856,8 +2926,8 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"return rendered;",
 		"const schedulePaneFullRenderValidation = (session, { forceHistory = false } = {}) => {",
 		"const scrollbackLength = Math.max(0, Number(session.term?.getScrollbackLength?.() || 0));",
-		"if (forceHistory && sameReplay && scrollbackLength > 0) {",
-		"renderPaneFullNow(session);",
+		"if (forceHistory && sameReplay && scrollbackLength > 0 && !presentationBlockedByResize) {",
+		"ensurePanePresentation(session, {",
 		"!panePresentationIsCurrent(session)",
 		"const installTerminalCanvasRecovery = (session) => {",
 		"canvas.addEventListener(\"contextlost\", handleContextLost);",
@@ -2924,7 +2994,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"((replayOutput || suppressRender) && !replayWriter)",
 		"|| (!replayOutput && !suppressRender && deferHiddenPaneRender(session))",
 		"cancelPendingTerminalRender(session.term);",
-		"schedulePaneFullRenderValidation(session, { forceHistory: true });",
+		"forceHistory: true,",
 		"schedulePaneFullRenderValidation(session);",
 	}
 	for _, want := range mainSnippets {

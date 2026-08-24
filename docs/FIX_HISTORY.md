@@ -1044,3 +1044,23 @@ git diff --check
 - 回归 guard：`TestRuntimeCrossClientResizeDoesNotAutoReclaim` 固定前端远端 ACK 不得调用自动 reclaim、服务端必须存在 owner guard；扩展 `TestTerminalPaneResizeEpochIsMonotonicIdempotentAndOrdered` 固定被动新 epoch 返回 `resize_owner_active` 且不改变 owner 尺寸；`TestTerminalControlInputCannotPassivelyResizeOwnedPane` 防止旧 input+尺寸路径绕过 owner guard；`terminal_resize_scheduler_test.mjs` 固定 `claimSize` 在节流合并后仍保留。新增 `scripts/test-multi-device-resize.sh`，执行定向 Go 测试、运行时语法检查、resize scheduler 测试和 `git diff --check`。
 - 验证结果：`./scripts/test-multi-device-resize.sh` 通过；覆盖测试固定 resize ACK、owner 拒绝和本地远端尺寸应用顺序。真实桌面浏览器、Android WebView 和 Lazycat iOS 宿主仍需用 PC+移动端同时持续输出场景验收。
 - 禁止复现：不得把远端尺寸差异自动转换为本机 claim；不得让无 `claim` 的新 epoch 覆盖已有 owner；不得在本地应用远端尺寸时由 `term.onResize` 再发 resize；显式用户交互仍必须先 claim 当前设备尺寸。
+
+### 2026-08-24：切换 tab 后 replay 已完成但最终帧未提交
+
+- 来源：用户现场反馈；部分已初始化 tab 在切换后永久黑屏，只有点击 pane 才恢复。点击会同时触发 focus、尺寸 claim、连接优先级调整和 full render，因此此前容易误判为连接或 PTY replay 失败。
+- 根因：隐藏 tab 的 history replay 完成后直接调用 `renderNow(true)`，但隐藏 Canvas 没有可提交的真实尺寸；之后 tab 激活虽会调度 fit/resize，却没有一条统一链路保证 resize ACK、post-ACK 输出屏障和最终 full render 全部完成。若首次隐藏 render 无效，或激活时仍停在 `resizeFenceActive` / `resizeAckPending`，pane 会保持 `renderReady=false` 且没有后续主动提交，最终只能靠用户点击触发另一条恢复路径。
+- 实施方案：新增统一的 pane presentation gate。隐藏或不可测量 pane 只登记 `presentation_deferred`，不再假装完成 live Canvas render；history replay 完成、Queue turn 完成、tab 激活后的稳定帧、resize ACK、resize error 和 post-ACK output settle 都进入同一 gate。gate 仅在 pane 可见、可测量、Canvas 几何匹配且 resize fence/ACK/settle 全部结束后请求最终 full render；否则通过既有 resize scheduler 和有上限的 validation backoff 继续检查。长期未返回的本设备 resize ACK 会重发保存的 fence 目标，但不会直接修改本地 Ghostty 网格。
+- 跨设备边界：presentation 恢复路径不得直接调用 `term.resize`，不得自动发送或重放 `claim: true`，不得把远端 observed resize 转换为本设备 reclaim。即使原 fence 来自一次显式交互，超时恢复也只做被动 resize 重发；`resize_owner_active` 采用服务端返回尺寸并停止回抢，重新 claim 必须来自新的点击、触摸或显式尺寸变化。
+- Guard：新增 `TestRuntimeTabActivationPresentationRecoveryGuard`，固定 replay/Queue/tab/resize 进入统一 gate，隐藏 pane 必须 defer，resize pending 必须等待 ACK 并复用 resize scheduler，同时禁止 gate 绕过 fence 或主动抢占远端尺寸。既有 resize epoch、跨设备 owner、Canvas residue 和 Queue FIFO guard 继续覆盖旧问题。
+- 验证结果：`node --check runtime/static/main.js runtime/static/terminal_topology_controller.js`、79 项连接/拓扑/Queue/cache/resize Node 测试、定向 presentation/resize/跨设备 Go guard、`go test ./... -count=1`、`go test -race ./...` 和 `git diff --check` 均通过。真机仍需覆盖“后台 tab replay 完成后首次切入不点击”和“PC/手机同时打开后反复切 tab”两组场景。
+- 禁止复现：不得依赖点击、Fast 提升或刷新浏览器才能显示 replay 完成的 pane；不得在隐藏 Canvas 上把无效 render 当作已呈现；不得在 resize ACK 前切换本地网格；不得为了消除黑屏回退跨设备尺寸 owner/claim 保护。
+
+### 2026-08-24：切换 tab 的呈现退避过长
+
+- 来源：上一条黑屏修复后的设备体验；功能最终能恢复，但部分 tab 切换仍需要接近 1 秒才显示。
+- 根因：呈现验证使用 `80ms -> 160ms -> 320ms -> 640ms -> 1000ms` 的退避检查，布局稳定和 Ghostty 下一帧渲染事件没有直接唤醒同一条 presentation gate；用户体感因此被定时器间隔放大。这个等待与 resize ACK 的传输重试混在同一恢复感受中，但两者不是同一个故障。
+- 实施方案：将呈现验证改为短序列 `32ms -> 64ms -> 128ms -> 250ms`，最大兜底 250ms；tab 激活后的下一帧、ResizeObserver 几何变化和 Ghostty `onRender` 未提交事件都主动调用统一 presentation gate。resize ACK 重发单独保留 1200ms 的传输 watchdog，并继续被动重发，不携带旧 `claim`。
+- 安全边界：短时验证只负责触发 fit/full render，不直接调用 `term.resize`；本地网格仍只能在合法 `resize-applied` ACK 后切换，远端尺寸仍不能自动 reclaim。ACK 未到时保留旧帧或缓存预览，不能以提前渲染制造黑屏或跨设备分辨率回弹。
+- Guard：扩展 `TestRuntimeTabActivationPresentationRecoveryGuard`，固定短验证上限、ResizeObserver/onRender 事件触发和禁止一秒级 fallback；既有 resize epoch、跨设备 owner、Canvas residue 和 Queue FIFO guard 继续覆盖旧问题。
+- 验证结果：`node --check runtime/static/main.js runtime/static/terminal_topology_controller.js`、79 项终端连接/拓扑/Queue/cache/resize Node 测试、`go test ./... -count=1`、`go test -race ./...`、`./scripts/test-multi-device-resize.sh` 和 `git diff --check` 均通过；真机仍需确认切换已完成 replay 的 tab 在首帧或合法 resize ACK 后立即显示。
+- 禁止复现：不得重新引入一秒级呈现退避；不得用降低 ACK 安全边界换取切 tab 速度；不得让渲染验证定时器成为唯一的 tab 激活触发源。

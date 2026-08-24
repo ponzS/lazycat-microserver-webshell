@@ -442,7 +442,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const terminalResizeSettleMs = 120;
   const terminalResizeOutputQuietMs = 120;
   const terminalResizeOutputMaxHoldMs = 800;
-  const terminalFullRenderValidationMs = 80;
+  // Presentation recovery is event-driven. These short delays only cover a
+  // layout frame that has not settled yet; they must not become a one-second
+  // tab-switch spinner or replace resize ACK handling.
+  const terminalFullRenderValidationMs = 32;
+  const terminalPresentationResizeRetryMs = 1200;
+  const terminalPresentationValidationMaxMs = 250;
   const terminalOutputQueueSoftLimitBytes = 1 * 1024 * 1024;
   const terminalOutputMeasureChunkChars = 32 * 1024;
   const terminalOutputMeasureBuffer = new Uint8Array(terminalOutputMeasureChunkChars * 4);
@@ -7025,15 +7030,15 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       || !isPaneMeasurable(session)
       || !terminalCanvasMatchesExpectedSize(session)
     ) {
-      return;
+      return false;
     }
     if (session.resizeAckPending) {
-      return;
+      return false;
     }
     const requestedResizeEpoch = normalizeTerminalResizeEpoch(session.requestedResizeEpoch);
     const appliedResizeEpoch = normalizeTerminalResizeEpoch(session.appliedResizeEpoch);
     if (session.resizeEpochSupported === true && requestedResizeEpoch && requestedResizeEpoch !== appliedResizeEpoch) {
-      return;
+      return false;
     }
     if (session.pendingRenderContentGeneration === session.terminalContentGeneration) {
       session.presentedContentGeneration = session.terminalContentGeneration;
@@ -7047,7 +7052,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       || session.pendingRenderReplayGeneration !== session.terminalReplayGeneration
       || session.pendingRenderContentGeneration !== session.terminalContentGeneration
     ) {
-      return;
+      return false;
     }
     session.fullRenderPending = false;
     session.presentedFitGeneration = session.measuredFitGeneration;
@@ -7058,6 +7063,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.hasPresentedFrame = true;
     session.shellEl.dataset.hasPresentedFrame = "true";
     session.presentedHistoryCursor = session.appliedHistoryCursor;
+    session.presentationValidationAttempts = 0;
+    session.presentationDeferredReason = "";
+    clearPaneFullRenderValidation(session);
     recordTerminalSessionEvent(session, "full_render_complete");
     if (session.presentationCommitPending && session.resizePresentationHold) {
       session.presentationCommitPending = false;
@@ -7066,6 +7074,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!session.renderReady && !session.resizePresentationHold) {
       setPaneRenderReady(session, true);
     }
+    return true;
   };
 
   const clearTerminalResizeFence = (session) => {
@@ -7104,13 +7113,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (session.closed || session.name !== activeName) {
       return false;
     }
-    requestPaneFullRender(session);
-    if (session.hasPresentedFrame && session.resizePresentationHold) {
-      commitTerminalPresentationNow(session);
-    } else {
-      renderPaneFullNow(session);
-    }
-    return true;
+    return ensurePanePresentation(session, {
+      reason: `resize_output_${reason}`,
+      forceHistory: true,
+    });
   };
 
   const scheduleResizeOutputSettle = (session, { reason = "resize_ack" } = {}) => {
@@ -7189,12 +7195,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       setPaneRenderReady(session, false);
     }
     if (!scheduleResizeOutputSettle(session)) {
-      requestPaneFullRender(session);
-      if (session.hasPresentedFrame && session.resizePresentationHold) {
-        commitTerminalPresentationNow(session);
-      } else {
-        renderPaneFullNow(session);
-      }
+      ensurePanePresentation(session, {
+        reason: "resize_fence_applied",
+        forceHistory: true,
+      });
     }
     return true;
   };
@@ -7289,14 +7293,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         cols: session.serverCols,
         rows: session.serverRows,
       });
-      if (session.replayComplete && session.resizePresentationHold) {
-        requestPaneFullRender(session);
-      } else if (session.replayComplete && !panePresentationIsCurrent(session)) {
-        renderPaneFullNow(session);
-      }
-      if (session.replayComplete && !session.resizePresentationHold && !session.fullRenderPending && session.hasPresentedFrame) {
-        setPaneRenderReady(session, true);
-      }
+      ensurePanePresentation(session, {
+        reason: "resize_applied",
+        forceHistory: true,
+      });
     }
   };
 
@@ -7346,6 +7346,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       pane: session.id,
       epoch,
       reason: message?.reason || "",
+    });
+    ensurePanePresentation(session, {
+      reason: "resize_error",
+      forceHistory: true,
     });
   };
 
@@ -7419,6 +7423,120 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return rendered;
   };
 
+  const deferPanePresentation = (session, reason = "hidden") => {
+    if (!session || session.closed) {
+      return false;
+    }
+    setPaneRenderReady(session, false);
+    cancelPendingTerminalRender(session.term);
+    session.fullRenderPending = false;
+    session.pendingRenderFitGeneration = 0;
+    session.pendingRenderReplayGeneration = 0;
+    session.pendingRenderContentGeneration = 0;
+    if (session.presentationDeferredReason !== reason) {
+      session.presentationDeferredReason = reason;
+      recordTerminalSessionEvent(session, "presentation_deferred", { reason });
+    }
+    return true;
+  };
+
+  const retryPendingPaneResize = (session, reason) => {
+    if (
+      !session?.resizeAckPending
+      || session.closed
+      || session.socket?.readyState !== WebSocket.OPEN
+      || performanceTaskNow() - Number(session.lastResizeRequestAt || 0) < terminalPresentationResizeRetryMs
+    ) {
+      return false;
+    }
+    const target = session.resizeFenceTarget || {
+      cols: session.requestedCols,
+      rows: session.requestedRows,
+      pixelWidth: session.requestedPixelWidth,
+      pixelHeight: session.requestedPixelHeight,
+    };
+    if (Number(target.cols || 0) <= 0 || Number(target.rows || 0) <= 0) {
+      return false;
+    }
+    const sent = sendTerminalSize(session, {
+      force: true,
+      dimensions: target,
+    });
+    if (sent) {
+      recordTerminalSessionEvent(session, "resize_fence_retry", { reason });
+    }
+    return sent;
+  };
+
+  const ensurePanePresentation = (session, {
+    reason = "presentation_check",
+    forceHistory = false,
+    scheduleValidation = true,
+  } = {}) => {
+    if (!session || session.closed || !session.replayComplete || session.name !== activeName) {
+      return false;
+    }
+    if (!isPaneVisibleForSizing(session) || !isPaneMeasurable(session)) {
+      return deferPanePresentation(session, `${reason}:hidden`);
+    }
+    setPaneRenderReady(session, false);
+    session.presentationDeferredReason = "";
+    if (session.resizeFenceActive || session.resizeAckPending || session.resizeOutputSettleActive) {
+      retryPendingPaneResize(session, reason);
+      recordTerminalSessionEvent(session, "presentation_wait_resize", { reason });
+      if (scheduleValidation) {
+        schedulePaneFullRenderValidation(session, { forceHistory });
+      }
+      return false;
+    }
+    if (session.activationFitPending || !terminalCanvasMatchesExpectedSize(session)) {
+      schedulePaneResize(session, {
+        forceFullRender: true,
+        hideUntilRender: true,
+      }, { immediate: true });
+      if (scheduleValidation) {
+        schedulePaneFullRenderValidation(session, { forceHistory });
+      }
+      return false;
+    }
+    requestPaneFullRender(session);
+    if (session.hasPresentedFrame && session.resizePresentationHold) {
+      commitTerminalPresentationNow(session);
+    } else {
+      if (session.resizePresentationHold) {
+        session.resizePresentationHold = false;
+        session.presentationCommitPending = false;
+      }
+      renderPaneFullNow(session);
+    }
+    recordTerminalSessionEvent(session, "presentation_ensure", { reason });
+    if (scheduleValidation) {
+      schedulePaneFullRenderValidation(session, { forceHistory });
+    }
+    return true;
+  };
+
+  const schedulePanePresentationFrame = (session, reason = "presentation_frame") => {
+    if (!session || session.closed || session.presentationFramePending) {
+      return false;
+    }
+    session.presentationFramePending = true;
+    session.presentationFrameReason = reason;
+    window.requestAnimationFrame(() => {
+      session.presentationFramePending = false;
+      const frameReason = session.presentationFrameReason || reason;
+      session.presentationFrameReason = "";
+      if (session.closed || session.name !== activeName) {
+        return;
+      }
+      ensurePanePresentation(session, {
+        reason: frameReason,
+        forceHistory: true,
+      });
+    });
+    return true;
+  };
+
   const clearPaneFullRenderValidation = (session) => {
     if (!session?.fullRenderValidationTimer) {
       return;
@@ -7438,38 +7556,59 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     clearPaneFullRenderValidation(session);
     const replayGeneration = Number(session.terminalReplayGeneration || 0);
+    const validationAttempt = Math.max(0, Number(session.presentationValidationAttempts || 0));
+    const validationDelay = Math.min(
+      terminalPresentationValidationMaxMs,
+      terminalFullRenderValidationMs * (2 ** Math.min(validationAttempt, 4)),
+    );
     session.fullRenderValidationTimer = window.setTimeout(() => {
       session.fullRenderValidationTimer = 0;
+      session.presentationValidationAttempts = validationAttempt + 1;
       if (
         !session.closed
         && session.replayComplete
-        && !session.resizePresentationHold
         && isPaneVisibleForSizing(session)
       ) {
         const sameReplay = Number(session.terminalReplayGeneration || 0) === replayGeneration;
         const scrollbackLength = Math.max(0, Number(session.term?.getScrollbackLength?.() || 0));
-        if (forceHistory && sameReplay && scrollbackLength > 0) {
+        const presentationBlockedByResize = session.resizeFenceActive
+          || session.resizeAckPending
+          || session.resizeOutputSettleActive;
+        if (forceHistory && sameReplay && scrollbackLength > 0 && !presentationBlockedByResize) {
           // The first bottom-frame render can succeed before Ghostty's
           // scrollback provider is ready. Paint the whole viewport again after
           // layout has settled, then verify once more on the next frame.
-          renderPaneFullNow(session);
+          ensurePanePresentation(session, {
+            reason: "history_validation",
+            forceHistory: true,
+            scheduleValidation: false,
+          });
           window.requestAnimationFrame(() => {
             if (
               !session.closed
               && session.replayComplete
               && Number(session.terminalReplayGeneration || 0) === replayGeneration
-              && !session.resizePresentationHold
               && isPaneVisibleForSizing(session)
             ) {
-              renderPaneFullNow(session);
+              ensurePanePresentation(session, {
+                reason: "history_validation_frame",
+                forceHistory: true,
+                scheduleValidation: false,
+              });
             }
+          });
+        } else {
+          ensurePanePresentation(session, {
+            reason: "presentation_validation",
+            forceHistory,
+            scheduleValidation: false,
           });
         }
         if (!panePresentationIsCurrent(session)) {
-          resizePane(session, { forceFullRender: true, hideUntilRender: true });
+          schedulePaneFullRenderValidation(session, { forceHistory });
         }
       }
-    }, terminalFullRenderValidationMs);
+    }, validationDelay);
   };
 
   const installTerminalCanvasRecovery = (session) => {
@@ -10069,6 +10208,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     pane.requestedPixelWidth = pixelWidth;
     pane.requestedPixelHeight = pixelHeight;
     pane.resizeAckPending = resizeEpochSupported;
+    pane.lastResizeRequestAt = performanceTaskNow();
     try {
       pane.socket.send(JSON.stringify({
         type: "resize",
@@ -10823,6 +10963,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         }, { immediate: true });
       }
       connectPendingSessionsForTab(tab);
+      if (tab.id === activeTabId) {
+        for (const pane of tab.panes.values()) {
+          schedulePanePresentationFrame(pane, "tab_activated");
+        }
+      }
     };
     if (immediate) {
       tab.resizeFrame = 0;
@@ -10917,6 +11062,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         hideUntilRender: !panePresentationIsCurrent(session),
         claimSize: hadObservedGeometry && geometryChanged,
       });
+      schedulePanePresentationFrame(session, geometryChanged ? "resize_observer_geometry" : "resize_observer");
     });
     observer.observe(session.terminalHost);
     addSessionCleanup(session, () => {
@@ -17039,8 +17185,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       }
     }
     setPaneRenderReady(session, false);
-    renderPaneFullNow(session);
-    schedulePaneFullRenderValidation(session, { forceHistory: true });
+    ensurePanePresentation(session, {
+      reason: "history_replay_complete",
+      forceHistory: true,
+    });
     scheduleSessionCacheV2Compaction(session);
     flushPendingInput(session);
     if (isClientInstanceName(activeName)) {
@@ -18741,8 +18889,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
               case "queue-turn-complete":
                 if (channel === "queue" && session.replayComplete) {
                   flushSessionOutput(session, { force: true });
-                  renderPaneFullNow(session);
-                  schedulePaneFullRenderValidation(session);
+                  ensurePanePresentation(session, {
+                    reason: "queue_turn_complete",
+                    forceHistory: true,
+                  });
                 }
                 return;
               case "agent-preparing":
@@ -20133,6 +20283,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       requestedResizeEpoch: "",
       appliedResizeEpoch: "",
       presentedResizeEpoch: "",
+      lastResizeRequestAt: 0,
       resizeFenceActive: false,
       resizeFenceTarget: null,
       resizeOutputSettleActive: false,
@@ -20154,6 +20305,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       presentationPending: true,
       fullRenderPending: false,
       fullRenderValidationTimer: 0,
+      presentationValidationAttempts: 0,
+      presentationDeferredReason: "",
+      presentationFramePending: false,
+      presentationFrameReason: "",
       presentationCommitPending: false,
       hasPresentedFrame: false,
       activationFitPending: false,
@@ -20203,7 +20358,15 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     installDesktopMouseClipboard(session);
     installTerminalResizeObserver(session);
     const renderDisposable = typeof term.onRender === "function" ? term.onRender(() => {
-      markPaneRenderedIfMeasurable(session);
+      const presentationCompleted = markPaneRenderedIfMeasurable(session);
+      if (
+        !presentationCompleted
+        && session.replayComplete
+        && session.tabId === activeTabId
+        && !panePresentationIsCurrent(session)
+      ) {
+        schedulePanePresentationFrame(session, "render_callback");
+      }
       syncTerminalViewportPan(session);
     }) : null;
     if (renderDisposable && typeof renderDisposable.dispose === "function") {
