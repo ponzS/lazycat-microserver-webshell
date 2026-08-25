@@ -447,7 +447,7 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`startSessionCacheV2WarmReplay`,
 		`session.cacheV2WarmReplayReady`,
 		`[terminal-cache-v2] warm replay ready`,
-		`const terminalReplayWriteBatchBytes = 1 * 1024 * 1024;`,
+		`const terminalReplayWriteBatchBytes = 64 * 1024;`,
 		`const terminalCacheV2FlushBytes = 1 * 1024 * 1024;`,
 		`const terminalCacheV2ReplayTimeoutMs = 2 * 1000;`,
 		`const terminalCacheV2CompactionTargetBytes = 1 * 1024 * 1024;`,
@@ -2879,7 +2879,7 @@ func TestRuntimeTerminalOutputBatchingGuard(t *testing.T) {
 	wantSnippets := []string{
 		"const terminalOutputFlushFallbackMs = 32;",
 		"const terminalOutputFlushBudgetBytes = 128 * 1024;",
-		"const terminalReplayWriteBatchBytes = 1 * 1024 * 1024;",
+		"const terminalReplayWriteBatchBytes = 64 * 1024;",
 		"const terminalOutputQueueSoftLimitBytes = 1 * 1024 * 1024;",
 		"const terminalOutputMeasureChunkChars = 32 * 1024;",
 		"const terminalOutputMeasureBuffer = new Uint8Array(terminalOutputMeasureChunkChars * 4);",
