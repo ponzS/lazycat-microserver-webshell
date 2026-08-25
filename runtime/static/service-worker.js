@@ -19,6 +19,7 @@ const appShellAssets = [
   `${assetBase}terminal_replay_controller.js`,
   `${assetBase}terminal_resize_controller.js`,
   `${assetBase}terminal_render_snapshot.js`,
+  `${assetBase}terminal_overview_preview.js`,
   `${assetBase}terminal_history_cache.js`,
   `${assetBase}terminal_size_sync.js`,
   `${assetBase}terminal_resize_scheduler.js`,

@@ -22,6 +22,7 @@ import { TerminalReplayController } from "./terminal_replay_controller.js";
 import { TerminalResizeController } from "./terminal_resize_controller.js";
 import { terminalCheckpointCapabilitiesForTerminal } from "./terminal_checkpoint.js";
 import { createRenderSnapshot, RenderSnapshot } from "./terminal_render_snapshot.js";
+import { TerminalOverviewPreviewController } from "./terminal_overview_preview.js";
 import { createTerminalHistoryCache } from "./terminal_history_cache.js";
 import {
   shouldSendTerminalSize,
@@ -6930,14 +6931,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   };
 
   const clearSessionCacheV2OverviewPreview = (session) => {
-    if (!session) {
-      return;
-    }
-    session.cacheV2OverviewPreviewSeq = Number(session.cacheV2OverviewPreviewSeq || 0) + 1;
-    const prepared = session.cacheV2OverviewPreview;
-    session.cacheV2OverviewPreview = null;
-    session.cacheV2OverviewPreviewPromise = null;
-    prepared?.image?.close?.();
+    terminalOverviewPreviewController.clear(session);
   };
 
   const terminalFrameHoldIdentity = (session) => ({
@@ -8169,49 +8163,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return { width, height };
   };
 
-  const sessionCacheV2OverviewPreviewMatches = (pane, prepared) => {
-    if (!pane || !prepared?.identity || !prepared.image || !prepared.historyGeneration) {
-      return false;
-    }
-    const paneHistoryGeneration = String(pane.historyGeneration || "").trim();
-    if (paneHistoryGeneration && paneHistoryGeneration !== String(prepared.historyGeneration || "").trim()) {
-      return false;
-    }
-    const expected = sessionTerminalCacheV2Identity(pane, prepared.historyGeneration);
-    try {
-      return Boolean(
-        expected
-        && terminalCacheV2.identityMatches(expected, prepared.identity, { requireHistory: true })
-        && prepared.endCursor === prepared.identity.endCursor
-        && prepared.previewCursor <= prepared.endCursor
-      );
-    } catch (error) {
-      return false;
-    }
-  };
-
-  const decodeTabOverviewPreviewBlob = async (blob) => {
-    if (typeof globalThis.createImageBitmap === "function") {
-      try {
-        return await globalThis.createImageBitmap(blob);
-      } catch (error) {
-      }
-    }
-    const objectURL = URL.createObjectURL(blob);
-    try {
-      return await new Promise((resolve, reject) => {
-        const image = new Image();
-        image.onload = () => resolve(image);
-        image.onerror = () => reject(new Error("Terminal overview preview image decode failed."));
-        image.src = objectURL;
-        if (typeof image.decode === "function") {
-          image.decode().then(() => resolve(image)).catch(() => {});
-        }
-      });
-    } finally {
-      URL.revokeObjectURL(objectURL);
-    }
-  };
+  const sessionCacheV2OverviewPreviewMatches = (pane, prepared) => (
+    terminalOverviewPreviewController.matches(pane, prepared)
+  );
 
   const loadPaneTabOverviewPreviewManifest = async (pane) => {
     const historyGeneration = String(pane?.historyGeneration || "").trim();
@@ -8241,78 +8195,22 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return snapshot;
   };
 
-  const preparePaneTabOverviewPreview = (pane) => {
-    if (!sessionUsesTerminalCacheV2(pane) || pane.closed) {
-      return Promise.resolve(null);
-    }
-    if (sessionCacheV2OverviewPreviewMatches(pane, pane.cacheV2OverviewPreview)) {
-      return Promise.resolve(pane.cacheV2OverviewPreview);
-    }
-    if (pane.cacheV2OverviewPreviewPromise) {
-      return pane.cacheV2OverviewPreviewPromise;
-    }
-    clearSessionCacheV2OverviewPreview(pane);
-    const previewSeq = pane.cacheV2OverviewPreviewSeq;
-    let previewPromise = null;
-    previewPromise = (async () => {
-      // The replay path intentionally clears historyCacheSnapshot after it
-      // becomes authoritative. Overview loading must read its own manifest
-      // instead of using that one-shot replay state.
-      const snapshot = await loadPaneTabOverviewPreviewManifest(pane);
-      const expected = snapshot
-        ? sessionTerminalCacheV2Identity(pane, snapshot.historyGeneration)
-        : null;
-      if (
-        !snapshot?.preview
-        || !expected
-        || !terminalCacheV2.identityMatches(expected, snapshot, { requireHistory: true })
-      ) {
-        return null;
-      }
-      const preview = await terminalCacheV2.loadPreview(snapshot);
-      if (!preview) {
-        return null;
-      }
-      const image = await decodeTabOverviewPreviewBlob(preview.blob);
-      const currentHistoryGeneration = String(pane.historyGeneration || "").trim();
-      if (
-        pane.closed
-        || pane.cacheV2OverviewPreviewSeq !== previewSeq
-        || (currentHistoryGeneration && currentHistoryGeneration !== String(snapshot.historyGeneration || "").trim())
-        || !sessionUsesTerminalCacheV2(pane)
-      ) {
-        image?.close?.();
-        return null;
-      }
-      const prepared = {
-        image,
-        identity: snapshot,
-        historyGeneration: snapshot.historyGeneration,
-        endCursor: snapshot.endCursor,
-        previewCursor: preview.metadata.checkpointCursor,
-      };
-      if (!sessionCacheV2OverviewPreviewMatches(pane, prepared)) {
-        image?.close?.();
-        return null;
-      }
-      pane.cacheV2OverviewPreview = prepared;
-      scheduleTabOverviewRender();
-      return prepared;
-    })().catch((error) => {
+  const terminalOverviewPreviewController = new TerminalOverviewPreviewController({
+    cache: terminalCacheV2,
+    canUse: sessionUsesTerminalCacheV2,
+    identityFor: sessionTerminalCacheV2Identity,
+    loadManifest: loadPaneTabOverviewPreviewManifest,
+    onReady: () => scheduleTabOverviewRender(),
+    onError: (pane, error) => {
       console.warn("[terminal-cache-v2] overview preview load failed", {
-        name: pane.name,
-        pane: pane.id,
+        name: pane?.name,
+        pane: pane?.id,
         error: error?.message || String(error),
       });
-      return null;
-    }).finally(() => {
-      if (pane.cacheV2OverviewPreviewPromise === previewPromise) {
-        pane.cacheV2OverviewPreviewPromise = null;
-      }
-    });
-    pane.cacheV2OverviewPreviewPromise = previewPromise;
-    return previewPromise;
-  };
+    },
+  });
+
+  const preparePaneTabOverviewPreview = (pane) => terminalOverviewPreviewController.prepare(pane);
 
   const prepareTabOverviewCachePreviews = (tab) => {
     for (const pane of tab?.panes?.values?.() || []) {
@@ -19281,7 +19179,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
                     session.receivedHistoryCursor = deltaFromCursor;
                     session.appliedHistoryCursor = deltaFromCursor;
                     session.persistedHistoryCursor = deltaFromCursor;
-                    setSessionReplayAuthorization(session, "identified");(session, historyGeneration, deltaFromCursor);
+                    setSessionReplayAuthorization(session, "identified");
+                    resetSessionHistoryCache(session, historyGeneration, deltaFromCursor);
                   }
                 } else {
                   if (!historyConnectRange || historyConnectRange.generation !== historyGeneration || historyConnectRange.endCursor !== deltaFromCursor) {

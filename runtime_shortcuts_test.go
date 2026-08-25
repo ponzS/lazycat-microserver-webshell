@@ -429,6 +429,10 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(index.html) error = %v", err)
 	}
+	overviewPreviewData, err := os.ReadFile("runtime/static/terminal_overview_preview.js")
+	if err != nil {
+		t.Fatalf("ReadFile(terminal_overview_preview.js) error = %v", err)
+	}
 	styleData, err := os.ReadFile("runtime/static/style.css")
 	if err != nil {
 		t.Fatalf("ReadFile(style.css) error = %v", err)
@@ -452,9 +456,6 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`const terminalCacheV2ReplayTimeoutMs = 2 * 1000;`,
 		`const terminalCacheV2CompactionTargetBytes = 1 * 1024 * 1024;`,
 		`prepareTabOverviewCachePreviews`,
-		`const paneHistoryGeneration = String(pane.historyGeneration || "").trim();`,
-		`paneHistoryGeneration && paneHistoryGeneration !== String(prepared.historyGeneration || "").trim()`,
-		`prepared.previewCursor <= prepared.endCursor`,
 		`pane.tabId !== activeTabId || !pane.renderReady || !pane.hasPresentedFrame`,
 		`const liveFrame = pane?.renderReady && pane?.hasPresentedFrame ? liveCanvas : null;`,
 		`const heldFrame = sessionTerminalFrameHoldIsCurrent(pane) ? pane.terminalFrameHold : null;`,
@@ -506,6 +507,16 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 	} {
 		if !strings.Contains(mainSource, want) {
 			t.Fatalf("runtime cache-v2 guard missing %q", want)
+		}
+	}
+	overviewPreviewSource := string(overviewPreviewData)
+	for _, want := range []string{
+		`const preview = await this.cache.loadPreview(snapshot);`,
+		`(currentHistoryGeneration && currentHistoryGeneration !== String(snapshot.historyGeneration || "").trim())`,
+		`this.matches(pane, prepared)`,
+	} {
+		if !strings.Contains(overviewPreviewSource, want) {
+			t.Fatalf("terminal overview preview isolation guard missing %q", want)
 		}
 	}
 	finishReplayBlock := sourceBetween(t, mainSource,
@@ -572,6 +583,15 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 	}
 	if !strings.Contains(workerSource, "${assetBase}terminal_render_snapshot.js") {
 		t.Fatal("service worker must precache terminal render snapshots")
+	}
+	if !strings.Contains(workerSource, "${assetBase}terminal_overview_preview.js") {
+		t.Fatal("service worker must precache the terminal overview preview controller")
+	}
+	if !strings.Contains(mainSource, `import { TerminalOverviewPreviewController } from "./terminal_overview_preview.js";`) {
+		t.Fatal("runtime must isolate terminal overview preview lifecycle in its controller module")
+	}
+	if !strings.Contains(mainSource, `resetSessionHistoryCache(session, historyGeneration, deltaFromCursor);`) || strings.Contains(mainSource, `;(session, historyGeneration, deltaFromCursor);`) {
+		t.Fatal("cold snapshot replay must reset its cache manifest before appending history")
 	}
 	if !strings.Contains(workerSource, "${assetBase}terminal_fast_integrity.js") || !strings.Contains(workerSource, "${assetBase}terminal_replay_controller.js") {
 		t.Fatal("service worker must precache replay integrity modules")
@@ -764,9 +784,6 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`const historyGeneration = String(pane?.historyGeneration || "").trim();`,
 		`const expected = sessionTerminalCacheV2Identity(pane, historyGeneration);`,
 		`terminalCacheV2.identityMatches(expected, snapshot, { requireHistory: Boolean(historyGeneration) })`,
-		`const preview = await terminalCacheV2.loadPreview(snapshot);`,
-		`(currentHistoryGeneration && currentHistoryGeneration !== String(snapshot.historyGeneration || "").trim())`,
-		`sessionCacheV2OverviewPreviewMatches(pane, prepared)`,
 	} {
 		if !strings.Contains(overviewBlock, want) {
 			t.Fatalf("tab overview cache preview guard missing %q", want)
