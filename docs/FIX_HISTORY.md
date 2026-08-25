@@ -1064,3 +1064,13 @@ git diff --check
 - Guard：扩展 `TestRuntimeTabActivationPresentationRecoveryGuard`，固定短验证上限、ResizeObserver/onRender 事件触发和禁止一秒级 fallback；既有 resize epoch、跨设备 owner、Canvas residue 和 Queue FIFO guard 继续覆盖旧问题。
 - 验证结果：`node --check runtime/static/main.js runtime/static/terminal_topology_controller.js`、79 项终端连接/拓扑/Queue/cache/resize Node 测试、`go test ./... -count=1`、`go test -race ./...`、`./scripts/test-multi-device-resize.sh` 和 `git diff --check` 均通过；真机仍需确认切换已完成 replay 的 tab 在首帧或合法 resize ACK 后立即显示。
 - 禁止复现：不得重新引入一秒级呈现退避；不得用降低 ACK 安全边界换取切 tab 速度；不得让渲染验证定时器成为唯一的 tab 激活触发源。
+
+### 2026-08-25：Agent 持续输出期间终端总览预览消失
+
+- 来源：用户现场反馈；静态会话可以显示终端预览，但会话中 Agent 持续输出时总览卡片变为“无预览”，停止输出后才恢复。
+- 根因：Cache v2 `append()` 每次提交历史字节都会把 manifest 的 `preview` 置空并删除旧图片，而新截图要等待输出静默窗口和浏览器空闲；持续输出不断重置捕获计时器，形成“旧图已删、新图未生成”的失效窗口。总览读取还要求 `preview.checkpointCursor === manifest.endCursor`，因此任何落后于最新历史的快照都会被当成无效。
+- 实施方案：预览改为 last-known-good 语义。历史 append 保留同一完整身份下的旧 preview，`normalizeManifest`/`loadPreview` 允许 `checkpointCursor <= endCursor`；新截图仍必须以当前已持久化 cursor 原子保存，成功后才替换旧图片，reset、删除 pane 和孤儿清理仍会删除预览。前端捕获改为 2 秒有界节流，任务串行执行并采用 pending/latest-wins；Agent 输出期间继续显示旧图，捕获失败不清空旧图，停止输出后下一次提交会追上最终状态。
+- 安全边界：账号、selector、workspace、tab、pane、history generation 身份校验保持不变；旧预览只用于总览视觉展示，不能进入 Ghostty 历史恢复或终端状态恢复。预览 cursor 只能落后，不能超前 manifest end cursor。
+- Guard：`terminal_cache_v2_test.mjs` 新增持续输出期间保留旧预览、随后原子替换新预览的测试；`TestRuntimeContainerCacheV2AndPWAContract` 固定 stale cursor 边界、节流刷新、串行捕获和失败保留语义；新增 `scripts/test-terminal-live-preview.sh` 运行语法检查、Cache v2 Node 测试、运行时契约和 diff 检查。
+- 验证结果：`./scripts/test-terminal-live-preview.sh` 通过（13 项 Cache v2 测试）；真实 Agent 持续输出、多设备总览和移动端 WebView 仍需在安装包环境做视觉验收。
+- 禁止复现：不得在 append 时删除仍属于当前 pane/history generation 的 last-known-good preview；不得以 preview cursor 落后为由在总览显示“无预览”；不得放宽跨账号、workspace、tab、pane 或 history generation 校验；不得让预览读取结果参与终端恢复；不得为追求实时性在每批 PTY 输出中同步 PNG 编码。

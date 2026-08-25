@@ -456,6 +456,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const terminalHistoryCacheFlushDelayMs = 50;
   const terminalCacheV2FlushDelayMs = 1000;
   const terminalCacheV2PreviewDelayMs = 3000;
+  const terminalCacheV2PreviewRefreshMs = 2000;
   const terminalHistoryCacheOrphanTTL = 30 * 1000;
   const terminalCacheV2TouchIntervalMs = 5 * 60 * 1000;
   const terminalCacheV2ManifestTimeoutMs = 1500;
@@ -7936,6 +7937,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         expected
         && terminalCacheV2.identityMatches(expected, prepared.identity, { requireHistory: true })
         && prepared.endCursor === prepared.identity.endCursor
+        && prepared.previewCursor <= prepared.endCursor
       );
     } catch (error) {
       return false;
@@ -8036,6 +8038,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         identity: snapshot,
         historyGeneration: snapshot.historyGeneration,
         endCursor: snapshot.endCursor,
+        previewCursor: preview.metadata.checkpointCursor,
       };
       if (!sessionCacheV2OverviewPreviewMatches(pane, prepared)) {
         image?.close?.();
@@ -15879,6 +15882,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.cacheV2NetworkQueue = [];
     session.cacheV2NetworkQueueBytes = 0;
     session.cacheV2PreviewCaptureSeq = Number(session.cacheV2PreviewCaptureSeq || 0) + 1;
+    session.cacheV2PreviewCapturePending = false;
+    session.cacheV2PreviewCaptureRunning = false;
     hideSessionTerminalPreview(session);
     clearSessionCacheV2PreparedPreview(session);
     clearSessionCacheV2OverviewPreview(session);
@@ -16845,20 +16850,26 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!sessionUsesTerminalCacheV2(session) || session.closed) {
       return;
     }
-    if (session.cacheV2PreviewCaptureTimer) {
-      window.clearTimeout(session.cacheV2PreviewCaptureTimer);
-      session.cacheV2PreviewCaptureTimer = 0;
+    session.cacheV2PreviewCapturePending = true;
+    session.cacheV2PreviewCaptureAllowRecentOutput = true;
+    if (session.cacheV2PreviewCaptureRunning) {
+      return;
     }
-    if (session.cacheV2PreviewCaptureIdle && typeof window.cancelIdleCallback === "function") {
-      window.cancelIdleCallback(session.cacheV2PreviewCaptureIdle);
-      session.cacheV2PreviewCaptureIdle = 0;
+    if (session.cacheV2PreviewCaptureTimer || session.cacheV2PreviewCaptureIdle) {
+      if (immediate && session.cacheV2PreviewCaptureTimer) {
+        window.clearTimeout(session.cacheV2PreviewCaptureTimer);
+        session.cacheV2PreviewCaptureTimer = 0;
+      } else {
+        return;
+      }
     }
     const captureSeq = Number(session.cacheV2PreviewCaptureSeq || 0) + 1;
     session.cacheV2PreviewCaptureSeq = captureSeq;
-    session.cacheV2PreviewCaptureAllowRecentOutput = immediate;
-    const delay = immediate ? 0 : terminalCacheV2PreviewDelayMs;
+    const delay = immediate ? 0 : terminalCacheV2PreviewRefreshMs;
     session.cacheV2PreviewCaptureTimer = window.setTimeout(() => {
       session.cacheV2PreviewCaptureTimer = 0;
+      session.cacheV2PreviewCapturePending = false;
+      session.cacheV2PreviewCaptureRunning = true;
       const capture = () => {
         session.cacheV2PreviewCaptureIdle = 0;
         captureSessionCacheV2Preview(session, captureSeq).catch((error) => {
@@ -16867,6 +16878,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
             pane: session.id,
             error: error?.message || String(error),
           });
+        }).finally(() => {
+          session.cacheV2PreviewCaptureRunning = false;
+          if (session.cacheV2PreviewCapturePending && !session.closed) {
+            scheduleSessionCacheV2PreviewCapture(session);
+          }
         });
       };
       if (!immediate && typeof window.requestIdleCallback === "function") {
@@ -20247,6 +20263,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       cacheV2PreviewCaptureIdle: 0,
       cacheV2PreviewCaptureSeq: 0,
       cacheV2PreviewCaptureAllowRecentOutput: false,
+      cacheV2PreviewCapturePending: false,
+      cacheV2PreviewCaptureRunning: false,
       lastTerminalOutputAt: 0,
       cacheV2OverviewPreview: null,
       cacheV2OverviewPreviewPromise: null,
@@ -21436,6 +21454,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     pane.cacheV2PreviewCaptureSeq = Number(pane.cacheV2PreviewCaptureSeq || 0) + 1;
     pane.cacheV2PreviewCaptureAllowRecentOutput = false;
+    pane.cacheV2PreviewCapturePending = false;
+    pane.cacheV2PreviewCaptureRunning = false;
     pane.cacheV2WarmReplaySeq = Number(pane.cacheV2WarmReplaySeq || 0) + 1;
     pane.cacheV2WarmReplayActive = false;
     pane.cacheV2WarmReplayReady = false;

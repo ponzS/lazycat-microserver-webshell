@@ -350,6 +350,7 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`const terminalCacheV2CompactionTargetBytes = 1 * 1024 * 1024;`,
 		`prepareTabOverviewCachePreviews`,
 		`String(pane.historyGeneration || "").trim() !== String(prepared.historyGeneration || "").trim()`,
+		`prepared.previewCursor <= prepared.endCursor`,
 		`pane.tabId !== activeTabId || !pane.renderReady || !pane.hasPresentedFrame`,
 		`const liveFrame = pane?.renderReady && pane?.hasPresentedFrame ? liveCanvas : null;`,
 		`scheduleWorkspaceTabOverviewCachePreviews();`,
@@ -360,7 +361,7 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`scheduleSessionCacheV2PreviewCapture(session, { immediate: true });`,
 		`const allowRecentOutput = session.cacheV2PreviewCaptureAllowRecentOutput === true;`,
 		`const scheduleSessionCacheV2PreviewCapture = (session, { immediate = false } = {}) => {`,
-		`session.cacheV2PreviewCaptureAllowRecentOutput = immediate;`,
+		`session.cacheV2PreviewCaptureAllowRecentOutput = true;`,
 		`session.connectionChannel !== "queue"`,
 		`const scheduleTerminalCacheV2OrphanPreviewCleanup = () => {`,
 		`terminalCacheV2.cleanupOrphanedPreviews({`,
@@ -440,7 +441,8 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`tabID: requiredText`,
 		`paneID: requiredText`,
 		`historyGeneration: source.historyGeneration`,
-		`checkpointCursor !== endCursor`,
+		`checkpointCursor > endCursor`,
+		`preview: previous.preview`,
 		`const defaultReadConcurrency = 8;`,
 		`const defaultWriteBlockBytes = 1 * 1024 * 1024;`,
 		`const defaultCompactionMinChunks = 2;`,
@@ -3244,11 +3246,15 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"const scheduleSessionCacheV2Compaction = (session) => {")
 	for _, want := range []string{
 		"const terminalCacheV2PreviewDelayMs = 3000;",
+		"const terminalCacheV2PreviewRefreshMs = 2000;",
 		"performance.now() - Number(session.lastTerminalOutputAt || 0) < terminalCacheV2PreviewDelayMs",
 		"window.requestIdleCallback(capture, { timeout: 1500 })",
 		"await terminalCacheV2.savePreview(identity, session.historyGeneration, cursor, blob, {",
 		"clearSessionCacheV2OverviewPreview(session);",
 		"scheduleTabOverviewRender();",
+		"session.cacheV2PreviewCapturePending = true;",
+		"session.cacheV2PreviewCaptureRunning",
+		"session.cacheV2PreviewCapturePending && !session.closed",
 	} {
 		if !strings.Contains(previewBlock, want) && !strings.Contains(mainSource, want) {
 			t.Fatalf("cache preview must stay outside the active output render path: missing %q", want)

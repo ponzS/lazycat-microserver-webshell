@@ -84,6 +84,48 @@ test("cache-v2 commits continuous bytes and preview at the exact cursor", async 
   assert.equal(preview.blob.type, "image/png");
 });
 
+test("cache-v2 keeps the last-known-good preview while output advances", async () => {
+  const cacheStorage = new MemoryCacheStorage();
+  const cache = createTerminalCacheV2({ cacheStorage, baseURL: "https://example.test/" });
+  await cache.reset(identity(), "history-a", 0n);
+  await cache.append(identity(), "history-a", [{
+    startCursor: 0n,
+    endCursor: 1n,
+    data: new Uint8Array([1]),
+  }]);
+  await cache.savePreview(identity(), "history-a", 1n, new Blob([new Uint8Array([9])], { type: "image/png" }), {
+    width: 100,
+    height: 50,
+    cols: 10,
+    rows: 5,
+    devicePixelRatio: 1,
+  });
+
+  await cache.append(identity(), "history-a", [{
+    startCursor: 1n,
+    endCursor: 2n,
+    data: new Uint8Array([2]),
+  }]);
+  const advancing = await cache.loadManifest(identity());
+  assert.equal(advancing.endCursor, 2n);
+  assert.equal(advancing.preview.checkpointCursor, 1n);
+  const stalePreview = await cache.loadPreview(advancing);
+  assert.equal(stalePreview.metadata.checkpointCursor, 1n);
+  assert.deepEqual([...new Uint8Array(await stalePreview.blob.arrayBuffer())], [9]);
+
+  await cache.savePreview(identity(), "history-a", 2n, new Blob([new Uint8Array([8])], { type: "image/png" }), {
+    width: 100,
+    height: 50,
+    cols: 10,
+    rows: 5,
+    devicePixelRatio: 1,
+  });
+  const current = await cache.loadManifest(identity());
+  const currentPreview = await cache.loadPreview(current);
+  assert.equal(currentPreview.metadata.checkpointCursor, 2n);
+  assert.deepEqual([...new Uint8Array(await currentPreview.blob.arrayBuffer())], [8]);
+});
+
 test("cache-v2 never resolves a manifest across account or workspace identity", async () => {
   const cacheStorage = new MemoryCacheStorage();
   const cache = createTerminalCacheV2({ cacheStorage, baseURL: "https://example.test/" });

@@ -177,7 +177,7 @@ const normalizeManifest = (source, expectedIdentity) => {
     const rows = Number(source.preview.rows);
     const devicePixelRatio = Number(source.preview.devicePixelRatio);
     if (
-      checkpointCursor !== endCursor
+      checkpointCursor > endCursor
       || !Number.isFinite(width) || width <= 0
       || !Number.isFinite(height) || height <= 0
       || !Number.isFinite(cols) || cols <= 0
@@ -373,20 +373,18 @@ export const createTerminalCacheV2 = ({
         removed.push(chunk);
         retainedBytes -= chunk.byteLength;
       }
-      const previousPreview = previous.preview;
       const manifest = {
         ...identity,
         baseCursor: nextChunks.length > 0 ? nextChunks[0].startCursor : merged.endCursor,
         endCursor: merged.endCursor,
         chunks: nextChunks,
-        preview: null,
+        // A preview is a last-known-good visual snapshot. Keep it while new
+        // history is arriving; savePreview replaces it atomically later.
+        preview: previous.preview,
         updatedAt: Date.now(),
       };
       await putManifest(store, manifest);
       await Promise.all(removed.map((chunk) => store.delete(chunkURL(identity, chunk.startCursor, chunk.endCursor))));
-      if (previousPreview) {
-        await store.delete(previewURL(identity, previousPreview.checkpointCursor));
-      }
       return manifest;
     });
   };
@@ -556,7 +554,7 @@ export const createTerminalCacheV2 = ({
 
   const loadPreview = async (manifest) => {
     const normalized = normalizeManifest(serializedManifest(manifest), manifest);
-    if (!normalized.preview || normalized.preview.checkpointCursor !== normalized.endCursor) {
+    if (!normalized.preview || normalized.preview.checkpointCursor > normalized.endCursor) {
       return null;
     }
     const identity = normalizeIdentity(normalized, { requireHistory: true });
