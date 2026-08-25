@@ -1123,14 +1123,21 @@ body.split-resize-active * {
 
 .debug-log-entry {
   display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
+  grid-template-columns: max-content max-content minmax(0, 1fr);
   gap: 7px;
   padding: 2px 0;
   overflow-wrap: anywhere;
 }
 
 .debug-log-entry-error {
-  grid-template-columns: max-content max-content minmax(0, 1fr);
+  grid-template-columns: max-content max-content max-content minmax(0, 1fr);
+}
+
+.debug-log-entry-count {
+  align-self: start;
+  color: color-mix(in srgb, #fde68a 78%, transparent);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .debug-log-entry-time {

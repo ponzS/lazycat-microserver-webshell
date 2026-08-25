@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"net/http"
 	"os/exec"
@@ -20,33 +22,41 @@ import (
 )
 
 const (
-	terminalQueueProtocolVersion  = 1
-	terminalQueueMaxSubscriptions = 1024
-	terminalFastMaxSubscriptions  = 1
-	terminalQueuePaneBufferLimit  = 4 << 20
-	terminalQueueRoundByteBudget  = 256 << 10
-	terminalQueueRoundTimeBudget  = 8 * time.Millisecond
-	terminalQueueBinaryMagic      = "LCQ1"
-	terminalQueueBinaryPrefixSize = 8
+	terminalQueueProtocolVersion     = 1
+	terminalQueueMaxSubscriptions    = 1024
+	terminalFastMaxSubscriptions     = 1
+	terminalQueuePaneBufferLimit     = 4 << 20
+	terminalQueuePaneBufferHighWater = 3 << 20
+	terminalQueueRoundByteBudget     = 256 << 10
+	terminalQueueRoundTimeBudget     = 8 * time.Millisecond
+	terminalQueueBinaryMagic         = "LCQ1"
+	terminalQueueBinaryPrefixSize    = 8
 )
 
+type terminalQueueCheckpointCapability struct {
+	Protocol     string `json:"protocol"`
+	MaxTailBytes int    `json:"max_tail_bytes"`
+}
+
 type terminalQueueSubscription struct {
-	PaneID              string `json:"pane_id"`
-	StreamID            string `json:"stream_id"`
-	ChannelGeneration   uint64 `json:"channel_generation"`
-	Cols                int    `json:"cols,omitempty"`
-	Rows                int    `json:"rows,omitempty"`
-	PixelWidth          int    `json:"pixel_width,omitempty"`
-	PixelHeight         int    `json:"pixel_height,omitempty"`
-	CacheProtocol       int    `json:"cache_protocol_version,omitempty"`
-	WorkspaceGeneration string `json:"workspace_generation,omitempty"`
-	HistoryGeneration   string `json:"history_generation,omitempty"`
-	LocalBaseCursor     string `json:"local_base_cursor,omitempty"`
-	LocalEndCursor      string `json:"local_end_cursor,omitempty"`
-	HistoryReplayMode   string `json:"history_replay_mode,omitempty"`
-	Foreground          string `json:"foreground,omitempty"`
-	Background          string `json:"background,omitempty"`
-	Cursor              string `json:"cursor,omitempty"`
+	PaneID                 string                              `json:"pane_id"`
+	StreamID               string                              `json:"stream_id"`
+	ChannelGeneration      uint64                              `json:"channel_generation"`
+	Cols                   int                                 `json:"cols,omitempty"`
+	Rows                   int                                 `json:"rows,omitempty"`
+	PixelWidth             int                                 `json:"pixel_width,omitempty"`
+	PixelHeight            int                                 `json:"pixel_height,omitempty"`
+	CacheProtocol          int                                 `json:"cache_protocol_version,omitempty"`
+	WorkspaceGeneration    string                              `json:"workspace_generation,omitempty"`
+	HistoryGeneration      string                              `json:"history_generation,omitempty"`
+	LocalBaseCursor        string                              `json:"local_base_cursor,omitempty"`
+	LocalEndCursor         string                              `json:"local_end_cursor,omitempty"`
+	HistoryReplayMode      string                              `json:"history_replay_mode,omitempty"`
+	FlowControl            string                              `json:"flow_control,omitempty"`
+	CheckpointCapabilities []terminalQueueCheckpointCapability `json:"checkpoint_capabilities,omitempty"`
+	Foreground             string                              `json:"foreground,omitempty"`
+	Background             string                              `json:"background,omitempty"`
+	Cursor                 string                              `json:"cursor,omitempty"`
 }
 
 type terminalQueueClientMessage struct {
@@ -77,15 +87,19 @@ type terminalQueueBinaryHeader struct {
 	ChannelGeneration uint64 `json:"channel_generation"`
 	StartCursor       string `json:"start_cursor"`
 	EndCursor         string `json:"end_cursor"`
+	Sequence          uint64 `json:"sequence"`
+	Checksum          string `json:"checksum"`
+	HistoryGeneration string `json:"history_generation,omitempty"`
 }
 
 type terminalQueueOutbound struct {
-	sequence    uint64
-	messageType int
-	payload     []byte
-	startCursor uint64
-	endCursor   uint64
-	byteCost    int
+	sequence       uint64
+	binarySequence uint64
+	messageType    int
+	payload        []byte
+	startCursor    uint64
+	endCursor      uint64
+	byteCost       int
 }
 
 type terminalQueuePaneStream struct {
@@ -111,6 +125,10 @@ type terminalQueuePaneStream struct {
 	overloaded      bool
 	terminalControl bool
 	nextSequence    uint64
+	binarySequence  uint64
+	awaitingTurnAck bool
+	turnAckCursor   uint64
+	turnAckSequence uint64
 	buffer          []terminalQueueOutbound
 	bufferBytes     int
 	hasCursor       bool
@@ -363,6 +381,8 @@ func (b *terminalQueueBroker) runWriter() {
 				startedAt := time.Now()
 				writtenBytes := 0
 				wroteBinary := false
+				turnCursor := uint64(0)
+				turnSequence := uint64(0)
 				for {
 					entry, ok := stream.popThrough(target, writtenBytes)
 					if !ok {
@@ -374,13 +394,22 @@ func (b *terminalQueueBroker) runWriter() {
 					}
 					wrote = true
 					wroteBinary = wroteBinary || entry.messageType == websocket.BinaryMessage
+					if entry.messageType == websocket.BinaryMessage {
+						turnCursor = entry.endCursor
+						turnSequence = entry.binarySequence
+					}
 					writtenBytes += entry.byteCost
 					if writtenBytes >= terminalQueueRoundByteBudget || time.Since(startedAt) >= terminalQueueRoundTimeBudget {
 						break
 					}
 				}
 				if wroteBinary {
-					if err := b.writePaneControl(stream, map[string]any{"type": "queue-turn-complete"}); err != nil {
+					stream.markTurnAwaitingAck(turnCursor, turnSequence)
+					if err := b.writePaneControl(stream, map[string]any{
+						"type":             "queue-turn-complete",
+						"applied_cursor":   strconv.FormatUint(turnCursor, 10),
+						"applied_sequence": strconv.FormatUint(turnSequence, 10),
+					}); err != nil {
 						b.cancel()
 						return
 					}
@@ -421,6 +450,9 @@ func (b *terminalQueueBroker) writeOutbound(stream *terminalQueuePaneStream, ent
 			ChannelGeneration: stream.subscription.ChannelGeneration,
 			StartCursor:       strconv.FormatUint(entry.startCursor, 10),
 			EndCursor:         strconv.FormatUint(entry.endCursor, 10),
+			Sequence:          entry.binarySequence,
+			Checksum:          terminalPayloadChecksum(entry.payload),
+			HistoryGeneration: stream.subscription.HistoryGeneration,
 		}, entry.payload)
 		if err != nil {
 			return err
@@ -428,6 +460,13 @@ func (b *terminalQueueBroker) writeOutbound(stream *terminalQueuePaneStream, ent
 		return b.writeMessage(websocket.BinaryMessage, frame)
 	}
 	return b.writePaneControl(stream, json.RawMessage(entry.payload))
+}
+
+func terminalPayloadChecksum(payload []byte) string {
+	value := crc32.ChecksumIEEE(payload)
+	var encoded [4]byte
+	binary.BigEndian.PutUint32(encoded[:], value)
+	return hex.EncodeToString(encoded[:])
 }
 
 func encodeTerminalQueueBinaryFrame(header terminalQueueBinaryHeader, payload []byte) ([]byte, error) {
@@ -452,6 +491,10 @@ func validateTerminalQueueSubscription(subscription terminalQueueSubscription) (
 	subscription.WorkspaceGeneration = strings.TrimSpace(subscription.WorkspaceGeneration)
 	subscription.HistoryGeneration = strings.TrimSpace(subscription.HistoryGeneration)
 	subscription.HistoryReplayMode = strings.TrimSpace(subscription.HistoryReplayMode)
+	subscription.FlowControl = strings.TrimSpace(subscription.FlowControl)
+	if subscription.FlowControl != "" && subscription.FlowControl != "turn-ack-v1" {
+		return subscription, historySyncRequest{}, errors.New("unsupported queue flow control")
+	}
 	if subscription.PaneID == "" || len(subscription.PaneID) > 128 {
 		return subscription, historySyncRequest{}, errors.New("invalid queue pane id")
 	}
@@ -649,6 +692,8 @@ func (b *terminalQueueBroker) handlePaneControl(message terminalQueueClientMessa
 		return stream.writeAgentFrame(agentFrameResize, message.Control)
 	case "input_lock":
 		return stream.writeAgentFrame(agentFrameLock, message.Control)
+	case "queue-turn-ack":
+		return stream.acknowledgeTurn(control.Data)
 	default:
 		return fmt.Errorf("unsupported queue pane control type: %s", control.Type)
 	}
@@ -728,9 +773,31 @@ func (s *terminalQueuePaneStream) writeAgentFrame(frameType byte, payload []byte
 	return writeAgentFrame(s.stdin, frameType, payload)
 }
 
+func (s *terminalQueuePaneStream) waitForBufferCapacity() bool {
+	for {
+		s.mu.Lock()
+		ready := s.active && !s.overloaded && s.bufferBytes < terminalQueuePaneBufferHighWater
+		s.mu.Unlock()
+		if ready {
+			return true
+		}
+		if s.isStopped() {
+			return false
+		}
+		select {
+		case <-s.ctx.Done():
+			return false
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+}
+
 func (s *terminalQueuePaneStream) run() {
 	defer s.stop()
 	for {
+		if !s.waitForBufferCapacity() {
+			return
+		}
 		frameType, payload, err := readAgentFrame(s.stdout)
 		if err != nil {
 			if s.isStopped() || errors.Is(err, context.Canceled) {
@@ -817,13 +884,16 @@ func (s *terminalQueuePaneStream) enqueueBinary(payload []byte) {
 	startCursor := s.cursor
 	s.cursor += uint64(len(payload))
 	endCursor := s.cursor
+	s.binarySequence++
+	sequence := s.binarySequence
 	s.mu.Unlock()
 	s.enqueue(terminalQueueOutbound{
-		messageType: websocket.BinaryMessage,
-		payload:     append([]byte(nil), payload...),
-		startCursor: startCursor,
-		endCursor:   endCursor,
-		byteCost:    len(payload),
+		messageType:    websocket.BinaryMessage,
+		payload:        append([]byte(nil), payload...),
+		startCursor:    startCursor,
+		endCursor:      endCursor,
+		binarySequence: sequence,
+		byteCost:       len(payload),
 	})
 }
 
@@ -874,10 +944,46 @@ func (s *terminalQueuePaneStream) overload(reason string) {
 	go s.stop()
 }
 
+func (s *terminalQueuePaneStream) acknowledgeTurn(value string) error {
+	parts := strings.Split(strings.TrimSpace(value), ":")
+	if len(parts) != 2 {
+		return errors.New("invalid queue turn acknowledgement")
+	}
+	cursor, cursorErr := strconv.ParseUint(parts[0], 10, 64)
+	sequence, sequenceErr := strconv.ParseUint(parts[1], 10, 64)
+	if cursorErr != nil || sequenceErr != nil {
+		return errors.New("invalid queue turn acknowledgement")
+	}
+	s.mu.Lock()
+	if s.subscription.FlowControl != "turn-ack-v1" || !s.awaitingTurnAck || cursor != s.turnAckCursor || sequence != s.turnAckSequence {
+		s.mu.Unlock()
+		return errors.New("queue turn acknowledgement does not match")
+	}
+	s.awaitingTurnAck = false
+	s.turnAckCursor = 0
+	s.turnAckSequence = 0
+	s.mu.Unlock()
+	s.broker.signalWriter()
+	return nil
+}
+
+func (s *terminalQueuePaneStream) markTurnAwaitingAck(cursor, sequence uint64) {
+	if s.subscription.FlowControl != "turn-ack-v1" {
+		return
+	}
+	s.mu.Lock()
+	if s.active && !s.overloaded {
+		s.awaitingTurnAck = true
+		s.turnAckCursor = cursor
+		s.turnAckSequence = sequence
+	}
+	s.mu.Unlock()
+}
+
 func (s *terminalQueuePaneStream) targetSequence() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.active || len(s.buffer) == 0 {
+	if !s.active || s.awaitingTurnAck || len(s.buffer) == 0 {
 		return 0
 	}
 	return s.buffer[len(s.buffer)-1].sequence

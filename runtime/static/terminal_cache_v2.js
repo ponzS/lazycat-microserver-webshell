@@ -86,6 +86,19 @@ const responseJSON = (value) => new Response(JSON.stringify(value), {
   },
 });
 
+const crc32 = (data) => {
+  let value = 0xffffffff;
+  for (const byte of data) {
+    value ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = (value >>> 1) ^ (value & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (value ^ 0xffffffff) >>> 0;
+};
+
+const payloadChecksum = (data) => crc32(data).toString(16).padStart(8, "0");
+
 const normalizedChunk = (chunk) => {
   const startCursor = cursorValue(chunk?.startCursor);
   const endCursor = cursorValue(chunk?.endCursor);
@@ -138,11 +151,20 @@ const normalizeManifest = (source, expectedIdentity) => {
     paneID: source.paneID,
     historyGeneration: source.historyGeneration,
   }, { requireHistory: true });
-  if (expectedIdentity && !identityMatches(identity, {
-    ...expectedIdentity,
-    historyGeneration: identity.historyGeneration,
-  })) {
-    throw new Error("Terminal cache manifest identity does not match.");
+  if (expectedIdentity) {
+    const expectedHistoryGeneration = String(identityValue(expectedIdentity, "historyGeneration", "history_generation") || "").trim();
+    if (!identityMatches(identity, {
+      ...expectedIdentity,
+      historyGeneration: expectedHistoryGeneration || identity.historyGeneration,
+    }, { requireHistory: Boolean(expectedHistoryGeneration) })) {
+      throw new Error("Terminal cache manifest identity does not match.");
+    }
+  }
+  const historyWindowLines = source.historyWindowLines === undefined || source.historyWindowLines === null
+    ? null
+    : Number(source.historyWindowLines);
+  if (historyWindowLines !== null && (!Number.isSafeInteger(historyWindowLines) || historyWindowLines < 1)) {
+    throw new Error("Terminal cache history window is invalid.");
   }
   const baseCursor = cursorValue(source.baseCursor);
   const endCursor = cursorValue(source.endCursor);
@@ -156,7 +178,11 @@ const normalizeManifest = (source, expectedIdentity) => {
     if (!Number.isSafeInteger(byteLength) || byteLength <= 0 || chunkEndCursor - startCursor !== BigInt(byteLength)) {
       throw new Error("Terminal cache manifest chunk is invalid.");
     }
-    return { startCursor, endCursor: chunkEndCursor, byteLength };
+    const checksum = String(chunk?.checksum || "").trim().toLowerCase();
+    if (checksum && !/^[0-9a-f]{8}$/.test(checksum)) {
+      throw new Error("Terminal cache manifest chunk checksum is invalid.");
+    }
+    return { startCursor, endCursor: chunkEndCursor, byteLength, ...(checksum ? { checksum } : {}) };
   });
   let expected = baseCursor;
   for (const chunk of chunks) {
@@ -199,6 +225,7 @@ const normalizeManifest = (source, expectedIdentity) => {
   return {
     schemaVersion: cacheSchemaVersion,
     ...identity,
+    historyWindowLines,
     baseCursor,
     endCursor,
     chunks,
@@ -216,12 +243,16 @@ const serializedManifest = (manifest) => ({
   tabID: manifest.tabID,
   paneID: manifest.paneID,
   historyGeneration: manifest.historyGeneration,
+  ...(manifest.historyWindowLines === null || manifest.historyWindowLines === undefined
+    ? {}
+    : { historyWindowLines: manifest.historyWindowLines }),
   baseCursor: cursorText(manifest.baseCursor),
   endCursor: cursorText(manifest.endCursor),
   chunks: manifest.chunks.map((chunk) => ({
     startCursor: cursorText(chunk.startCursor),
     endCursor: cursorText(chunk.endCursor),
     byteLength: chunk.byteLength,
+    ...(chunk.checksum ? { checksum: chunk.checksum } : {}),
   })),
   preview: manifest.preview ? {
     checkpointCursor: cursorText(manifest.preview.checkpointCursor),
@@ -263,6 +294,12 @@ export const createTerminalCacheV2 = ({
     return next;
   };
 
+  const historyWindowMatches = (manifest, expectedLines) => {
+    const expected = Number(expectedLines);
+    return Number.isSafeInteger(expected) && expected >= 1
+      && Number(manifest?.historyWindowLines) === expected;
+  };
+
   const loadManifest = async (sourceIdentity) => {
     const identity = normalizeIdentity(sourceIdentity);
     const store = await cache();
@@ -284,7 +321,7 @@ export const createTerminalCacheV2 = ({
         "Cache-Control": "no-store",
         "Content-Type": "application/octet-stream",
         "X-Terminal-Start-Cursor": cursorText(chunk.startCursor),
-        "X-Terminal-End-Cursor": cursorText(chunk.endCursor),
+        "X-Terminal-Checksum": payloadChecksum(chunk.data),
       },
     });
     await store.put(chunkURL(identity, chunk.startCursor, chunk.endCursor), response);
@@ -301,13 +338,16 @@ export const createTerminalCacheV2 = ({
     }
   };
 
-  const reset = (sourceIdentity, generation, cursor) => runMutation(async () => {
+  const reset = (sourceIdentity, generation, cursor, { historyWindowLines = null } = {}) => runMutation(async () => {
     const identity = normalizeIdentity({ ...sourceIdentity, historyGeneration: generation }, { requireHistory: true });
     const store = await cache();
     const previous = await loadManifest(identity).catch(() => null);
     const normalizedCursor = cursorValue(cursor);
     const manifest = {
       ...identity,
+      historyWindowLines: historyWindowLines === null
+        ? null
+        : (Number.isSafeInteger(Number(historyWindowLines)) ? Number(historyWindowLines) : null),
       baseCursor: normalizedCursor,
       endCursor: normalizedCursor,
       chunks: [],
@@ -321,7 +361,7 @@ export const createTerminalCacheV2 = ({
     return manifest;
   });
 
-  const append = async (sourceIdentity, generation, chunks, { limitBytes } = {}) => {
+  const append = async (sourceIdentity, generation, chunks, { limitBytes, historyWindowLines = null } = {}) => {
     const identity = normalizeIdentity({ ...sourceIdentity, historyGeneration: generation }, { requireHistory: true });
     const merged = mergeChunks(chunks);
     if (!merged) {
@@ -347,8 +387,11 @@ export const createTerminalCacheV2 = ({
           throw new Error("Terminal cache tail chunk is missing.");
         }
         const tailData = new Uint8Array(await tailResponse.arrayBuffer());
-        if (tailData.byteLength !== previousTail.byteLength) {
-          throw new Error("Terminal cache tail chunk is invalid.");
+        if (
+          previousTail.checksum
+          && payloadChecksum(tailData) !== previousTail.checksum
+        ) {
+          throw new Error("Terminal cache tail chunk checksum is invalid.");
         }
         stored = mergeChunks([
           { startCursor: previousTail.startCursor, endCursor: previousTail.endCursor, data: tailData },
@@ -363,6 +406,7 @@ export const createTerminalCacheV2 = ({
           startCursor: stored.startCursor,
           endCursor: stored.endCursor,
           byteLength: stored.data.byteLength,
+          checksum: payloadChecksum(stored.data),
         },
       ];
       const removed = replacedTail ? [replacedTail] : [];
@@ -375,6 +419,9 @@ export const createTerminalCacheV2 = ({
       }
       const manifest = {
         ...identity,
+        historyWindowLines: historyWindowLines === null
+          ? (previous.historyWindowLines ?? null)
+          : (Number.isSafeInteger(Number(historyWindowLines)) ? Number(historyWindowLines) : null),
         baseCursor: nextChunks.length > 0 ? nextChunks[0].startCursor : merged.endCursor,
         endCursor: merged.endCursor,
         chunks: nextChunks,
@@ -400,8 +447,14 @@ export const createTerminalCacheV2 = ({
         throw new Error("Terminal cache chunk is missing.");
       }
       const data = new Uint8Array(await response.arrayBuffer());
-      if (data.byteLength !== chunk.byteLength || chunk.endCursor - chunk.startCursor !== BigInt(data.byteLength)) {
-        throw new Error("Terminal cache chunk data is invalid.");
+      if (
+        data.byteLength !== chunk.byteLength
+        || chunk.endCursor - chunk.startCursor !== BigInt(data.byteLength)
+        || (chunk.checksum && payloadChecksum(data) !== chunk.checksum)
+      ) {
+        throw new Error(chunk.checksum
+          ? "Terminal cache chunk checksum is invalid."
+          : "Terminal cache chunk data is invalid.");
       }
       return { chunk, data };
     };
@@ -475,6 +528,7 @@ export const createTerminalCacheV2 = ({
           startCursor: only.startCursor,
           endCursor: only.endCursor,
           byteLength: only.data.byteLength,
+          checksum: only.checksum || payloadChecksum(only.data),
         });
       } else {
         const merged = mergeChunks(pending);
@@ -483,6 +537,7 @@ export const createTerminalCacheV2 = ({
           startCursor: merged.startCursor,
           endCursor: merged.endCursor,
           byteLength: merged.data.byteLength,
+          checksum: payloadChecksum(merged.data),
         });
       }
       pending = [];
@@ -573,7 +628,8 @@ export const createTerminalCacheV2 = ({
   const deletePane = (sourceIdentity) => runMutation(async () => {
     const identity = normalizeIdentity(sourceIdentity);
     const store = await cache();
-    const manifest = await loadManifest(identity).catch(() => null);
+    const manifestIdentity = { ...identity, historyGeneration: "" };
+    const manifest = await loadManifest(manifestIdentity).catch(() => null);
     if (manifest) {
       if (identity.historyGeneration && manifest.historyGeneration !== identity.historyGeneration) {
         return false;
@@ -728,6 +784,7 @@ export const createTerminalCacheV2 = ({
     compact,
     deletePane,
     identityMatches,
+    historyWindowMatches,
     loadManifest,
     loadPreview,
     readChunks,

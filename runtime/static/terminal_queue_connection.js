@@ -112,6 +112,37 @@ const parseCursor = (value) => {
   }
 };
 
+const parseSequence = (value) => {
+  const text = String(value ?? "").trim();
+  if (!/^\d+$/.test(text)) {
+    return null;
+  }
+  const sequence = Number(text);
+  return Number.isSafeInteger(sequence) ? sequence : null;
+};
+
+const crc32 = (data) => {
+  let value = 0xffffffff;
+  for (const byte of data) {
+    value ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = (value >>> 1) ^ (value & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (value ^ 0xffffffff) >>> 0;
+};
+
+const payloadChecksumMatches = (data, expected) => {
+  if (expected === undefined || expected === null || expected === "") {
+    return true;
+  }
+  const text = String(expected).trim().toLowerCase().replace(/^0x/, "");
+  if (!/^[0-9a-f]{1,8}$/.test(text)) {
+    return false;
+  }
+  return crc32(data).toString(16).padStart(8, "0") === text.padStart(8, "0");
+};
+
 export const decodeTerminalQueueBinaryFrame = (input) => {
   const data = input instanceof Uint8Array
     ? input
@@ -337,8 +368,20 @@ export const createTerminalQueueConnection = ({
     if (!entry || entry.readyState !== socketOpen) {
       return false;
     }
+    const frameHistoryGeneration = String(decoded.header.history_generation || "").trim();
+    const expectedHistoryGeneration = String(entry.subscription.history_generation || "").trim();
+    if (frameHistoryGeneration && expectedHistoryGeneration && frameHistoryGeneration !== expectedHistoryGeneration) {
+      failLogicalProtocol(entry, "terminal queue binary history generation does not match");
+      return false;
+    }
     const startCursor = parseCursor(decoded.header.start_cursor);
     const endCursor = parseCursor(decoded.header.end_cursor);
+    const sequenceProvided = Object.prototype.hasOwnProperty.call(decoded.header, "sequence");
+    const sequence = parseSequence(decoded.header.sequence);
+    const expectedSequence = entry.expectedSequence;
+    const sequenceValid = entry.sequenceMode === null
+      ? (!sequenceProvided || sequence !== null)
+      : sequence !== null && sequence === expectedSequence + 1;
     if (
       startCursor === null
       || endCursor === null
@@ -346,15 +389,29 @@ export const createTerminalQueueConnection = ({
       || BigInt(decoded.payload.byteLength) !== endCursor - startCursor
       || entry.expectedCursor === null
       || entry.expectedCursor !== startCursor
+      || !sequenceValid
+      || !payloadChecksumMatches(new Uint8Array(decoded.payload), decoded.header.checksum)
     ) {
-      failLogicalProtocol(entry, "terminal queue binary cursor is not continuous");
+      failLogicalProtocol(entry, "terminal queue binary frame identity or cursor validation failed");
       return false;
+    }
+    if (entry.sequenceMode === null) {
+      entry.sequenceMode = sequenceProvided;
+    }
+    if (sequence !== null) {
+      entry.expectedSequence = sequence;
     }
     entry.expectedCursor = endCursor;
     entry.listeners.dispatch("message", {
       type: "message",
       data: decoded.payload,
-      queueMetadata: { ...identity, startCursor, endCursor },
+      queueMetadata: {
+        ...identity,
+        startCursor,
+        endCursor,
+        ...(sequence === null ? {} : { sequence }),
+        ...(frameHistoryGeneration ? { historyGeneration: frameHistoryGeneration } : {}),
+      },
       target: entry.socket,
     });
     return true;
@@ -478,6 +535,8 @@ export const createTerminalQueueConnection = ({
       },
       readyState: physicalReadyState === socketOpen ? socketOpen : socketConnecting,
       expectedCursor: null,
+      expectedSequence: null,
+      sequenceMode: null,
       listeners,
       socket: null,
     };

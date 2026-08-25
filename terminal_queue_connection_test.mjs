@@ -9,6 +9,7 @@ import {
   terminalQueueGateAllowsCreation,
   terminalQueueProtocolVersion,
 } from "./runtime/static/terminal_queue_connection.js";
+import { TerminalReplayController } from "./runtime/static/terminal_replay_controller.js";
 
 class FakeWebSocket {
   static CONNECTING = 0;
@@ -82,6 +83,17 @@ const encodeBinaryFrame = (header, payload) => {
   frame.set(headerData, 8);
   frame.set(payload, 8 + headerData.byteLength);
   return frame.buffer;
+};
+
+const crc32 = (data) => {
+  let value = 0xffffffff;
+  for (const byte of data) {
+    value ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = (value >>> 1) ^ (value & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (value ^ 0xffffffff) >>> 0;
 };
 
 test.beforeEach(() => {
@@ -328,6 +340,66 @@ test("history replay start, binary data, and completion preserve one continuous 
   assert.equal(JSON.parse(messages[2]).type, "history-replay-complete");
 });
 
+test("Queue metadata drives ReplayController through replay and commit", async () => {
+  const connection = createTerminalQueueConnection({ url: "ws://example/ws?mode=queue", WebSocketImpl: FakeWebSocket });
+  const logical = connection.open({ ...subscription("pane-1"), history_generation: "hg-1" });
+  const controller = new TerminalReplayController();
+  const identity = { selector: "target-1", paneID: "pane-1", historyGeneration: "hg-1" };
+  const physical = FakeWebSocket.instances[0];
+  logical.addEventListener("message", (event) => {
+    if (typeof event.data === "string") {
+      const message = JSON.parse(event.data);
+      if (message.type === "history-replay-start") {
+        controller.begin({ requestID: "4", connectionEpoch: 2, identity, startCursor: message.delta_from_cursor, targetCursor: message.delta_to_cursor });
+      } else if (message.type === "history-replay-complete") {
+        controller.complete({ cursor: message.history_cursor, requestID: "4", connectionEpoch: 2, identity });
+      }
+      return;
+    }
+    controller.acceptBinary({
+      sequence: event.queueMetadata.sequence,
+      startCursor: event.queueMetadata.startCursor,
+      endCursor: event.queueMetadata.endCursor,
+      length: event.data.byteLength,
+      requestID: "4",
+      connectionEpoch: 2,
+      identity,
+    });
+  });
+  physical.emit("open");
+  await Promise.resolve();
+
+  physical.emit("message", { data: JSON.stringify({
+    type: "pane-control",
+    pane_id: "pane-1",
+    stream_id: "stream-pane-1-1",
+    channel_generation: 1,
+    payload: { type: "history-replay-start", delta_from_cursor: "10", delta_to_cursor: "13" },
+  }) });
+  const payload = new Uint8Array([1, 2, 3]);
+  physical.emit("message", { data: encodeBinaryFrame({
+    pane_id: "pane-1",
+    stream_id: "stream-pane-1-1",
+    channel_generation: 1,
+    history_generation: "hg-1",
+    sequence: 1,
+    start_cursor: "10",
+    end_cursor: "13",
+    checksum: crc32(payload).toString(16).padStart(8, "0"),
+  }, payload) });
+  physical.emit("message", { data: JSON.stringify({
+    type: "pane-control",
+    pane_id: "pane-1",
+    stream_id: "stream-pane-1-1",
+    channel_generation: 1,
+    payload: { type: "history-replay-complete", history_cursor: "13" },
+  }) });
+
+  assert.equal(controller.snapshot().phase, "awaiting_commit");
+  assert.equal(controller.snapshot().expectedCursor, 13n);
+  assert.equal(controller.commit().phase, "committed");
+});
+
 test("replay completion cursor mismatch requests logical resynchronization", async () => {
   const connection = createTerminalQueueConnection({ url: "ws://example/ws?mode=queue", WebSocketImpl: FakeWebSocket });
   const logical = connection.open(subscription("pane-1"));
@@ -357,6 +429,76 @@ test("replay completion cursor mismatch requests logical resynchronization", asy
   const error = JSON.parse(messages.at(-1));
   assert.equal(error.type, "connection-error");
   assert.equal(error.resync_required, true);
+});
+
+test("sequence and checksum validation rejects an altered or reordered frame", async () => {
+  const protocolErrors = [];
+  const connection = createTerminalQueueConnection({
+    url: "ws://example/ws?mode=queue",
+    WebSocketImpl: FakeWebSocket,
+    onProtocolError: (error) => protocolErrors.push(error.message),
+  });
+  const logical = connection.open(subscription("pane-1"));
+  const messages = [];
+  logical.addEventListener("message", (event) => messages.push(event.data));
+  const physical = FakeWebSocket.instances[0];
+  physical.emit("open");
+  await Promise.resolve();
+  const first = new Uint8Array([1, 2, 3]);
+  physical.emit("message", { data: JSON.stringify({
+    type: "pane-control",
+    pane_id: "pane-1",
+    stream_id: "stream-pane-1-1",
+    channel_generation: 1,
+    payload: { type: "history-replay-start", delta_from_cursor: "10" },
+  }) });
+  physical.emit("message", { data: encodeBinaryFrame({
+    pane_id: "pane-1",
+    stream_id: "stream-pane-1-1",
+    channel_generation: 1,
+    start_cursor: "10",
+    end_cursor: "13",
+    sequence: "1",
+    checksum: crc32(first).toString(16),
+  }, first) });
+  assert.deepEqual(Array.from(new Uint8Array(messages.at(-1))), [1, 2, 3]);
+  physical.emit("message", { data: encodeBinaryFrame({
+    pane_id: "pane-1",
+    stream_id: "stream-pane-1-1",
+    channel_generation: 1,
+    start_cursor: "13",
+    end_cursor: "14",
+    sequence: "3",
+    checksum: "00",
+  }, new Uint8Array([4])) });
+  assert.equal(protocolErrors.length, 1);
+  assert.match(messages.at(-1), /connection-error/);
+});
+
+
+test("an invalid first sequence is rejected instead of becoming legacy metadata", async () => {
+  const protocolErrors = [];
+  const connection = createTerminalQueueConnection({
+    url: "ws://example/ws?mode=queue",
+    WebSocketImpl: FakeWebSocket,
+    onProtocolError: (error) => protocolErrors.push(error.message),
+  });
+  const logical = connection.open(subscription("pane-1"));
+  const messages = [];
+  logical.addEventListener("message", (event) => messages.push(event.data));
+  const physical = FakeWebSocket.instances[0];
+  physical.emit("open");
+  await Promise.resolve();
+  physical.emit("message", { data: encodeBinaryFrame({
+    pane_id: "pane-1",
+    stream_id: "stream-pane-1-1",
+    channel_generation: 1,
+    start_cursor: "10",
+    end_cursor: "11",
+    sequence: "not-a-sequence",
+  }, new Uint8Array([1])) });
+  assert.equal(protocolErrors.length, 1);
+  assert.equal(messages.length, 1);
 });
 
 test("a physical queue error is reported once instead of retrying every logical pane", async () => {

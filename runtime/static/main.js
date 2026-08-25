@@ -17,6 +17,11 @@ import { installHerdrFullscreenTouchAdapter } from "./herdr_fullscreen_touch_ada
 import { createPerformanceTaskMonitor } from "./performance_tasks.js";
 import { createInstancesLoader } from "./instances_loader.js";
 import { createTerminalCacheV2 } from "./terminal_cache_v2.js";
+import { decodeFastBinaryFrame } from "./terminal_fast_integrity.js";
+import { TerminalReplayController } from "./terminal_replay_controller.js";
+import { TerminalResizeController } from "./terminal_resize_controller.js";
+import { terminalCheckpointCapabilitiesForTerminal } from "./terminal_checkpoint.js";
+import { createRenderSnapshot, RenderSnapshot } from "./terminal_render_snapshot.js";
 import { createTerminalHistoryCache } from "./terminal_history_cache.js";
 import {
   shouldSendTerminalSize,
@@ -151,6 +156,7 @@ const markWebShellStartupMetric = (key) => {
 };
 const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).then(() => {
   markWebShellStartupMetric("ghosttyReadyAt");
+  globalThis.__webshellStartupTrace?.("Ghostty WASM 已就绪");
 });
 
 (async () => {
@@ -447,6 +453,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   // tab-switch spinner or replace resize ACK handling.
   const terminalFullRenderValidationMs = 32;
   const terminalPresentationResizeRetryMs = 1200;
+  const terminalReplayFailureLimit = 3;
+  const terminalReplayCheckpointDelayMs = 48;
   const terminalPresentationValidationMaxMs = 250;
   const terminalOutputQueueSoftLimitBytes = 1 * 1024 * 1024;
   const terminalOutputMeasureChunkChars = 32 * 1024;
@@ -1283,14 +1291,20 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       if (level) {
         row.append(level);
       }
+      if (entry.count > 1) {
+        const count = document.createElement("span");
+        count.className = "debug-log-entry-count";
+        count.textContent = `x${entry.count}`;
+        row.append(count);
+      }
       row.append(message);
       debugLogList.appendChild(row);
     }
     debugLogList.scrollTop = debugLogList.scrollHeight;
   };
 
-  const appendDebugLog = (level, message, details = "", { dedupeKey = "" } = {}) => {
-    if (!debugModeEnabled || !debugLogEnabled) {
+  const appendDebugLog = (level, message, details = "", { dedupeKey = "", retainWhenDisabled = false } = {}) => {
+    if ((!debugModeEnabled || !debugLogEnabled) && !retainWhenDisabled) {
       return;
     }
     const normalized = String(message || "").trim();
@@ -1298,30 +1312,69 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return;
     }
     const suffix = String(details || "").trim();
+    const now = Date.now();
     if (dedupeKey) {
-      const now = Date.now();
-      const previous = Number(debugLogLastSeen.get(dedupeKey) || 0);
-      if (previous > 0 && now - previous < debugLogDedupWindowMs) {
+      const previous = debugLogLastSeen.get(dedupeKey);
+      if (previous && now - previous.lastAt < debugLogDedupWindowMs) {
+        const entry = debugLogEntries[previous.index];
+        if (entry) {
+          entry.count = Number(entry.count || 1) + 1;
+          entry.time = new Date().toLocaleTimeString([], { hour12: false });
+          if (suffix) {
+            entry.message = `${normalized} (${suffix})`;
+          }
+          previous.lastAt = now;
+          if (debugModeEnabled && debugLogEnabled && (entry.count === 2 || entry.count % 10 === 0)) {
+            renderDebugLog();
+          }
+        }
         return;
       }
-      debugLogLastSeen.set(dedupeKey, now);
     }
-    debugLogEntries.push({
+    const entry = {
       level: ["error", "warn", "info"].includes(level) ? level : "info",
       time: new Date().toLocaleTimeString([], { hour12: false }),
       message: suffix ? `${normalized} (${suffix})` : normalized,
-    });
-    if (debugLogEntries.length > debugLogEntryLimit) {
-      debugLogEntries.splice(0, debugLogEntries.length - debugLogEntryLimit);
+      count: 1,
+    };
+    debugLogEntries.push(entry);
+    if (dedupeKey) {
+      debugLogLastSeen.set(dedupeKey, { index: debugLogEntries.length - 1, lastAt: now });
     }
-    renderDebugLog();
+    if (debugLogEntries.length > debugLogEntryLimit) {
+      const removed = debugLogEntries.length - debugLogEntryLimit;
+      debugLogEntries.splice(0, removed);
+      for (const [key, value] of debugLogLastSeen) {
+        const index = value.index - removed;
+        if (index < 0) {
+          debugLogLastSeen.delete(key);
+        } else {
+          value.index = index;
+        }
+      }
+    }
+    if (debugModeEnabled && debugLogEnabled) {
+      renderDebugLog();
+    }
   };
 
   const appendDebugError = (message, details = "") => appendDebugLog("error", message, details);
   const appendDebugWarning = (message, details = "") => appendDebugLog("warn", message, details);
 
+  const appendStartupTrace = (event, details = "", { dedupeKey = event } = {}) => {
+    const elapsed = Math.max(0, Math.round(webShellStartupNow() - webShellStartupMetrics.moduleStartedAt));
+    appendDebugLog("info", `[startup +${elapsed}ms] ${event}`, details, {
+      dedupeKey: `startup:${dedupeKey}`,
+      retainWhenDisabled: true,
+    });
+  };
+
+  globalThis.__webshellStartupTrace = (event, details = "") => appendStartupTrace(event, details);
+
+  appendStartupTrace("页面模块已启动", `target=${String(params.get("name") || params.get("target") || "").trim() || "未指定"}`, { dedupeKey: "module-start" });
+
   const debugLogClipboardText = () => debugLogEntries
-    .map((entry) => `[${entry.time}] ${String(entry.level || "info").toUpperCase()} ${entry.message}`)
+    .map((entry) => `[${entry.time}] ${String(entry.level || "info").toUpperCase()}${entry.count > 1 ? ` x${entry.count}` : ""} ${entry.message}`)
     .join("\n");
 
   const formatDebugLogValue = (value) => {
@@ -1870,6 +1923,35 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const syncSettingsScrollbackInput = () => {
     if (settingsScrollbackInput) {
       settingsScrollbackInput.value = String(terminalOptionsBase.scrollback || defaultTerminalScrollback);
+    }
+  };
+
+  const invalidateSessionsForTerminalScrollbackChange = (previousScrollback, nextScrollback) => {
+    if (previousScrollback === nextScrollback) {
+      return;
+    }
+    for (const tab of tabs.values()) {
+      for (const session of tab.panes.values()) {
+        clearSessionHistoryCacheWriteSchedule(session);
+        session.historyCacheWriteQueue = [];
+        session.historyCacheWriteBytes = 0;
+        session.historyCacheLoaded = false;
+        session.historyCacheLoadPromise = null;
+        session.historyCacheLoadSeq = Number(session.historyCacheLoadSeq || 0) + 1;
+        session.historyCacheWindowMismatch = true;
+        session.historyCacheSnapshot = null;
+        session.historyCacheReplayCommitSeq = Number(session.historyCacheReplayCommitSeq || 0) + 1;
+        session.historyCacheReplayCommitPending = false;
+        session.historyStateReady = false;
+        session.localBaseCursor = 0n;
+        session.persistedHistoryCursor = 0n;
+        session.appliedHistoryCursor = 0n;
+        session.historyGeneration = "";
+        session.resetOnNextReplay = true;
+        if (session.name === activeName && !session.closed) {
+          requestSessionHistoryReplay(session);
+        }
+      }
     }
   };
 
@@ -3096,7 +3178,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     const nextFontID = String(state?.terminal_font_id || "").trim();
     activeTerminalFontID = uploadedFonts.some((font) => font.id === nextFontID) ? nextFontID : "";
     terminalLineHeightPercent = normalizeTerminalLineHeightPercent(state?.terminal_line_height_percent);
+    const previousScrollback = terminalOptionsBase.scrollback;
     terminalOptionsBase.scrollback = normalizeTerminalScrollback(state?.terminal_scrollback);
+    invalidateSessionsForTerminalScrollbackChange(previousScrollback, terminalOptionsBase.scrollback);
     applyTerminalScrollback();
     desktopMouseClipboardEnabled = state?.desktop_mouse_clipboard_enabled !== false;
     desktopShortcutsBarEnabled = state?.desktop_shortcuts_bar_enabled === true;
@@ -4302,6 +4386,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     const startupElapsed = (timestamp) => timestamp > 0
       ? Math.round(timestamp - webShellStartupMetrics.navigationStartedAt)
       : null;
+    appendStartupTrace("终端恢复阶段完成", `pane=${session.id} replay=${metrics.historyReplayCompleteAt > 0 ? Math.round(metrics.historyReplayCompleteAt - metrics.startedAt) : "?"}ms canvas=${metrics.realCanvasVisibleAt > 0 ? Math.round(metrics.realCanvasVisibleAt - metrics.startedAt) : "?"}ms preview=${metrics.previewPreparedAt > 0 ? Math.round(metrics.previewPreparedAt - metrics.startedAt) : "未准备"}`, { dedupeKey: `recovery-complete:${session.id}:${session.terminalReplayGeneration}` });
     console.info("[terminal-cache-v2] recovery metrics", {
       historySource: metrics.historySource,
       syncMode: metrics.syncMode,
@@ -6855,6 +6940,38 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     prepared?.image?.close?.();
   };
 
+  const terminalFrameHoldIdentity = (session) => ({
+    selector: String(session?.name || "").trim(),
+    tabID: String(session?.tabId || "").trim(),
+    paneID: String(session?.id || "").trim(),
+    cacheV2Epoch: Number(session?.cacheV2Epoch || 0),
+    workspaceIdentity: workspaceCacheV2IdentityKey(session?.cacheV2WorkspaceIdentity),
+    historyGeneration: String(session?.historyGeneration || "").trim(),
+  });
+
+  const sessionTerminalFrameHoldIsCurrent = (session) => {
+    const hold = session?.terminalFrameHold;
+    const heldIdentity = session?.terminalFrameHoldIdentity;
+    if (
+      !session
+      || session.closed
+      || session.terminalFrameHeld !== true
+      || !(hold instanceof HTMLCanvasElement)
+      || hold.width <= 0
+      || hold.height <= 0
+      || !heldIdentity
+    ) {
+      return false;
+    }
+    const current = terminalFrameHoldIdentity(session);
+    return heldIdentity.selector === current.selector
+      && heldIdentity.tabID === current.tabID
+      && heldIdentity.paneID === current.paneID
+      && heldIdentity.cacheV2Epoch === current.cacheV2Epoch
+      && heldIdentity.workspaceIdentity === current.workspaceIdentity
+      && heldIdentity.historyGeneration === current.historyGeneration;
+  };
+
   const holdSessionTerminalFrame = (session) => {
     const source = session?.term?.canvas || session?.term?.renderer?.getCanvas?.();
     const hold = session?.terminalFrameHold;
@@ -6894,10 +7011,14 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     ctx.drawImage(source, 0, 0, hold.width, hold.height);
     hold.hidden = false;
     session.terminalFrameHeld = true;
+    session.terminalFrameHoldIdentity = terminalFrameHoldIdentity(session);
     return true;
   };
 
   const releaseSessionTerminalFrame = (session) => {
+    if (session) {
+      session.terminalFrameHoldIdentity = null;
+    }
     const hold = session?.terminalFrameHold;
     if (!(hold instanceof HTMLCanvasElement)) {
       return;
@@ -6923,6 +7044,86 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return true;
   };
 
+  const scheduleReplayPresentationCheckpoint = (session) => {
+    if (
+      !session
+      || session.closed
+      || session.replayPresentationCheckpointPending
+      || session.name !== activeName
+      || sessionReplayIsCommitted(session)
+    ) {
+      return false;
+    }
+    session.replayPresentationCheckpointPending = true;
+    const replayGeneration = Number(session.terminalReplayGeneration || 0);
+    const connectionEpoch = Number(session.connectionEpoch || 0);
+    session.replayPresentationCheckpointTimer = window.setTimeout(() => {
+      session.replayPresentationCheckpointTimer = 0;
+      session.replayPresentationCheckpointPending = false;
+      if (
+        session.closed
+        || session.name !== activeName
+        || sessionReplayIsCommitted(session)
+        || Number(session.terminalReplayGeneration || 0) !== replayGeneration
+        || Number(session.connectionEpoch || 0) !== connectionEpoch
+        || !isPaneMeasurable(session)
+        || !terminalCanvasMatchesExpectedSize(session)
+      ) {
+        return;
+      }
+      const rendered = typeof session.term?.renderNow === "function" && session.term.renderNow(true) !== false;
+      if (!rendered) {
+        return;
+      }
+      if (holdSessionTerminalFrame(session)) {
+        session.replayPresentationCheckpointCursor = session.appliedHistoryCursor;
+        recordTerminalSessionEvent(session, "replay_presentation_checkpoint", {
+          cursor: String(session.appliedHistoryCursor || 0n),
+        });
+      }
+    }, terminalReplayCheckpointDelayMs);
+    return true;
+  };
+
+  const noteSessionReplayFailure = (session, reason = "replay_failed") => {
+    if (!session || session.closed || sessionReplayIsCommitted(session)) {
+      return false;
+    }
+    session.replayFailureAttempts = Math.min(
+      terminalReplayFailureLimit,
+      Number(session.replayFailureAttempts || 0) + 1,
+    );
+    session.lastReplayFailureReason = String(reason || "replay_failed");
+    if (session.replayFailureAttempts < terminalReplayFailureLimit) {
+      return false;
+    }
+    session.replayRetryPaused = true;
+    session.connectionRetrying = false;
+    session.shellEl.dataset.connection = "error";
+    beginTerminalPresentationHold(session);
+    appendDebugError(
+      "终端历史回放已暂停",
+      `${terminalLocationDescription(session)}: ${session.lastReplayFailureReason}，请重新操作后继续。`,
+    );
+    return true;
+  };
+
+  const resumeSessionReplayRetry = (session, reason = "user_recovery") => {
+    if (!session || session.closed || !session.replayRetryPaused) {
+      return false;
+    }
+    session.replayRetryPaused = false;
+    session.replayFailureAttempts = 0;
+    session.lastReplayFailureReason = "";
+    session.resetOnNextReplay = true;
+    session.connectionRetrying = true;
+    session.shellEl.dataset.connection = "reconnecting";
+    appendDebugLog("info", "终端历史回放恢复重试", `${terminalLocationDescription(session)}: ${reason}`);
+    return true;
+  };
+
+  const replayRetryIsPaused = (session) => Boolean(session?.replayRetryPaused === true);
+
   const hideSessionTerminalPreview = (session) => {
     if (!session?.terminalPreview) {
       return;
@@ -6941,7 +7142,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (
       !session
       || session.connectionChannel !== "fast"
-      || !session.replayComplete
+      || !sessionReplayIsCommitted(session)
       || session.connectionLeaseClosing
       || terminalConnectionScheduler?.currentLease(session)?.leaseID !== session.connectionLeaseID
       || session.fastBootstrapReady
@@ -6973,12 +7174,15 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       clearSessionCacheV2PreparedPreview(session);
       flushPendingInput(session);
       scheduleSessionCacheV2PreviewCapture(session);
-      markSessionCacheV2RecoveryMetric(session, "realCanvasVisibleAt");
-      if (session.replayComplete) {
+      if (sessionReplayIsCommitted(session)) {
         markSessionCacheV2RecoveryMetric(session, "inputReadyAt");
+        appendStartupTrace("终端输入已就绪", `pane=${session.id}`, { dedupeKey: `input-ready:${session.id}:${session.terminalReplayGeneration}` });
       }
+      markSessionCacheV2RecoveryMetric(session, "realCanvasVisibleAt");
+      appendStartupTrace("真实终端 Canvas 已显示", `pane=${session.id}`, { dedupeKey: `canvas-visible:${session.id}:${session.terminalReplayGeneration}` });
+      session.startupTraceActive = false;
       reportSessionCacheV2RecoveryMetrics(session);
-      if (session.connectionChannel === "queue" && session.replayComplete) {
+      if (session.connectionChannel === "queue" && sessionReplayIsCommitted(session)) {
         settleTerminalQueueStartup(session, "ready");
       }
       if (
@@ -6989,16 +7193,18 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
   };
 
-  const panePresentationIsCurrent = (session) => Boolean(
-    session
-    && session.renderReady
-    && !session.resizeAckPending
-    && Number(session.measuredFitGeneration || 0) > 0
-    && session.presentedFitGeneration === session.measuredFitGeneration
-    && session.presentedReplayGeneration === session.terminalReplayGeneration
-    && session.presentedContentGeneration === session.terminalContentGeneration
-    && (!session.appliedResizeEpoch || session.presentedResizeEpoch === session.appliedResizeEpoch)
-  );
+  const panePresentationIsCurrent = (session) => {
+    if (!session?.renderSnapshot || !session.renderReady || session.resizeAckPending) {
+      return false;
+    }
+    const current = createRenderSnapshot(session);
+    return session.renderSnapshot.equals(current)
+      && Number(session.measuredFitGeneration || 0) > 0
+      && session.presentedFitGeneration === session.measuredFitGeneration
+      && session.presentedReplayGeneration === session.terminalReplayGeneration
+      && session.presentedContentGeneration === session.terminalContentGeneration
+      && (!session.appliedResizeEpoch || session.presentedResizeEpoch === session.appliedResizeEpoch);
+  };
 
   const markPaneSyncPending = (session) => {
     if (!session || session.closed) {
@@ -7047,8 +7253,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (
       !session.fullRenderPending
       || session.activationFitPending
-      || session.replayCompletionPending
-      || !session.replayComplete
+      || sessionReplayCommitIsPending(session)
+      || !sessionReplayIsCommitted(session)
       || session.pendingRenderFitGeneration !== session.measuredFitGeneration
       || session.pendingRenderReplayGeneration !== session.terminalReplayGeneration
       || session.pendingRenderContentGeneration !== session.terminalContentGeneration
@@ -7056,12 +7262,17 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return false;
     }
     session.fullRenderPending = false;
+    if (["ready", "applied"].includes(session.resizeController?.phase)) {
+      session.resizeController.commit();
+    }
     session.presentedFitGeneration = session.measuredFitGeneration;
     session.presentedReplayGeneration = session.terminalReplayGeneration;
     session.presentedResizeEpoch = normalizeTerminalResizeEpoch(session.appliedResizeEpoch)
       || normalizeTerminalResizeEpoch(session.requestedResizeEpoch)
       || session.presentedResizeEpoch;
     session.hasPresentedFrame = true;
+    session.renderGeneration = Number(session.renderGeneration || 0) + 1;
+    session.renderSnapshot = createRenderSnapshot(session, { presented: true });
     session.shellEl.dataset.hasPresentedFrame = "true";
     session.presentedHistoryCursor = session.appliedHistoryCursor;
     session.presentationValidationAttempts = 0;
@@ -7107,6 +7318,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return false;
     }
     clearResizeOutputSettle(session);
+    if (session.resizeController?.phase === "settling") {
+      session.resizeController.finishSettle(session.resizeControllerSettleToken);
+    }
     recordTerminalSessionEvent(session, "resize_output_settle_complete", { reason });
     // Entries received during the barrier retain suppressRender=true, so this
     // drain parses them in order without exposing intermediate TUI redraws.
@@ -7121,7 +7335,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   };
 
   const scheduleResizeOutputSettle = (session, { reason = "resize_ack" } = {}) => {
-    if (!session || session.closed || !session.replayComplete) {
+    if (!session || session.closed || !sessionReplayIsCommitted(session)) {
       return false;
     }
     const now = performanceTaskNow();
@@ -7129,6 +7343,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       session.resizeOutputSettleActive = true;
       session.resizeOutputSettleStartedAt = now;
       session.resizeOutputSettleDeadline = now + terminalResizeOutputMaxHoldMs;
+      if (session.resizeController?.phase === "applied") {
+        session.resizeControllerSettleToken = session.resizeController.beginSettle();
+      }
       recordTerminalSessionEvent(session, "resize_output_settle_start", { reason });
     }
     if (session.resizeOutputSettleTimer) {
@@ -7192,7 +7409,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     positionTerminalInput(session);
     syncTerminalViewportPan(session);
     updateMobileSelectionHandles(session);
-    if (session.replayComplete) {
+    if (sessionReplayIsCommitted(session)) {
       setPaneRenderReady(session, false);
     }
     if (!scheduleResizeOutputSettle(session)) {
@@ -7245,6 +7462,23 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.serverRows = Math.max(0, Math.floor(Number(message.rows) || 0));
     session.serverPixelWidth = Math.max(0, Math.floor(Number(message.pixel_width) || 0));
     session.serverPixelHeight = Math.max(0, Math.floor(Number(message.pixel_height) || 0));
+    const resizeController = session.resizeController || (session.resizeController = new TerminalResizeController());
+    try {
+      resizeController.acknowledge({
+        requestID: String(requestedEpoch || epoch),
+        connectionEpoch: Number(session.connectionEpoch || 0),
+        resizeEpoch: epoch,
+        dimensions: {
+          cols: session.serverCols,
+          rows: session.serverRows,
+          pixelWidth: session.serverPixelWidth,
+          pixelHeight: session.serverPixelHeight,
+        },
+      });
+    } catch (error) {
+      console.warn("[terminal-resize] rejected stale resize ACK", error);
+      return;
+    }
     recordTerminalSessionEvent(session, "resize_applied", {
       appliedResizeEpoch: epoch,
       cols: session.serverCols,
@@ -7262,10 +7496,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (resizeFenceMatchesAck) {
       applyTerminalResizeFence(session);
     } else if (session.resizeFenceActive && requestedEpoch && epoch === requestedEpoch) {
-      // The server accepted this epoch with a different geometry (for
-      // example, another owner won a size claim). Do not apply the stale
-      // local target; the normal size-claim path will issue a fresh fence.
-      clearTerminalResizeFence(session);
+      // The server may normalize or arbitrate the requested geometry. Apply
+      // the acknowledged PTY size locally instead of leaving the old grid in
+      // place until a later focus/click triggers another fit.
+      applyObservedTerminalResize(session, message);
     }
     const appliedGeometryMatchesLocal = dimensionsEqualTerminalSize(session, {
       cols: session.serverCols,
@@ -7308,6 +7542,17 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     const epoch = normalizeTerminalResizeEpoch(message?.resize_epoch);
     const requestedEpoch = normalizeTerminalResizeEpoch(session.requestedResizeEpoch);
     if (epoch && requestedEpoch && epoch !== requestedEpoch) {
+      return;
+    }
+    const resizeController = session.resizeController || (session.resizeController = new TerminalResizeController());
+    try {
+      resizeController.fail({
+        requestID: String(epoch || requestedEpoch || ""),
+        connectionEpoch: Number(session.connectionEpoch || 0),
+        resizeEpoch: epoch || requestedEpoch || undefined,
+      });
+    } catch (error) {
+      console.warn("[terminal-resize] rejected stale resize error", error);
       return;
     }
     session.resizeAckPending = false;
@@ -7474,7 +7719,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     forceHistory = false,
     scheduleValidation = true,
   } = {}) => {
-    if (!session || session.closed || !session.replayComplete || session.name !== activeName) {
+    if (!session || session.closed || !sessionReplayIsCommitted(session) || session.name !== activeName) {
       return false;
     }
     if (!isPaneVisibleForSizing(session) || !isPaneMeasurable(session)) {
@@ -7550,7 +7795,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (
       !session
       || session.closed
-      || !session.replayComplete
+      || !sessionReplayIsCommitted(session)
       || (!forceHistory && panePresentationIsCurrent(session))
     ) {
       return;
@@ -7567,7 +7812,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       session.presentationValidationAttempts = validationAttempt + 1;
       if (
         !session.closed
-        && session.replayComplete
+        && sessionReplayIsCommitted(session)
         && isPaneVisibleForSizing(session)
       ) {
         const sameReplay = Number(session.terminalReplayGeneration || 0) === replayGeneration;
@@ -7587,7 +7832,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
           window.requestAnimationFrame(() => {
             if (
               !session.closed
-              && session.replayComplete
+              && sessionReplayIsCommitted(session)
               && Number(session.terminalReplayGeneration || 0) === replayGeneration
               && isPaneVisibleForSizing(session)
             ) {
@@ -7928,7 +8173,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!pane || !prepared?.identity || !prepared.image || !prepared.historyGeneration) {
       return false;
     }
-    if (String(pane.historyGeneration || "").trim() !== String(prepared.historyGeneration || "").trim()) {
+    const paneHistoryGeneration = String(pane.historyGeneration || "").trim();
+    if (paneHistoryGeneration && paneHistoryGeneration !== String(prepared.historyGeneration || "").trim()) {
       return false;
     }
     const expected = sessionTerminalCacheV2Identity(pane, prepared.historyGeneration);
@@ -7969,9 +8215,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
 
   const loadPaneTabOverviewPreviewManifest = async (pane) => {
     const historyGeneration = String(pane?.historyGeneration || "").trim();
-    if (!historyGeneration || !sessionUsesTerminalCacheV2(pane)) {
+    if (!sessionUsesTerminalCacheV2(pane)) {
       return null;
     }
+    // Hidden panes have not attached yet after a cold page load, so their
+    // history generation is not known. The pane-level manifest key is already
+    // scoped by account, selector, workspace, tab and pane; once replay
+    // supplies a generation, require it strictly.
     const expected = sessionTerminalCacheV2Identity(pane, historyGeneration);
     if (!expected) {
       return null;
@@ -7983,8 +8233,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     );
     if (
       !snapshot
-      || snapshot.historyGeneration !== historyGeneration
-      || !terminalCacheV2.identityMatches(expected, snapshot, { requireHistory: true })
+      || (historyGeneration && snapshot.historyGeneration !== historyGeneration)
+      || !terminalCacheV2.identityMatches(expected, snapshot, { requireHistory: Boolean(historyGeneration) })
     ) {
       return null;
     }
@@ -8024,10 +8274,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         return null;
       }
       const image = await decodeTabOverviewPreviewBlob(preview.blob);
+      const currentHistoryGeneration = String(pane.historyGeneration || "").trim();
       if (
         pane.closed
         || pane.cacheV2OverviewPreviewSeq !== previewSeq
-        || String(pane.historyGeneration || "").trim() !== String(snapshot.historyGeneration || "").trim()
+        || (currentHistoryGeneration && currentHistoryGeneration !== String(snapshot.historyGeneration || "").trim())
         || !sessionUsesTerminalCacheV2(pane)
       ) {
         image?.close?.();
@@ -8116,12 +8367,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
 
     const liveCanvas = pane?.term?.canvas || pane?.term?.element?.querySelector?.("canvas");
     const liveFrame = pane?.renderReady && pane?.hasPresentedFrame ? liveCanvas : null;
+    const heldFrame = sessionTerminalFrameHoldIsCurrent(pane) ? pane.terminalFrameHold : null;
     const cachedPreview = sessionCacheV2OverviewPreviewMatches(pane, pane?.cacheV2OverviewPreview)
       ? pane.cacheV2OverviewPreview.image
       : null;
     const source = pane?.tabId === activeTabId
-      ? liveFrame || cachedPreview
-      : cachedPreview || (!sessionUsesTerminalCacheV2(pane) ? liveFrame : null);
+      ? liveFrame || cachedPreview || heldFrame
+      : cachedPreview || heldFrame || (!sessionUsesTerminalCacheV2(pane) ? liveFrame : null);
     if (source?.width > 0 && source?.height > 0) {
       try {
         const scale = Math.min(width / source.width, height / source.height);
@@ -10211,6 +10463,15 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     pane.requestedPixelWidth = pixelWidth;
     pane.requestedPixelHeight = pixelHeight;
     pane.resizeAckPending = resizeEpochSupported;
+    pane.resizeController = pane.resizeController || new TerminalResizeController();
+    if (resizeEpochSupported) {
+      pane.resizeController.request({
+        requestID: String(resizeEpoch),
+        connectionEpoch: Number(pane.connectionEpoch || 0),
+        resizeEpoch,
+        dimensions: { cols, rows, pixelWidth, pixelHeight },
+      });
+    }
     pane.lastResizeRequestAt = performanceTaskNow();
     try {
       pane.socket.send(JSON.stringify({
@@ -10725,7 +10986,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       // parsed by the old grid, and output after it is parsed by the new grid.
       const canDeferLocalResize = Boolean(
         dimensionsWillChange
-        && pane.replayComplete
+        && sessionReplayIsCommitted(pane)
         && pane.socket?.readyState === WebSocket.OPEN
         && pane.resizeEpochSupported !== false
       );
@@ -10789,10 +11050,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       resetTerminalHostViewport(pane, { clean: true });
       positionTerminalInput(pane);
       syncTerminalViewportPan(pane);
-      if (!pane.initialRuntimeResetDone && !pane.replayComplete) {
+      if (!pane.initialRuntimeResetDone && !sessionReplayIsCommitted(pane)) {
         resetTerminalAfterInitialFit(pane);
       }
-      if (fitGenerationChanged && pane.replayComplete) {
+      if (fitGenerationChanged && sessionReplayIsCommitted(pane)) {
         setPaneRenderReady(pane, false);
       }
       const sentTerminalSize = sendTerminalSize(pane, {
@@ -10804,7 +11065,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       if (
         sentTerminalSize
         && dimensionsWillChange
-        && pane.replayComplete
+        && sessionReplayIsCommitted(pane)
         && pane.resizeEpochSupported === false
         && scheduleResizeOutputSettle(pane, { reason: "legacy_resize" })
       ) {
@@ -11447,22 +11708,34 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!session?.term) {
       return;
     }
-    try {
-      beginTerminalPresentationHold(session);
-      installRendererBaselinePatch(session);
-      if (session.term.renderer && typeof session.term.renderer.measureFont === "function") {
-        session.term.renderer.metrics = session.term.renderer.measureFont();
+    const metricsGeneration = Number(session.fontMetricsGeneration || 0) + 1;
+    session.fontMetricsGeneration = metricsGeneration;
+    const refresh = (forceSizeSync = false) => {
+      if (session.closed || Number(session.fontMetricsGeneration || 0) !== metricsGeneration) {
+        return;
       }
-      cancelPendingTerminalRender(session.term);
-      resizePane(session, { settlePresentation: true });
-      if (deferFitRetry) {
-        window.setTimeout(() => {
-          if (!session.closed) {
-            resizePane(session, { settlePresentation: true });
-          }
-        }, 60);
+      try {
+        installRendererBaselinePatch(session);
+        if (session.term.renderer && typeof session.term.renderer.measureFont === "function") {
+          session.term.renderer.metrics = session.term.renderer.measureFont();
+        }
+        cancelPendingTerminalRender(session.term);
+        resizePane(session, {
+          settlePresentation: true,
+          forceFullRender: true,
+          hideUntilRender: true,
+          forceSizeSync,
+        });
+      } catch (error) {
+        console.warn("[terminal-font] failed to refresh terminal metrics", error);
       }
-    } catch (error) {
+    };
+    beginTerminalPresentationHold(session);
+    refresh(false);
+    if (deferFitRetry) {
+      window.requestAnimationFrame(() => refresh(true));
+      window.setTimeout(() => refresh(true), 80);
+      window.setTimeout(() => refresh(true), 240);
     }
   };
 
@@ -13299,6 +13572,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     const tab = currentTab();
     for (const pane of tab?.panes.values() || []) {
       if (pane.name === activeName) {
+        if (probe) {
+          resumeSessionReplayRetry(pane, "user_recovery");
+        }
         const ready = checkSessionConnectionHealth(pane, { connect: true, force: true, allowHidden });
         if (probe && ready) {
           probeOpenSessionSocket(pane, { allowHidden });
@@ -13314,6 +13590,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     for (const tab of tabs.values()) {
       for (const pane of tab.panes.values()) {
         if (pane.name === activeName) {
+          resumeSessionReplayRetry(pane, "network_online");
           checkSessionConnectionHealth(pane, { connect: true, force: true, allowHidden });
         }
       }
@@ -15357,7 +15634,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
 
   const isSessionInputReady = (session) => (
     Boolean(
-      session?.replayComplete
+      sessionReplayIsCommitted(session)
       && session.shellEl?.dataset.previewReady !== "true"
       && session.socket?.readyState === WebSocket.OPEN
       && session.connectionChannel === "fast"
@@ -15369,7 +15646,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
 
   const isSessionGeneratedInputReady = (session) => (
     Boolean(
-      session?.replayComplete
+      sessionReplayIsCommitted(session)
       && session.shellEl?.dataset.previewReady !== "true"
       && session.socket?.readyState === WebSocket.OPEN
       && session.connectionChannel === "fast"
@@ -15920,6 +16197,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       session.historyCacheSnapshot = null;
       return null;
     }
+    const loadSeq = Number(session.historyCacheLoadSeq || 0) + 1;
+    session.historyCacheLoadSeq = loadSeq;
     const load = cacheV2Identity
       ? withTerminalCacheTimeout(
         terminalCacheV2.loadManifest(cacheV2Identity),
@@ -15931,9 +16210,16 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       .then((snapshot) => {
         if (
           session.closed
+          || session.historyCacheLoadSeq !== loadSeq
           || (cacheV2Identity && !sessionUsesTerminalCacheV2(session))
           || (!cacheV2Identity && !sessionUsesLegacyHistoryCache(session))
         ) {
+          return null;
+        }
+        if (snapshot && !terminalCacheV2.historyWindowMatches(snapshot, terminalOptionsBase.scrollback)) {
+          session.historyCacheSnapshot = null;
+          session.historyCacheLoaded = true;
+          session.historyCacheWindowMismatch = true;
           return null;
         }
         session.historyCacheSnapshot = snapshot;
@@ -15945,10 +16231,16 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         return snapshot;
       })
       .catch((error) => {
+        if (session.historyCacheLoadSeq !== loadSeq) {
+          return null;
+        }
         disableSessionHistoryCache(session, error);
         return null;
       })
       .finally(() => {
+        if (session.historyCacheLoadSeq !== loadSeq) {
+          return;
+        }
         session.historyCacheLoaded = true;
         session.historyCacheLoadPromise = null;
       });
@@ -15977,6 +16269,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
           ? [cacheV2Identity, generation, chunks]
           : [session.name, session.id, generation, chunks]), {
         limitBytes: Math.max(1, Number(terminalOptionsBase.scrollback || 0) * averageTerminalHistoryBytesPerLine),
+        historyWindowLines: terminalOptionsBase.scrollback,
       }))
       .then((result) => {
         if (!result || session.closed || session.historyGeneration !== generation) {
@@ -16051,7 +16344,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       .catch(() => {})
       .then(() => previewPreparation ? Promise.resolve(previewPreparation).catch(() => null) : null)
       .then(() => cacheV2Identity
-        ? terminalCacheV2.reset(cacheV2Identity, generation, cursor)
+        ? terminalCacheV2.reset(cacheV2Identity, generation, cursor, {
+          historyWindowLines: terminalOptionsBase.scrollback,
+        })
         : terminalHistoryCache.reset(session.name, session.id, generation, cursor))
       .then((result) => {
         if (session.closed || session.historyGeneration !== generation) {
@@ -16296,6 +16591,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       pendingObjectURL = "";
       session.cacheV2PreparedPreview = prepared;
       markSessionCacheV2RecoveryMetric(session, "previewPreparedAt");
+      appendStartupTrace("终端预览已准备", `pane=${session.id}`, { dedupeKey: `preview-prepared:${session.id}:${session.terminalReplayGeneration}` });
       return prepared;
       })(), terminalCacheV2PreviewTimeoutMs, "Terminal cache preview prepare timed out.")
       .catch((error) => {
@@ -16346,8 +16642,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (
       session.socket !== currentSocket
       || session.terminalReplayGeneration !== replayGeneration
-      || session.replayVerified !== "identified"
-      || session.replayComplete
+      || !sessionReplayHasIdentifiedAuthorization(session)
+      || sessionReplayIsCommitted(session)
       || !sessionUsesTerminalCacheV2(session)
     ) {
       setSessionCacheV2PreviewMiss(session, "preview-session-changed");
@@ -16388,7 +16684,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       || session.closed
       || session.name !== activeName
       || session.renderReady
-      || session.replayComplete
+      || sessionReplayIsCommitted(session)
       || !sessionUsesTerminalCacheV2(session)
       || !snapshot?.preview
       || session.historyCacheSnapshot !== snapshot
@@ -16406,7 +16702,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       session.closed
       || session.name !== activeName
       || session.renderReady
-      || session.replayComplete
+      || sessionReplayIsCommitted(session)
       || !sessionUsesTerminalCacheV2(session)
       || session.historyCacheSnapshot !== snapshot
       || !sessionCacheV2PreviewMatchesSnapshot(prepared, snapshot)
@@ -16443,7 +16739,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!snapshot?.preview) {
       return false;
     }
-    const authorized = session.replayVerified === "identified"
+    const authorized = sessionReplayHasIdentifiedAuthorization(session)
       && validateSessionCacheV2PreviewIdentity(
         session,
         message,
@@ -16499,6 +16795,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!session || session.closed || session.cacheV2WarmReplaySeq !== replaySeq) {
       return;
     }
+    if (session.hasPresentedFrame && !session.terminalFrameHeld) {
+      beginTerminalPresentationHold(session);
+    }
     session.cacheV2WarmReplayActive = false;
     session.cacheV2WarmReplayReady = false;
     session.cacheV2WarmReplaySnapshot = null;
@@ -16509,6 +16808,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.resetOnNextReplay = true;
     markPaneSyncPending(session);
     disableSessionHistoryCache(session, error);
+    if (noteSessionReplayFailure(session, error?.message || "local_cache_replay_failed")) {
+      return;
+    }
     const socket = session.socket;
     if (socket) {
       closeSessionSocketForReconnect(session, socket, "Terminal local cache replay failed.");
@@ -16623,7 +16925,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       if (
         session.connectionChannel === "queue"
         && session.socket?.readyState === WebSocket.OPEN
-        && !session.replayComplete
+        && !sessionReplayIsCommitted(session)
       ) {
         startAttachReadyTimer(session, session.socket);
       }
@@ -16674,7 +16976,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.appliedHistoryCursor = snapshotStartCursor;
     session.persistedHistoryCursor = snapshotStartCursor;
     session.historyStateReady = false;
-    session.replayVerified = "identified";
+    setSessionReplayAuthorization(session, "identified");
     session.replayCompletionPending = true;
     resetSessionHistoryCache(session, session.historyGeneration, snapshotStartCursor);
     try {
@@ -16762,7 +17064,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       !session
       || session.closed
       || session.connectionChannel !== "queue"
-      || !session.replayComplete
+      || !sessionReplayIsCommitted(session)
       || session.resizeAckPending
       || session.cacheV2WarmReplayActive
     ) {
@@ -16782,7 +17084,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (
       !sessionUsesTerminalCacheV2(session)
       || session.cacheV2PreviewCaptureSeq !== captureSeq
-      || !session.replayComplete
+      || !sessionReplayIsCommitted(session)
       || !sessionCanCaptureCacheV2Preview(session)
       || !session.historyStateReady
       || !session.historyGeneration
@@ -16813,12 +17115,14 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     const { cols, rows } = terminalSize(session);
     const devicePixelRatio = window.devicePixelRatio || 1;
     const themeFingerprint = terminalCacheV2ThemeFingerprint();
+    const previewCaptureStartedAt = terminalCacheV2MetricNow();
+    appendDebugLog("info", "[preview] PNG capture 开始", `pane=${session.id}`, { dedupeKey: `preview-capture-start:${session.id}` });
     const blob = await terminalCanvasBlob(canvas);
     const currentSize = terminalSize(session);
     if (
       !sessionUsesTerminalCacheV2(session)
       || session.cacheV2PreviewCaptureSeq !== captureSeq
-      || !session.replayComplete
+      || !sessionReplayIsCommitted(session)
       || !session.historyStateReady
       || !sessionCanCaptureCacheV2Preview(session)
       || session.outputQueueSize > 0
@@ -16842,6 +17146,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       devicePixelRatio,
       themeFingerprint,
     });
+    appendDebugLog("info", "[preview] PNG capture 完成", `pane=${session.id} duration=${Math.round(terminalCacheV2MetricNow() - previewCaptureStartedAt)}ms bytes=${blob.size}`, { dedupeKey: `preview-capture-complete:${session.id}` });
     clearSessionCacheV2OverviewPreview(session);
     scheduleTabOverviewRender();
   };
@@ -17106,13 +17411,42 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
   };
 
+  const setSessionReplayAuthorization = (session, authorization = false) => {
+    const normalized = authorization === "identified" || authorization === "legacy"
+      ? authorization
+      : false;
+    session.replayAuthorization = normalized;
+    session.replayVerified = normalized;
+    return normalized;
+  };
+
+  const sessionReplayAuthorization = (session) => (
+    session?.replayAuthorization || session?.replayVerified || false
+  );
+
+  const sessionReplayIsAuthorized = (session) => Boolean(sessionReplayAuthorization(session));
+
+  const sessionReplayHasIdentifiedAuthorization = (session) => (
+    sessionReplayAuthorization(session) === "identified"
+  );
+
+  const sessionReplayCommitIsPending = (session) => Boolean(
+    session
+    && session.replayController?.phase === "awaiting_commit"
+  );
+
+  const sessionReplayIsCommitted = (session) => Boolean(
+    session
+    && session.replayController?.phase === "committed"
+  );
+
   const finishSessionHistoryReplayIfReady = (session) => {
     if (
       !session ||
-      !session.replayCompletionPending ||
+      !sessionReplayCommitIsPending(session) ||
       session.outputQueueSize > 0 ||
       session.cacheV2ReplayActive ||
-      !session.replayVerified ||
+      !sessionReplayIsAuthorized(session) ||
       session.closed ||
       session.name !== activeName ||
       (session.historyProtocolActive && session.appliedHistoryCursor < session.historyReplayTargetCursor)
@@ -17151,8 +17485,19 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       markSessionCacheV2RecoveryMetric(session, "cacheCommitCompleteAt");
     }
     session.replayCompletionPending = false;
+    if (session.replayController?.phase === "awaiting_commit") {
+      session.replayController.commit();
+    }
+    if (session.replayController?.phase === "committed") {
+      session.replayControllerLegacyActive = false;
+      session.queueReplayControllerActive = false;
+      session.queueReplayControllerLegacy = false;
+    }
+    session.replayFailureAttempts = 0;
+    session.replayRetryPaused = false;
+    session.lastReplayFailureReason = "";
     session.replayComplete = true;
-    session.replayVerified = false;
+    setSessionReplayAuthorization(session, false);
     session.historyStateReady = true;
     session.historyCacheSnapshot = null;
     session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
@@ -17218,6 +17563,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return;
     }
     clearSessionOutputFlushSchedule(session);
+    if (session.replayPresentationCheckpointTimer) {
+      window.clearTimeout(session.replayPresentationCheckpointTimer);
+      session.replayPresentationCheckpointTimer = 0;
+    }
+    session.replayPresentationCheckpointPending = false;
+    session.outputQueueGeneration = Number(session.outputQueueGeneration || 0) + 1;
     session.outputQueue = [];
     session.outputQueueSize = 0;
     session.replayCompletionPending = false;
@@ -17232,6 +17583,25 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     clearSessionOutputFlushSchedule(session);
     const queue = Array.isArray(session.outputQueue) ? session.outputQueue : [];
     if (queue.length === 0) {
+      finishSessionHistoryReplayIfReady(session);
+      return;
+    }
+    const outputQueueGenerationMismatch = queue.some((entry) => entry.queueGeneration !== session.outputQueueGeneration);
+    const outputIdentityMismatch = outputQueueGenerationMismatch || queue.some((entry) => (
+      entry.queueGeneration !== session.outputQueueGeneration
+      || entry.connectionEpoch !== Number(session.connectionEpoch || 0)
+      || entry.selector !== String(session.name || "")
+      || entry.paneID !== String(session.id || "")
+      || entry.channelGeneration !== Number(session.connectionChannelGeneration || 0)
+      || entry.historyGeneration !== String(session.historyGeneration || "")
+    ));
+    if (outputIdentityMismatch) {
+      recordTerminalRuntimeMetric("staleOutputQueueDrops");
+      session.outputQueue = [];
+      session.outputQueueSize = 0;
+      session.replayCompletionPending = false;
+      session.resetOnNextReplay = true;
+      beginTerminalPresentationHold(session);
       finishSessionHistoryReplayIfReady(session);
       return;
     }
@@ -17337,6 +17707,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         positionTerminalInput(session);
         schedulePaneFullRenderValidation(session);
       }
+      if (wrote && flushQueue.some((entry) => entry.replayOutput)) {
+        scheduleReplayPresentationCheckpoint(session);
+      }
       if (session.outputQueueSize > 0) {
         scheduleSessionOutputFlush(session);
       } else {
@@ -17378,7 +17751,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return;
     }
     // Output chunks carry replay state because the replay-complete control frame can arrive before the next paint.
-    const replayOutput = !session.replayComplete;
+    const replayOutput = !sessionReplayIsCommitted(session);
     const resizeOutputSettleActive = session.resizeOutputSettleActive === true;
     if (resizeOutputSettleActive) {
       scheduleResizeOutputSettle(session, { reason: "output_received" });
@@ -17392,6 +17765,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     let nextHistoryCursor = trackHistory
       ? (startCursor === null ? session.receivedHistoryCursor : startCursor)
       : null;
+    const connectionEpoch = Number(session.connectionEpoch || 0);
+    const channelGeneration = Number(session.connectionChannelGeneration || 0);
+    const historyGeneration = String(session.historyGeneration || "");
     const enqueueEntry = (entryData) => {
       const byteLength = terminalOutputByteLength(entryData);
       if (byteLength <= 0) {
@@ -17410,6 +17786,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         replayOutput,
         suppressRender,
         allowGeneratedInput,
+        queueGeneration: session.outputQueueGeneration,
+        connectionEpoch,
+        channelGeneration,
+        historyGeneration,
+        selector: String(session.name || ""),
+        paneID: String(session.id || ""),
         historyCacheable: historySource === "server" && historyEndCursor !== null,
         historyStartCursor,
         historyEndCursor,
@@ -17451,7 +17833,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (session.closed) {
       return;
     }
+    const writeStartedAt = session.startupTraceActive ? terminalCacheV2MetricNow() : 0;
     measurePerformanceTask("terminal render", () => session.term.write(data));
+    if (session.startupTraceActive) {
+      appendStartupTrace("终端写入完成", `pane=${session.id} bytes=${data?.byteLength || 0} duration=${Math.round(terminalCacheV2MetricNow() - writeStartedAt)}ms`, { dedupeKey: `terminal-write:${session.id}` });
+    }
     session.lastTerminalOutputAt = performance.now();
     session.term.requestRender?.({ throttle: true });
     advanceTerminalContentGeneration(session);
@@ -17593,8 +17979,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     clearResizeOutputSettle(session);
     session.socket = null;
+    session.replayController?.reset();
+    session.queueReplayControllerActive = false;
+    session.queueReplayControllerLegacy = false;
+    session.replayControllerLegacyActive = false;
     session.replayComplete = false;
-    session.replayVerified = false;
+    setSessionReplayAuthorization(session, false);
     session.replayCompletionPending = false;
     session.historyCacheReplayCommitSeq = Number(session.historyCacheReplayCommitSeq || 0) + 1;
     session.historyCacheReplayCommitPending = false;
@@ -17649,7 +18039,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       discardSessionOutputBuffers(session);
       markPaneSyncPending(session);
       session.replayComplete = false;
-      session.replayVerified = false;
+      setSessionReplayAuthorization(session, false);
       session.replayCompletionPending = false;
       session.historyStateReady = false;
       session.resetOnNextReplay = false;
@@ -17682,6 +18072,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return;
     }
     clearResizeOutputSettle(session);
+    session.replayController?.reset();
+    session.queueReplayControllerActive = false;
+    session.queueReplayControllerLegacy = false;
+    session.replayControllerLegacyActive = false;
     session.resetOnNextReplay = true;
     session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
     session.cacheV2WarmReplayActive = false;
@@ -17703,7 +18097,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       closeSessionSocketForReconnect(session, socket, "Terminal history resync requested.");
     } else {
       session.replayComplete = false;
-      session.replayVerified = false;
+      setSessionReplayAuthorization(session, false);
       session.connectionRetrying = true;
       session.shellEl.dataset.connection = "reconnecting";
     }
@@ -17720,7 +18114,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   };
 
   const scheduleReconnect = (session, { immediate = false, allowHidden = true } = {}) => {
-    if (disposed || !session || session.closed || !isCurrentInstanceSession(session)) {
+    if (disposed || !session || session.closed || !isCurrentInstanceSession(session) || replayRetryIsPaused(session)) {
       return;
     }
     if (navigator.onLine === false) {
@@ -17863,7 +18257,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     session.attachReadyTimeoutMs = timeoutMs;
     session.attachReadyTimer = window.setTimeout(() => {
       session.attachReadyTimer = 0;
-      if (session.socket !== currentSocket || session.replayComplete) {
+      if (session.socket !== currentSocket || sessionReplayIsCommitted(session)) {
         return;
       }
       if (
@@ -17907,7 +18301,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         && session.cacheV2WarmReplayActive
         && !session.cacheV2WarmReplayReady
       );
-      if (!queueWarmReplayActive && !session.replayComplete && attachStartedAt > 0 && now - attachStartedAt > attachReadyTimeout) {
+      if (!queueWarmReplayActive && !sessionReplayIsCommitted(session) && attachStartedAt > 0 && now - attachStartedAt > attachReadyTimeout) {
         closeSessionSocketForReconnect(session, socket, `Terminal attach readiness check failed: ${session.name}/${session.id}`, { allowHidden: allowHidden || force });
         return false;
       }
@@ -18255,16 +18649,19 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     channel = "fast",
     channelGeneration = 0,
   } = {}) => {
+    let connectionEpoch = Number(session?.connectionEpoch || 0);
     const fastUsesMultiplexedTransport = channel === "fast" && !isClientInstanceName(session?.name);
     const usesMultiplexedTransport = channel === "queue" || fastUsesMultiplexedTransport;
     const transportIsCurrent = () => Boolean(
       channel === "queue"
         ? channelGeneration > 0
+          && session?.connectionEpoch === connectionEpoch
           && session?.connectionChannel === "queue"
           && session.connectionChannelGeneration === channelGeneration
           && terminalQueueConnection
           && terminalQueueTargetName === session.name
         : leaseID
+          && session?.connectionEpoch === connectionEpoch
           && session?.connectionChannel === "fast"
           && (!fastUsesMultiplexedTransport || (
             channelGeneration > 0
@@ -18277,6 +18674,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (
       !session ||
       session.closed ||
+      replayRetryIsPaused(session) ||
       !transportIsCurrent() ||
       !isCurrentInstanceSession(session) ||
       !sessionHasTerminalConnectionSize(session) ||
@@ -18291,8 +18689,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return false;
     }
     startSessionCacheV2RecoveryMetrics(session);
+    session.startupTraceActive = true;
     await prepareSessionHistoryCache(session);
     markSessionCacheV2RecoveryMetric(session, "cacheManifestReadyAt");
+    appendStartupTrace("终端缓存 manifest 准备完成", `pane=${session.id}`, { dedupeKey: `cache-manifest:${session.id}:${session.terminalReplayGeneration}` });
     flushSessionOutput(session, { force: true });
     try {
       const flush = flushSessionHistoryCacheWrites(session);
@@ -18316,6 +18716,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return false;
     }
     session.pendingConnect = false;
+    connectionEpoch += 1;
+    session.connectionEpoch = connectionEpoch;
     clearReconnectTimer(session);
     session.terminalReplayGeneration = Number(session.terminalReplayGeneration || 0) + 1;
     session.replayFitGeneration = session.measuredFitGeneration;
@@ -18330,6 +18732,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       socketUrl.searchParams.set("pane", session.id);
       socketUrl.searchParams.set("cols", String(session.term.cols || 120));
       socketUrl.searchParams.set("rows", String(session.term.rows || 32));
+      if (!isClientInstanceName(session.name)) {
+        socketUrl.searchParams.set("integrity_protocol", "fast-v1");
+      }
     }
     const themePayload = terminalThemePayload();
     if (!usesMultiplexedTransport) {
@@ -18374,6 +18779,44 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       binaryBytes: 0,
       openedAt: 0,
     };
+    const replayController = session.replayController || (session.replayController = new TerminalReplayController());
+    session.fastIntegrityEnabled = false;
+    replayController.reset();
+    session.queueReplayControllerActive = false;
+    session.queueReplayControllerLegacy = false;
+    session.replayControllerLegacyActive = false;
+    const decodeFastBinaryMessage = (input) => {
+      const decoded = decodeFastBinaryFrame(input, {
+        selector: String(session.name || ""),
+        paneID: String(session.id || ""),
+        historyGeneration: String(session.historyGeneration || ""),
+        expectedSequence: BigInt(session.fastIntegritySequence || 1),
+        expectedStartCursor: BigInt(session.fastIntegrityCursor ?? session.receivedHistoryCursor ?? 0n),
+      });
+      const expectedSequence = BigInt(session.fastIntegritySequence || 1);
+      const expectedCursor = BigInt(session.fastIntegrityCursor ?? session.receivedHistoryCursor ?? 0n);
+      if (decoded.sequence !== expectedSequence || decoded.startCursor !== expectedCursor) {
+        throw new Error("Fast binary envelope sequence or cursor discontinuity");
+      }
+      session.fastIntegritySequence = Number(expectedSequence + 1n);
+      session.fastIntegrityCursor = decoded.endCursor;
+      if (replayController.phase === "replaying") {
+        replayController.acceptBinary({
+          sequence: decoded.header.sequence,
+          startCursor: decoded.header.start_cursor,
+          endCursor: decoded.header.end_cursor,
+          length: decoded.header.length,
+          requestID: String(session.terminalReplayGeneration || ""),
+          connectionEpoch,
+          identity: {
+            selector: session.name,
+            paneID: session.id,
+            historyGeneration: session.historyGeneration,
+          },
+        });
+      }
+      return decoded.payload;
+    };
     console.info("[client-terminal] websocket connecting", {
       name: session.name,
       pane: session.id,
@@ -18402,6 +18845,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         throw new Error(`terminal ${channel} multiplexed connection is unavailable`);
       }
       const size = terminalSize(session);
+      const checkpointCapabilities = terminalCheckpointCapabilitiesForTerminal(session.term);
       currentSocket = multiplexedConnection.open({
         pane_id: session.id,
         stream_id: streamID,
@@ -18416,9 +18860,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         local_base_cursor: historyConnectRange?.baseCursor?.toString?.() || "",
         local_end_cursor: historyConnectRange?.endCursor?.toString?.() || "",
         history_replay_mode: session.resetOnNextReplay ? "snapshot" : "",
+        flow_control: channel === "queue" ? "turn-ack-v1" : "",
         foreground: themePayload.foreground,
         background: themePayload.background,
         cursor: themePayload.cursor,
+        ...(checkpointCapabilities.length > 0
+          ? { checkpoint_capabilities: checkpointCapabilities }
+          : {}),
       });
     } else {
       currentSocket = new WebSocket(socketUrl.toString());
@@ -18440,8 +18888,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       session.fastBootstrapLeaseID = Number(leaseID || 0);
       session.fastBootstrapReplayGeneration = 0;
     }
-    session.replayVerified = false;
+    setSessionReplayAuthorization(session, false);
     session.replayCompletionPending = false;
+    session.queueTurnReceivedCursor = null;
+    session.queueTurnReceivedSequence = null;
     session.allowGeneratedInputDuringReplay = false;
     if (!cacheV2WarmReplayStarted) {
       session.cacheV2ReplayActive = false;
@@ -18475,10 +18925,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     const validateReplayMessage = (message) => {
       const selector = String(message?.selector || "").trim();
       const paneID = String(message?.pane_id || message?.paneId || "").trim();
-      if (!selector && !paneID) {
-        return true;
-      }
-      return selector === session.name && paneID === session.id;
+      // Legacy control frames may omit identity, but every identity field that
+      // is present must independently match this terminal owner.
+      return (!selector || selector === session.name)
+        && (!paneID || paneID === session.id);
     };
 
     // Multiplexed transports already route frames by logical stream, but keep
@@ -18536,8 +18986,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       const streamID = String(metadata.streamID || metadata.stream_id || "unknown").trim() || "unknown";
       session.resetOnNextReplay = true;
       session.replayComplete = false;
-      session.replayVerified = false;
+      setSessionReplayAuthorization(session, false);
       session.replayCompletionPending = false;
+      session.replayController?.reset();
+      session.queueReplayControllerActive = false;
+      session.queueReplayControllerLegacy = false;
+      session.replayControllerLegacyActive = false;
       discardSessionOutputBuffers(session);
       // Keep the last valid frame visible while the current logical stream is
       // replaced. The wrong frame must never be allowed to turn into a black
@@ -18566,6 +19020,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       session.historyProtocolActive = false;
       session.historyCacheSnapshot = null;
       session.historyGeneration = "";
+      session.replayController?.reset();
+      session.queueReplayControllerActive = false;
+      session.queueReplayControllerLegacy = false;
+      session.replayControllerLegacyActive = false;
       session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
       session.cacheV2WarmReplayActive = false;
       session.cacheV2WarmReplayReady = false;
@@ -18580,6 +19038,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         reason,
       });
       appendDebugError("终端历史同步失败", reason);
+      if (noteSessionReplayFailure(session, reason)) {
+        try {
+          currentSocket.close(4001, "replay_retry_paused");
+        } catch (error) {
+        }
+        return;
+      }
       closeSessionSocketForReconnect(session, currentSocket, `Terminal history sync failed: ${reason}`);
     };
 
@@ -18592,6 +19057,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       }
       socketDebug.openedAt = Date.now();
       markSessionCacheV2RecoveryMetric(session, "websocketOpenAt");
+      appendStartupTrace("终端 WebSocket 已打开", `pane=${session.id} channel=${channel}`, { dedupeKey: `socket-open:${session.id}:${session.terminalReplayGeneration}:${channel}` });
       console.info("[client-terminal] websocket open", {
         name: session.name,
         pane: session.id,
@@ -18700,8 +19166,17 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
                   session.serverPixelWidth = Math.max(0, Math.floor(Number(message.pixel_width) || 0));
                   session.serverPixelHeight = Math.max(0, Math.floor(Number(message.pixel_height) || 0));
                 }
+                session.fastIntegrityEnabled = String(message.integrity_protocol || "").trim() === "fast-v1";
                 const modernHistoryProtocol = Boolean(historyGeneration && syncMode);
                 if (!modernHistoryProtocol) {
+                  replayController.beginLegacy({
+                    requestID: String(session.terminalReplayGeneration || ""),
+                    connectionEpoch,
+                    identity: { selector: session.name, paneID: session.id },
+                  });
+                  session.queueReplayControllerActive = false;
+                  session.queueReplayControllerLegacy = channel === "queue";
+                  session.replayControllerLegacyActive = true;
                   session.historyProtocolActive = false;
                   session.historyStateReady = false;
                   session.historyGeneration = "";
@@ -18717,7 +19192,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
                     closeSessionSocketForReconnect(session, currentSocket, "Terminal reset for legacy replay failed.");
                     return;
                   }
-                  session.replayVerified = replayMessageHasIdentity(message) ? "identified" : "legacy";
+                  setSessionReplayAuthorization(
+                    session,
+                    replayMessageHasIdentity(message) ? "identified" : "legacy",
+                  );
                   session.allowGeneratedInputDuringReplay = message.allow_generated_input === true || message.allowGeneratedInput === true;
                   session.suppressGeneratedTerminalInputUntil = 0;
                   session.shellEl.dataset.connection = sessionConnectingState(session);
@@ -18746,8 +19224,34 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
                 if (session.cacheV2RecoveryMetrics) {
                   session.cacheV2RecoveryMetrics.syncMode = syncMode;
                   markSessionCacheV2RecoveryMetric(session, "replayStartAt");
+                appendStartupTrace("PTY replay 开始", `pane=${session.id} mode=${syncMode || "legacy"} source=${session.cacheV2RecoveryMetrics?.historySource || "unknown"}`, { dedupeKey: `replay-start:${session.id}:${session.terminalReplayGeneration}` });
                 }
+                session.fastIntegritySequence = 1;
+                session.fastIntegrityCursor = deltaFromCursor ?? 0n;
                 session.historyReplayTargetCursor = deltaToCursor;
+                if (channel === "fast" && !isClientInstanceName(session.name) && session.fastIntegrityEnabled !== true) {
+                  replayController.beginLegacy({
+                    requestID: String(session.terminalReplayGeneration || ""),
+                    connectionEpoch,
+                    identity: { selector: session.name, paneID: session.id },
+                  });
+                  session.replayControllerLegacyActive = true;
+                } else {
+                  replayController.begin({
+                    requestID: String(session.terminalReplayGeneration || ""),
+                    connectionEpoch,
+                    identity: {
+                      selector: session.name,
+                      paneID: session.id,
+                      historyGeneration,
+                    },
+                    startCursor: deltaFromCursor,
+                    targetCursor: deltaToCursor,
+                  });
+                  session.replayControllerLegacyActive = false;
+                }
+                session.queueReplayControllerActive = channel === "queue" && deltaFromCursor === deltaToCursor;
+                session.queueReplayControllerLegacy = false;
                 session.serverBaseCursor = serverBaseCursor;
                 session.resetOnNextReplay = false;
                 if (syncMode === "snapshot") {
@@ -18763,8 +19267,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
                     session.cacheV2ServerSnapshotStartCursor = deltaFromCursor;
                     session.cacheV2ReplayActive = true;
                     session.cacheV2NetworkQueue = [];
-                    session.cacheV2NetworkQueueBytes = 0;
-                    session.replayVerified = "identified";
+                    setSessionReplayAuthorization(session, "identified");
                   } else {
                     if (!resetTerminalForHistoryReplay(session)) {
                       rejectHistorySync("terminal reset failed");
@@ -18778,9 +19281,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
                     session.receivedHistoryCursor = deltaFromCursor;
                     session.appliedHistoryCursor = deltaFromCursor;
                     session.persistedHistoryCursor = deltaFromCursor;
-                    session.historyStateReady = false;
-                    session.replayVerified = "identified";
-                    resetSessionHistoryCache(session, historyGeneration, deltaFromCursor);
+                    setSessionReplayAuthorization(session, "identified");(session, historyGeneration, deltaFromCursor);
                   }
                 } else {
                   if (!historyConnectRange || historyConnectRange.generation !== historyGeneration || historyConnectRange.endCursor !== deltaFromCursor) {
@@ -18839,8 +19340,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
                       session.historyProtocolActive = true;
                       session.historySyncMode = syncMode;
                       session.serverBaseCursor = serverBaseCursor;
-                      session.persistedHistoryCursor = snapshot.endCursor;
-                      session.replayVerified = "identified";
+                      setSessionReplayAuthorization(session, "identified");
                     } else {
                       if (!resetTerminalForHistoryReplay(session)) {
                         rejectHistorySync("terminal reset for cache-v2 history failed");
@@ -18853,8 +19353,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
                       session.localBaseCursor = snapshot.baseCursor;
                       session.receivedHistoryCursor = snapshot.baseCursor;
                       session.appliedHistoryCursor = snapshot.baseCursor;
-                      session.persistedHistoryCursor = snapshot.endCursor;
-                      session.replayVerified = "identified";
+                      setSessionReplayAuthorization(session, "identified");
                       beginSessionCacheV2Replay(session, snapshot, deltaFromCursor, currentSocket, rejectHistorySync);
                     }
                   } else {
@@ -18862,13 +19361,14 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
                     return;
                   }
                 }
-                session.replayVerified = "identified";
+                setSessionReplayAuthorization(session, "identified");
                 session.allowGeneratedInputDuringReplay = message.allow_generated_input === true || message.allowGeneratedInput === true;
                 session.suppressGeneratedTerminalInputUntil = 0;
                 session.shellEl.dataset.connection = sessionConnectingState(session);
                 return;
               case "history-replay-complete":
-                if (!session.replayVerified || (session.replayVerified === "identified" && !validateReplayMessage(message))) {
+                appendStartupTrace("PTY replay 完成通知", `pane=${session.id}`, { dedupeKey: `replay-complete:${session.id}:${session.terminalReplayGeneration}` });
+                if (!sessionReplayIsAuthorized(session) || (sessionReplayHasIdentifiedAuthorization(session) && !validateReplayMessage(message))) {
                   rejectMismatchedReplay(message);
                   return;
                 }
@@ -18891,6 +19391,40 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
                     return;
                   }
                 }
+                if (session.replayControllerLegacyActive) {
+                  try {
+                    replayController.completeLegacy({
+                      requestID: String(session.terminalReplayGeneration || ""),
+                      connectionEpoch,
+                      identity: { selector: session.name, paneID: session.id },
+                    });
+                  } catch (error) {
+                    rejectMismatchedReplay(message);
+                    return;
+                  }
+                }
+                const replayControllerRequired = (
+                  channel === "fast" && !isClientInstanceName(session.name) && session.fastIntegrityEnabled === true
+                ) || (
+                  channel === "queue" && session.queueReplayControllerActive
+                );
+                if (replayControllerRequired && session.historyProtocolActive) {
+                  try {
+                    replayController.complete({
+                      cursor: message.history_cursor,
+                      requestID: String(session.terminalReplayGeneration || ""),
+                      connectionEpoch,
+                      identity: {
+                        selector: session.name,
+                        paneID: session.id,
+                        historyGeneration: session.historyGeneration,
+                      },
+                    });
+                  } catch (error) {
+                    rejectHistorySync(error?.message || "Fast replay completion validation failed");
+                    return;
+                  }
+                }
                 markSessionCacheV2RecoveryMetric(session, "historyReplayCompleteAt");
                 recordTerminalSessionEvent(session, "history_replay_complete", {
                   cursor: message.history_cursor || "",
@@ -18903,12 +19437,36 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
                 finishSessionHistoryReplayIfReady(session) || flushSessionOutput(session);
                 return;
               case "queue-turn-complete":
-                if (channel === "queue" && session.replayComplete) {
+                if (channel === "queue") {
                   flushSessionOutput(session, { force: true });
-                  ensurePanePresentation(session, {
-                    reason: "queue_turn_complete",
-                    forceHistory: true,
-                  });
+                  if (sessionReplayIsCommitted(session)) {
+                    ensurePanePresentation(session, {
+                      reason: "queue_turn_complete",
+                      forceHistory: true,
+                    });
+                  }
+                  const appliedCursor = String(message.applied_cursor || "").trim();
+                  const appliedSequence = String(message.applied_sequence || "").trim();
+                  const receivedCursor = String(session.queueTurnReceivedCursor ?? "").trim();
+                  const receivedSequence = String(session.queueTurnReceivedSequence ?? "").trim();
+                  if (
+                    /^\d+$/.test(appliedCursor)
+                    && /^\d+$/.test(appliedSequence)
+                    && appliedCursor === receivedCursor
+                    && appliedSequence === receivedSequence
+                  ) {
+                    try {
+                      currentSocket.send(JSON.stringify({
+                        type: "queue-turn-ack",
+                        data: `${appliedCursor}:${appliedSequence}`,
+                      }));
+                    } catch (error) {
+                      closeSessionSocketForReconnect(session, currentSocket, "Terminal queue turn acknowledgement failed.");
+                    }
+                  } else if (appliedCursor || appliedSequence) {
+                    rejectHistorySync("queue turn acknowledgement boundary does not match received output");
+                    return;
+                  }
                 }
                 return;
               case "agent-preparing":
@@ -18926,6 +19484,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
                   pane: session.id,
                   message: message.message || "",
                 });
+                if (!sessionReplayIsCommitted(session) && noteSessionReplayFailure(session, message.message || "replay_connection_error")) {
+                  try {
+                    currentSocket.close(4001, "replay_retry_paused");
+                  } catch (error) {
+                  }
+                  return;
+                }
                 closeSessionSocketForReconnect(session, currentSocket, message.message || "Terminal retryable connection error.");
                 return;
               case "pong":
@@ -18962,7 +19527,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
             });
           }
         }
-        writeSessionOutput(session, event.data);
+        writeSessionOutput(session, event.data, { connectionEpoch });
         return;
       }
       if (event.data instanceof ArrayBuffer) {
@@ -18983,7 +19548,47 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
             replayComplete: session.replayComplete,
           });
         }
-        if (!session.replayVerified && !session.replayComplete) {
+        let outputPayload = new Uint8Array(event.data);
+        if (channel === "fast" && !isClientInstanceName(session.name) && session.fastIntegrityEnabled === true) {
+          try {
+            outputPayload = decodeFastBinaryMessage(event.data);
+            if (!outputPayload) {
+              throw new Error("Fast binary integrity envelope is missing");
+            }
+          } catch (error) {
+            rejectHistorySync(error?.message || "Fast binary integrity validation failed");
+            return;
+          }
+        }
+        if (channel === "queue" && replayController.phase === "replaying" && session.historyProtocolActive) {
+          const metadata = event.queueMetadata || {};
+          if (metadata.sequence === undefined || metadata.sequence === null) {
+            replayController.reset();
+            session.queueReplayControllerActive = false;
+            session.queueReplayControllerLegacy = true;
+          } else {
+            try {
+              replayController.acceptBinary({
+                sequence: metadata.sequence,
+                startCursor: metadata.startCursor,
+                endCursor: metadata.endCursor,
+                length: outputPayload.byteLength,
+                requestID: String(session.terminalReplayGeneration || ""),
+                connectionEpoch,
+                identity: {
+                  selector: session.name,
+                  paneID: session.id,
+                  historyGeneration: session.historyGeneration,
+                },
+              });
+              session.queueReplayControllerActive = true;
+            } catch (error) {
+              rejectHistorySync(error?.message || "Queue replay controller validation failed");
+              return;
+            }
+          }
+        }
+        if (!sessionReplayIsAuthorized(session) && !sessionReplayIsCommitted(session)) {
           if (socketDebug.binaryMessages <= 8) {
             console.warn("[client-terminal] dropped binary before replay verification", {
               name: session.name,
@@ -18995,7 +19600,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
           return;
         }
         if (session.cacheV2ReplayActive) {
-          const data = new Uint8Array(event.data);
+          const data = outputPayload;
           if (session.cacheV2RecoveryMetrics) {
             session.cacheV2RecoveryMetrics.serverReplayBytes += data.byteLength;
           }
@@ -19008,10 +19613,18 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         }
         try {
           if (session.cacheV2RecoveryMetrics) {
-            session.cacheV2RecoveryMetrics.serverReplayBytes += event.data.byteLength;
+            session.cacheV2RecoveryMetrics.serverReplayBytes += outputPayload.byteLength;
           }
-          writeSessionOutput(session, new Uint8Array(event.data), {
-            deferRender: channel === "queue" && session.replayComplete,
+          if (channel === "queue") {
+          const metadata = event.queueMetadata || {};
+          if (metadata.endCursor !== undefined && metadata.sequence !== undefined) {
+            session.queueTurnReceivedCursor = metadata.endCursor;
+            session.queueTurnReceivedSequence = metadata.sequence;
+          }
+        }
+        writeSessionOutput(session, outputPayload, {
+            connectionEpoch,
+            deferRender: channel === "queue" && sessionReplayIsCommitted(session),
           });
         } catch (error) {
           rejectHistorySync(error?.message || "terminal history output range failed");
@@ -19068,7 +19681,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       if (!intentionalTransportClose) {
         appendDebugWarning("终端 WebSocket 已断开", `${terminalLocationDescription(session)}, code=${event.code}, ${event.reason || "无原因"}`);
       }
-      const nextConnectionState = intentionallyParked
+      const nextConnectionState = replayRetryIsPaused(session)
+        ? "error"
+        : intentionallyParked
         ? schedulerCloseReason === "promote_to_fast" ? "connecting" : "parked"
         : intentionallyClosed
           ? "closed"
@@ -19085,7 +19700,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       if (channel === "queue") {
         settleTerminalQueueStartup(session, "cancelled");
         session.queueConnectPending = false;
-        session.queueTaskState = intentionallyParked
+        session.queueTaskState = replayRetryIsPaused(session)
+          ? "paused"
+          : intentionallyParked
           ? "idle"
           : intentionallyClosed
             ? "closed"
@@ -19257,7 +19874,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   };
 
   const scheduleTerminalQueuePaneRetry = (session, reason, { immediate = false } = {}) => {
-    if (disposed || !session || session.closed || !isCurrentInstanceSession(session)) {
+    if (disposed || !session || session.closed || !isCurrentInstanceSession(session) || replayRetryIsPaused(session)) {
       return false;
     }
     if (navigator.onLine === false) {
@@ -19656,6 +20273,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       && !pane.closed
       && pane.name === activeName
       && sessionHasTerminalConnectionSize(pane)
+      && !replayRetryIsPaused(pane)
       && !pane.queueRetryTimer
       && !terminalConnectionScheduler?.currentLease(pane)
     ));
@@ -20149,6 +20767,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       terminalPreview,
       terminalFrameHold,
       terminalFrameHeld: false,
+      terminalFrameHoldIdentity: null,
       compositionPreview,
       term,
       fitAddon,
@@ -20159,12 +20778,14 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       reconnectTimer: 0,
       reconnectPending: false,
       reconnectAttempts: 0,
+      startupTraceActive: false,
       connectionRetrying: false,
       connectionLeaseID: 0,
       connectionLeaseClosing: false,
       connectionLeaseCloseReason: "",
       connectionChannel: "",
       connectionChannelGeneration: 0,
+      connectionEpoch: 0,
       topologyEpoch: 0,
       fastTopologyAttemptID: 0,
       fastTopologySlot: -1,
@@ -20174,6 +20795,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       fastStreamID: "",
       connectionQueueCloseReason: "",
       queueStreamID: "",
+      queueTurnReceivedCursor: null,
+      queueTurnReceivedSequence: null,
       queueConnectPending: false,
       queueTaskState: "idle",
       queueStartupWaiter: null,
@@ -20194,8 +20817,16 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       attachStartedAt: 0,
       attachReadyTimeoutMs: 0,
       lastSocketHealthAt: 0,
+      replayFailureAttempts: 0,
+      replayRetryPaused: false,
+      lastReplayFailureReason: "",
       replayComplete: false,
+      replayAuthorization: false,
       replayVerified: false,
+      replayController: new TerminalReplayController(),
+      queueReplayControllerActive: false,
+      queueReplayControllerLegacy: false,
+      replayControllerLegacyActive: false,
       replayCompletionPending: false,
       agentPreparing: false,
       pendingInput: [],
@@ -20215,9 +20846,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       inputPumpActive: false,
       outputQueue: [],
       outputQueueSize: 0,
+      outputQueueGeneration: 0,
       outputOverloadPending: false,
       outputFlushFrame: 0,
       outputFlushTimer: 0,
+      replayPresentationCheckpointPending: false,
+      replayPresentationCheckpointTimer: 0,
+      replayPresentationCheckpointCursor: 0n,
       replayOutputDepth: 0,
       allowGeneratedInputDuringReplay: false,
       resetOnNextReplay: false,
@@ -20301,10 +20936,14 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       requestedResizeEpoch: "",
       appliedResizeEpoch: "",
       presentedResizeEpoch: "",
+      renderSnapshot: new RenderSnapshot(),
+      renderGeneration: 0,
       lastResizeRequestAt: 0,
       resizeFenceActive: false,
       resizeFenceTarget: null,
       resizeOutputSettleActive: false,
+      resizeController: new TerminalResizeController(),
+      resizeControllerSettleToken: 0,
       resizeOutputSettleTimer: 0,
       resizeOutputSettleStartedAt: 0,
       resizeOutputSettleDeadline: 0,
@@ -20379,7 +21018,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       const presentationCompleted = markPaneRenderedIfMeasurable(session);
       if (
         !presentationCompleted
-        && session.replayComplete
+        && sessionReplayIsCommitted(session)
         && session.tabId === activeTabId
         && !panePresentationIsCurrent(session)
       ) {
@@ -21176,12 +21815,14 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       latestWorkspaceRecoveryMetrics = recoveryMetrics;
     }
     markWebShellStartupMetric("workspaceRequestStartedAt");
+    appendStartupTrace("workspace 请求开始", `selector=${requestName}`, { dedupeKey: `workspace-request:${requestName}` });
     const state = await fetchWorkspaceState(requestName);
     if (!isCurrentInstanceRequest(requestName, generation)) {
       return { state, requestName, generation };
     }
     recoveryMetrics.readyAt = terminalCacheV2MetricNow();
     markWebShellStartupMetric("workspaceReadyAt");
+    appendStartupTrace("workspace 响应完成", `selector=${requestName}`, { dedupeKey: `workspace-ready:${requestName}` });
     return { state, requestName, generation };
   };
 
@@ -21193,6 +21834,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     observeServerRevision(state);
     applyWorkspaceState(state, { focus, instanceName: requestName, generation });
     markWebShellStartupMetric("workspaceAppliedAt");
+    appendStartupTrace("workspace 应用完成", `tabs=${tabs.size}`, { dedupeKey: "workspace-applied" });
     clearWorkspaceRefreshRetry();
     return state;
   };
@@ -21413,6 +22055,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     // logical close is synchronous, so the close handler must never schedule
     // a retry for a pane that is being intentionally destroyed.
     pane.closed = true;
+    pane.replayController?.reset();
+    pane.queueReplayControllerActive = false;
+    pane.queueReplayControllerLegacy = false;
     detachTerminalQueueSession(pane, "session_closed");
     terminalConnectionScheduler?.unregister(pane, "session_closed");
     pane.pendingInput = [];
@@ -22971,14 +23616,17 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     syncDebugModeState();
     const themePromise = loadThemeCatalog().finally(() => {
       markWebShellStartupMetric("themeReadyAt");
+      appendStartupTrace("主题加载完成", "", { dedupeKey: "theme-ready" });
     });
     const settingsPromise = loadSettings({ deferFontLoad: true })
       .catch((error) => showToast(error.message || "设置加载失败。"))
       .finally(() => {
         markWebShellStartupMetric("settingsReadyAt");
+        appendStartupTrace("设置加载完成", "", { dedupeKey: "settings-ready" });
       });
-    const instancesPromise = refreshInstances().finally(() => {
+    const instancesPromise = loadInstances().finally(() => {
       markWebShellStartupMetric("instancesReadyAt");
+      appendStartupTrace("实例列表加载完成", "", { dedupeKey: "instances-ready" });
     });
     let bootstrapWorkspaceContext = null;
     const requestBootstrapWorkspace = () => {
@@ -23001,6 +23649,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       startupInputUnlockPromise,
     ]);
     applyThemeDocumentState();
+    appendStartupTrace("Ghostty、主题、设置和实例初始化完成", "", { dedupeKey: "runtime-prerequisites-ready" });
     renderThemePicker();
     renderSettingsThemeList();
     const workspaceOutcome = await workspacePromise;
@@ -23023,6 +23672,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       applyWorkspaceRefresh(workspaceOutcome.result, { focus: true });
     }
     requestTerminalStoragePersistence().catch(() => {});
+    appendStartupTrace("应用 bootstrap 完成", `active=${activeName || "无"} tabs=${tabs.size}`, { dedupeKey: "bootstrap-complete" });
     startActivityRefresh();
     refreshActivity({ silent: true }).catch(() => {});
   };
@@ -23463,6 +24113,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   });
   debugLogClear?.addEventListener("click", () => {
     debugLogEntries = [];
+    debugLogLastSeen.clear();
     renderDebugLog();
   });
   settingsOnlineDevicesButton?.addEventListener("click", openDevicePanel);
@@ -24187,6 +24838,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       }
       for (const pane of tab.panes.values()) {
         pane.closed = true;
+        pane.replayController?.reset();
+        pane.queueReplayControllerActive = false;
+        pane.queueReplayControllerLegacy = false;
         terminalConnectionScheduler?.unregister(pane, "page_disposed");
         if (pane.connectionPriorityTimer) {
           window.clearTimeout(pane.connectionPriorityTimer);

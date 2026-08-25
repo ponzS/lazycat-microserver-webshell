@@ -21,6 +21,42 @@ func TestTerminalCacheV2Behavior(t *testing.T) {
 	}
 }
 
+func TestTerminalReplayControllerBehavior(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is unavailable")
+	}
+	command := exec.Command(node, "--test", "terminal_replay_controller_test.mjs")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("terminal replay controller tests failed: %v\n%s", err, output)
+	}
+}
+
+func TestTerminalRenderSnapshotBehavior(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is unavailable")
+	}
+	command := exec.Command(node, "--test", "terminal_render_snapshot_test.mjs")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("terminal render snapshot tests failed: %v\n%s", err, output)
+	}
+}
+
+func TestTerminalResizeControllerBehavior(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is unavailable")
+	}
+	command := exec.Command(node, "--test", "terminal_resize_controller_test.mjs")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("terminal resize controller tests failed: %v\n%s", err, output)
+	}
+}
+
 func TestTerminalResizeSchedulerBehavior(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -40,7 +76,13 @@ func TestRuntimeResizeEpochAckGuard(t *testing.T) {
 	}
 	mainSource := string(source)
 	for _, want := range []string{
-		"const normalizeTerminalResizeEpoch = (value) => {",
+		"TerminalResizeController",
+		"resizeController.request({",
+		"resizeController.acknowledge({",
+		"resizeController.fail({",
+		"session.resizeController.commit();",
+		"createRenderSnapshot(session, { presented: true })",
+		"session.renderSnapshot.equals(current)",
 		"const resizeEpochSupported = pane.resizeEpochSupported !== false;",
 		"resize_epoch: resizeEpoch",
 		"pane.resizeAckPending = resizeEpochSupported;",
@@ -125,10 +167,17 @@ func TestRuntimeCrossClientResizeDoesNotAutoReclaim(t *testing.T) {
 	)
 	remoteIndex := strings.Index(ackBlock, `const remoteEpoch = Boolean(`)
 	applyIndex := strings.Index(ackBlock, `applyObservedTerminalResize(session, message);`)
-	if remoteIndex < 0 || applyIndex < remoteIndex {
-		t.Fatal("remote resize ACK must be adopted locally before any later handling")
+	if !strings.Contains(ackBlock, "applyObservedTerminalResize(session, message);") {
+		t.Fatal("same-epoch normalized resize ACK must be applied locally")
 	}
-	if strings.Contains(ackBlock[remoteIndex:applyIndex], `resizePane(session, { forceSizeSync: true`) {
+	if remoteIndex < 0 || applyIndex < 0 {
+		t.Fatal("resize ACK handling must include remote epoch adoption")
+	}
+	guardStart, guardEnd := remoteIndex, applyIndex
+	if guardStart > guardEnd {
+		guardStart, guardEnd = guardEnd, guardStart
+	}
+	if strings.Contains(ackBlock[guardStart:guardEnd], `resizePane(session, { forceSizeSync: true`) {
 		t.Fatal("remote resize ACK must not automatically reclaim the local device size")
 	}
 	workspaceData, err := os.ReadFile("workspace.go")
@@ -164,7 +213,20 @@ func TestRuntimeTabActivationPresentationRecoveryGuard(t *testing.T) {
 		"schedulePanePresentationFrame(session, \"render_callback\")",
 		"const terminalPresentationValidationMaxMs = 250;",
 		"const terminalFullRenderValidationMs = 32;",
-	} {
+		"const scheduleReplayPresentationCheckpoint = (session) => {",
+		"session.replayPresentationCheckpointPending",
+		"session.term.renderNow(true) !== false",
+		"replay_presentation_checkpoint",
+		"session.replayPresentationCheckpointTimer",
+		`flow_control: channel === "queue" ? "turn-ack-v1" : ""`,
+		`case "queue-turn-complete":`,
+		`type: "queue-turn-ack"`,
+		"data: `${appliedCursor}:${appliedSequence}`",
+		"flushSessionOutput(session, { force: true });",
+		`session.queueTurnReceivedCursor = null`,
+		`session.queueTurnReceivedSequence = null`,
+		`beginTerminalPresentationHold(session);`,
+		`queue turn acknowledgement boundary does not match received output`} {
 		if !strings.Contains(source, want) {
 			t.Fatalf("runtime tab presentation recovery guard missing %q", want)
 		}
@@ -210,6 +272,45 @@ func TestRuntimeTabActivationPresentationRecoveryGuard(t *testing.T) {
 	}
 }
 
+func TestRuntimeReplayRetryBudgetPreservesPresentation(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+	for _, want := range []string{
+		`const terminalReplayFailureLimit = 3;`,
+		`const noteSessionReplayFailure = (session, reason = "replay_failed") => {`,
+		`session.replayRetryPaused = true;`,
+		`beginTerminalPresentationHold(session);`,
+		`const resumeSessionReplayRetry = (session, reason = "user_recovery") => {`,
+		`resumeSessionReplayRetry(pane, "user_recovery");`,
+		`resumeSessionReplayRetry(pane, "network_online");`,
+		`!replayRetryIsPaused(pane)`,
+		`const nextConnectionState = replayRetryIsPaused(session)`,
+		`? "paused"`,
+		`replayRetryIsPaused(session)`,
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime replay retry budget guard missing %q", want)
+		}
+	}
+	pauseBlock := sourceBetween(t, source,
+		`const noteSessionReplayFailure = (session, reason = "replay_failed") => {`,
+		`const resumeSessionReplayRetry = (session, reason = "user_recovery") => {`)
+	for _, forbidden := range []string{
+		`replayController.commit`,
+		`historyStateReady = true`,
+		`flushPendingInput`,
+		`savePreview`,
+		`putManifest`,
+	} {
+		if strings.Contains(pauseBlock, forbidden) {
+			t.Fatalf("partial replay failure pause must remain presentation-only: found %q", forbidden)
+		}
+	}
+}
+
 func TestRuntimeTerminalMultiplexedIdentityGate(t *testing.T) {
 	data, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {
@@ -225,6 +326,8 @@ func TestRuntimeTerminalMultiplexedIdentityGate(t *testing.T) {
 		"const rejectMismatchedChannelMessage = (event, messageType) => {",
 		"session.resetOnNextReplay = true;",
 		"beginTerminalPresentationHold(session);",
+		"return (!selector || selector === session.name)",
+		"every identity field that",
 		"Terminal multiplexed message identity validation failed.",
 		"if (!validateTerminalChannelMessageIdentity(event, message.type, false)) {",
 		"if (!validateTerminalChannelMessageIdentity(event, \"\", true)) {",
@@ -240,7 +343,7 @@ func TestRuntimeTerminalMultiplexedIdentityGate(t *testing.T) {
 	controlIndex := strings.Index(messageBlock, "validateTerminalChannelMessageIdentity(event, message.type, false)")
 	binaryIndex := strings.Index(messageBlock, "validateTerminalChannelMessageIdentity(event, \"\", true)")
 	switchIndex := strings.Index(messageBlock, "switch (message.type)")
-	binaryReplayIndex := strings.Index(messageBlock, "if (!session.replayVerified && !session.replayComplete) {")
+	binaryReplayIndex := strings.Index(messageBlock, "if (!sessionReplayIsAuthorized(session) && !sessionReplayIsCommitted(session)) {")
 	if controlIndex < 0 || binaryIndex < 0 || switchIndex < 0 || binaryReplayIndex < 0 {
 		t.Fatal("multiplexed terminal identity gate must cover control and binary messages")
 	}
@@ -349,10 +452,13 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`const terminalCacheV2ReplayTimeoutMs = 2 * 1000;`,
 		`const terminalCacheV2CompactionTargetBytes = 1 * 1024 * 1024;`,
 		`prepareTabOverviewCachePreviews`,
-		`String(pane.historyGeneration || "").trim() !== String(prepared.historyGeneration || "").trim()`,
+		`const paneHistoryGeneration = String(pane.historyGeneration || "").trim();`,
+		`paneHistoryGeneration && paneHistoryGeneration !== String(prepared.historyGeneration || "").trim()`,
 		`prepared.previewCursor <= prepared.endCursor`,
 		`pane.tabId !== activeTabId || !pane.renderReady || !pane.hasPresentedFrame`,
 		`const liveFrame = pane?.renderReady && pane?.hasPresentedFrame ? liveCanvas : null;`,
+		`const heldFrame = sessionTerminalFrameHoldIsCurrent(pane) ? pane.terminalFrameHold : null;`,
+		`terminalFrameHoldIdentity`,
 		`scheduleWorkspaceTabOverviewCachePreviews();`,
 		`const loadPaneTabOverviewPreviewManifest = async (pane) => {`,
 		`terminalCacheV2.loadManifest(expected)`,
@@ -372,8 +478,7 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`applySessionCacheV2ServerSnapshot`,
 		`session.cacheV2ServerSnapshotPending`,
 		`beginSessionCacheV2Replay`,
-		`session.cacheV2NetworkQueue.push(data);`,
-		`|| !session.replayComplete`,
+		`|| !sessionReplayIsCommitted(session)`,
 		`session.renderReady`,
 		`session.shellEl?.dataset.previewReady !== "true"`,
 		`requestTerminalStoragePersistence`,
@@ -425,7 +530,7 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 	}
 	cacheSource := string(cacheData)
 	appendBlock := sourceBetween(t, cacheSource,
-		"const append = async (sourceIdentity, generation, chunks, { limitBytes } = {}) => {",
+		"const append = async (sourceIdentity, generation, chunks, { limitBytes, historyWindowLines = null } = {}) => {",
 		"const readChunks = async (manifest, onChunk) => {")
 	chunkPut := strings.Index(appendBlock, "await putChunk(store, identity, stored);")
 	manifestPut := strings.Index(appendBlock, "await putManifest(store, manifest);")
@@ -461,6 +566,15 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 	workerSource := string(workerData)
 	if !strings.Contains(workerSource, "${assetBase}terminal_resize_scheduler.js") {
 		t.Fatal("service worker must precache the terminal resize scheduler")
+	}
+	if !strings.Contains(workerSource, "${assetBase}terminal_resize_controller.js") {
+		t.Fatal("service worker must precache the terminal resize controller")
+	}
+	if !strings.Contains(workerSource, "${assetBase}terminal_render_snapshot.js") {
+		t.Fatal("service worker must precache terminal render snapshots")
+	}
+	if !strings.Contains(workerSource, "${assetBase}terminal_fast_integrity.js") || !strings.Contains(workerSource, "${assetBase}terminal_replay_controller.js") {
+		t.Fatal("service worker must precache replay integrity modules")
 	}
 	if !strings.Contains(workerSource, "${assetBase}instances_loader.js") {
 		t.Fatal("service worker must precache the instances loader")
@@ -537,7 +651,7 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		"} else {\n                    rejectHistorySync(\"unknown local history source\");")
 	for _, want := range []string{
 		`if (sessionCacheV2WarmReplayMatchesSnapshot(session, snapshot)) {`,
-		`session.replayVerified = "identified";`,
+		`setSessionReplayAuthorization(session, "identified");`,
 		`} else {`,
 		`beginSessionCacheV2Replay(session, snapshot, deltaFromCursor, currentSocket, rejectHistorySync);`,
 	} {
@@ -600,8 +714,7 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		"const markPaneRenderedIfMeasurable = (session) => {",
 		"const requestPaneFullRender = (session) => {")
 	for _, want := range []string{
-		`|| session.replayCompletionPending`,
-		`|| !session.replayComplete`,
+		`|| !sessionReplayIsCommitted(session)`,
 	} {
 		if !strings.Contains(renderReadyBlock, want) {
 			t.Fatalf("completed replay presentation guard missing %q", want)
@@ -610,7 +723,7 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 	inputReadyBlock := sourceBetween(t, mainSource,
 		"const isSessionInputReady = (session) => (",
 		"const sendSessionInputChunk = (session, data, { generated = false } = {}) => {")
-	if !strings.Contains(inputReadyBlock, `session?.replayComplete`) ||
+	if !strings.Contains(inputReadyBlock, `sessionReplayIsCommitted(session)`) ||
 		strings.Contains(inputReadyBlock, `session.renderReady`) ||
 		strings.Contains(inputReadyBlock, `cacheV2WarmReplayReady`) {
 		t.Fatal("terminal input readiness must not depend on the presentation frame")
@@ -618,29 +731,59 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 	prepareCacheBlock := sourceBetween(t, mainSource,
 		"const prepareSessionHistoryCache = async (session) => {",
 		"const flushSessionHistoryCacheWrites = (session) => {")
+	failWarmReplayBlock := sourceBetween(t, mainSource,
+		"const failSessionCacheV2WarmReplay = (session, replaySeq, error) => {",
+		"const stageSessionCacheV2WarmReplay = (session, snapshot) => {")
+	for _, want := range []string{
+		`beginTerminalPresentationHold(session);`,
+		`disableSessionHistoryCache(session, error);`,
+		`noteSessionReplayFailure(session, error?.message || "local_cache_replay_failed")`,
+	} {
+		if !strings.Contains(failWarmReplayBlock, want) {
+			t.Fatalf("cache warm failure fallback missing %q", want)
+		}
+	}
+	queueAckResetBlock := sourceBetween(t, mainSource,
+		"session.replayComplete = false;",
+		"if (!cacheV2WarmReplayStarted) {")
+	for _, want := range []string{
+		`session.queueTurnReceivedCursor = null`,
+		`session.queueTurnReceivedSequence = null`,
+	} {
+		if !strings.Contains(queueAckResetBlock, want) {
+			t.Fatalf("queue ACK boundary reset missing %q", want)
+		}
+	}
 	if strings.Contains(prepareCacheBlock, `prepareSessionCacheV2Preview(session, snapshot)`) {
 		t.Fatal("container startup must replay cached bytes instead of waiting on a visual preview")
 	}
 	overviewBlock := sourceBetween(t, mainSource,
-		"const preparePaneTabOverviewPreview = (pane) => {",
+		"const loadPaneTabOverviewPreviewManifest = async (pane) => {",
 		"const drawTabOverviewFallback = (ctx, x, y, width, height, colors) => {")
 	for _, want := range []string{
-		`terminalCacheV2.identityMatches(expected, snapshot, { requireHistory: true })`,
+		`const historyGeneration = String(pane?.historyGeneration || "").trim();`,
+		`const expected = sessionTerminalCacheV2Identity(pane, historyGeneration);`,
+		`terminalCacheV2.identityMatches(expected, snapshot, { requireHistory: Boolean(historyGeneration) })`,
 		`const preview = await terminalCacheV2.loadPreview(snapshot);`,
-		`String(pane.historyGeneration || "").trim() !== String(snapshot.historyGeneration || "").trim()`,
+		`(currentHistoryGeneration && currentHistoryGeneration !== String(snapshot.historyGeneration || "").trim())`,
 		`sessionCacheV2OverviewPreviewMatches(pane, prepared)`,
 	} {
 		if !strings.Contains(overviewBlock, want) {
 			t.Fatalf("tab overview cache preview guard missing %q", want)
 		}
 	}
+	if strings.Contains(overviewBlock, `if (!historyGeneration || !sessionUsesTerminalCacheV2(pane))`) {
+		t.Fatal("cold-start overview preview must load the pane manifest before hidden panes receive a history generation")
+	}
 	drawOverviewBlock := sourceBetween(t, mainSource,
 		"const drawPaneOverviewPreview = (ctx, pane, x, y, width, height, colors) => {",
 		"const drawLayoutOverviewPreview = (ctx, tab, node, x, y, width, height, colors) => {")
 	for _, want := range []string{
 		`const liveFrame = pane?.renderReady && pane?.hasPresentedFrame ? liveCanvas : null;`,
+		`const heldFrame = sessionTerminalFrameHoldIsCurrent(pane) ? pane.terminalFrameHold : null;`,
 		`pane?.tabId === activeTabId`,
-		`!sessionUsesTerminalCacheV2(pane) ? liveFrame : null`,
+		`liveFrame || cachedPreview || heldFrame`,
+		`cachedPreview || heldFrame || (!sessionUsesTerminalCacheV2(pane) ? liveFrame : null)`,
 		`sessionCacheV2OverviewPreviewMatches(pane, pane?.cacheV2OverviewPreview)`,
 	} {
 		if !strings.Contains(drawOverviewBlock, want) {
@@ -665,6 +808,17 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		fontIndex := strings.Index(body, fontUpdate)
 		if holdIndex < 0 || fontIndex < 0 || holdIndex > fontIndex {
 			t.Fatalf("font changes must hold the prior terminal frame before updating Ghostty options")
+		}
+		if marker == `  const setTerminalFontSize = (size) => {` {
+			for _, want := range []string{
+				`const metricsGeneration = Number(session.fontMetricsGeneration || 0) + 1;`,
+				`window.requestAnimationFrame(() => refresh(true));`,
+				`window.setTimeout(() => refresh(true), 240);`,
+			} {
+				if !strings.Contains(mainSource, want) {
+					t.Fatalf("font resize stabilization guard missing %q", want)
+				}
+			}
 		}
 	}
 }
@@ -2740,6 +2894,31 @@ func TestRuntimeTerminalOutputBatchingGuard(t *testing.T) {
 		"const flushSessionOutput = (session, { force = false } = {}) => {",
 		"window.requestAnimationFrame(flush);",
 		"session.outputQueue.push({",
+		"outputQueueGeneration: 0,",
+		"queueGeneration: session.outputQueueGeneration,",
+		"replayController.beginLegacy({",
+		"replayController.completeLegacy({",
+		"session.replayControllerLegacyActive = true;",
+		"session.replayControllerLegacyActive = false;",
+		"pane.replayController?.reset();",
+		"replayController.begin({",
+		"replayController.beginLegacy({",
+		"replayController.completeLegacy({",
+		"session.replayControllerLegacyActive = false;",
+		"session.queueReplayControllerActive = false;",
+		"session.queueReplayControllerLegacy = false;",
+		"const metadata = event.queueMetadata || {};",
+		"metadata.sequence",
+		"replayController.acceptBinary({",
+		"replayController.complete({",
+		"replayController.commit()",
+		"connectionEpoch",
+		"channelGeneration",
+		"historyGeneration",
+		"outputIdentityMismatch",
+		"staleOutputQueueDrops",
+		"beginTerminalPresentationHold(session);",
+		"session.outputQueueGeneration = Number(session.outputQueueGeneration || 0) + 1;",
 		"outputData.byteLength > outputChunkBytes",
 		"entry.replayOutput",
 		"? terminalReplayWriteBatchBytes",
@@ -2904,7 +3083,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"const markPaneRenderedIfMeasurable = (session) => {",
 		"!session.fullRenderPending",
 		"|| session.activationFitPending",
-		"!session.replayComplete",
+		"!sessionReplayIsCommitted(session)",
 		"session.pendingRenderFitGeneration !== session.measuredFitGeneration",
 		"session.pendingRenderReplayGeneration !== session.terminalReplayGeneration",
 		"session.pendingRenderContentGeneration !== session.terminalContentGeneration",
@@ -2913,7 +3092,8 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"session.hasPresentedFrame = true;",
 		"!session.renderReady && !session.resizePresentationHold",
 		"setPaneRenderReady(session, true);",
-		"const panePresentationIsCurrent = (session) => Boolean(",
+		"const panePresentationIsCurrent = (session) => {",
+		"session.renderSnapshot.equals(current)",
 		"const cancelPendingTerminalRender = (term) => {",
 		"if (term.renderRetryTimer !== undefined) {",
 		"window.clearTimeout(term.renderRetryTimer);",
@@ -3241,6 +3421,22 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	if preserveIndex < 0 || activateIndex < 0 || preserveIndex > activateIndex || !strings.Contains(tabSwitchBlock, "pane.terminalFrameHeld") {
 		t.Fatal("tab switching must preserve the prior live frame before hiding its pane and render through that frame on activation")
 	}
+	holdBlock := sourceBetween(t, mainSource,
+		"const terminalFrameHoldIdentity = (session) => ({",
+		"const beginTerminalPresentationHold = (session) => {")
+	for _, want := range []string{
+		`selector: String(session?.name || "").trim()`,
+		`tabID: String(session?.tabId || "").trim()`,
+		`paneID: String(session?.id || "").trim()`,
+		`workspaceIdentity: workspaceCacheV2IdentityKey(session?.cacheV2WorkspaceIdentity)`,
+		`historyGeneration: String(session?.historyGeneration || "").trim()`,
+		`session.terminalFrameHoldIdentity = terminalFrameHoldIdentity(session);`,
+		`session.terminalFrameHoldIdentity = null;`,
+	} {
+		if !strings.Contains(holdBlock, want) {
+			t.Fatalf("held terminal overview frame identity guard missing %q", want)
+		}
+	}
 	previewBlock := sourceBetween(t, mainSource,
 		"const captureSessionCacheV2Preview = async (session, captureSeq) => {",
 		"const scheduleSessionCacheV2Compaction = (session) => {")
@@ -3447,10 +3643,20 @@ func TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard(t *testing.T) 
 		"const debugLogEntryLimit = 200;",
 		"const debugLogDedupWindowMs = 5000;",
 		"const debugLogLastSeen = new Map();",
-		"const appendDebugLog = (level, message, details = \"\", { dedupeKey = \"\" } = {}) => {",
+		"const appendDebugLog = (level, message, details = \"\", { dedupeKey = \"\", retainWhenDisabled = false } = {}) => {",
+		"const appendDebugError = (message, details = \"\") => appendDebugLog(\"error\", message, details);",
+		"const appendDebugWarning = (message, details = \"\") => appendDebugLog(\"warn\", message, details);",
+		"const appendStartupTrace = (event, details = \"\", { dedupeKey = event } = {}) => {",
+		"entry.count = Number(entry.count || 1) + 1;",
+		"count.textContent = `x${entry.count}`;",
+		"debugLogLastSeen.clear();",
+		"session.startupTraceActive = true;",
+		"if (session.startupTraceActive) {",
+		"[preview] PNG capture 完成",
 		"const dedupeKey = `console:${level}:",
 		"debugLogPanel.hidden = !debugModeEnabled || !debugLogEnabled;",
-		"debugLogEntries.splice(0, debugLogEntries.length - debugLogEntryLimit);",
+		"const removed = debugLogEntries.length - debugLogEntryLimit;",
+		"debugLogEntries.splice(0, removed);",
 		"const debugLogClipboardText = () => debugLogEntries",
 		"debugLogCopy?.addEventListener(\"click\", async () => {",
 		"showToast(\"暂无可复制的调试日志。\");",
@@ -3573,7 +3779,7 @@ func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
 		"keepAliveWhenEmpty: true,",
 		"connectTerminalQueueSession(pane);",
 		`case "queue-turn-complete":`,
-		`deferRender: channel === "queue" && session.replayComplete,`,
+		`deferRender: channel === "queue" && sessionReplayIsCommitted(session),`,
 		`detachTerminalQueueSession(session, "promote_to_fast");`,
 		`session.connectionChannel === "fast"`,
 		`session.connectionChannel === "queue"`,
@@ -3618,6 +3824,21 @@ func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
 			t.Fatalf("terminal connection scheduler module guard missing %q", want)
 		}
 	}
+	serverQueueSource, err := os.ReadFile("terminal_queue.go")
+	if err != nil {
+		t.Fatalf("ReadFile(terminal_queue.go) error = %v", err)
+	}
+	for _, want := range []string{
+		"Sequence          uint64 `json:\"sequence\"`",
+		"Checksum          string `json:\"checksum\"`",
+		"HistoryGeneration string `json:\"history_generation,omitempty\"`",
+		"Sequence:          entry.binarySequence,",
+		"Checksum:          terminalPayloadChecksum(entry.payload),",
+	} {
+		if !strings.Contains(string(serverQueueSource), want) {
+			t.Fatalf("Queue server integrity envelope missing %q", want)
+		}
+	}
 	for _, want := range []string{
 		"export const terminalQueueProtocolVersion = 1;",
 		"fastCapacity = 1,",
@@ -3630,11 +3851,15 @@ func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
 		`type: "replace-subscriptions"`,
 		`type: "pane-control"`,
 		"entry.expectedCursor !== startCursor",
+		"parseSequence = (value) =>",
+		"payloadChecksumMatches",
+		"entry.sequenceMode === null",
+		"history generation does not match",
 		"logicalStreams.size === 0",
 		"disposed = true;",
 		"resolveFinalClose();",
 	} {
-		if !strings.Contains(queueSource, want) {
+		if !strings.Contains(string(queueSource), want) {
 			t.Fatalf("terminal queue connection guard missing %q", want)
 		}
 	}

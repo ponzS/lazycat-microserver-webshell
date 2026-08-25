@@ -16,6 +16,29 @@ import (
 	"testing"
 )
 
+func TestFastIntegrityForwarderWritesEncodedPayload(t *testing.T) {
+	data, err := os.ReadFile("agent.go")
+	if err != nil {
+		t.Fatalf("ReadFile(agent.go) error = %v", err)
+	}
+	source := string(data)
+	start := strings.Index(source, "func (d *agentDaemon) handleAttach(")
+	end := strings.Index(source[start:], "func runAgentRequestClient(")
+	if start < 0 || end < 0 {
+		t.Fatal("handleAgentAttach source block not found")
+	}
+	block := source[start : start+end]
+	if !strings.Contains(block, "frame, encodeErr := encodeFastBinaryFrame") {
+		t.Fatal("Fast integrity frame encoding is missing")
+	}
+	if !strings.Contains(block, "writeAgentFrame(conn, frameType, payload)") {
+		t.Fatal("Fast forwarder must write the encoded payload")
+	}
+	if strings.Contains(block, "writeAgentFrame(conn, frameType, outbound.payload)") {
+		t.Fatal("Fast forwarder must not write the raw payload after encoding")
+	}
+}
+
 func TestAgentConnectionErrorPayloadIsRetryable(t *testing.T) {
 	payload := agentConnectionErrorPayload(errors.New("agent unavailable"))
 	if payload["type"] != "connection-error" {

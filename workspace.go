@@ -173,6 +173,7 @@ type historySyncRequest struct {
 	cacheProtocolVersion int
 	hasRange             bool
 	forceSnapshot        bool
+	integrityProtocol    string
 }
 
 type workspaceState struct {
@@ -461,6 +462,7 @@ func historySyncRequestFromQuery(r *http.Request) historySyncRequest {
 		generation:          strings.TrimSpace(query.Get("history_generation")),
 		workspaceGeneration: strings.TrimSpace(query.Get("workspace_generation")),
 		forceSnapshot:       strings.TrimSpace(query.Get("history_replay_mode")) == "snapshot",
+		integrityProtocol:   strings.TrimSpace(query.Get("integrity_protocol")),
 	}
 	if version, err := strconv.Atoi(strings.TrimSpace(query.Get("cache_protocol_version"))); err == nil && version > 0 {
 		request.cacheProtocolVersion = version

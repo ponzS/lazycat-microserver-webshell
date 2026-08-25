@@ -51,6 +51,31 @@ const identity = (overrides = {}) => ({
   ...overrides,
 });
 
+test("cache-v2 binds a manifest to its configured history window", async () => {
+  const cacheStorage = new MemoryCacheStorage();
+  const cache = createTerminalCacheV2({ cacheStorage, baseURL: "https://example.test/" });
+  await cache.reset(identity(), "history-a", 0n, { historyWindowLines: 5000 });
+  await cache.append(identity(), "history-a", [{
+    startCursor: 0n,
+    endCursor: 1n,
+    data: new Uint8Array([1]),
+  }], { historyWindowLines: 5000, limitBytes: 1024 });
+
+  const manifest = await cache.loadManifest(identity());
+  assert.equal(manifest.historyWindowLines, 5000);
+  assert.equal(cache.historyWindowMatches(manifest, 5000), true);
+  assert.equal(cache.historyWindowMatches(manifest, 1000), false);
+});
+
+test("cache-v2 treats a legacy manifest without a history window as incompatible", async () => {
+  const cacheStorage = new MemoryCacheStorage();
+  const cache = createTerminalCacheV2({ cacheStorage, baseURL: "https://example.test/" });
+  await cache.reset(identity(), "history-a", 0n);
+
+  const manifest = await cache.loadManifest(identity());
+  assert.equal(manifest.historyWindowLines, null);
+  assert.equal(cache.historyWindowMatches(manifest, 5000), false);
+});
 test("cache-v2 commits continuous bytes and preview at the exact cursor", async () => {
   const cacheStorage = new MemoryCacheStorage();
   const cache = createTerminalCacheV2({ cacheStorage, baseURL: "https://example.test/webshell/" });
@@ -137,6 +162,24 @@ test("cache-v2 never resolves a manifest across account or workspace identity", 
   assert.equal(await cache.loadManifest(identity({ paneID: "pane-2" })), null);
 });
 
+test("cache-v2 rejects a manifest from a different history generation", async () => {
+  const cacheStorage = new MemoryCacheStorage();
+  const cache = createTerminalCacheV2({ cacheStorage, baseURL: "https://example.test/" });
+  await cache.reset(identity(), "history-a", 0n);
+  await cache.append(identity(), "history-a", [{
+    startCursor: 0n,
+    endCursor: 1n,
+    data: new Uint8Array([1]),
+  }]);
+
+  await assert.rejects(
+    cache.loadManifest(identity({ historyGeneration: "history-b" })),
+    /identity does not match/,
+  );
+  const matching = await cache.loadManifest(identity({ historyGeneration: "history-a" }));
+  assert.equal(matching.historyGeneration, "history-a");
+});
+
 test("cache-v2 rejects cursor gaps and preview checkpoints that are not persisted", async () => {
   const cacheStorage = new MemoryCacheStorage();
   const cache = createTerminalCacheV2({ cacheStorage, baseURL: "https://example.test/" });
@@ -172,6 +215,25 @@ test("cache-v2 detects a missing immutable byte block during replay", async () =
 
   const manifest = await cache.loadManifest(identity());
   await assert.rejects(cache.readChunks(manifest, () => {}), /chunk is missing/);
+});
+
+test("cache-v2 rejects an altered immutable block when its checksum is present", async () => {
+  const cacheStorage = new MemoryCacheStorage();
+  const cache = createTerminalCacheV2({ cacheStorage, baseURL: "https://example.test/" });
+  await cache.reset(identity(), "history-a", 0n);
+  await cache.append(identity(), "history-a", [{
+    startCursor: 0n,
+    endCursor: 2n,
+    data: new Uint8Array([1, 2]),
+  }]);
+  const store = await cacheStorage.open("lcmd-webshell-terminal-v2");
+  const chunkKey = [...store.entries.keys()].find((key) => key.endsWith(".bin"));
+  assert.ok(chunkKey);
+  await store.put(chunkKey, new Response(new Uint8Array([9, 2]), {
+    headers: { "Content-Type": "application/octet-stream" },
+  }));
+  const manifest = await cache.loadManifest(identity());
+  await assert.rejects(cache.readChunks(manifest, () => {}), /checksum is invalid/);
 });
 
 test("cache-v2 rolls its read-ahead window while replaying chunks in cursor order", async () => {

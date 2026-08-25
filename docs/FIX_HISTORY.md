@@ -1074,3 +1074,127 @@ git diff --check
 - Guard：`terminal_cache_v2_test.mjs` 新增持续输出期间保留旧预览、随后原子替换新预览的测试；`TestRuntimeContainerCacheV2AndPWAContract` 固定 stale cursor 边界、节流刷新、串行捕获和失败保留语义；新增 `scripts/test-terminal-live-preview.sh` 运行语法检查、Cache v2 Node 测试、运行时契约和 diff 检查。
 - 验证结果：`./scripts/test-terminal-live-preview.sh` 通过（13 项 Cache v2 测试）；真实 Agent 持续输出、多设备总览和移动端 WebView 仍需在安装包环境做视觉验收。
 - 禁止复现：不得在 append 时删除仍属于当前 pane/history generation 的 last-known-good preview；不得以 preview cursor 落后为由在总览显示“无预览”；不得放宽跨账号、workspace、tab、pane 或 history generation 校验；不得让预览读取结果参与终端恢复；不得为追求实时性在每批 PTY 输出中同步 PNG 编码。
+
+### 2026-08-25：统一终端 render 请求诊断与同帧 reason 合并
+
+- 来源：终端一致性与调度优化执行计划 Phase 0/Phase 1；为后续 live output scheduler 建立可观测基线。
+- 影响模块：`ghostty-web/lib/terminal.ts`、`ghostty-web/lib/terminal.test.ts`。
+- 实施方案：为 `Terminal.requestRender()` 增加可选 `reason`，在一个 animation frame 内合并多个 output、resize、selection、cursor 和 explicit 请求；保留 full render 优先级。新增 `getRenderDiagnostics()`，统计 render request、scheduled frame、render attempt、成功 frame、full/partial render 以及当前和上一次合并的 reason。失败 materialization 继续保留 full redraw 和 retry，不改变 PTY write 时序或现有公开调用兼容性。
+- 回归 guard：新增 `coalesces render requests and records merged reasons`，固定三个同帧请求只排一个 frame、reason 顺序和 full render 合并；既有失败 materialization retry 测试继续固定失败帧不触发成功 `onRender`。
+- 验证结果：定向测试 `bun test lib/terminal.test.ts -t 'coalesces render requests'` 通过；`git diff --check` 通过。直接运行完整 `terminal.test.ts` 时，当前命令环境缺少项目测试预期的 Happy DOM 初始化，已有 DOM 测试出现环境基线失败；该环境问题与本次 render 诊断改动无关，后续需按项目正确测试入口复验完整套件。
+- 禁止复现：不得让 render reason 合并改变 live/replay 字节处理顺序；不得让失败 render 触发成功 render event 或清除 full redraw 状态；不得删除 diagnostics 中的 session/generation 维度扩展入口；后续 output scheduler 必须复用该 render 合并边界。
+
+### 2026-08-25：Live output scheduler 基础设施
+
+- 来源：终端一致性与调度优化执行计划 Phase 2；为高输出场景建立可验证的分帧工作队列。
+- 影响模块：`ghostty-web/lib/terminal-work-scheduler.ts`、`ghostty-web/lib/terminal-work-scheduler.test.ts`、`ghostty-web/lib/index.ts`。
+- 实施方案：新增 FIFO 字节 scheduler，默认每帧最多处理 `256 KiB`、最多 8 次 write；超过单帧预算的输入会被分片，保留字节顺序。支持 cancel/dispose、queued bytes/writes、frame/write/byte、失败和最后帧预算 diagnostics。
+- 接入边界：本阶段没有替换 `Terminal.write()` 的同步路径，echo、DSR/DA、response 和 callback 顺序不变。live-output 接入保持关闭，待 WebShell 入口完成 session identity/generation 绑定后再启用。
+- 回归 guard：新增 4 项 scheduler 单测，覆盖 FIFO 与预算、大块分片、取消丢弃、异常后保留队列并可重试。
+- 验证结果：`bun test lib/terminal-work-scheduler.test.ts`（4/4）、`bun run typecheck`、`git diff --check` 通过；上一阶段完整 `terminal.test.ts`（153/153）和 `go test ./...` 已通过，本阶段未修改其行为路径。
+- 禁止复现：不得把 scheduler 当作跨会话隔离方案；不得丢弃或重复字节；不得在未验证 response 时序前异步化所有 `Terminal.write()`；session 销毁必须取消队列，异常不得让 scheduler 永久卡死。
+
+### 2026-08-25：Runtime live output queue generation guard
+
+- 来源：终端一致性与调度优化执行计划 Phase 2；修复旧 rAF/timeout 或 replay reset 后的输出队列继续写入当前 session 的风险。
+- 影响模块：`runtime/static/main.js`、`runtime_shortcuts_test.go`。
+- 实施方案：每个 session 的 output queue 使用单调 `outputQueueGeneration`；入队条目保存 generation；flush 前验证队列条目全部属于当前 generation；`discardSessionOutputBuffers()` 清空队列并递增 generation；stale queue 被丢弃并记录 `staleOutputQueueDrops`。
+- 安全边界：不改变既有 live/replay/suppressRender 分流、output batching、history cursor 或 Terminal 同步 write；不会把 replay 数据送入 live scheduler，也不会跨 session 共用队列。
+- 回归 guard：扩展 `TestRuntimeTerminalOutputBatchingGuard`，固定 generation 初始化、入队绑定、flush 校验、discard 递增和 stale-drop metric。
+- 验证结果：`node --check runtime/static/main.js`、`go test ./...`、连接 scheduler 20 项、Queue 16 项、topology 20 项、Cache v2 13 项、resize 5 项、network monitor 6 项、`./scripts/test-multi-device-resize.sh`、`./scripts/test-terminal-live-preview.sh` 和 `git diff --check` 均通过。
+- 已知风险：generation guard 只解决旧队列归属，不能替代 session identity、generation/sequence/cursor/checksum 的端到端帧校验；新的 `TerminalWorkScheduler` 仍未接入 WASM write。
+- 禁止复现：不得删除 generation 校验以追求输出吞吐；不得让 session dispose、history reset 或 reconnect 后的旧 callback 写入当前终端；不得把 stale queue 当作合法 replay 数据恢复。
+
+### 2026-08-25：Queue binary frame sequence/checksum 校验
+
+- 来源：终端一致性与调度优化执行计划 Phase 4；进一步收紧 Queue relay 到 Terminal 前的帧边界。
+- 影响模块：`runtime/static/terminal_queue_connection.js`、`terminal_queue_connection_test.mjs`、`runtime_shortcuts_test.go`。
+- 实施方案：在 pane、stream、channel generation 和 cursor 连续性基础上，增加可选 `sequence` 连续性校验、CRC32 payload checksum 校验和 `history_generation` 匹配；旧服务端省略这些字段时保持兼容。
+- 失败行为：sequence 跳号、checksum 非法/不匹配、history generation 不一致、长度或 cursor 不连续时，只让当前逻辑流进入 `connection-error`/`resync_required`，payload 不分发到 Terminal，其他 Queue pane 不受影响。
+- 回归 guard：新增 Queue 测试覆盖首帧 sequence/checksum、重排和篡改帧拒绝；扩展 `runtime_shortcuts_test.go` 固定解析、校验和 generation 保护存在。
+- 验证结果：Queue 测试 17/17；Queue module、Queue test、main runtime `node --check`；`go test ./...`；`git diff --check` 均通过。
+- 已知风险：Fast 直连帧和服务端发送策略仍需后续继续收紧；可选字段未被服务端强制发送前，checksum 不能覆盖所有传输路径。
+- 禁止复现：不得接受 sequence 跳号或 checksum 错误的 payload；不得把可选校验缺失伪装成已验证；不得因一个 Queue pane 的坏帧关闭或污染其他 pane。
+
+### 2026-08-25：Fast identity partial-field boundary and malformed sequence guard
+
+- 来源：终端一致性与调度优化执行计划 Phase 4；继续收紧 Fast replay/control 和 Queue binary 的字段语义。
+- 影响模块：`runtime/static/main.js`、`runtime/static/terminal_queue_connection.js`、`terminal_queue_connection_test.mjs`、`runtime_shortcuts_test.go`。
+- 实施方案：Fast replay/control 消息中只要出现 `selector` 或 `pane_id`，该字段就必须分别匹配当前 Terminal owner；只有两个字段都缺失时才允许 legacy 兼容。Queue 首帧区分 sequence 缺失与非法值，非法值不能降级为无 sequence 的旧协议。
+- 失败行为：Fast 身份不匹配时清空未确认输出、保持 presentation hold 并重连；Queue 非法或跳号 sequence 不分发 payload，当前 logical stream 进入 resync/error。
+- 回归 guard：新增非法首帧 sequence 测试；runtime shortcut test 固定 Fast partial-field 校验和 Queue sequence mode guard。
+- 验证结果：Queue 测试 18/18；main、Queue module、Queue test `node --check`；`go test ./...`；`git diff --check` 均通过。
+- 已知风险：Fast binary output 仍是服务端裸 payload，未具备可选 sequence/checksum envelope；该限制已明确记录，不能假设 Queue 校验自动覆盖 Fast。
+- 禁止复现：不得把存在但错误的身份字段当作 legacy；不得把非法 sequence 当作字段缺失；不得在校验失败后继续向 Ghostty 写入 payload。
+
+### 2026-08-25：Cache v2 manifest history identity validation
+
+- 来源：终端一致性与调度优化执行计划 Phase 4；修复缓存 manifest 在指定历史代次下可能解析到旧 manifest 的边界。
+- 影响模块：`runtime/static/terminal_cache_v2.js`、`terminal_cache_v2_test.mjs`。
+- 实施方案：调用方提供 `historyGeneration` 时，manifest identity comparison 强制启用 history 比较；未指定 generation 的 pane-level manifest lookup 仍可读取当前 manifest。`deletePane()` 先读取 pane 当前 manifest，再比较旧 generation，避免旧删除请求删除新 generation。
+- 失败行为：history generation 不匹配时拒绝 manifest；旧 generation 删除返回 `false` 且保留新 manifest；上层缓存 replay 可回退网络同步。
+- 回归 guard：新增跨 history generation manifest 拒绝测试，并保留旧 generation 删除不影响新 generation 的测试。
+- 验证结果：Cache v2 测试 14/14；Cache module、Cache test `node --check`；`git diff --check` 通过。
+- 已知风险：immutable chunk 目前只做长度和 cursor 范围校验，尚未保存每块 checksum；Fast 裸 binary output 同样尚未具备 sequence/checksum envelope。
+- 禁止复现：不得用 pane identity 覆盖明确的 history identity；不得在旧 generation 校验失败后删除当前 manifest；不得把 manifest mismatch 当作可安全 replay 的数据。
+
+### 2026-08-25：Fast binary `LCF1` integrity envelope
+
+- Fast 直连在 `integrity_protocol=fast-v1` 协商后，为 replay 和 live binary payload 添加 `LCF1` header；payload 本身不变。
+- Header 严格绑定 selector、pane、history generation、sequence、start/end cursor、length 和 CRC32 checksum。
+- 旧请求继续兼容裸 binary；新客户端遇到缺 envelope、身份不匹配、cursor/sequence 不连续、长度错误或 checksum 错误时停止写入并重新同步。
+- Fast replay focused 回归新增 `LCF1` header 检查，验证 delta replay 首帧从 `deltaFrom` 开始，sequence 为 1，end cursor 与 payload length 一致。
+- 新增 `TerminalResizeController` 及 focused tests，覆盖 request/ACK/settle/commit 顺序、stale ACK、stale callback、error 和非法 geometry。
+- Queue modern replay 已接入 `ReplayController`：有 sequence 的 `LCQ1` binary frame 使用 Queue transport 已验证的 `queueMetadata` 驱动 sequence/cursor/length/identity 校验；旧 Queue 缺 sequence 时明确 reset controller 并保留 legacy 兼容路径。连接换代、resync、pane dispose 和 page dispose 均重置 replay controller。
+- 字号/字体切换现在使用 `fontMetricsGeneration` 防止旧延迟回调覆盖新字号，并在当前帧、80ms、240ms 重新测量 renderer metrics、执行 fit、发送最新尺寸和 full render；修复放大字号后必须点击一次才恢复底部内容与排版的问题。- 新增 `RenderSnapshot` 及 focused tests，将 content/history generation、cursor、resize epoch、geometry、fit/replay/render generation 和 canvas materialization 冻结为不可变对象；presentation-current 判断现在会拒绝与当前 session 状态不一致的已提交 snapshot。
+
+
+- 来源：终端一致性与调度优化执行计划 Phase 4；补齐 Queue 客户端已有校验对应的服务端字段。
+- 影响模块：`terminal_queue.go`、`terminal_queue_test.go`。
+- 实施方案：Queue `LCQ1` binary header 为每个 payload 发送 `sequence`、cursor 起止、CRC32 checksum；订阅包含 history generation 时同时发送该 generation。payload 本身保持不变。
+- 失败行为：Queue stream 不能维护连续 cursor 时停止当前 logical stream；客户端对缺帧、重排、长度错误、checksum mismatch 或 generation mismatch 拒绝 payload 并重新同步。
+- 回归 guard：新增 Go 测试验证 sequence、checksum 和 history generation；既有 Queue JS 18 项校验测试继续保留。
+- 验证结果：`go test ./...`、Queue connection 18/18、Cache v2 15/15 和 `git diff --check` 通过。
+- 已知风险：Fast 裸 binary output 仍无等价 envelope；旧服务端 Queue 帧仍按客户端可选字段兼容。
+- 重要修正：binary sequence 与文本控制帧的内部队列顺序分离，控制帧交错在两个 binary payload 之间时不会制造客户端可见的 sequence 跳号。
+- 禁止复现：不得只在客户端校验而不发送服务端字段；不得把 sequence/checksum 缺失的 Queue 新帧宣称为完整性已验证；不得修改 envelope payload 字节导致终端语义变化。
+
+### 2026-08-25：Cache v2 immutable chunk CRC32 validation
+
+- 来源：终端一致性与调度优化执行计划 Phase 4；补足 Cache v2 immutable byte block 的内容完整性校验。
+- 影响模块：`runtime/static/terminal_cache_v2.js`、`terminal_cache_v2_test.mjs`。
+- 实施方案：新写入 chunk 在 manifest 中记录 CRC32，并在 Cache response header 保存 checksum；append tail merge、replay read 和 compaction 对 checksum 进行校验或重新计算。
+- 失败行为：带 checksum 的 chunk 内容篡改、长度错误或 cursor 范围错误时拒绝 replay；旧 manifest 缺少 checksum 时保持兼容，仅执行长度/cursor 校验。
+- 回归 guard：新增篡改 immutable block 测试；已有连续 cursor、缺块、compaction、并发 read-ahead 和旧缓存兼容测试继续保留。
+- 验证结果：Cache v2 测试 15/15；Cache module、Cache test `node --check`；最终全量 Ghostty、Go、runtime 回归需继续通过。
+- 已知风险：旧缓存块不会自动变成已验证块，需自然重写或 compaction；Fast 裸 binary output 仍无 sequence/checksum envelope。
+- 禁止复现：不得只检查 chunk 长度而跳过已有 checksum；不得在 checksum mismatch 后继续向 replay/Terminal 提供数据；不得将旧无 checksum chunk 标记为 checksum 已验证。
+
+### 2026-08-25：终端总览后台会话退化为无预览
+
+- 来源：用户现场反馈；终端总览始终只有当前 tab 显示预览，切换后原 tab 立即变为“无预览”。
+- 根因：tab 切换前虽然通过 `preserveTabTerminalFrames()` 保存了最后有效 Canvas，但总览从未读取 `terminalFrameHold`。cache-v2 后台 pane 又被明确禁止使用 live Canvas，只允许异步持久化 preview；preview 尚未捕获、加载或暂时不可用时因此没有任何可绘制来源。
+- 实施方案：后台总览保持已验证 Cache v2 preview 为首选，缺失时使用切换前冻结的 held frame；当前 tab 仍优先使用 live Canvas。held frame 保存 selector、tab、pane、cache epoch、workspace identity 和 history generation，绘制前全部重新匹配；释放 frame 时同步清除身份。cache-v2 后台 pane 仍不允许退回可能继续变化或已经 stale 的 live Canvas。
+- 安全边界：held frame 仅参与总览 Canvas 绘制，不参与 Ghostty 状态恢复、history replay、输入 readiness 或 cache manifest；pane 关闭、workspace/cache epoch 或 history generation 变化后旧帧不能复用。
+- Guard：扩展 `TestRuntimeContainerCacheV2AndPWAContract` 和 `TestRuntimeTerminalCanvasResidueGuard`，固定总览 source 优先级、held frame 身份字段、保存/释放行为，以及 cache-v2 后台 live Canvas 禁用边界。
+- 验证结果：`node --check runtime/static/main.js`、定向 runtime guard、`./scripts/test-terminal-live-preview.sh`（Cache v2 15/15）、`go test ./... -count=1` 和 `git diff --check` 通过；真实 Lazycat 桌面及移动端总览仍需视觉验收。
+- 禁止复现：不得再次保存旧 tab 帧却不提供给总览；不得以放开后台 live Canvas 或放松 cache identity 校验修复空预览；不得让 held frame 跨 selector、workspace、tab、pane 或 history generation 展示。
+
+### 2026-08-25：首次终端可见时间线与错误日志重复折叠
+
+- 来源：用户反馈应用打开和首次终端显示体感略慢，需要区分页面初始化、workspace、连接、preview、PTY replay、Canvas 提交及输入 ready 的耗时，同时避免诊断日志刷屏。
+- 实施方案：错误日志增加从模块启动开始保留的 startup trace，记录 Ghostty WASM、主题、设置、实例、workspace 请求/应用、cache manifest、WebSocket、replay 开始/完成、preview 准备、Terminal write、真实 Canvas 和输入 ready。所有时间使用相对模块启动毫秒；Terminal write 只在首次恢复至真实 Canvas 可见之间记录 payload 字节数与同步 write 耗时，不记录内容。预览 PNG capture 另行记录开始、完成、耗时和 Blob 大小，用于确认截图是否发生在首帧之后。重复日志不再静默丢弃，而是在同一 dedupe key 的一行显示 `xN`，第 2 次及每 10 次刷新 UI；达到 200 行后同步修正折叠索引。
+- 安全边界：启动 trace 不记录账号 scope、token、cookie、PTY 内容或缓存字节内容；preview 只记录准备完成事件，不进入终端 readiness。诊断关闭时只保留有界 startup trace，普通 console/error 日志仍不采集。
+- Guard：更新 `TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard` 固定 retained startup trace、重复计数和有界淘汰结构；既有 cache-v2 runtime guard 固定 startup 初始化仍并行执行。
+- 验证结果：`node --check runtime/static/main.js`、定向 runtime tests、`go test ./... -count=1` 和 `git diff --check` 通过。真实宿主下一步根据日志中相邻阶段差值判断主要等待发生在 WASM、workspace/attach、cache/replay、write 还是 presentation。
+- 禁止复现：不得为诊断同步读取缓存或终端内容；不得让日志渲染进入每个 PTY chunk 的热路径；不得用完全丢弃重复项替代可观察的折叠计数；不得让诊断事件成为终端状态来源。
+
+### 2026-08-25：冷启动后台会话无法读取持久化总览预览
+
+- 来源：用户现场反馈；会话预览在当前页面内切换后可以保留，但关闭窗口重新打开应用时，除当前会话外全部显示“无预览”，必须逐个打开后才恢复。
+- 根因：后台 pane 在冷启动时尚未 attach，`historyGeneration` 为空；`loadPaneTabOverviewPreviewManifest()` 把非空 generation 作为读取 Cache API manifest 的前置条件，因此根本没有读取已经按 workspace/tab/pane 持久化的 preview。点击会话后 replay 填入 generation，加载入口才放行，形成“必须访问一次”的假象。
+- 实施方案：冷启动未 attach pane 使用完整 account scope、selector、workspace generation、tab 和 pane identity 读取 pane-level 当前 manifest，并采用 manifest 中已提交的 history generation 验证 preview 路径、cursor 和图片记录。若 pane 已通过 replay 获得 history generation，则 manifest、prepared preview 和异步 decode 完成检查全部恢复严格 generation 相等；generation 从空变为已知且不匹配时拒绝并关闭旧图片。
+- 安全边界：没有放宽跨账号、selector、workspace、tab 或 pane 身份；未知 generation 只允许读取该精确 pane 的当前 manifest，不能按最近记录或 pane ID 模糊查找。preview 仍只用于总览，不能参与 Ghostty replay、输入 ready 或终端状态恢复。
+- Guard：更新 `TestRuntimeContainerCacheV2AndPWAContract`，明确禁止恢复 `!historyGeneration` 早退，固定 pane-level manifest lookup、可选 generation identity check，以及 decode 完成后“generation 已知则严格相等”的 stale guard。Cache v2 15 项测试继续覆盖完整身份隔离和跨 generation 拒绝。
+- 验证结果：`node --check runtime/static/main.js`、`./scripts/test-terminal-live-preview.sh`（Cache v2 15/15）、`go test ./... -count=1` 和 `git diff --check` 通过；真实宿主需关闭窗口后重新进入，确认未打开的后台会话立即显示上一轮持久化预览。
+- 禁止复现：不得要求后台 pane 先 attach 才允许读取其精确 pane manifest；不得把未知 generation 当成任意 generation 的模糊缓存查询；一旦服务端 generation 已知，不得继续展示不同 generation 的旧 preview。

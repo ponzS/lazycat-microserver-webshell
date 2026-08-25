@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"net"
 	"os"
@@ -39,6 +41,47 @@ const (
 	agentReconcileMarker = "__LCMD_WEBSHELL_AGENT_RECONCILED__"
 )
 
+type fastBinaryHeader struct {
+	ProtocolVersion   int    `json:"protocol_version"`
+	Selector          string `json:"selector"`
+	PaneID            string `json:"pane_id"`
+	HistoryGeneration string `json:"history_generation,omitempty"`
+	Sequence          uint64 `json:"sequence"`
+	StartCursor       string `json:"start_cursor"`
+	EndCursor         string `json:"end_cursor"`
+	Length            int    `json:"length"`
+	Checksum          string `json:"checksum"`
+}
+
+const fastBinaryProtocolVersion = 1
+
+func encodeFastBinaryFrame(selector, paneID, historyGeneration string, sequence, startCursor uint64, payload []byte) ([]byte, error) {
+	endCursor := startCursor + uint64(len(payload))
+	checksum := crc32.ChecksumIEEE(payload)
+	var checksumBytes [4]byte
+	binary.BigEndian.PutUint32(checksumBytes[:], checksum)
+	header, err := json.Marshal(fastBinaryHeader{
+		ProtocolVersion:   fastBinaryProtocolVersion,
+		Selector:          selector,
+		PaneID:            paneID,
+		HistoryGeneration: historyGeneration,
+		Sequence:          sequence,
+		StartCursor:       strconv.FormatUint(startCursor, 10),
+		EndCursor:         strconv.FormatUint(endCursor, 10),
+		Length:            len(payload),
+		Checksum:          hex.EncodeToString(checksumBytes[:]),
+	})
+	if err != nil {
+		return nil, err
+	}
+	frame := make([]byte, 8+len(header)+len(payload))
+	copy(frame[:4], []byte("LCF1"))
+	binary.BigEndian.PutUint32(frame[4:8], uint32(len(header)))
+	copy(frame[8:], header)
+	copy(frame[8+len(header):], payload)
+	return frame, nil
+}
+
 type agentRequest struct {
 	Type                 string                  `json:"type"`
 	Selector             string                  `json:"selector,omitempty"`
@@ -54,6 +97,7 @@ type agentRequest struct {
 	LocalBaseCursor      string                  `json:"local_base_cursor,omitempty"`
 	LocalEndCursor       string                  `json:"local_end_cursor,omitempty"`
 	HistoryReplayMode    string                  `json:"history_replay_mode,omitempty"`
+	IntegrityProtocol    string                  `json:"integrity_protocol,omitempty"`
 	Action               *workspaceActionRequest `json:"action,omitempty"`
 	CloseIdle            bool                    `json:"close_idle,omitempty"`
 }
@@ -142,10 +186,11 @@ func runAgentCommand(args []string) error {
 		localBaseCursor := fs.String("local-base-cursor", "", "local terminal history base cursor")
 		localEndCursor := fs.String("local-end-cursor", "", "local terminal history end cursor")
 		historyReplayMode := fs.String("history-replay-mode", "", "terminal history replay mode")
+		integrityProtocol := fs.String("integrity-protocol", "", "terminal binary integrity protocol")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		return runAgentAttachClient(*socketPath, *selector, *accountID, *paneID, *cols, *rows, *terminalScrollback, *cacheProtocolVersion, *workspaceGeneration, *historyGeneration, *localBaseCursor, *localEndCursor, *historyReplayMode)
+		return runAgentAttachClient(*socketPath, *selector, *accountID, *paneID, *cols, *rows, *terminalScrollback, *cacheProtocolVersion, *workspaceGeneration, *historyGeneration, *localBaseCursor, *localEndCursor, *historyReplayMode, *integrityProtocol)
 	default:
 		return fmt.Errorf("unknown agent command %q", args[0])
 	}
@@ -479,6 +524,7 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 		workspaceGeneration:  strings.TrimSpace(request.WorkspaceGeneration),
 		cacheProtocolVersion: request.CacheProtocolVersion,
 		forceSnapshot:        strings.TrimSpace(request.HistoryReplayMode) == "snapshot",
+		integrityProtocol:    strings.TrimSpace(request.IntegrityProtocol),
 	}
 	base, baseErr := strconv.ParseUint(strings.TrimSpace(request.LocalBaseCursor), 10, 64)
 	end, endErr := strconv.ParseUint(strings.TrimSpace(request.LocalEndCursor), 10, 64)
@@ -523,20 +569,32 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 	}()
 
 	writerDone := make(chan struct{})
+	fastSequence := uint64(1)
+	fastCursor := history.deltaFrom
 	go func() {
 		defer close(writerDone)
-		if !writeAgentHistoryReplay(conn, replayIdentity, history, allowGeneratedInputDuringReplay) {
+		if !writeAgentHistoryReplay(conn, replayIdentity, history, allowGeneratedInputDuringReplay, request.IntegrityProtocol == "fast-v1", &fastSequence, &fastCursor) {
 			return
 		}
 		for {
 			select {
 			case outbound := <-client.send:
 				client.dequeued(len(outbound.payload))
+				payload := outbound.payload
+				if request.IntegrityProtocol == "fast-v1" && outbound.messageType == websocket.BinaryMessage {
+					frame, encodeErr := encodeFastBinaryFrame(replayIdentity.selector, replayIdentity.paneID, history.generation, fastSequence, fastCursor, payload)
+					if encodeErr != nil {
+						return
+					}
+					fastSequence++
+					fastCursor += uint64(len(payload))
+					payload = frame
+				}
 				frameType := agentFrameBinary
 				if outbound.messageType == websocket.TextMessage {
 					frameType = agentFrameText
 				}
-				if err := writeAgentFrame(conn, frameType, outbound.payload); err != nil {
+				if err := writeAgentFrame(conn, frameType, payload); err != nil {
 					return
 				}
 				if outbound.closeAfter {
@@ -615,7 +673,7 @@ func runAgentRequestClient(socketPath, encodedRequest string) error {
 	return nil
 }
 
-func runAgentAttachClient(socketPath, selector, accountID, paneID string, cols, rows, terminalScrollback, cacheProtocolVersion int, workspaceGeneration, historyGeneration, localBaseCursor, localEndCursor, historyReplayMode string) error {
+func runAgentAttachClient(socketPath, selector, accountID, paneID string, cols, rows, terminalScrollback, cacheProtocolVersion int, workspaceGeneration, historyGeneration, localBaseCursor, localEndCursor, historyReplayMode, integrityProtocol string) error {
 	if strings.TrimSpace(paneID) == "" {
 		return errors.New("pane is required")
 	}
@@ -638,6 +696,7 @@ func runAgentAttachClient(socketPath, selector, accountID, paneID string, cols, 
 		LocalBaseCursor:      strings.TrimSpace(localBaseCursor),
 		LocalEndCursor:       strings.TrimSpace(localEndCursor),
 		HistoryReplayMode:    strings.TrimSpace(historyReplayMode),
+		IntegrityProtocol:    strings.TrimSpace(integrityProtocol),
 	}
 	data, err := json.Marshal(request)
 	if err != nil {
@@ -661,7 +720,7 @@ func runAgentAttachClient(socketPath, selector, accountID, paneID string, cols, 
 	return <-done
 }
 
-func writeAgentHistoryReplay(w io.Writer, identity terminalReplayIdentity, history paneHistorySnapshot, allowGeneratedInput bool) bool {
+func writeAgentHistoryReplay(w io.Writer, identity terminalReplayIdentity, history paneHistorySnapshot, allowGeneratedInput bool, integrity bool, sequence, cursor *uint64) bool {
 	start := map[string]any{
 		"type":                  "history-replay-start",
 		"resize_protocol":       "epoch-v1",
@@ -680,6 +739,9 @@ func writeAgentHistoryReplay(w io.Writer, identity terminalReplayIdentity, histo
 		"pixel_width":           history.pixelWidth,
 		"pixel_height":          history.pixelHeight,
 	}
+	if integrity {
+		start["integrity_protocol"] = "fast-v1"
+	}
 	if identity.cacheProtocolVersion == terminalCacheProtocolVersion && identity.cacheScopeID != "" && identity.workspaceGeneration != "" && identity.tabID != "" {
 		start["cache_protocol_version"] = terminalCacheProtocolVersion
 		start["cache_scope_id"] = identity.cacheScopeID
@@ -695,7 +757,14 @@ func writeAgentHistoryReplay(w io.Writer, identity terminalReplayIdentity, histo
 			if len(chunk) < chunkSize {
 				chunkSize = len(chunk)
 			}
-			if err := writeAgentFrame(w, agentFrameBinary, chunk[:chunkSize]); err != nil {
+			if integrity {
+				frame, err := encodeFastBinaryFrame(identity.selector, identity.paneID, history.generation, *sequence, *cursor, chunk[:chunkSize])
+				if err != nil || writeAgentFrame(w, agentFrameBinary, frame) != nil {
+					return false
+				}
+				*sequence = *sequence + 1
+				*cursor += uint64(chunkSize)
+			} else if err := writeAgentFrame(w, agentFrameBinary, chunk[:chunkSize]); err != nil {
 				return false
 			}
 			chunk = chunk[chunkSize:]

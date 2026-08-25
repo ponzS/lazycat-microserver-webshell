@@ -51,6 +51,36 @@ func TestTerminalQueueBinaryFrameCarriesLogicalStreamAndCursor(t *testing.T) {
 	}
 }
 
+func TestTerminalQueueBinaryFrameAddsSequenceAndChecksum(t *testing.T) {
+	header := terminalQueueBinaryHeader{
+		ProtocolVersion:   terminalQueueProtocolVersion,
+		PaneID:            "pane-1",
+		StreamID:          "stream-1",
+		ChannelGeneration: 1,
+		StartCursor:       "7",
+		EndCursor:         "12",
+		Sequence:          4,
+		Checksum:          terminalPayloadChecksum([]byte("hello")),
+		HistoryGeneration: "history-2",
+	}
+	payload := []byte("hello")
+	frame, err := encodeTerminalQueueBinaryFrame(header, payload)
+	if err != nil {
+		t.Fatalf("encodeTerminalQueueBinaryFrame() error = %v", err)
+	}
+	headerSize := int(binary.BigEndian.Uint32(frame[4:8]))
+	var decoded terminalQueueBinaryHeader
+	if err := json.Unmarshal(frame[8:8+headerSize], &decoded); err != nil {
+		t.Fatalf("decode queue header: %v", err)
+	}
+	if decoded.Sequence != 4 || decoded.HistoryGeneration != "history-2" {
+		t.Fatalf("decoded sequencing metadata = %+v", decoded)
+	}
+	if decoded.Checksum != terminalPayloadChecksum(payload) {
+		t.Fatalf("checksum = %q, want %q", decoded.Checksum, terminalPayloadChecksum(payload))
+	}
+}
+
 func TestTerminalQueueWebSocketRequiresAccountHeader(t *testing.T) {
 	server := &pluginServer{}
 	recorder := httptest.NewRecorder()
@@ -233,6 +263,104 @@ func TestTerminalQueueWriterEmitsOneRenderBoundaryAfterBinaryTurn(t *testing.T) 
 	}
 	if gotControl != "queue-turn-complete" {
 		t.Fatalf("turn control = %q, want queue-turn-complete", gotControl)
+	}
+}
+
+func TestTerminalQueueTurnAckReleasesWriter(t *testing.T) {
+	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "", "queue", func(int, []byte) error { return nil })
+	stream := &terminalQueuePaneStream{
+		broker:          broker,
+		subscription:    terminalQueueSubscription{PaneID: "pane-1", StreamID: "s1", ChannelGeneration: 1, FlowControl: "turn-ack-v1"},
+		active:          true,
+		awaitingTurnAck: true,
+		turnAckCursor:   42,
+		turnAckSequence: 7,
+	}
+	if err := stream.acknowledgeTurn("42:7"); err != nil {
+		t.Fatalf("acknowledgeTurn() error = %v", err)
+	}
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if stream.awaitingTurnAck || stream.turnAckCursor != 0 || stream.turnAckSequence != 0 {
+		t.Fatalf("turn ACK state was not cleared: awaiting=%v cursor=%d sequence=%d", stream.awaitingTurnAck, stream.turnAckCursor, stream.turnAckSequence)
+	}
+}
+
+func TestTerminalQueueTurnAckRejectsStaleBoundary(t *testing.T) {
+	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "", "queue", func(int, []byte) error { return nil })
+	stream := &terminalQueuePaneStream{
+		broker:          broker,
+		subscription:    terminalQueueSubscription{PaneID: "pane-1", StreamID: "s1", ChannelGeneration: 1, FlowControl: "turn-ack-v1"},
+		active:          true,
+		awaitingTurnAck: true,
+		turnAckCursor:   42,
+		turnAckSequence: 7,
+	}
+	if err := stream.acknowledgeTurn("41:7"); err == nil {
+		t.Fatal("stale queue turn acknowledgement must be rejected")
+	}
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if !stream.awaitingTurnAck || stream.turnAckCursor != 42 || stream.turnAckSequence != 7 {
+		t.Fatal("stale acknowledgement changed the pending turn boundary")
+	}
+}
+
+func TestTerminalQueueWaitsAtHighWaterUntilWriterConsumes(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream := &terminalQueuePaneStream{
+		ctx:    ctx,
+		broker: &terminalQueueBroker{wake: make(chan struct{}, 1)},
+		active: true,
+	}
+	stream.enqueue(terminalQueueOutbound{
+		messageType: websocket.BinaryMessage,
+		payload:     make([]byte, terminalQueuePaneBufferHighWater),
+		startCursor: 0,
+		endCursor:   terminalQueuePaneBufferHighWater,
+		byteCost:    terminalQueuePaneBufferHighWater,
+	})
+	ready := make(chan bool, 1)
+	go func() { ready <- stream.waitForBufferCapacity() }()
+	select {
+	case got := <-ready:
+		if got {
+			t.Fatal("stream reported capacity while at high water")
+		}
+	case <-time.After(20 * time.Millisecond):
+	}
+	stream.popThrough(1, 0)
+	select {
+	case got := <-ready:
+		if !got {
+			t.Fatal("stream did not resume after writer consumed the buffered turn")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("stream remained paused after writer consumption")
+	}
+}
+
+func TestTerminalQueueBinarySequenceIgnoresInterleavedControlFrames(t *testing.T) {
+	stream := &terminalQueuePaneStream{
+		broker: &terminalQueueBroker{wake: make(chan struct{}, 1)},
+		active: true,
+	}
+	stream.enqueueText([]byte(`{"type":"history-replay-start","delta_from_cursor":"0"}`))
+	stream.enqueueBinary([]byte("one"))
+	stream.enqueueText([]byte(`{"type":"queue-turn-complete"}`))
+	stream.enqueueBinary([]byte("two"))
+
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if stream.overloaded {
+		t.Fatal("interleaved control frame unexpectedly overloaded stream")
+	}
+	if len(stream.buffer) != 4 {
+		t.Fatalf("buffer length = %d, want 4", len(stream.buffer))
+	}
+	if stream.buffer[1].binarySequence != 1 || stream.buffer[3].binarySequence != 2 {
+		t.Fatalf("binary sequences = %d, %d, want 1, 2", stream.buffer[1].binarySequence, stream.buffer[3].binarySequence)
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -2703,7 +2704,8 @@ func TestAgentHistoryReplayFramesIncludeSelectorAndPane(t *testing.T) {
 		tabID:                "tab-1",
 		paneID:               "pane-1",
 	}
-	if !writeAgentHistoryReplay(&out, identity, history, false) {
+	sequence, cursor := uint64(1), history.deltaFrom
+	if !writeAgentHistoryReplay(&out, identity, history, false, false, &sequence, &cursor) {
 		t.Fatal("writeAgentHistoryReplay returned false")
 	}
 
@@ -2758,10 +2760,54 @@ func TestAgentHistoryReplayFramesIncludeSelectorAndPane(t *testing.T) {
 	}
 }
 
+func TestAgentHistoryReplayFastIntegrityEnvelope(t *testing.T) {
+	var out bytes.Buffer
+	history := paneHistorySnapshot{
+		chunks:     [][]byte{[]byte("hello")},
+		generation: "generation-one",
+		deltaFrom:  12,
+		deltaTo:    17,
+	}
+	sequence, cursor := uint64(1), history.deltaFrom
+	if !writeAgentHistoryReplay(&out, terminalReplayIdentity{selector: "demo@owner", paneID: "pane-1"}, history, false, true, &sequence, &cursor) {
+		t.Fatal("writeAgentHistoryReplay returned false")
+	}
+	frameType, payload, err := readAgentFrame(&out)
+	if err != nil || frameType != agentFrameText {
+		t.Fatalf("reading Fast replay start: type=%q err=%v", frameType, err)
+	}
+	var start map[string]any
+	if err := json.Unmarshal(payload, &start); err != nil {
+		t.Fatalf("decode Fast replay start: %v", err)
+	}
+	if start["integrity_protocol"] != "fast-v1" {
+		t.Fatalf("Fast replay start integrity protocol = %v, want fast-v1", start["integrity_protocol"])
+	}
+	frameType, payload, err = readAgentFrame(&out)
+	if err != nil || frameType != agentFrameBinary {
+		t.Fatalf("reading Fast replay frame: type=%q err=%v", frameType, err)
+	}
+	if !bytes.Equal(payload[:4], []byte("LCF1")) {
+		t.Fatalf("Fast replay frame magic = %q", payload[:4])
+	}
+	headerLength := int(binary.BigEndian.Uint32(payload[4:8]))
+	var header fastBinaryHeader
+	if err := json.Unmarshal(payload[8:8+headerLength], &header); err != nil {
+		t.Fatalf("decode Fast replay header: %v", err)
+	}
+	if header.Sequence != 1 || header.StartCursor != "12" || header.EndCursor != "17" || header.Length != 5 || header.HistoryGeneration != "generation-one" {
+		t.Fatalf("unexpected Fast replay header: %+v", header)
+	}
+	if _, _, err := readAgentFrame(&out); err != nil {
+		t.Fatalf("reading replay complete: %v", err)
+	}
+}
+
 func TestAgentHistoryReplayWritesMultipleChunksInOrder(t *testing.T) {
 	var out bytes.Buffer
 	history := paneHistorySnapshot{chunks: [][]byte{[]byte("one"), []byte("two")}}
-	if !writeAgentHistoryReplay(&out, terminalReplayIdentity{selector: "demo@owner", paneID: "pane-1"}, history, false) {
+	sequence, cursor := uint64(1), history.deltaFrom
+	if !writeAgentHistoryReplay(&out, terminalReplayIdentity{selector: "demo@owner", paneID: "pane-1"}, history, false, false, &sequence, &cursor) {
 		t.Fatal("writeAgentHistoryReplay returned false")
 	}
 
@@ -2792,7 +2838,8 @@ func TestAgentHistoryReplayWritesMultipleChunksInOrder(t *testing.T) {
 
 func TestAgentHistoryReplayWritesStartAndCompleteForEmptyHistory(t *testing.T) {
 	var out bytes.Buffer
-	if !writeAgentHistoryReplay(&out, terminalReplayIdentity{selector: "demo@owner", paneID: "pane-1"}, paneHistorySnapshot{}, true) {
+	sequence, cursor := uint64(1), uint64(0)
+	if !writeAgentHistoryReplay(&out, terminalReplayIdentity{selector: "demo@owner", paneID: "pane-1"}, paneHistorySnapshot{}, true, false, &sequence, &cursor) {
 		t.Fatal("writeAgentHistoryReplay returned false")
 	}
 

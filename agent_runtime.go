@@ -1152,6 +1152,9 @@ func persistentAgentAttachCommandArgs(scope agentScope, paneID string, cols, row
 	if syncRequest.forceSnapshot {
 		commandArgs = append(commandArgs, "--history-replay-mode", "snapshot")
 	}
+	if syncRequest.integrityProtocol != "" {
+		commandArgs = append(commandArgs, "--integrity-protocol", syncRequest.integrityProtocol)
+	}
 	return commandArgs
 }
 
