@@ -31,6 +31,7 @@ import {
 import { createTerminalResizeScheduler } from "./terminal_resize_scheduler.js";
 import { createTerminalConnectionScheduler } from "./terminal_connection_scheduler.js";
 import { createTerminalTopologyController } from "./terminal_topology_controller.js";
+import { createTabActivationScheduler } from "./tab_activation_scheduler.js";
 import {
   createTerminalQueueTaskQueue,
   createTerminalQueueConnection,
@@ -688,6 +689,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const readTargetNameParam = (sourceParams) => (sourceParams.get("target") || sourceParams.get("name") || "").trim();
   let activeName = readTargetNameParam(params);
   let activeTabId = null;
+  const activeTabPersistenceChains = new Map();
   let inlineTabRenameState = null;
   let recentTabIds = [];
   let activeInstanceGeneration = 0;
@@ -725,6 +727,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   let recycleTerminalQueueSession = () => false;
   let nextTabSeq = 1;
   let nextPaneSeq = 1;
+  const tabActivationScheduler = createTabActivationScheduler();
   let contextTarget = null;
   let lastTerminalTouchContextMenuCandidate = null;
   const terminalLocalMouseClaimedEvents = new WeakSet();
@@ -5325,7 +5328,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return response.json();
   };
 
-  const postWorkspaceAction = async (action, payload = {}, { focus = true, preferStateActiveTab = true } = {}) => {
+  const postWorkspaceAction = async (action, payload = {}, {
+    focus = true,
+    preferStateActiveTab = true,
+    applyResponse = true,
+  } = {}) => {
     const requestName = activeName;
     const generation = activeInstanceGeneration;
     if (!requestName) {
@@ -5346,8 +5353,41 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     ensureResponseSelector(state, requestName);
     observeServerRevision(state);
-    applyWorkspaceState(state, { focus, instanceName: requestName, generation, preferStateActiveTab });
+    if (applyResponse) {
+      applyWorkspaceState(state, { focus, instanceName: requestName, generation, preferStateActiveTab });
+    }
     return state;
+  };
+
+  const persistActiveWorkspaceTab = (tabID) => {
+    const requestName = activeName;
+    const generation = activeInstanceGeneration;
+    const chainKey = `${generation}:${requestName}`;
+    const previous = activeTabPersistenceChains.get(chainKey) || Promise.resolve();
+    let pending = null;
+    pending = previous.catch(() => {}).then(() => {
+      if (
+        !isCurrentInstanceRequest(requestName, generation)
+        || activeTabId !== tabID
+        || !tabs.has(tabID)
+      ) {
+        return false;
+      }
+      return postWorkspaceAction("activate_tab", {
+        tab_id: tabID,
+        recent_tab_ids: recentTabIds,
+      }, {
+        focus: false,
+        preferStateActiveTab: false,
+        applyResponse: false,
+      });
+    }).finally(() => {
+      if (activeTabPersistenceChains.get(chainKey) === pending) {
+        activeTabPersistenceChains.delete(chainKey);
+      }
+    });
+    activeTabPersistenceChains.set(chainKey, pending);
+    return pending;
   };
 
   const updateLocationName = (nextName, { replace = false, tabId = activeTabId } = {}) => {
@@ -9341,6 +9381,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     if (focus) {
       window.requestAnimationFrame(() => {
+        if (
+          activeTabId !== tab.id
+          || tab.activePaneId !== activePane?.id
+          || activePane?.closed
+        ) {
+          return;
+        }
         connectPendingSession(activePane);
         activePane?.term?.focus();
       });
@@ -21754,6 +21801,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     button.dataset.tabId = tab.id;
     button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", "false");
+    button.setAttribute("tabindex", "-1");
     button.innerHTML = `
       <span class="tab-content">
         <span class="tab-label"></span>
@@ -21840,11 +21889,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (!tab) {
       return;
     }
-    return measurePerformanceTask("tab switch", () => {
+    return measurePerformanceTask("tab switch visual", () => {
       const previousTabId = activeTabId;
+      const previousTab = tabs.get(previousTabId);
       const wasActive = previousTabId === tab.id;
       if (!wasActive) {
-        preserveTabTerminalFrames(tabs.get(previousTabId));
+        preserveTabTerminalFrames(previousTab);
       }
       activeTabId = tab.id;
       const activePane = tab.panes.get(tab.activePaneId);
@@ -21854,7 +21904,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       if (rememberRecent) {
         rememberRecentTab(tab.id, previousTabId);
       }
-      for (const item of tabs.values()) {
+      const visuallyChangedTabs = new Set([previousTab, tab]);
+      for (const item of visuallyChangedTabs) {
+        if (!item) {
+          continue;
+        }
         const isActive = item.id === activeTabId;
         item.paneEl.classList.toggle("active", isActive);
         item.button?.classList.toggle("active", isActive);
@@ -21875,24 +21929,49 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
           setPaneRenderReady(pane, false);
         }
       }
-      setActivePane(tab, tab.activePaneId, { focus, resize: false, syncConnection: false });
       resetSessionUserInput(activePane);
-      syncCursorBlinkState();
       clearTabNotification(tab);
-      if (remember) {
-        rememberActiveTab();
-      }
-      renderAttachmentUploadsForActiveTab();
-      scheduleVisibleTabResize(tab, { immediate: true });
-      syncTerminalConnectionDemands({
-        reason: "active_tab_changed",
-        interactionSession: null,
-      });
-      window.requestAnimationFrame(() => scrollTabButtonIntoView(tab.button));
-      if (!applyingWorkspaceState && !wasActive) {
-        postWorkspaceAction("activate_tab", { tab_id: tab.id, recent_tab_ids: recentTabIds }).catch((error) => showToast(error.message));
-      }
-      scheduleTabOverviewRender();
+
+      const activationInstanceGeneration = activeInstanceGeneration;
+      const shouldPostWorkspaceAction = !applyingWorkspaceState && !wasActive;
+      const activationIsCurrent = () => (
+        !disposed
+        && activeInstanceGeneration === activationInstanceGeneration
+        && activeTabId === tab.id
+        && tabs.get(tab.id) === tab
+      );
+      tabActivationScheduler.schedule(tab.id, [
+        () => measurePerformanceTask("tab activation state", () => {
+          if (!activationIsCurrent()) {
+            return;
+          }
+          setActivePane(tab, tab.activePaneId, { focus, resize: false, syncConnection: false });
+          if (remember) {
+            rememberActiveTab();
+          }
+          renderAttachmentUploadsForActiveTab();
+          scrollTabButtonIntoView(tab.button);
+          scheduleTabOverviewRender();
+        }),
+        () => measurePerformanceTask("tab activation resize", () => {
+          if (!activationIsCurrent()) {
+            return;
+          }
+          scheduleVisibleTabResize(tab, { immediate: false });
+        }),
+        () => measurePerformanceTask("tab activation topology", () => {
+          if (!activationIsCurrent()) {
+            return;
+          }
+          syncTerminalConnectionDemands({
+            reason: "active_tab_changed",
+            interactionSession: null,
+          });
+          if (shouldPostWorkspaceAction) {
+            persistActiveWorkspaceTab(tab.id).catch((error) => showToast(error.message));
+          }
+        }),
+      ]);
     });
   };
 
@@ -22120,6 +22199,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         }
       } else {
         activeTabId = null;
+        tabActivationScheduler.cancel();
       }
       updateEmptyState();
       scheduleTabOverviewRender();
@@ -22629,6 +22709,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     tabs.delete(tab.id);
     if (activeTabId === tab.id) {
       activeTabId = null;
+      tabActivationScheduler.cancel();
       if (nextActiveTab && tabs.has(nextActiveTab.id)) {
         setActiveTab(nextActiveTab.id, { remember });
       }
@@ -25244,6 +25325,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return "";
     }
     disposed = true;
+    tabActivationScheduler.dispose();
     closeTerminalFastTransports("page_disposed");
     closeTerminalQueueConnection("page_disposed");
     instancesLoader.dispose();

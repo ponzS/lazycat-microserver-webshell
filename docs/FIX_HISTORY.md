@@ -1286,3 +1286,16 @@ git diff --check
 - 回归 guard：`TestRuntimeTerminalCanvasResidueGuard` 固定预览捕获必须经过 `sessionHasCurrentPresentedFrame`、`hasPresentedFrame`、presented cursor 和 render generation 校验；既有 Cache v2 测试继续覆盖旧预览在 append 后保留及身份隔离。
 - 验证结果：`go test ./... -run TestRuntimeTerminalCanvasResidueGuard -count=1`、`node --test terminal_cache_v2_test.mjs`（17/17）、`node --check runtime/static/main.js` 和 `git diff --check` 通过；现场需覆盖冷启动、未打开后台 pane、打开后首次真实渲染、合法全黑终端和 Agent 持续输出场景。
 - 禁止复现：不得仅按 Canvas 尺寸或像素颜色判断预览有效；不得让未呈现的初始化黑帧覆盖旧图；不得因保留旧预览而放宽账号、workspace、tab、pane 或 history generation 身份校验。
+
+### LCMD-20260826-07：快速切换 tab 时视觉状态被终端初始化阻塞
+
+- 日期：2026-08-26
+- 来源：用户手动验收；连续快速点击 tab 时，tab 栏选中状态和 pane 可见性存在明显拖延，体感上要等待目标终端初始化后才完成切换。
+- 影响模块：`runtime/static/main.js` tab 激活流程、`runtime/static/tab_activation_scheduler.js`、Service Worker 资产清单和运行时 guard。
+- 错误现象：点击 tab 后虽然代码已修改 `.active`，但浏览器迟迟不能绘制该状态；终端较多、目标 pane 尚未测量或连接拓扑需要 Fast/Queue handoff 时更明显。
+- 根因：`setActiveTab()` 在同一个事件任务内继续同步执行 Canvas held-frame 处理、所有 pane 光标状态同步、立即 resize/fit、presentation 恢复、连接需求遍历和拓扑布局读取。DOM 选中态只有在整个长任务返回后才能绘制，因此被终端初始化工作间接阻塞；连续点击还会为已经切走的中间 tab 重复执行初始化。
+- 实施方案：保留切走前 last-known-good frame 的同步保护，随后立即只更新目标/前一 tab 的可见性、选中 class、ARIA、通知和基础激活状态。新增模块化 latest-only tab activation scheduler，把 pane 状态/focus、resize/presentation、连接拓扑和服务端 activate action 拆成三个跨 frame/task 的阶段；每次点击递增 generation 并取消旧 frame/timer，阶段执行前还校验 instance generation、active tab ID 和 tab 对象身份。延迟 focus 同样校验当前 tab/pane，防止旧回调抢回输入焦点。`activate_tab` 按 workspace generation 串行持久化，跳过尚未发送且已经失活的 tab，并禁止其响应重新执行完整 workspace apply，避免旧响应回滚 optimistic UI；已经在途的旧请求之后必然跟随最终 tab 请求，保证服务端最终状态顺序。
+- 安全边界：异步化只调整浏览器 UI 和初始化调度，不改变服务端 workspace/tab/session 权威状态，不销毁 PTY/history，不修改 replay、Queue/Fast envelope、cursor 或 ACK 语义；held frame 仍在隐藏旧 pane 前建立，历史 replay 仍受现有 suppression gate 保护。
+- 回归 guard：`tab_activation_scheduler_test.mjs` 覆盖首阶段必须跨过 frame 和 task、快速切换 latest-only、阶段间主动 yield 和 cancel；`TestRuntimeTerminalCanvasResidueGuard`、`TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs` 固定视觉提交顺序、禁止同步 immediate resize、instance generation fencing、延迟 focus fencing、`activate_tab` 串行 optimistic 持久化和 Service Worker 预缓存。
+- 验证结果：`node --check runtime/static/main.js`、`node --check runtime/static/tab_activation_scheduler.js`、scheduler Node 4/4、完整终端 Node 96/96、`go test ./... -count=1` 和 `git diff --check` 已通过；用户已完成目标环境手动验收，快速切换 tab 的状态响应符合预期。
+- 禁止复现：不得把 resize/fit、连接拓扑重排或服务端 action 放回 tab 点击的同步视觉阶段；不得让已失活 tab 的 generation 继续 focus、resize 或覆盖连接需求；不得为了切换速度跳过 held frame 或放宽 replay presentation gate。

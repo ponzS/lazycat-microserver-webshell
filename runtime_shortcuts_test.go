@@ -69,6 +69,18 @@ func TestTerminalResizeSchedulerBehavior(t *testing.T) {
 	}
 }
 
+func TestTabActivationSchedulerBehavior(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is unavailable")
+	}
+	command := exec.Command(node, "--test", "tab_activation_scheduler_test.mjs")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("tab activation scheduler tests failed: %v\n%s", err, output)
+	}
+}
+
 func TestRuntimeResizeEpochAckGuard(t *testing.T) {
 	source, err := os.ReadFile("runtime/static/main.js")
 	if err != nil {
@@ -594,6 +606,9 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		}
 	}
 	workerSource := string(workerData)
+	if !strings.Contains(workerSource, "${assetBase}tab_activation_scheduler.js") {
+		t.Fatal("service worker must precache the tab activation scheduler")
+	}
 	if !strings.Contains(workerSource, "${assetBase}terminal_resize_scheduler.js") {
 		t.Fatal("service worker must precache the terminal resize scheduler")
 	}
@@ -3481,10 +3496,23 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	tabSwitchBlock := sourceBetween(t, mainSource,
 		"const setActiveTab = (tabId, { focus = true, remember = true, rememberRecent = true } = {}) => {",
 		"const renderLeaf = (tab, node) => {")
-	preserveIndex := strings.Index(tabSwitchBlock, "preserveTabTerminalFrames(tabs.get(previousTabId));")
+	preserveIndex := strings.Index(tabSwitchBlock, "preserveTabTerminalFrames(previousTab);")
 	activateIndex := strings.Index(tabSwitchBlock, "activeTabId = tab.id;")
-	if preserveIndex < 0 || activateIndex < 0 || preserveIndex > activateIndex || !strings.Contains(tabSwitchBlock, "pane.terminalFrameHeld") {
-		t.Fatal("tab switching must preserve the prior live frame before hiding its pane and render through that frame on activation")
+	visualIndex := strings.Index(tabSwitchBlock, `item.button?.classList.toggle("active", isActive);`)
+	deferredIndex := strings.Index(tabSwitchBlock, "tabActivationScheduler.schedule(tab.id, [")
+	if preserveIndex < 0 || activateIndex < 0 || visualIndex < 0 || deferredIndex < 0 ||
+		preserveIndex > activateIndex || activateIndex > visualIndex || visualIndex > deferredIndex ||
+		!strings.Contains(tabSwitchBlock, "pane.terminalFrameHeld") {
+		t.Fatal("tab switching must preserve the prior frame, commit visual selection, then defer terminal activation")
+	}
+	for _, forbidden := range []string{
+		"scheduleVisibleTabResize(tab, { immediate: true });",
+		"syncTerminalConnectionDemands(",
+	} {
+		visualPrefix := tabSwitchBlock[:deferredIndex]
+		if strings.Contains(visualPrefix, forbidden) {
+			t.Fatalf("tab visual selection must not synchronously run terminal initialization %q", forbidden)
+		}
 	}
 	holdBlock := sourceBetween(t, mainSource,
 		"const terminalFrameHoldIdentity = (session) => ({",
@@ -4999,7 +5027,6 @@ func TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs(t *testing.T) {
 		"scheduleTabResize(currentTab(), {",
 		"const shouldResizeTerminal = supportsViewportInsets && isTouchShortcutLayout();",
 		"if (shouldResizeTerminal && (heightChanged || insetChanged || safeOffsetChanged)) {",
-		"scheduleVisibleTabResize(tab, { immediate: true });",
 	}
 	for _, want := range wantSnippets {
 		if !strings.Contains(source, want) {
@@ -5017,13 +5044,34 @@ func TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs(t *testing.T) {
 		t.Fatalf("runtime hidden pane resize guard is not before terminal viewport reset")
 	}
 
-	activeTabIndex := strings.Index(source, "const setActiveTab = (tabId, { focus = true, remember = true, rememberRecent = true } = {}) => {")
-	if activeTabIndex < 0 {
-		t.Fatalf("runtime setActiveTab is missing")
+	activeTabBlock := sourceBetween(t, source,
+		"const setActiveTab = (tabId, { focus = true, remember = true, rememberRecent = true } = {}) => {",
+		"const renderLeaf = (tab, node) => {")
+	for _, want := range []string{
+		`import { createTabActivationScheduler } from "./tab_activation_scheduler.js";`,
+		`measurePerformanceTask("tab switch visual"`,
+		"const visuallyChangedTabs = new Set([previousTab, tab]);",
+		"tabActivationScheduler.schedule(tab.id, [",
+		`measurePerformanceTask("tab activation state"`,
+		`measurePerformanceTask("tab activation resize"`,
+		`scheduleVisibleTabResize(tab, { immediate: false });`,
+		`measurePerformanceTask("tab activation topology"`,
+		"activeInstanceGeneration === activationInstanceGeneration",
+		"activeTabId !== tab.id",
+		"tab.activePaneId !== activePane?.id",
+		"const persistActiveWorkspaceTab = (tabID) => {",
+		"const activeTabPersistenceChains = new Map();",
+		"activeTabId !== tabID",
+		"applyResponse: false",
+		"if (applyResponse) {",
+		"tabActivationScheduler.dispose();",
+	} {
+		if !strings.Contains(source, want) && !strings.Contains(activeTabBlock, want) {
+			t.Fatalf("runtime asynchronous tab activation guard missing %q", want)
+		}
 	}
-	scheduleIndex := strings.Index(source[activeTabIndex:], "scheduleVisibleTabResize(tab, { immediate: true });")
-	if scheduleIndex < 0 {
-		t.Fatalf("runtime setActiveTab does not schedule visible tab resize")
+	if strings.Contains(activeTabBlock, "scheduleVisibleTabResize(tab, { immediate: true });") {
+		t.Fatal("tab activation must not synchronously resize terminal panes before the visual selection frame")
 	}
 
 	forbiddenSnippets := []string{
