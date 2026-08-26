@@ -88,8 +88,16 @@ func TestRuntimeResizeEpochAckGuard(t *testing.T) {
 		"pane.resizeAckPending = resizeEpochSupported;",
 		"case \"resize-applied\":",
 		"case \"resize-error\":",
+		"const ackDimensions = {",
+		"resize_ack_stale",
 		"session.appliedResizeEpoch = epoch;",
+		"const pendingResizeTarget = session.pendingResizeTarget;",
 		"const canDeferLocalResize = Boolean(",
+		"const resizeRequestInFlight = Boolean(",
+		"reusedPendingRequest: true,",
+		"queuedBehindRequest: pane.requestedResizeEpoch,",
+		"const terminalIsAlternateScreen = (term) => Boolean(",
+		"term?.buffer?.active?.type === \"alternate\"",
 		"const terminalResizeOutputQuietMs = 120;",
 		"const terminalResizeOutputMaxHoldMs = 800;",
 		"pane.resizeFenceActive = true;",
@@ -2226,6 +2234,7 @@ func TestRuntimeTerminalScrollbackSettingPersistence(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
+		`const defaultTerminalScrollback = 1000;`,
 		`const applyTerminalScrollback = () => {`,
 		`pane.term.options.scrollback = terminalOptionsBase.scrollback;`,
 		`applyTerminalScrollback();`,

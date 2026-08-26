@@ -377,7 +377,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const defaultFontSize = 16;
   const minFontSize = 10;
   const maxFontSize = 32;
-  const defaultTerminalScrollback = 5000;
+  const defaultTerminalScrollback = 1000;
   const minTerminalScrollback = 100;
   const maxTerminalScrollback = 100000;
   const defaultTerminalLineHeightPercent = 100;
@@ -7451,28 +7451,38 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     if (appliedEpoch && BigInt(epoch) < BigInt(appliedEpoch)) {
       return;
     }
-    session.appliedResizeEpoch = epoch;
-    session.serverCols = Math.max(0, Math.floor(Number(message.cols) || 0));
-    session.serverRows = Math.max(0, Math.floor(Number(message.rows) || 0));
-    session.serverPixelWidth = Math.max(0, Math.floor(Number(message.pixel_width) || 0));
-    session.serverPixelHeight = Math.max(0, Math.floor(Number(message.pixel_height) || 0));
+    const ackDimensions = {
+      cols: Math.max(0, Math.floor(Number(message.cols) || 0)),
+      rows: Math.max(0, Math.floor(Number(message.rows) || 0)),
+      pixelWidth: Math.max(0, Math.floor(Number(message.pixel_width) || 0)),
+      pixelHeight: Math.max(0, Math.floor(Number(message.pixel_height) || 0)),
+    };
     const resizeController = session.resizeController || (session.resizeController = new TerminalResizeController());
     try {
       resizeController.acknowledge({
         requestID: String(requestedEpoch || epoch),
         connectionEpoch: Number(session.connectionEpoch || 0),
         resizeEpoch: epoch,
-        dimensions: {
-          cols: session.serverCols,
-          rows: session.serverRows,
-          pixelWidth: session.serverPixelWidth,
-          pixelHeight: session.serverPixelHeight,
-        },
+        dimensions: ackDimensions,
       });
     } catch (error) {
+      recordTerminalSessionEvent(session, "resize_ack_stale", {
+        ackEpoch: epoch,
+        requestedEpoch,
+        appliedEpoch,
+        cols: ackDimensions.cols,
+        rows: ackDimensions.rows,
+      });
       console.warn("[terminal-resize] rejected stale resize ACK", error);
       return;
     }
+    session.appliedResizeEpoch = epoch;
+    session.serverCols = ackDimensions.cols;
+    session.serverRows = ackDimensions.rows;
+    session.serverPixelWidth = ackDimensions.pixelWidth;
+    session.serverPixelHeight = ackDimensions.pixelHeight;
+    const pendingResizeTarget = session.pendingResizeTarget;
+    session.pendingResizeTarget = null;
     recordTerminalSessionEvent(session, "resize_applied", {
       appliedResizeEpoch: epoch,
       cols: session.serverCols,
@@ -7526,6 +7536,23 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         reason: "resize_applied",
         forceHistory: true,
       });
+      if (pendingResizeTarget && !resizeTargetMatches({
+        cols: session.serverCols,
+        rows: session.serverRows,
+        pixelWidth: session.serverPixelWidth,
+        pixelHeight: session.serverPixelHeight,
+      }, pendingResizeTarget)) {
+        window.requestAnimationFrame(() => {
+          if (session.closed || session.resizeAckPending) {
+            return;
+          }
+          schedulePaneResize(session, {
+            forceFullRender: true,
+            hideUntilRender: true,
+            forceSizeSync: true,
+          }, { immediate: true });
+        });
+      }
     }
   };
 
@@ -10361,6 +10388,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     pane.requestedPixelWidth = pixelWidth;
     pane.requestedPixelHeight = pixelHeight;
     pane.resizeAckPending = resizeEpochSupported;
+    pane.requestedResizeClaim = claim;
     pane.resizeController = pane.resizeController || new TerminalResizeController();
     if (resizeEpochSupported) {
       pane.resizeController.request({
@@ -10764,6 +10792,20 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     term.scrollAnimationLastFrameTime = undefined;
   };
 
+  const resizeTargetMatches = (left, right) => Boolean(
+    left
+    && right
+    && Number(left.cols || 0) === Number(right.cols || 0)
+    && Number(left.rows || 0) === Number(right.rows || 0)
+    && (!left.pixelWidth || !right.pixelWidth || Number(left.pixelWidth) === Number(right.pixelWidth))
+    && (!left.pixelHeight || !right.pixelHeight || Number(left.pixelHeight) === Number(right.pixelHeight))
+  );
+
+  const terminalIsAlternateScreen = (term) => Boolean(
+    term?.wasmTerm?.isAlternateScreen?.()
+    || term?.buffer?.active?.type === "alternate"
+  );
+
   const captureTerminalViewport = (term) => ({
     atBottom: isTerminalViewportAtBottom(term),
     viewportY: terminalViewportValue(term?.viewportY),
@@ -10775,6 +10817,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       return;
     }
     stopTerminalScrollAnimation(term);
+    if (terminalIsAlternateScreen(term)) {
+      term.viewportY = 0;
+      term.targetViewportY = 0;
+      return;
+    }
     if (viewport.atBottom) {
       term.viewportY = 0;
       term.targetViewportY = 0;
@@ -10888,6 +10935,46 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         && pane.socket?.readyState === WebSocket.OPEN
         && pane.resizeEpochSupported !== false
       );
+      const resizeRequestInFlight = Boolean(canDeferLocalResize && pane.resizeAckPending);
+      const requestedResizeTarget = resizeRequestInFlight ? {
+        cols: pane.requestedCols,
+        rows: pane.requestedRows,
+        pixelWidth: pane.requestedPixelWidth,
+        pixelHeight: pane.requestedPixelHeight,
+      } : null;
+      if (resizeRequestInFlight && resizeTargetMatches(requestedResizeTarget, targetDimensions)) {
+        recordTerminalSessionEvent(pane, "resize_fence_wait", {
+          cols: targetDimensions.cols,
+          rows: targetDimensions.rows,
+          reusedPendingRequest: true,
+        });
+        return {
+          ok: true,
+          measurable: true,
+          pending: true,
+          cols: sizeBefore.cols,
+          rows: sizeBefore.rows,
+          sizeChanged: false,
+          canvasChanged: false,
+        };
+      }
+      if (resizeRequestInFlight) {
+        pane.pendingResizeTarget = { ...targetDimensions };
+        recordTerminalSessionEvent(pane, "resize_fence_wait", {
+          cols: targetDimensions.cols,
+          rows: targetDimensions.rows,
+          queuedBehindRequest: pane.requestedResizeEpoch,
+        });
+        return {
+          ok: true,
+          measurable: true,
+          pending: true,
+          cols: sizeBefore.cols,
+          rows: sizeBefore.rows,
+          sizeChanged: false,
+          canvasChanged: false,
+        };
+      }
       if (canDeferLocalResize) {
         clearResizeOutputSettle(pane);
         flushSessionOutput(pane, { force: true });
@@ -11602,7 +11689,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return tab?.panes.get(tab.activePaneId) || null;
   };
 
-  const refreshTerminalMetrics = (session, { deferFitRetry = false } = {}) => {
+  const refreshTerminalMetrics = (session, { deferFitRetry = false, claimSize = false } = {}) => {
     if (!session?.term) {
       return;
     }
@@ -11623,6 +11710,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
           forceFullRender: true,
           hideUntilRender: true,
           forceSizeSync,
+          claimSize,
         });
       } catch (error) {
         console.warn("[terminal-font] failed to refresh terminal metrics", error);
@@ -11646,7 +11734,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       for (const pane of tab.panes.values()) {
         beginTerminalPresentationHold(pane);
         pane.term.options.fontSize = terminalFontSize;
-        refreshTerminalMetrics(pane, { deferFitRetry: true });
+        refreshTerminalMetrics(pane, { deferFitRetry: true, claimSize: true });
       }
     }
     showToast(`字号 ${terminalFontSize}px`);
