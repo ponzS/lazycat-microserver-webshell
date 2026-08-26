@@ -32,6 +32,7 @@ import { createTerminalResizeScheduler } from "./terminal_resize_scheduler.js";
 import { createTerminalConnectionScheduler } from "./terminal_connection_scheduler.js";
 import { createTerminalTopologyController } from "./terminal_topology_controller.js";
 import { createTabActivationScheduler } from "./tab_activation_scheduler.js";
+import { createTerminalLongScreenshot } from "./terminal_long_screenshot.js";
 import {
   createTerminalQueueTaskQueue,
   createTerminalQueueConnection,
@@ -518,7 +519,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const themeCardNameLineY = 40;
   const themeCardBackgroundAlpha = 0.8;
   const themePickerScrollbarMinThumbPx = 100;
-  const contextPaneActions = new Set(["copy", "paste", "select-all", "search", "split-vertical", "split-horizontal", "move-pane-new-tab", "close-pane"]);
+  const contextPaneActions = new Set(["copy", "paste", "select-all", "search", "capture-long-screenshot", "split-vertical", "split-horizontal", "move-pane-new-tab", "close-pane"]);
   const contextTabActions = new Set(["rename-tab", "move-tab-first", "move-tab-left", "move-tab-right", "move-tab-last", "close-other-tabs", "close-tab"]);
   const contextLinkActions = new Set(["open-link", "copy-link"]);
   const storedFontSize = window.localStorage.getItem(fontSizeVersionStorageKey) === fontSizeStorageVersion
@@ -14225,6 +14226,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const svgNamespace = "http://www.w3.org/2000/svg";
   const menuIconPath = "M216.615385 295.384615h586.830769c15.753846 0 31.507692-11.815385 31.507692-31.507692s-15.753846-31.507692-31.507692-31.507692H216.615385c-19.692308 0-31.507692 11.815385-31.507693 31.507692s15.753846 31.507692 31.507693 31.507692zM803.446154 480.492308H216.615385c-19.692308 0-31.507692 11.815385-31.507693 31.507692s15.753846 31.507692 31.507693 31.507692h586.830769c15.753846 0 31.507692-11.815385 31.507692-31.507692s-15.753846-31.507692-31.507692-31.507692zM803.446154 724.676923H216.615385c-19.692308 0-31.507692 11.815385-31.507693 31.507692s15.753846 31.507692 31.507693 31.507693h586.830769c15.753846 0 31.507692-11.815385 31.507692-31.507693s-15.753846-31.507692-31.507692-31.507692z";
   const mobileActionIconNames = {
+    "capture-long-screenshot": "screenshot",
     copy: "copy",
     paste: "paste",
     "select-all": "select-all",
@@ -14246,8 +14248,26 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   };
   const mobileIconDefinitions = {
     menu: { viewBox: "0 0 1024 1024", paths: [{ d: menuIconPath, fill: "currentColor" }] },
+    screenshot: { paths: [{ d: "M4 7h3l1.5-2h7L17 7h3v12H4z" }, { d: "M12 10a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z" }] },
+    arrowUp: { paths: [{ d: "M12 19V5" }, { d: "M6 11l6-6 6 6" }] },
+    arrowDown: { paths: [{ d: "M12 5v14" }, { d: "M6 13l6 6 6-6" }] },
+    arrowLeft: { paths: [{ d: "M19 12H5" }, { d: "M11 6l-6 6 6 6" }] },
+    arrowRight: { paths: [{ d: "M5 12h14" }, { d: "M13 6l6 6-6 6" }] },
+    slash: { paths: [{ d: "M7 19L17 5" }] },
     copy: { paths: [{ d: "M8 8h10v12H8z" }, { d: "M6 16H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" }] },
     paste: { paths: [{ d: "M9 4h6l1 2h2v15H6V6h2z" }, { d: "M9 4h6" }, { d: "M9 10h6" }, { d: "M9 14h6" }] },
+    tab: { paths: [{ d: "M4 12h15" }, { d: "M14 7l5 5-5 5" }] },
+    enter: { paths: [{ d: "M5 6v6h14" }, { d: "M15 8l4 4-4 4" }] },
+    shiftTab: { paths: [{ d: "M19 12H4" }, { d: "M9 7l-5 5 5 5" }] },
+    pageUp: { paths: [{ d: "M5 17V7" }, { d: "M2 10l3-3 3 3" }, { d: "M11 17h8" }, { d: "M11 12h8" }, { d: "M11 7h8" }] },
+    pageDown: { paths: [{ d: "M5 7v10" }, { d: "M2 14l3 3 3-3" }, { d: "M11 17h8" }, { d: "M11 12h8" }, { d: "M11 7h8" }] },
+    swap: { paths: [{ d: "M7 7h12l-3-3" }, { d: "M17 17H5l3 3" }] },
+    zoomIn: { paths: [{ d: "M10.5 3a7.5 7.5 0 1 0 0 15 7.5 7.5 0 0 0 0-15z" }, { d: "M16 16l5 5" }, { d: "M10.5 7v6" }, { d: "M7.5 10h6" }] },
+    zoomOut: { paths: [{ d: "M10.5 3a7.5 7.5 0 1 0 0 15 7.5 7.5 0 0 0 0-15z" }, { d: "M16 16l5 5" }, { d: "M7.5 10h6" }] },
+    home: { paths: [{ d: "M4 11l8-7 8 7" }, { d: "M6 10v10h12V10" }] },
+    end: { paths: [{ d: "M5 4v16" }, { d: "M19 4v16" }, { d: "M8 12h8" }, { d: "M13 7l5 5-5 5" }] },
+    attachment: { paths: [{ d: "M8 12l5-5a3 3 0 0 1 4 4l-6 6a5 5 0 0 1-7-7l6-6" }] },
+    tabAdd: { paths: [{ d: "M12 5v14" }, { d: "M5 12h14" }, { d: "M4 4h7" }] },
     "select-all": { paths: [{ d: "M5 5h14v14H5z" }, { d: "M8 8h8v8H8z" }] },
     search: { paths: [{ d: "M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15z" }, { d: "M16 16l5 5" }] },
     "open-link": { paths: [{ d: "M14 4h6v6" }, { d: "M20 4l-9 9" }, { d: "M11 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5" }] },
@@ -15003,14 +15023,19 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         button.className = "mobile-shortcut-key";
         button.tabIndex = -1;
         button.dataset.mobileShortcutId = shortcut.id;
+        if (shortcut.inputKey) {
+          button.dataset.mobileShortcutInputKey = shortcut.inputKey;
+        }
         if (shortcut.action) {
           button.dataset.mobileAction = shortcut.action;
         }
         if (shortcut.kind) {
           button.dataset.kind = shortcut.kind;
         }
-        if (shortcut.icon && shortcut.action !== "open_mobile_menu") {
-          button.appendChild(createSVGIcon(shortcut.icon, "mobile-shortcut-icon"));
+
+        const iconName = String(shortcut.icon || "").trim();
+        if (iconName && shortcut.action !== "open_mobile_menu") {
+          button.appendChild(createSVGIcon(iconName, "mobile-shortcut-icon"));
         } else {
           button.textContent = shortcut.label;
         }
@@ -17327,6 +17352,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     });
     session.cacheV2ReplayPromise = replayPromise;
   };
+
+  const { runLongScreenshot } = createTerminalLongScreenshot({
+    mobileShortcuts,
+    createSVGIcon,
+    confirmDialog,
+    showToast,
+  });
 
   const terminalCanvasBlob = (canvas) => new Promise((resolve, reject) => {
     if (!(canvas instanceof HTMLCanvasElement) || typeof canvas.toBlob !== "function") {
@@ -22844,7 +22876,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     contextMenu.dataset.type = target.type;
     for (const item of contextMenu.querySelectorAll(".context-menu-btn")) {
       const action = item.dataset.action;
-      item.hidden = (contextPaneActions.has(action) && !target.paneId) || (contextTabActions.has(action) && !target.tabId) || (contextLinkActions.has(action) && !target.link);
+      item.hidden = (action === "capture-long-screenshot" && !isTouchShortcutLayout())
+        || (contextPaneActions.has(action) && !target.paneId)
+        || (contextTabActions.has(action) && !target.tabId)
+        || (contextLinkActions.has(action) && !target.link);
     }
     updateContextMenuGroups();
     const rect = contextMenu.getBoundingClientRect();
@@ -22883,6 +22918,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         break;
       case "search":
         openSearch();
+        break;
+      case "capture-long-screenshot":
+        runLongScreenshot(tabs.get(target.tabId)?.panes.get(target.paneId));
         break;
       case "open-link":
         openURL(target.link);
