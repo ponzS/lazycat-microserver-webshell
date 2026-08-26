@@ -695,8 +695,6 @@ git diff --check
 - 验证结果：`node --check` 通过 `main.js`、`terminal_cache_v2.js` 和 `ghostty-web.js`；Cache API v2、resize、Kitty Graphics、实例加载 Node 测试 35/35 通过；完整 `go test ./... -count=1`、`go test -race ./... -count=1`、Ghostty 资产校验和 `git diff --check` 通过。`lzc-cli project release` 已生成 `cloud.lazycat.webshell.lcmd-v1.0.33.lpk`，包内 `package.yml` 与 `.lpk-version` 均为 `1.0.33`，运行时包含 replay 专用写入、滚动预读、无进度超时和后台 commit generation guard；LPK SHA-256 为 `5facc2feb5969116dd2ec9cbcbfef8b1202b29e2d6ffe6f1b54daa6aaf6fe8e2`。真实浏览器仍需使用无缓存、warm cache、大历史且 Codex 持续输出三种场景记录恢复耗时和主线程长任务。
 - 禁止复现：不得把 replay 写入理解为跳过终端解析或丢弃恢复期间的实时字节；不得让普通实时输出进入 replay 渲染抑制；不得在每个 WASM 子块重复申请/释放输入内存；Cache 预读不得乱序消费或恢复整批屏障；有持续 cursor 进展时不得因固定总时长中断；本地 Cache commit 不得重新成为最终 Canvas 的可见门槛。
 
-## 新增记录模板
-
 ```md
 ### LCMD-YYYYMMDD-NN：问题标题
 
@@ -1208,3 +1206,38 @@ git diff --check
 - 历史重放提速方向：默认值调整直接减少 snapshot 和 Cache v2 replay 的字节量；进一步优化应优先使用启动 trace 分解 WASM 初始化、workspace/attach、网络传输、Cache read、Ghostty parser/write 和最终 render 的耗时，再针对最大阶段做增量回放、首屏 checkpoint 或批量解析，不能跳过 cursor/generation 校验或在 replay 中恢复为无界全量加载。
 - 验证结果：`go test ./... -count=1`、`go test -race ./...`、`node --check runtime/static/main.js`、81 项 Cache/连接/Queue/拓扑/resize Node 测试和 `git diff --check` 通过；真实设备需比较升级前后冷启动、断线重连和 1000/5000 行用户设置的回放耗时。
 - 禁止复现：不得通过升级直接覆盖已有用户的滚动历史设置；不得只修改前端默认而遗漏服务端默认；不得把 1000 行误解为严格物理行数，实际容量仍是按字节近似；不得为了提速取消历史身份、cursor 连续性或最终完整渲染校验。
+
+### 2026-08-26：限制 resize 期间的同步输出峰值并统一渲染 suppression
+
+- 来源：用户反馈 pi/Codex 等 TUI 在快速拖拽窗口或调整字号后终端卡死，同时历史恢复和 resize 期间仍可能看到快速变化的中间画面。
+- 根因：resize fence、resize settle、Cache warm replay 和队列完成路径存在多个 `flushSessionOutput(session, { force: true })`，可能在一个主线程任务中同步排空大量 PTY/TUI 输出；resize ACK 前后的输出边界也没有使用有界 drain 明确分开。Ghostty 的旧 `writeReplay()` 只抑制部分写入触发的 render request，`Terminal.reset()` 的 `renderer.clear()`、`renderNow()`、render RAF 仍可能绕过 replay 的可见性边界。
+- 实施方案：前端新增 resize 专用 64 KiB flush budget，并让 `flushSessionOutput()` 支持 byte/entry 上限和排空结果；resize fence 在发送请求时冻结 ACK 前队列条目边界，只在旧 geometry 下分批排空该前缀，之后切换本地 geometry，ACK 后输出留在 resize settle 队列中按预算处理。settle barrier 也使用冻结前缀，持续 live output 不会让 barrier 永久等待。新增 `forceFlushBytes`、`forceFlushPeakBytes` 和 force flush 耗时指标。终端事件的 identity、generation、cursor、resize、replay、presentation 和队列边界详情同步进入调试错误日志；事件仍按既有 dedupe 规则折叠，不记录 PTY 内容、命令文本或票据。
+- Ghostty 保护：增加嵌套的 `beginRenderSuppression()`/`endRenderSuppression()`。suppression 期间保留 pending full render，但阻止 RAF 和 `renderNow()` 触碰 renderer；`reset()` 不再直接清空 Canvas。WebShell 在 history replay reset、deferred resize 和最终 replay commit 之间维护 suppression transaction，保留现有 `Terminal.write()` 同步语义和 cursor/generation barrier。
+- 安全边界：该修复只限制客户端解析/呈现峰值，不暂停或销毁服务端 Agent/PTY/session，不改变 Queue payload、Fast envelope、服务端 history 权威性或 Cache v2 identity。旧协议继续走兼容路径；如果新 Ghostty suppression API 不可用，WebShell 仍保留原有 `writeReplay()` fallback。
+- 回归 guard：更新 `runtime_shortcuts_test.go`，固定 resize 输出预算、ACK 前缀分批排空、resize transition suppression 和 replay reset suppression；新增 Ghostty `Terminal` 测试覆盖嵌套 suppression 下 renderer 不被调用以及 suppression 释放后可执行最终 render。
+- 验证结果：`node --check runtime/static/main.js`、根仓库 `go test ./... -count=1`、终端 Node 测试 33/33、Ghostty `bun run typecheck`、`bun test lib/terminal.test.ts`（155/155）和 `git diff --check` 通过。尚待真实桌面浏览器、Lazycat WebView、pi/Codex 持续输出、快速 resize 和字号调整手测。
+- 禁止复现：不得将 resize 期间的 force flush 恢复为无界同步排空；不得把 ACK 后新输出按旧 geometry 解析；不得在 replay/resize suppression 期间调用 renderer.clear/renderNow 绕过 gate；不得把 suppression 或旧帧保护误当作服务端 session 保活机制；不得通过清空 PTY、重建 Agent/session 或丢弃历史掩盖卡死和重放问题。
+
+### LCMD-20260826-01：发布构建每次重建并同步 Ghostty WASM
+
+- 日期：2026-08-26
+- 来源：用户要求；发布流程审计发现 `lzc-build.yml` 原先只执行 `tools/sync-ghostty-web-assets.sh --check`
+- 影响模块：`lzc-build.yml`、`tools/sync-ghostty-web-assets.sh`、`runtime/static/ghostty-vt.wasm`
+- 错误现象：直接执行 `lightos-build.sh` 时虽然会从当前源码重建并比较 WASM，但不会更新 `runtime/static/ghostty-vt.wasm`；发布包可能继续携带旧的 WASM。只修改 `ghostty-web` 源码后，发布流程无法保证随包 WASM 一定来自本次源码构建。
+- 根因：`--check` 的职责是校验，不会复制重建产物；构建脚本在打包前只调用了该校验模式。
+- 实施方案：新增 `--rebuild-wasm-only`，每次执行 `bun run build:wasm`，确认源产物存在后复制到 `runtime/static/ghostty-vt.wasm`，再执行核心 section 校验。`lzc-build.yml` 改为在每次 LPK 构建时调用该模式。该模式只更新 WASM，不覆盖 `runtime/static/ghostty-web.js`，以保留 WebShell 的历史定制 bundle；原有 `--rebuild-wasm` 仍用于有意同时同步 JavaScript 和 WASM 的场景。
+- Guard：更新 `TestBuildWritesPackageVersionForRuntimeAssets`，固定 LPK buildscript 必须调用 `--rebuild-wasm-only` 且不得调用 `--check`；更新 Ghostty 资产同步脚本契约，固定新模式存在、执行 `build:wasm`、复制 WASM 并保留定制 JavaScript。
+- 验证结果：本次执行 `node --check runtime/static/main.js`、相关 Go 测试、shell 语法检查和 `git diff --check`。
+- 禁止复现：发布构建不得只校验而不更新 WASM；不得让 WASM 更新模式覆盖 WebShell 定制 `ghostty-web.js`；不得在 WASM 构建失败或未生成产物时继续打包。
+
+### LCMD-20260826-02：Ghostty suppression bundle 使用未定义变量导致终端黑屏
+
+- 日期：2026-08-26
+- 来源：用户现场错误日志；`writeReplay()` 收尾时报 `Uncaught ReferenceError: render is not defined`
+- 影响模块：`runtime/static/ghostty-web.js` 的 `endRenderSuppression()`、历史 replay 和终端 presentation
+- 错误现象：终端打开后一直黑屏。历史或队列输出进入 `writeReplay()` 后，在 `endRenderSuppression()` 中抛出异常，后续 flush 和最终 Canvas presentation 无法完成。
+- 根因：TypeScript 源码中的参数已被压缩器重命名为 `A`，但随包定制 bundle 的函数体仍引用原参数名 `render`；该错误只在实际运行 `endRenderSuppression()` 时暴露，静态语法检查无法发现。
+- 实施方案：修正随包 `runtime/static/ghostty-web.js`，使压缩后的 `endRenderSuppression()` 使用参数 `A`；保留 TypeScript 源码现有正确实现。新增发布资产 guard，直接检查随包 bundle 中的压缩变量引用，避免只验证源码而遗漏定制运行时 bundle。
+- Guard：`TestRuntimeTerminalCanvasResidueGuard` 固定 bundle 中 `endRenderSuppression()` 使用 `A`、检查 suppression 深度和最终 render 条件；现有 replay、resize suppression 和 Ghostty 单元测试继续覆盖正常渲染路径。
+- 验证结果：`node --check runtime/static/ghostty-web.js`、`node --check runtime/static/main.js`、`go test ./... -count=1`、shell 语法检查和 `git diff --check` 通过。
+- 禁止复现：修改 `ghostty-web` 源码后不得只验证 TypeScript 或新构建产物；必须检查实际发布的 `runtime/static/ghostty-web.js`；压缩后的参数名与函数体引用必须保持一致；replay 收尾异常不得被吞掉后继续宣称终端 ready。

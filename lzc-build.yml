@@ -19,7 +19,7 @@ buildscript: |
     fi
   } > "$CONTENT_DIR/.env"
   if [ -x ./tools/sync-ghostty-web-assets.sh ]; then
-    ./tools/sync-ghostty-web-assets.sh --check
+    ./tools/sync-ghostty-web-assets.sh --rebuild-wasm-only
   fi
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -o "$CONTENT_DIR/lcmd-webshell" .
   cp -R ./runtime/. "$CONTENT_DIR/runtime/"

@@ -2626,12 +2626,18 @@ class IA {
    * Parse replay bytes without presenting intermediate frames.
    */
   writeReplay(A) {
-    this.assertOpen(), this.renderSuppressionDepth += 1;
+    this.beginRenderSuppression();
     try {
       this.write(A);
     } finally {
-      this.renderSuppressionDepth = Math.max(0, this.renderSuppressionDepth - 1);
+      this.endRenderSuppression({ render: !1 });
     }
+  }
+  beginRenderSuppression() {
+    this.renderSuppressionDepth += 1;
+  }
+  endRenderSuppression({ render: A = !0, full: Q = !0 } = {}) {
+    this.renderSuppressionDepth = Math.max(0, this.renderSuppressionDepth - 1), this.renderSuppressionDepth === 0 && A && this.isOpen && !this.isDisposed && this.requestRender({ full: Q });
   }
   /**
    * Internal write implementation (extracted from write())
@@ -2712,7 +2718,7 @@ class IA {
     } catch (E) {
       console.warn("ghostty-web: previous terminal cleanup failed after reset", E);
     }
-    this.renderer.clear(), this.currentTitle = "", this.requestRender({ full: !0 });
+    this.renderSuppressionDepth === 0 && this.renderer.clear(), this.currentTitle = "", this.requestRender({ full: !0 });
   }
   /**
    * Focus terminal input
@@ -2950,12 +2956,20 @@ class IA {
       return;
     this.animationFrameId = requestAnimationFrame(() => {
       const B = this.renderFullNextFrame === !0;
-      this.animationFrameId = void 0, this.renderFullNextFrame = !1, this.renderNow(B);
+      this.animationFrameId = void 0;
+      if (this.renderSuppressionDepth > 0) {
+        this.renderFullNextFrame = this.renderFullNextFrame || B;
+        return;
+      }
+      this.renderFullNextFrame = !1;
+      this.renderNow(B);
     });
   }
   renderNow(A = !1) {
     if (this.isDisposed || !this.isOpen || !this.renderer || !this.wasmTerm)
       return !1;
+    if (this.renderSuppressionDepth > 0)
+      return this.renderFullNextFrame = this.renderFullNextFrame || A, !1;
     if (!this.renderer.render(this.wasmTerm, A, this.viewportY, this, this.scrollbarOpacity))
       return this.renderFullNextFrame = !0, this.scheduleRenderRetry(), !1;
     this.renderRetryTimer !== void 0 && (window.clearTimeout(this.renderRetryTimer), this.renderRetryTimer = void 0), this.renderRetryDelayMs = 16, this.lastRenderAt = performance.now(), this.renderEmitter.fire();

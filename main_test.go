@@ -66,10 +66,13 @@ func TestBuildWritesPackageVersionForRuntimeAssets(t *testing.T) {
 		t.Fatalf("ReadFile(lzc-build.yml) error = %v", err)
 	}
 	source := string(data)
+	if strings.Contains(source, `./tools/sync-ghostty-web-assets.sh --check`) {
+		t.Fatal("LPK buildscript must rebuild and sync WASM instead of only checking it")
+	}
 	for _, want := range []string{
 		`LPK_VERSION="$(awk '/^version:[[:space:]]*/ { print $2; exit }' package.yml)"`,
 		`printf '%s\n' "$LPK_VERSION" > "$CONTENT_DIR/.lpk-version"`,
-		`./tools/sync-ghostty-web-assets.sh --check`,
+		`./tools/sync-ghostty-web-assets.sh --rebuild-wasm-only`,
 		`hash_content_file "$CONTENT_DIR/lcmd-webshell"`,
 		`find "$CONTENT_DIR/runtime" -type f -print | LC_ALL=C sort`,
 		`printf '%s\n' "$CONTENT_REVISION" > "$CONTENT_DIR/.lpk-content-revision"`,
@@ -177,7 +180,21 @@ func TestGhosttyAssetCheckRebuildsAndComparesWasmCoreContent(t *testing.T) {
 		return cmd.CombinedOutput()
 	}
 
-	output, err := run("--check")
+	output, err := run("--rebuild-wasm-only")
+	if err != nil {
+		t.Fatalf("wasm-only rebuild error = %v, output = %s", err, output)
+	}
+	if got, err := os.ReadFile(filepath.Join(staticDir, "ghostty-vt.wasm")); err != nil || string(got) != string(wasmWithCustomSection("source-build-metadata")) {
+		t.Fatalf("wasm-only rebuild did not copy rebuilt WASM: err = %v, data = %x", err, got)
+	}
+	if got, err := os.ReadFile(filepath.Join(staticDir, "ghostty-web.js")); err != nil || string(got) != "export const runtime = true;\n" {
+		t.Fatalf("wasm-only rebuild changed custom JavaScript: err = %v, data = %q", err, got)
+	}
+
+	if err := os.WriteFile(filepath.Join(staticDir, "ghostty-vt.wasm"), wasmWithCustomSection("runtime-build-metadata"), 0o600); err != nil {
+		t.Fatalf("WriteFile(runtime WASM fixture) error = %v", err)
+	}
+	output, err = run("--check")
 	if err != nil {
 		t.Fatalf("vendored --check error = %v, output = %s", err, output)
 	}

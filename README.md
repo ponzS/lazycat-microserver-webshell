@@ -93,9 +93,9 @@ lzc-cli project release
 ./tools/sync-ghostty-web-assets.sh --check
 ```
 
-`--check-source` 是同一源码校验的显式入口。校验会执行 `bun run build:wasm`，再解析并比较两份 WASM 的核心 section 内容；自定义构建元数据不参与版本判断。submodule 根目录的 `ghostty-vt.wasm` 是被 Git 忽略的构建产物，只有本次重建后才能作为比较输入。
+`--check-source` 是源码校验的显式入口。校验会执行 `bun run build:wasm`，再解析并比较两份 WASM 的核心 section 内容；自定义构建元数据不参与版本判断。submodule 根目录的 `ghostty-vt.wasm` 是被 Git 忽略的构建产物。
 
-WebShell 的 `ghostty-web.js` 还包含移动端像素滚动、resize 和渲染性能等历史定制。只有有意更新这部分前端代码时才执行 `--sync`，并在覆盖 bundle 后运行完整 WebShell 回归测试。只有 Ghostty 子模块、WASM patch 或 ABI 确实变化时才使用 `--rebuild-wasm`。
+每次执行 `lzc-cli project release` 时，`lzc-build.yml` 都会调用 `--rebuild-wasm-only`，从当前 `ghostty-web` 源码重新构建 WASM 并复制到 `runtime/static/ghostty-vt.wasm`，然后才复制 runtime 并打包。该模式不会覆盖包含 WebShell 历史定制的 `runtime/static/ghostty-web.js`。只有有意更新 JavaScript bundle 时才执行 `--sync`；只有需要同时更新 JavaScript 和 WASM 时才执行 `--rebuild-wasm`。
 
 安装到目标设备：
 

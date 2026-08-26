@@ -12,13 +12,15 @@ usage() {
   ./tools/sync-ghostty-web-assets.sh --check
   ./tools/sync-ghostty-web-assets.sh --check-source
   ./tools/sync-ghostty-web-assets.sh --sync
+  ./tools/sync-ghostty-web-assets.sh --rebuild-wasm-only
   ./tools/sync-ghostty-web-assets.sh --rebuild-wasm
 
 说明:
-  --check         校验随包资产，并从 Ghostty Web submodule 重建 WASM 比较核心 section；发布构建使用此模式。
+  --check         校验随包资产，并从 Ghostty Web submodule 重建 WASM 比较核心 section。
   --check-source  显式执行与 --check 相同的源码 WASM 校验。
-  --sync          构建并同步 JavaScript/许可证；要求现有源 WASM 核心内容已一致。
-  --rebuild-wasm  重建 WASM 和 JavaScript，再同步全部运行时资产。
+  --sync                构建并同步 JavaScript/许可证；要求现有源 WASM 核心内容已一致。
+  --rebuild-wasm-only   每次重建并同步 WASM，不覆盖 WebShell 定制 JavaScript。
+  --rebuild-wasm        重建 WASM 和 JavaScript，再同步全部运行时资产。
 
 可选环境变量:
   GHOSTTY_WEB_DIR 覆盖仓库内 ghostty-web submodule 路径。
@@ -31,7 +33,7 @@ if [[ $# -gt 1 ]]; then
   exit 1
 fi
 case "$mode" in
-  --check|--check-source|--sync|--rebuild-wasm)
+  --check|--check-source|--sync|--rebuild-wasm-only|--rebuild-wasm)
     ;;
   -h|--help)
     usage
@@ -139,6 +141,19 @@ fi
 
 require_source_tree
 require_bun
+
+if [[ "$mode" == "--rebuild-wasm-only" ]]; then
+  (cd "$GHOSTTY_WEB_DIR" && bun run build:wasm)
+  if [[ ! -f "$source_wasm" ]]; then
+    echo "Ghostty WASM 构建未生成 ${source_wasm}" >&2
+    exit 1
+  fi
+  cp "$source_wasm" "$runtime_wasm"
+  check_runtime_assets
+  compare_source_wasm_content
+  echo "Ghostty WASM 已重建并同步；保留 WebShell 定制 JavaScript。"
+  exit 0
+fi
 
 if [[ "$mode" == "--rebuild-wasm" ]]; then
   (cd "$GHOSTTY_WEB_DIR" && bun run build)

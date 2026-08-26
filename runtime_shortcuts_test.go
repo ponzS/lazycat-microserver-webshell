@@ -108,15 +108,21 @@ func TestRuntimeResizeEpochAckGuard(t *testing.T) {
 		"sendTerminalSize(pane, {",
 		"dimensions: targetDimensions,",
 		"const applyTerminalResizeFence = (session) => {",
-		"flushSessionOutput(session, { force: true });",
+		"terminalResizeOutputFlushBudgetBytes",
+		"pane.resizeFenceDrainRemainingEntries = Array.isArray(pane.outputQueue)",
+		"maxBytes: terminalResizeOutputFlushBudgetBytes,",
+		"maxEntries: session.resizeFenceDrainRemainingEntries,",
+		"scheduleRemainder: false,",
 		"session.term.resize(target.cols, target.rows);",
-		"const scheduleResizeOutputSettle = (session, { reason = \"resize_ack\" } = {}) => {",
+		"beginTerminalRenderSuppression(session);",
+		"endTerminalRenderSuppression(session, { render: false });",
 		"const finishResizeOutputSettle = (session, reason = \"quiet\") => {",
 		"session.resizeOutputSettleActive = true;",
 		"resize_output_settle_start",
 		"resize_output_settle_complete",
 		"const resizeOutputSettleActive = session.resizeOutputSettleActive === true;",
-		"const suppressRender = (deferRender || resizeOutputSettleActive) && !replayOutput;",
+		"const resizeTransitionActive = resizeOutputSettleActive || session.resizeFenceActive === true;",
+		"const suppressRender = (deferRender || resizeTransitionActive) && !replayOutput;",
 		"replayOutput ? \"write_replay\" : \"write_suppressed\"",
 		"reason: \"legacy_resize\"",
 		"session.term.writeReplay(data);",
@@ -151,7 +157,7 @@ func TestRuntimeResizeEpochAckGuard(t *testing.T) {
 	if applyIndex < 0 || settleIndex < 0 || applyIndex > settleIndex {
 		t.Fatal("resize ACK must enter the bounded output settle barrier before the final render")
 	}
-	writeIndex := strings.Index(mainSource, "const suppressRender = (deferRender || resizeOutputSettleActive) && !replayOutput;")
+	writeIndex := strings.Index(mainSource, "const suppressRender = (deferRender || resizeTransitionActive) && !replayOutput;")
 	if writeIndex < 0 || writeIndex < strings.Index(mainSource, "const writeSessionOutput = (") {
 		t.Fatal("resize output must be render-suppressed while the settle barrier is active")
 	}
@@ -2923,7 +2929,10 @@ func TestRuntimeTerminalOutputBatchingGuard(t *testing.T) {
 		"const utf8ByteLengthForCodePoint = (codepoint) => (",
 		"const byteLength = utf8ByteLengthForCodePoint(codepoint);",
 		"const finishSessionHistoryReplayIfReady = (session) => {",
-		"const flushSessionOutput = (session, { force = false } = {}) => {",
+		"const flushSessionOutput = (session, {",
+		"maxBytes = 0,",
+		"maxEntries = 0,",
+		"recordTerminalRuntimeMetric(\"forceFlushBytes\", flushBytes);",
 		"window.requestAnimationFrame(flush);",
 		"session.outputQueue.push({",
 		"outputQueueGeneration: 0,",
@@ -3202,7 +3211,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"markPaneRenderedIfMeasurable(session);",
 		"syncTerminalViewportPan(session);",
 		"const resetTerminalForHistoryReplay = (session) => {",
-		"markPaneSyncPending(session);",
+		"beginTerminalRenderSuppression(session);",
 		"session.resetOnNextReplay = false;",
 		"if (!resetTerminalRuntimeState(session)) {",
 		"const disposePane = (pane) => {",
@@ -3284,6 +3293,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"this.writeBytes(A);",
 		"writeReplay(A)",
 		"this.renderSuppressionDepth += 1",
+		"this.renderSuppressionDepth === 0 && A && this.isOpen && !this.isDisposed",
 		"this.renderSuppressionDepth > 0",
 		"this.renderFullNextFrame = !0",
 		"this.renderThrottleTimer = void 0",
