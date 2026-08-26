@@ -2760,6 +2760,41 @@ func TestAgentHistoryReplayFramesIncludeSelectorAndPane(t *testing.T) {
 	}
 }
 
+func TestAgentHistoryReplayUsesBoundedChunks(t *testing.T) {
+	var out bytes.Buffer
+	payload := bytes.Repeat([]byte{'y'}, historyReplayChunk*2+11)
+	history := paneHistorySnapshot{
+		chunks:     [][]byte{payload},
+		generation: "generation-one",
+		deltaFrom:  10,
+		deltaTo:    10 + uint64(len(payload)),
+	}
+	sequence, cursor := uint64(1), history.deltaFrom
+	if !writeAgentHistoryReplay(&out, terminalReplayIdentity{selector: "demo@owner", paneID: "pane-1"}, history, false, false, &sequence, &cursor) {
+		t.Fatal("writeAgentHistoryReplay returned false")
+	}
+	if _, _, err := readAgentFrame(&out); err != nil {
+		t.Fatalf("read replay start: %v", err)
+	}
+	frameCount := 0
+	for {
+		frameType, frame, err := readAgentFrame(&out)
+		if err != nil {
+			t.Fatalf("read replay frame: %v", err)
+		}
+		if frameType == agentFrameText {
+			break
+		}
+		frameCount++
+		if len(frame) > historyReplayChunk {
+			t.Fatalf("replay frame size = %d, exceeds %d", len(frame), historyReplayChunk)
+		}
+	}
+	if frameCount != 3 {
+		t.Fatalf("replay frame count = %d, want 3", frameCount)
+	}
+}
+
 func TestAgentHistoryReplayFastIntegrityEnvelope(t *testing.T) {
 	var out bytes.Buffer
 	history := paneHistorySnapshot{

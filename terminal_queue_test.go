@@ -341,6 +341,40 @@ func TestTerminalQueueWaitsAtHighWaterUntilWriterConsumes(t *testing.T) {
 	}
 }
 
+func TestTerminalQueueBinaryPayloadIsSplitIntoContinuousFrames(t *testing.T) {
+	broker := &terminalQueueBroker{wake: make(chan struct{}, 1)}
+	stream := &terminalQueuePaneStream{
+		broker:       broker,
+		active:       true,
+		hasCursor:    true,
+		cursor:       100,
+		subscription: terminalQueueSubscription{PaneID: "pane-1", StreamID: "stream-1", ChannelGeneration: 1},
+	}
+	payload := bytes.Repeat([]byte{'x'}, terminalQueueBinaryPayloadMaxBytes*2+17)
+	stream.enqueueBinary(payload)
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	if len(stream.buffer) != 3 {
+		t.Fatalf("split frame count = %d, want 3", len(stream.buffer))
+	}
+	cursor := uint64(100)
+	for index, entry := range stream.buffer {
+		if entry.byteCost > terminalQueueBinaryPayloadMaxBytes {
+			t.Fatalf("frame %d size = %d, exceeds %d", index, entry.byteCost, terminalQueueBinaryPayloadMaxBytes)
+		}
+		if entry.startCursor != cursor || entry.endCursor-entry.startCursor != uint64(entry.byteCost) {
+			t.Fatalf("frame %d range = %d-%d, want start %d and length %d", index, entry.startCursor, entry.endCursor, cursor, entry.byteCost)
+		}
+		if entry.binarySequence != uint64(index+1) {
+			t.Fatalf("frame %d sequence = %d, want %d", index, entry.binarySequence, index+1)
+		}
+		cursor = entry.endCursor
+	}
+	if cursor != 100+uint64(len(payload)) {
+		t.Fatalf("final cursor = %d, want %d", cursor, 100+uint64(len(payload)))
+	}
+}
+
 func TestTerminalQueueBinarySequenceIgnoresInterleavedControlFrames(t *testing.T) {
 	stream := &terminalQueuePaneStream{
 		broker: &terminalQueueBroker{wake: make(chan struct{}, 1)},

@@ -114,8 +114,8 @@ func TestRuntimeResizeEpochAckGuard(t *testing.T) {
 		"maxEntries: session.resizeFenceDrainRemainingEntries,",
 		"scheduleRemainder: false,",
 		"session.term.resize(target.cols, target.rows);",
-		"beginTerminalRenderSuppression(session);",
-		"endTerminalRenderSuppression(session, { render: false });",
+		"beginTerminalRenderSuppression(session, \"resize\");",
+		"endTerminalRenderSuppression(session, { render: false, reason: \"resize\" });",
 		"const finishResizeOutputSettle = (session, reason = \"quiet\") => {",
 		"session.resizeOutputSettleActive = true;",
 		"resize_output_settle_start",
@@ -241,11 +241,10 @@ func TestRuntimeTabActivationPresentationRecoveryGuard(t *testing.T) {
 		`flow_control: channel === "queue" ? "turn-ack-v1" : ""`,
 		`case "queue-turn-complete":`,
 		`type: "queue-turn-ack"`,
-		"data: `${appliedCursor}:${appliedSequence}`",
-		"flushSessionOutput(session, { force: true });",
+		"data: `${pending.cursor.toString()}:${pending.sequence}`",
 		`session.queueTurnReceivedCursor = null`,
 		`session.queueTurnReceivedSequence = null`,
-		`beginTerminalPresentationHold(session);`,
+		`session.pendingQueueTurnAck = null`,
 		`queue turn acknowledgement boundary does not match received output`} {
 		if !strings.Contains(source, want) {
 			t.Fatalf("runtime tab presentation recovery guard missing %q", want)
@@ -471,7 +470,7 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 		`startSessionCacheV2WarmReplay`,
 		`session.cacheV2WarmReplayReady`,
 		`[terminal-cache-v2] warm replay ready`,
-		`const terminalReplayWriteBatchBytes = 64 * 1024;`,
+		"const terminalReplayWriteBatchBytes = 512 * 1024;",
 		`const terminalCacheV2FlushBytes = 1 * 1024 * 1024;`,
 		`const terminalCacheV2ReplayTimeoutMs = 2 * 1000;`,
 		`const terminalCacheV2CompactionTargetBytes = 1 * 1024 * 1024;`,
@@ -2917,11 +2916,15 @@ func TestRuntimeTerminalOutputBatchingGuard(t *testing.T) {
 	wantSnippets := []string{
 		"const terminalOutputFlushFallbackMs = 32;",
 		"const terminalOutputFlushBudgetBytes = 128 * 1024;",
-		"const terminalReplayWriteBatchBytes = 64 * 1024;",
-		"const terminalOutputQueueSoftLimitBytes = 1 * 1024 * 1024;",
+		"const terminalOutputFlushMaxEntries = 8;",
+		"const terminalOutputFlushTimeBudgetMs = 12;",
+		"terminalRenderSuppressionReasons",
+		"beginTerminalRenderSuppression(session, \"replay\");",
+		"beginTerminalRenderSuppression(pane, \"resize\");",
+		"endTerminalRenderSuppression(session, { render: false, reason: \"replay\" });",
+		"endTerminalRenderSuppression(session, { render: false, reason: \"resize\" });", "const terminalOutputQueueSoftLimitBytes = 1 * 1024 * 1024;",
 		"const terminalOutputMeasureChunkChars = 32 * 1024;",
 		"const terminalOutputMeasureBuffer = new Uint8Array(terminalOutputMeasureChunkChars * 4);",
-		"const maxTerminalOutputMessageBytes = maxQueuedTerminalOutputBytes;",
 		"const maxQueuedTerminalOutputBytes = 4 * 1024 * 1024;",
 		"const clearSessionOutputFlushSchedule = (session) => {",
 		"const terminalOutputByteChunkEnd = (data, start, maxBytes) => {",
@@ -2932,6 +2935,7 @@ func TestRuntimeTerminalOutputBatchingGuard(t *testing.T) {
 		"const flushSessionOutput = (session, {",
 		"maxBytes = 0,",
 		"maxEntries = 0,",
+		"maxTimeMs = 0,",
 		"recordTerminalRuntimeMetric(\"forceFlushBytes\", flushBytes);",
 		"window.requestAnimationFrame(flush);",
 		"session.outputQueue.push({",
@@ -2964,7 +2968,12 @@ func TestRuntimeTerminalOutputBatchingGuard(t *testing.T) {
 		"entry.replayOutput",
 		"? terminalReplayWriteBatchBytes",
 		"finishSessionHistoryReplayIfReady(session) || flushSessionOutput(session);",
-		"flushSessionOutput(session, { force: true });",
+		"const trySendPendingQueueTurnAck = (session) => {",
+		"session.pendingQueueTurnAck = null;",
+		"queue_turn_ack_pending",
+		"queue_turn_ack_sent",
+		"flushSessionOutput(session, {",
+		"maxTimeMs: terminalOutputFlushTimeBudgetMs,",
 		"const handleTerminalOutputOverload = (session, reason) => {",
 		"requestSessionHistoryReplay(session);",
 		"const genericWebSocketStartupFallbacks = new Set([",
@@ -2976,6 +2985,15 @@ func TestRuntimeTerminalOutputBatchingGuard(t *testing.T) {
 		if !strings.Contains(source, want) {
 			t.Fatalf("runtime terminal batching guard missing %q", want)
 		}
+	}
+	queueTurnBlock := sourceBetween(t, source,
+		`case "queue-turn-complete":`,
+		`case "agent-preparing":`)
+	if strings.Contains(queueTurnBlock, "flushSessionOutput(session, { force: true });") {
+		t.Fatal("Queue turn completion must not use an unbounded force flush")
+	}
+	if strings.Contains(source, "message exceeds maxTerminalOutputMessageBytes") || strings.Contains(source, "const maxTerminalOutputMessageBytes") {
+		t.Fatal("a legal large output message must be split instead of rejected by message size")
 	}
 	if strings.Contains(source, "writeSessionWebShellError(session, message || fallback);") {
 		t.Fatal("generic websocket startup fallbacks should not be written as terminal errors")
@@ -3032,7 +3050,7 @@ func TestRuntimeTerminalHistoryRangeSyncAndCache(t *testing.T) {
 		"outputQueuedBytes",
 		"outputQueuePeakBytes",
 		"recordTerminalRuntimeMaxMetric(\"outputQueuePeakBytes\", session.outputQueueSize);",
-		"session.outputQueueSize + outputByteLength >= maxQueuedTerminalOutputBytes",
+		"session.outputQueueSize + byteLength > maxQueuedTerminalOutputBytes",
 		"session.historyCacheWriteQueue.push({ startCursor, endCursor, data });",
 	} {
 		if !strings.Contains(mainSource, want) {
@@ -3211,7 +3229,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"markPaneRenderedIfMeasurable(session);",
 		"syncTerminalViewportPan(session);",
 		"const resetTerminalForHistoryReplay = (session) => {",
-		"beginTerminalRenderSuppression(session);",
+		"beginTerminalRenderSuppression(session, \"replay\");",
 		"session.resetOnNextReplay = false;",
 		"if (!resetTerminalRuntimeState(session)) {",
 		"const disposePane = (pane) => {",

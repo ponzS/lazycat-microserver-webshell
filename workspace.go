@@ -35,7 +35,7 @@ const (
 	averageHistoryBytesPerLine = 350
 	historyChunkMaxBytes       = 32 << 10
 	clientQueueLimit           = 8 << 20
-	historyReplayChunk         = 256 << 10
+	historyReplayChunk         = 512 << 10
 	websocketReadLimit         = 10 << 20
 	terminalPTYInputChunkBytes = 16 << 10
 )

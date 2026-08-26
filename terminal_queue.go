@@ -22,15 +22,16 @@ import (
 )
 
 const (
-	terminalQueueProtocolVersion     = 1
-	terminalQueueMaxSubscriptions    = 1024
-	terminalFastMaxSubscriptions     = 1
-	terminalQueuePaneBufferLimit     = 4 << 20
-	terminalQueuePaneBufferHighWater = 3 << 20
-	terminalQueueRoundByteBudget     = 256 << 10
-	terminalQueueRoundTimeBudget     = 8 * time.Millisecond
-	terminalQueueBinaryMagic         = "LCQ1"
-	terminalQueueBinaryPrefixSize    = 8
+	terminalQueueProtocolVersion       = 1
+	terminalQueueMaxSubscriptions      = 1024
+	terminalFastMaxSubscriptions       = 1
+	terminalQueuePaneBufferLimit       = 4 << 20
+	terminalQueuePaneBufferHighWater   = 3 << 20
+	terminalQueueRoundByteBudget       = 512 << 10
+	terminalQueueRoundTimeBudget       = 8 * time.Millisecond
+	terminalQueueBinaryPayloadMaxBytes = 512 << 10
+	terminalQueueBinaryMagic           = "LCQ1"
+	terminalQueueBinaryPrefixSize      = 8
 )
 
 type terminalQueueCheckpointCapability struct {
@@ -875,26 +876,45 @@ func (s *terminalQueuePaneStream) enqueueText(payload []byte) {
 }
 
 func (s *terminalQueuePaneStream) enqueueBinary(payload []byte) {
+	if len(payload) == 0 {
+		return
+	}
 	s.mu.Lock()
 	if !s.hasCursor {
 		s.mu.Unlock()
 		s.overload("queue output arrived before history cursor")
 		return
 	}
+	if s.bufferBytes+len(payload) > terminalQueuePaneBufferLimit {
+		s.mu.Unlock()
+		s.overload("queue pane buffer exceeded its limit")
+		return
+	}
 	startCursor := s.cursor
 	s.cursor += uint64(len(payload))
-	endCursor := s.cursor
-	s.binarySequence++
-	sequence := s.binarySequence
 	s.mu.Unlock()
-	s.enqueue(terminalQueueOutbound{
-		messageType:    websocket.BinaryMessage,
-		payload:        append([]byte(nil), payload...),
-		startCursor:    startCursor,
-		endCursor:      endCursor,
-		binarySequence: sequence,
-		byteCost:       len(payload),
-	})
+	for offset := 0; offset < len(payload); {
+		end := offset + terminalQueueBinaryPayloadMaxBytes
+		if end > len(payload) {
+			end = len(payload)
+		}
+		chunk := append([]byte(nil), payload[offset:end]...)
+		s.mu.Lock()
+		s.binarySequence++
+		sequence := s.binarySequence
+		chunkStart := startCursor + uint64(offset)
+		chunkEnd := chunkStart + uint64(len(chunk))
+		s.mu.Unlock()
+		s.enqueue(terminalQueueOutbound{
+			messageType:    websocket.BinaryMessage,
+			payload:        chunk,
+			startCursor:    chunkStart,
+			endCursor:      chunkEnd,
+			binarySequence: sequence,
+			byteCost:       len(chunk),
+		})
+		offset = end
+	}
 }
 
 func (s *terminalQueuePaneStream) enqueue(entry terminalQueueOutbound) {

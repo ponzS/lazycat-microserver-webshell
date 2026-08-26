@@ -1240,4 +1240,27 @@ git diff --check
 - 实施方案：修正随包 `runtime/static/ghostty-web.js`，使压缩后的 `endRenderSuppression()` 使用参数 `A`；保留 TypeScript 源码现有正确实现。新增发布资产 guard，直接检查随包 bundle 中的压缩变量引用，避免只验证源码而遗漏定制运行时 bundle。
 - Guard：`TestRuntimeTerminalCanvasResidueGuard` 固定 bundle 中 `endRenderSuppression()` 使用 `A`、检查 suppression 深度和最终 render 条件；现有 replay、resize suppression 和 Ghostty 单元测试继续覆盖正常渲染路径。
 - 验证结果：`node --check runtime/static/ghostty-web.js`、`node --check runtime/static/main.js`、`go test ./... -count=1`、shell 语法检查和 `git diff --check` 通过。
-- 禁止复现：修改 `ghostty-web` 源码后不得只验证 TypeScript 或新构建产物；必须检查实际发布的 `runtime/static/ghostty-web.js`；压缩后的参数名与函数体引用必须保持一致；replay 收尾异常不得被吞掉后继续宣称终端 ready。
+
+### LCMD-20260826-03：高频输出触发 Queue 无界排空与大消息误重同步
+
+- 日期：2026-08-26
+- 来源：用户反馈；高频输出或单次提交块过大时终端右上角出现红点、输出短暂停止，移动端更容易复现；切换并聚焦其他会话时旧会话也可能短暂停止后恢复。
+- 影响模块：`runtime/static/main.js`、`terminal_queue.go`、`workspace.go`、对应 Go/runtime guard。
+- 根因：Queue `queue-turn-complete` 到达后，浏览器调用 `flushSessionOutput(session, { force: true })`，在单个 WebSocket message task 内无界执行 Ghostty/WASM 输出处理，导致移动端主线程长任务延迟 Queue ACK、后续 WebSocket 事件、输入和连接调度。另一个路径先按整条消息大小判断 4 MiB 上限，合法的大消息尚未拆分就触发 history replay，导致正常的短时背压被误报为 reconnecting。
+- 实施方案：浏览器输出 drain 增加 byte、entry 和 time budget；Queue turn 只登记待确认 cursor/sequence，输出按序进入 Ghostty 且队列排空后才发送 ACK，ACK 不等待 Canvas 绘制。合法大消息先按现有 replay/live batch 拆分，4 MiB 仅保护累计队列内存。Agent replay 和 Queue binary payload 最终采用 512 KiB 分片，以兼顾隐藏 replay 的追赶速度；Queue 分片保持 cursor、sequence、history generation 和 checksum 连续。现有 Queue turn ACK 提供第一阶段兼容背压，modern credit/consume confirmation 和 Fast 对等流控留待指标证明需要后继续实施。
+- 安全边界：不改变 Queue `LCQ1`、Fast 原始 payload、legacy/旧 Agent fallback、persistent Agent/PTY、服务端 history 或 Cache v2 权威归属；分片入队失败时不推进未入队数据的浏览器 cursor；错误日志不记录 PTY 内容、命令文本或凭据。
+- 回归 guard：`TestTerminalQueueBinaryPayloadIsSplitIntoContinuousFrames` 验证 Queue binary frame 不超过 512 KiB 且 cursor/sequence 连续；`TestAgentHistoryReplayUsesBoundedChunks` 验证 Agent replay 大块拆分；`TestRuntimeTerminalOutputBatchingGuard` 固定 byte/entry/time drain、pending Queue ACK、合法大消息拆分和禁止 Queue turn 无界 force flush。
+- 验证结果：`node --check runtime/static/main.js`、相关 Queue/Agent/runtime 定向测试通过；完整 Go、Node 终端回归和真实桌面/移动端高输出、Queue ACK、切 tab 场景仍待执行和手动验收。
+- 禁止复现：不得在 Queue turn 回调中恢复无界 `flushSessionOutput(..., { force: true })`；不得因为合法单消息较大直接请求 history replay；不得在 Ghostty 尚未按序解析 turn 数据前发送 ACK；不得通过关闭 PTY/session、清空 history 或丢弃输出掩盖背压。
+
+### LCMD-20260826-04：resize/replay 事务间中间帧泄漏且回放吞吐过低
+
+- 日期：2026-08-26
+- 来源：用户手动验收；初次进入终端通常不明显，但 resize 或字号变化后会看到明显历史重放；回放期间再次 resize 会立即隐藏中间画面并跳到最新底部。
+- 影响模块：`runtime/static/main.js`、输出流控参数、replay/resize presentation suppression。
+- 根因：本轮输出流控第一批把 replay chunk 从 256 KiB 降到 64 KiB，并把默认 drain entry 限制为 1，合法 replay 的解析速度明显下降，使 resize 触发的 TUI 输出更容易在浏览器中形成长时间可见的逐块变化。更重要的是，原 presentation 门禁只在单次 `writeReplay()` 或本地 `term.resize()` 临界区生效；replay start 到 replay commit、resize fence 到 resize output settle 之间没有持有跨 task 的统一 suppression。多个流程共用一个布尔状态时，replay 与 resize 并发还可能互相提前释放门禁。第二次 resize 恰好重新建立 hold/suppression，因此会掩盖第一轮门禁泄漏并立即显示最新画面。
+- 实施方案：`history-replay-start` 建立持续到 replay commit 的 `replay` suppression；resize fence 建立持续到 resize output settle 完成的 `resize` suppression；WebShell wrapper 以 reason set 管理两个独立 owner，只有全部 owner 释放后才调用 Ghostty end suppression。legacy resize 也纳入同一 `resize` suppression 生命周期。replay batch、Agent history replay chunk 和 Queue binary payload 恢复为 512 KiB，live output 仍使用较小 byte/time budget，避免把保护门禁与 live 交互延迟混为一谈。失败、detach、重连和 settle 清理路径按对应 reason 释放，避免黑屏或永久隐藏。
+- 安全边界：suppression 只延迟 Canvas presentation，不停止 PTY、不丢 history、不推进 cursor/ready；Queue `LCQ1`、Fast payload 和 legacy 协议不变；replay 仍必须按序完成后才能 commit，Canvas 不参与 Queue ACK。
+- 回归 guard：扩展 runtime guard 固定 reason-based suppression、replay/resize 生命周期、legacy resize suppression 和 512 KiB replay budget；保留 Queue/Agent 分片连续性、presentation gate、resize fence 和 Ghostty suppression 测试。
+- 验证结果：`node --check runtime/static/main.js`、`go test ./... -count=1`、终端 Node 92/92、`git diff --check` 和 `/home/ponzs/Desktop/os-dev/lightos-build.sh` 构建验证已通过；本地 WebShell LPK 为 `dist/local-lcmd-webshell.lpk`，LightOS Admin LPK 为 `../lightos-admin/dist/cloud.lazycat.lightos.entry-v0.3.57-229.lpk`。用户手动验收必须重新覆盖初次进入、resize、字号变化、pi、Codex、持续输出和第二次 resize。
+- 禁止复现：不得只提高 replay 上限而释放中间 Canvas；不得只依赖单个 `writeReplay()` 的局部 suppression；不得让 replay 或 resize 任一流程提前释放另一流程的 suppression；不得把第二次 resize 的即时恢复当作第一轮实现正确的依据。
