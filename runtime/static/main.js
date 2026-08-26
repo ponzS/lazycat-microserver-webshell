@@ -17295,7 +17295,32 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }, "image/png");
   });
 
+  // A sized Canvas can still be the renderer's initial background. Only a
+  // frame that was actually presented for the current terminal state may
+  // replace the last-known-good persisted preview.
+  const sessionHasCurrentPresentedFrame = (session) => {
+    if (
+      !session
+      || session.closed
+      || session.hasPresentedFrame !== true
+      || session.resizePresentationHold
+      || session.resizeAckPending
+      || !session.renderSnapshot
+      || Number(session.measuredFitGeneration || 0) <= 0
+      || session.presentedFitGeneration !== session.measuredFitGeneration
+      || session.presentedReplayGeneration !== session.terminalReplayGeneration
+      || session.presentedContentGeneration !== session.terminalContentGeneration
+      || session.presentedHistoryCursor !== session.appliedHistoryCursor
+    ) {
+      return false;
+    }
+    return terminalCanvasMatchesExpectedSize(session);
+  };
+
   const sessionCanCaptureCacheV2Preview = (session) => {
+    if (!sessionHasCurrentPresentedFrame(session)) {
+      return false;
+    }
     if (panePresentationIsCurrent(session)) {
       return true;
     }
@@ -17352,6 +17377,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     const width = canvas.width;
     const height = canvas.height;
     const { cols, rows } = terminalSize(session);
+    const renderGeneration = Number(session.renderGeneration || 0);
+    const contentGeneration = Number(session.presentedContentGeneration || 0);
+    const presentedCursor = session.presentedHistoryCursor;
     const devicePixelRatio = window.devicePixelRatio || 1;
     const themeFingerprint = terminalCacheV2ThemeFingerprint();
     const previewCaptureStartedAt = terminalCacheV2MetricNow();
@@ -17372,6 +17400,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       || canvas.height !== height
       || currentSize.cols !== cols
       || currentSize.rows !== rows
+      || Number(session.renderGeneration || 0) !== renderGeneration
+      || Number(session.presentedContentGeneration || 0) !== contentGeneration
+      || session.presentedHistoryCursor !== presentedCursor
       || Math.abs((window.devicePixelRatio || 1) - devicePixelRatio) > 0.01
       || terminalCacheV2ThemeFingerprint() !== themeFingerprint
     ) {

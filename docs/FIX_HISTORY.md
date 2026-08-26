@@ -1276,3 +1276,13 @@ git diff --check
 - 回归 guard：`TestContainerUnavailableErrorStopsAgentEnsure` 验证错误分类边界；`TestEnsurePersistentAgentStopsBeforeInstallForMissingContainer` 固定不可用判断位于 agent 安装调用之前。
 - 验证结果：`gofmt`、`go test ./...`（项目根目录）和 `git diff --check` 通过；未修改前端、Queue 协议或 LightOS 生命周期配置。
 - 禁止复现：收到明确的 `container does not exist` 后不得继续安装、启动或 readiness 重试；普通临时 agent 故障不得被该判断一并终止。
+
+### LCMD-20260826-06：冷启动后台黑色 Canvas 覆盖已有终端预览
+
+- 来源：用户反馈；退出 WebShell 后重新进入时，已有终端预览先正常显示，随后被此前从未打开过的终端黑色预览覆盖。
+- 影响模块：`runtime/static/main.js` Cache v2 预览捕获与终端总览。
+- 根因：后台 Queue pane 在历史回放完成后会立即安排 PNG 捕获；捕获门禁只验证 Canvas 已有尺寸和 replay/cache cursor 状态，没有验证 Canvas 是否经过真实 full render/presentation。Ghostty 初始化产生的纯背景 Canvas 因此被当作合法新预览保存，原有 last-known-good 预览被原子替换。
+- 实施方案：新增当前呈现帧门禁，要求 `hasPresentedFrame`、fit/replay/content generation、presented history cursor 与当前状态一致，且 Canvas 尺寸匹配；截图编码前后再次校验 render generation、content generation 和 presented cursor。未打开或未真实更新的后台 pane 不得写入 preview，Cache v2 继续保留旧预览；真实呈现的合法全黑终端仍允许保存。
+- 回归 guard：`TestRuntimeTerminalCanvasResidueGuard` 固定预览捕获必须经过 `sessionHasCurrentPresentedFrame`、`hasPresentedFrame`、presented cursor 和 render generation 校验；既有 Cache v2 测试继续覆盖旧预览在 append 后保留及身份隔离。
+- 验证结果：`go test ./... -run TestRuntimeTerminalCanvasResidueGuard -count=1`、`node --test terminal_cache_v2_test.mjs`（17/17）、`node --check runtime/static/main.js` 和 `git diff --check` 通过；现场需覆盖冷启动、未打开后台 pane、打开后首次真实渲染、合法全黑终端和 Agent 持续输出场景。
+- 禁止复现：不得仅按 Canvas 尺寸或像素颜色判断预览有效；不得让未呈现的初始化黑帧覆盖旧图；不得因保留旧预览而放宽账号、workspace、tab、pane 或 history generation 身份校验。

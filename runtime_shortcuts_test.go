@@ -3508,6 +3508,12 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	for _, want := range []string{
 		"const terminalCacheV2PreviewDelayMs = 3000;",
 		"const terminalCacheV2PreviewRefreshMs = 2000;",
+		"const sessionHasCurrentPresentedFrame = (session) => {",
+		"session.hasPresentedFrame !== true",
+		"session.presentedHistoryCursor !== session.appliedHistoryCursor",
+		"if (!sessionHasCurrentPresentedFrame(session)) {",
+		"const renderGeneration = Number(session.renderGeneration || 0);",
+		"Number(session.renderGeneration || 0) !== renderGeneration",
 		"performance.now() - Number(session.lastTerminalOutputAt || 0) < terminalCacheV2PreviewDelayMs",
 		"window.requestIdleCallback(capture, { timeout: 1500 })",
 		"await terminalCacheV2.savePreview(identity, session.historyGeneration, cursor, blob, {",
