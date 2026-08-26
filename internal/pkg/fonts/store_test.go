@@ -91,6 +91,9 @@ func TestStoreRejectsUploadedFontOverMaxBytes(t *testing.T) {
 
 func TestStoreDefaultsInvalidAndPersistsScrollback(t *testing.T) {
 	store := Store{Dir: t.TempDir()}
+	if DefaultTerminalScrollback != 1000 {
+		t.Fatalf("DefaultTerminalScrollback = %d, want 1000", DefaultTerminalScrollback)
+	}
 
 	state, err := store.State()
 	if err != nil {
@@ -149,6 +152,21 @@ func TestStoreDefaultsInvalidAndPersistsScrollback(t *testing.T) {
 	}
 	if state.TerminalLineHeightPercent != DefaultTerminalLineHeightPercent {
 		t.Fatalf("TerminalLineHeightPercent = %d, want default %d", state.TerminalLineHeightPercent, DefaultTerminalLineHeightPercent)
+	}
+}
+
+func TestStoreUpgradePreservesExistingScrollbackSetting(t *testing.T) {
+	store := Store{Dir: t.TempDir()}
+	writeSettingsJSON(t, store, map[string]any{
+		"terminal_scrollback": 5000,
+	})
+
+	state, err := store.State()
+	if err != nil {
+		t.Fatalf("State() error = %v", err)
+	}
+	if state.TerminalScrollback != 5000 {
+		t.Fatalf("existing TerminalScrollback = %d, want 5000 after default change", state.TerminalScrollback)
 	}
 }
 

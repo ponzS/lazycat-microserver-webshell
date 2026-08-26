@@ -1198,3 +1198,13 @@ git diff --check
 - Guard：更新 `TestRuntimeContainerCacheV2AndPWAContract`，明确禁止恢复 `!historyGeneration` 早退，固定 pane-level manifest lookup、可选 generation identity check，以及 decode 完成后“generation 已知则严格相等”的 stale guard。Cache v2 15 项测试继续覆盖完整身份隔离和跨 generation 拒绝。
 - 验证结果：`node --check runtime/static/main.js`、`./scripts/test-terminal-live-preview.sh`（Cache v2 15/15）、`go test ./... -count=1` 和 `git diff --check` 通过；真实宿主需关闭窗口后重新进入，确认未打开的后台会话立即显示上一轮持久化预览。
 - 禁止复现：不得要求后台 pane 先 attach 才允许读取其精确 pane manifest；不得把未知 generation 当成任意 generation 的模糊缓存查询；一旦服务端 generation 已知，不得继续展示不同 generation 的旧 preview。
+
+### 2026-08-26：降低终端滚动历史默认值
+
+- 来源：用户反馈默认历史回放较慢，首次打开或重连时等待时间较长。
+- 实施方案：前端和服务端默认 `terminal_scrollback` 从 5000 行统一调整为 1000 行；已有设置文件中的合法值不迁移、不覆盖，仅新安装、缺失/非法设置和“恢复默认”使用 1000 行。滚动历史仍按约 350 bytes/行换算为服务端和浏览器缓存的字节上限，因此默认回放数据量约降至原来的五分之一。
+- 兼容边界：用户主动保存的 5000 行或其他合法值继续保留；设置变更仍会使不匹配的本地历史缓存失效并按新的 history window 重建，避免旧范围与新设置混用。
+- 回归 guard：`internal/pkg/fonts/store_test.go` 固定默认值为 1000 且验证升级读取已有 5000 行设置不变；`TestRuntimeTerminalScrollbackSettingPersistence` 固定前端默认值；现有服务端 workspace/agent 参数测试继续覆盖设置值向 PTY 传递。
+- 历史重放提速方向：默认值调整直接减少 snapshot 和 Cache v2 replay 的字节量；进一步优化应优先使用启动 trace 分解 WASM 初始化、workspace/attach、网络传输、Cache read、Ghostty parser/write 和最终 render 的耗时，再针对最大阶段做增量回放、首屏 checkpoint 或批量解析，不能跳过 cursor/generation 校验或在 replay 中恢复为无界全量加载。
+- 验证结果：`go test ./... -count=1`、`go test -race ./...`、`node --check runtime/static/main.js`、81 项 Cache/连接/Queue/拓扑/resize Node 测试和 `git diff --check` 通过；真实设备需比较升级前后冷启动、断线重连和 1000/5000 行用户设置的回放耗时。
+- 禁止复现：不得通过升级直接覆盖已有用户的滚动历史设置；不得只修改前端默认而遗漏服务端默认；不得把 1000 行误解为严格物理行数，实际容量仍是按字节近似；不得为了提速取消历史身份、cursor 连续性或最终完整渲染校验。
