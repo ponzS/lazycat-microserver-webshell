@@ -39,6 +39,42 @@ func TestFastIntegrityForwarderWritesEncodedPayload(t *testing.T) {
 	}
 }
 
+func TestContainerUnavailableErrorStopsAgentEnsure(t *testing.T) {
+	for _, err := range []error{
+		errors.New(`runc state failed: container does not exist`),
+		fmt.Errorf("wrapped: %w", errors.New("container does not exist")),
+	} {
+		if !isContainerUnavailableError(err) {
+			t.Fatalf("isContainerUnavailableError(%v) = false, want true", err)
+		}
+	}
+	if isContainerUnavailableError(errors.New("agent daemon temporarily unavailable")) {
+		t.Fatal("ordinary agent failure must remain retryable")
+	}
+}
+
+func TestEnsurePersistentAgentStopsBeforeInstallForMissingContainer(t *testing.T) {
+	data, err := os.ReadFile("agent_runtime.go")
+	if err != nil {
+		t.Fatalf("ReadFile(agent_runtime.go) error = %v", err)
+	}
+	source := string(data)
+	start := strings.Index(source, "func ensurePersistentAgentOnce(")
+	end := strings.Index(source[start:], "func cachedInstanceUsername(")
+	if start < 0 || end < 0 {
+		t.Fatal("ensurePersistentAgentOnce source block not found")
+	}
+	block := source[start : start+end]
+	stop := strings.Index(block, "if isContainerUnavailableError(preInstallPingErr) {")
+	install := strings.Index(block, "ensureAgentBinaryInstalled(ctx, scope, trace)")
+	if stop < 0 || install < 0 || stop > install {
+		t.Fatal("missing-container guard must return before agent installation")
+	}
+	if !strings.Contains(block[stop:install], "return \"\", trace.errorf(") {
+		t.Fatal("missing-container guard must terminate the current ensure")
+	}
+}
+
 func TestAgentConnectionErrorPayloadIsRetryable(t *testing.T) {
 	payload := agentConnectionErrorPayload(errors.New("agent unavailable"))
 	if payload["type"] != "connection-error" {

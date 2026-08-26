@@ -67,6 +67,10 @@ func isUnsupportedAgentProtocolError(err error) bool {
 	return errors.As(err, &protocolErr)
 }
 
+func isContainerUnavailableError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "container does not exist")
+}
+
 func normalizeAgentScope(selector, accountID string) agentScope {
 	return agentScope{
 		Selector:  strings.TrimSpace(selector),
@@ -482,6 +486,9 @@ func ensurePersistentAgentOnce(ctx context.Context, scope agentScope) (string, e
 	} else {
 		trace.add("pre-install ping failed: %v", preInstallPingErr)
 		rememberIncompatiblePersistentAgentNotice(scope, preInstallPingErr)
+		if isContainerUnavailableError(preInstallPingErr) {
+			return "", trace.errorf("persistent webshell agent target container unavailable: %v", preInstallPingErr)
+		}
 	}
 
 	persistentAgentCache.Lock()

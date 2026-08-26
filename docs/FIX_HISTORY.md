@@ -1264,3 +1264,15 @@ git diff --check
 - 回归 guard：扩展 runtime guard 固定 reason-based suppression、replay/resize 生命周期、legacy resize suppression 和 512 KiB replay budget；保留 Queue/Agent 分片连续性、presentation gate、resize fence 和 Ghostty suppression 测试。
 - 验证结果：`node --check runtime/static/main.js`、`go test ./... -count=1`、终端 Node 92/92、`git diff --check` 和 `/home/ponzs/Desktop/os-dev/lightos-build.sh` 构建验证已通过；本地 WebShell LPK 为 `dist/local-lcmd-webshell.lpk`，LightOS Admin LPK 为 `../lightos-admin/dist/cloud.lazycat.lightos.entry-v0.3.57-229.lpk`。用户手动验收必须重新覆盖初次进入、resize、字号变化、pi、Codex、持续输出和第二次 resize。
 - 禁止复现：不得只提高 replay 上限而释放中间 Canvas；不得只依赖单个 `writeReplay()` 的局部 suppression；不得让 replay 或 resize 任一流程提前释放另一流程的 suppression；不得把第二次 resize 的即时恢复当作第一轮实现正确的依据。
+
+### LCMD-20260826-05：不存在的容器仍进入 agent 安装启动循环
+
+- 日期：2026-08-26
+- 来源：LightOS 客户日志；persistent agent pre-install ping 已返回 `container does not exist`，但仍继续执行 agent install、daemon reconcile 和 readiness ping。
+- 影响模块：`agent_runtime.go` 的 persistent agent ensure 流程。
+- 错误现象：Debian 实例已停止或被删除时，WebShell 请求反复触发针对不存在容器的管理操作，持续产生 `nsenter`、`runc state` 和 agent 安装失败日志。
+- 根因：首次 pre-install ping 的错误没有区分“临时 agent 故障”和“目标容器不存在”；后者仍沿用普通恢复路径，继续安装并启动 agent。
+- 实施方案：新增 `isContainerUnavailableError`，仅当错误明确包含 `container does not exist` 时，在 `ensurePersistentAgentOnce` 中立即返回，跳过安装、daemon reconcile 和启动就绪轮询。其他 agent/网络临时错误继续使用原有自动恢复路径。
+- 回归 guard：`TestContainerUnavailableErrorStopsAgentEnsure` 验证错误分类边界；`TestEnsurePersistentAgentStopsBeforeInstallForMissingContainer` 固定不可用判断位于 agent 安装调用之前。
+- 验证结果：`gofmt`、`go test ./...`（项目根目录）和 `git diff --check` 通过；未修改前端、Queue 协议或 LightOS 生命周期配置。
+- 禁止复现：收到明确的 `container does not exist` 后不得继续安装、启动或 readiness 重试；普通临时 agent 故障不得被该判断一并终止。
