@@ -5386,3 +5386,87 @@ func TestRuntimeMobileOverviewDragAndSelectionToolbar(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeTerminalLongScreenshotContract(t *testing.T) {
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	moduleData, err := os.ReadFile("runtime/static/terminal_long_screenshot.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/terminal_long_screenshot.js) error = %v", err)
+	}
+	indexData, err := os.ReadFile("runtime/static/index.html")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
+	}
+	workerData, err := os.ReadFile("runtime/static/service-worker.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/service-worker.js) error = %v", err)
+	}
+	mainSource := string(mainData)
+	moduleSource := string(moduleData)
+	indexSource := string(indexData)
+	workerSource := string(workerData)
+	contractSource := mainSource + "\n" + moduleSource
+	if strings.Contains(indexSource, `class="mobile-shortcuts-brand"`) {
+		t.Fatal("brand text must be screenshot-only, not live footer DOM")
+	}
+	if !strings.Contains(workerSource, "`${assetBase}terminal_long_screenshot.js`,") {
+		t.Fatal("service worker must precache terminal_long_screenshot.js")
+	}
+
+	for _, want := range []string{
+		`data-action="capture-long-screenshot">截取长图`,
+		`import { createTerminalLongScreenshot } from "./terminal_long_screenshot.js";`,
+		`item.hidden = (action === "capture-long-screenshot" && !isTouchShortcutLayout())`,
+		`button.dataset.kind = shortcut.kind;`,
+		`const { runLongScreenshot } = createTerminalLongScreenshot({`,
+		`runLongScreenshot(tabs.get(target.tabId)?.panes.get(target.paneId));`,
+		`export const captureTerminalGeometry =`,
+		`export const terminalGeometryMatches =`,
+		`export const planTerminalScreenshotParts =`,
+		`export const snapshotTerminalRows =`,
+		`export const drawTerminalRows =`,
+		`const DEFAULT_MAX_PARTS = 4;`,
+		`SCREENSHOT_RANGE_TOO_LARGE`,
+		`current.resizeEpoch === snapshot.resizeEpoch`,
+		`current.fontMetricsGeneration === snapshot.fontMetricsGeneration`,
+		`current.themeFingerprint === snapshot.themeFingerprint`,
+		`Match Ghostty's two-pass line renderer`,
+		`let captureActive = false;`,
+		`Powered by LazyCat MicroServer LightOS`,
+		`files.length === 1`,
+		`return "saved";`,
+	} {
+		if !strings.Contains(contractSource, want) && !strings.Contains(indexSource, want) {
+			t.Fatalf("runtime terminal long screenshot guard missing %q", want)
+		}
+	}
+
+	captureBlock := moduleSource
+	for _, forbidden := range []string{
+		"scrollToTop(",
+		"scrollToBottom(",
+		"requestSessionHistoryReplay(",
+		"resetTerminalForHistoryReplay(",
+		"foreignObject",
+		"roundRect(",
+	} {
+		if strings.Contains(captureBlock, forbidden) {
+			t.Fatalf("long screenshot must not mutate the live terminal or use unsafe rasterization, found %q", forbidden)
+		}
+	}
+}
+
+func TestTerminalLongScreenshotBehavior(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is unavailable")
+	}
+	command := exec.Command(node, "--test", "terminal_long_screenshot_test.mjs")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("terminal long screenshot tests failed: %v\n%s", err, output)
+	}
+}

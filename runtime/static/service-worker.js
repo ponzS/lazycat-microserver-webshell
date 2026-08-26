@@ -26,6 +26,7 @@ const appShellAssets = [
   `${assetBase}terminal_connection_scheduler.js`,
   `${assetBase}terminal_topology_controller.js`,
   `${assetBase}tab_activation_scheduler.js`,
+  `${assetBase}terminal_long_screenshot.js`,
   `${assetBase}terminal_queue_connection.js`,
   `${assetBase}themes.json`,
   `${assetBase}ios_terminal_host.js`,
