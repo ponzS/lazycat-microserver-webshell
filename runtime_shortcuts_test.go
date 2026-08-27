@@ -1604,6 +1604,23 @@ func TestRuntimeAttachmentBrowserStartsAtRootForClientInstances(t *testing.T) {
 	}
 }
 
+func TestRuntimeTerminalSettingsPhysicalMachineInfo(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/index.html")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
+	}
+	source := string(data)
+	clientTitle := strings.Index(source, `id="settingsPhysicalMachineTitle"`)
+	multiScreenTitle := strings.Index(source, `id="settingsMultiScreenOutputTitle"`)
+	if clientTitle < 0 || multiScreenTitle < 0 || clientTitle >= multiScreenTitle {
+		t.Fatal("physical machine information must appear above multi-screen output information")
+	}
+	const want = "在懒猫微服 PC 客户端中启用「接入 LightOS」后，这台物理机将作为客户端实例接入 LightOS，并允许你从 LightOS 访问其终端和相关资源。"
+	if !strings.Contains(source, want) {
+		t.Fatalf("physical machine information text missing %q", want)
+	}
+}
+
 func TestRuntimeMobileSettingsUsesListNavigation(t *testing.T) {
 	wantSnippets := map[string][]string{
 		"runtime/static/index.html": {
