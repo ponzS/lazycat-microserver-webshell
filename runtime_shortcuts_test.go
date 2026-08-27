@@ -3120,6 +3120,24 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	rendererSource := string(rendererData)
 	kittySource := string(kittyData)
 
+	for _, want := range []string{
+		"getScrollbarWidth() {",
+		"return 3 + 5 * this.scrollbarHoverProgress;",
+		"SCROLLBAR_HOVER_SENSOR_SIZE = 24",
+		"SCROLLBAR_HOVER_ANIMATION_MS = 160",
+		"setScrollbarHoverProgress",
+		"updateScrollbarHover(g.clientX)",
+		"scrollbarHoverAnimationFrame && (cancelAnimationFrame",
+		"this.scrollbarHoverActive ? this.showScrollbar() : this.hideScrollbar();",
+		"g.touch ? 18 : 8",
+		"i = this.getScrollbarWidth()",
+		"if (I < N || I > i)",
+	} {
+		if !strings.Contains(rendererSource, want) && !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime scrollbar hover expansion guard missing %q", want)
+		}
+	}
+
 	mainSnippets := []string{
 		"const terminalRuntimeClearSequence = \"\\x1b[2J\\x1b[3J\\x1b[H\";",
 		"const clearTerminalCanvasPixels = (session) => {",

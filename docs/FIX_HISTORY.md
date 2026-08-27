@@ -1299,3 +1299,15 @@ git diff --check
 - 回归 guard：`tab_activation_scheduler_test.mjs` 覆盖首阶段必须跨过 frame 和 task、快速切换 latest-only、阶段间主动 yield 和 cancel；`TestRuntimeTerminalCanvasResidueGuard`、`TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs` 固定视觉提交顺序、禁止同步 immediate resize、instance generation fencing、延迟 focus fencing、`activate_tab` 串行 optimistic 持久化和 Service Worker 预缓存。
 - 验证结果：`node --check runtime/static/main.js`、`node --check runtime/static/tab_activation_scheduler.js`、scheduler Node 4/4、完整终端 Node 96/96、`go test ./... -count=1` 和 `git diff --check` 已通过；用户已完成目标环境手动验收，快速切换 tab 的状态响应符合预期。
 - 禁止复现：不得把 resize/fit、连接拓扑重排或服务端 action 放回 tab 点击的同步视觉阶段；不得让已失活 tab 的 generation 继续 focus、resize 或覆盖连接需求；不得为了切换速度跳过 held frame 或放宽 replay presentation gate。
+
+### LCMD-20260826-08：鼠标接近右侧时滚动条无法稳定拖拽
+
+- 日期：2026-08-26
+- 来源：用户反馈；终端滚动条过窄，鼠标接近右侧时难以准确抓住并拖动。
+- 影响模块：`ghostty-web/lib/renderer.ts`、`ghostty-web/lib/terminal.ts`、`runtime/static/ghostty-web.js`。
+- 错误现象：终端滚动条默认视觉宽度较窄，尤其在指针从终端内容区靠近右侧时，命中窗口小，拖拽容易落到文本选择或其他终端交互上。
+- 根因：滚动条绘制宽度与鼠标命中范围固定，未利用用户已经接近右侧这一明确意图，也没有为宽度变化提供过渡状态；运行包中的定制 bundle 使用了约 3px 的绘制宽度。
+- 实施方案：保留 3px 默认视觉宽度，增加 24px 右侧感应区。指针进入感应区后，滚动条在 160ms 内使用缓出动画平滑展开到 8px，右边缘保持固定并向左扩展；离开终端后反向收回。鼠标命中和拖拽按最大 8px 范围处理，触摸滚动继续保留现有 18px 命中范围；动画在释放拖拽、离开和销毁时可取消。Canvas 清理跟随当前绘制宽度，宽度过渡期间执行完整重绘，避免黑色区域和收回残影。
+- 回归 guard：`CanvasRenderer > Scrollbar hover sizing` 固定 3px 默认、5.5px 中间值和 8px 展开值；`TestRuntimeTerminalCanvasResidueGuard` 固定感应区、动画参数、源码/运行 bundle 的展开 API、最大命中区域和离开收回路径。
+- 验证结果：`bun run typecheck`、`bun test lib/renderer.test.ts`（10/10）、`node --check runtime/static/ghostty-web.js`、`node --check runtime/static/main.js` 和 `git diff --check` 通过。尚未在真实桌面浏览器及 Lazycat WebView 进行鼠标/触摸视觉验收。
+- 禁止复现：不得只加宽绘制而保留窄命中区域；不得在动画中改变终端 Canvas 尺寸、列数、行数或滚动比例；不得无条件按最大展开宽度清理并覆盖终端内容；宽度过渡必须完整重绘以恢复旧区域；不得让滚动条 hover 动画进入触摸滚动或其他设置面板滚动条路径。

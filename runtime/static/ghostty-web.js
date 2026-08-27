@@ -1455,7 +1455,7 @@ const f = {
 };
 class $ {
   constructor(A, B = {}) {
-    this.cursorVisible = !0, this.lastCursorPosition = { x: 0, y: 0 }, this.lastViewportY = 0, this.currentBuffer = null, this.currentSelectionCoords = null, this.hoveredHyperlinkId = 0, this.previousHoveredHyperlinkId = 0, this.hoveredLinkRange = null, this.previousHoveredLinkRange = null, this.canvas = A;
+    this.cursorVisible = !0, this.lastCursorPosition = { x: 0, y: 0 }, this.lastViewportY = 0, this.scrollbarHoverProgress = 0, this.currentBuffer = null, this.currentSelectionCoords = null, this.hoveredHyperlinkId = 0, this.previousHoveredHyperlinkId = 0, this.hoveredLinkRange = null, this.previousHoveredLinkRange = null, this.canvas = A;
     const g = A.getContext("2d", { alpha: !0 });
     if (!g)
       throw new Error("Failed to get 2D rendering context");
@@ -1838,22 +1838,28 @@ class $ {
   /**
    * Get current font metrics
    */
+  setScrollbarHoverProgress(A) {
+    this.scrollbarHoverProgress = Math.max(0, Math.min(1, A));
+  }
+  getScrollbarWidth() {
+    return 3 + 5 * this.scrollbarHoverProgress;
+  }
   /**
    * Render scrollbar (Phase 2)
    * Shows scroll position and allows click/drag interaction
    * @param opacity Opacity level (0-1) for fade in/out effect
    */
   renderScrollbar(A, B, g, E = 1) {
-    const C = this.ctx, I = this.canvas.height / this.devicePixelRatio, D = this.canvas.width / this.devicePixelRatio, i = 3, w = D - i - 3, s = 4, N = I - s * 2;
-    if (C.fillStyle = this.theme.background, C.fillRect(w - 2, 0, i + 5, I), E <= 0 || B === 0)
+    const C = this.ctx, I = this.canvas.height / this.devicePixelRatio, D = this.canvas.width / this.devicePixelRatio, i = this.getScrollbarWidth(), w = D - i - 3, s = 4, N = I - s * 2, k = w - 2;
+    if (C.clearRect(k, 0, i + 6, I), C.fillStyle = this.theme.background, C.fillRect(k, 0, i + 6, I), E <= 0 || B === 0)
       return;
-    const k = B + g, M = Math.max(20, g / k * N), a = A / B, h = s + (N - M) * (1 - a), G = (U, t, c, F) => {
-      const S = Math.min(c / 2, F / 2);
-      C.beginPath(), C.moveTo(U, t + S), C.arc(U + S, t + S, S, Math.PI, 0), C.lineTo(U + c, t + F - S), C.arc(U + S, t + F - S, S, 0, Math.PI), C.closePath(), C.fill();
+    const M = B + g, a = Math.max(20, g / M * N), h = A / B, G = s + (N - a) * (1 - h), U = (t, c, F, S) => {
+      const x = Math.min(F / 2, S / 2);
+      C.beginPath(), C.moveTo(t, c + x), C.arc(t + x, c + x, x, Math.PI, 0), C.lineTo(t + F, c + S - x), C.arc(t + x, c + S - x, x, 0, Math.PI), C.closePath(), C.fill();
     };
-    C.fillStyle = `rgba(128, 128, 128, ${0.1 * E})`, G(w, s, i, N);
-    const U = A > 0 ? 0.5 : 0.3;
-    C.fillStyle = `rgba(128, 128, 128, ${U * E})`, G(w, h, i, M);
+    C.fillStyle = `rgba(128, 128, 128, ${0.1 * E})`, U(w, s, i, N);
+    const t = A > 0 ? 0.5 : 0.3;
+    C.fillStyle = `rgba(128, 128, 128, ${t * E})`, U(w, G, i, a);
   }
   getMetrics() {
     return { ...this.metrics };
@@ -2302,7 +2308,7 @@ class IA {
       get activeVersion() {
         return "15.1";
       }
-    }, this.dataEmitter = new J(), this.resizeEmitter = new J(), this.bellEmitter = new J(), this.selectionChangeEmitter = new J(), this.keyEmitter = new J(), this.titleChangeEmitter = new J(), this.scrollEmitter = new J(), this.renderEmitter = new J(), this.cursorMoveEmitter = new J(), this.onData = this.dataEmitter.event, this.onResize = this.resizeEmitter.event, this.onBell = this.bellEmitter.event, this.onSelectionChange = this.selectionChangeEmitter.event, this.onKey = this.keyEmitter.event, this.onTitleChange = this.titleChangeEmitter.event, this.onScroll = this.scrollEmitter.event, this.onRender = this.renderEmitter.event, this.onCursorMove = this.cursorMoveEmitter.event, this.isOpen = !1, this.isDisposed = !1, this.renderSuppressionDepth = 0, this.renderFullNextFrame = !1, this.renderRetryTimer = void 0, this.renderThrottleTimer = void 0, this.lastRenderAt = 0, this.renderRetryDelayMs = 16, this.addons = [], this.currentTitle = "", this.viewportY = 0, this.targetViewportY = 0, this.lastCursorY = 0, this.isDraggingScrollbar = !1, this.scrollbarDragStart = null, this.scrollbarDragStartViewportY = 0, this.scrollbarVisible = !1, this.scrollbarOpacity = 0, this.SCROLLBAR_HIDE_DELAY_MS = 1500, this.SCROLLBAR_FADE_DURATION_MS = 200, this.touchScrollActive = !1, this.touchScrollLastY = 0, this.touchScrollStartY = 0, this.touchScrollRemainderY = 0, this.touchScrollMoved = !1, this.touchScrollLastAt = 0, this.touchScrollVelocity = 0, this.touchInertiaFrame = void 0, this.touchInertiaLastAt = 0, this.finishTouchScroll = () => {
+    }, this.dataEmitter = new J(), this.resizeEmitter = new J(), this.bellEmitter = new J(), this.selectionChangeEmitter = new J(), this.keyEmitter = new J(), this.titleChangeEmitter = new J(), this.scrollEmitter = new J(), this.renderEmitter = new J(), this.cursorMoveEmitter = new J(), this.onData = this.dataEmitter.event, this.onResize = this.resizeEmitter.event, this.onBell = this.bellEmitter.event, this.onSelectionChange = this.selectionChangeEmitter.event, this.onKey = this.keyEmitter.event, this.onTitleChange = this.titleChangeEmitter.event, this.onScroll = this.scrollEmitter.event, this.onRender = this.renderEmitter.event, this.onCursorMove = this.cursorMoveEmitter.event, this.isOpen = !1, this.isDisposed = !1, this.renderSuppressionDepth = 0, this.renderFullNextFrame = !1, this.renderRetryTimer = void 0, this.renderThrottleTimer = void 0, this.lastRenderAt = 0, this.renderRetryDelayMs = 16, this.addons = [], this.currentTitle = "", this.viewportY = 0, this.targetViewportY = 0, this.lastCursorY = 0, this.isDraggingScrollbar = !1, this.scrollbarDragStart = null, this.scrollbarDragStartViewportY = 0, this.scrollbarVisible = !1, this.scrollbarOpacity = 0, this.SCROLLBAR_HIDE_DELAY_MS = 1500, this.SCROLLBAR_FADE_DURATION_MS = 200, this.scrollbarHoverAnimationFrame = void 0, this.scrollbarHoverActive = !1, this.SCROLLBAR_HOVER_SENSOR_SIZE = 24, this.SCROLLBAR_HOVER_ANIMATION_MS = 160, this.touchScrollActive = !1, this.touchScrollLastY = 0, this.touchScrollStartY = 0, this.touchScrollRemainderY = 0, this.touchScrollMoved = !1, this.touchScrollLastAt = 0, this.touchScrollVelocity = 0, this.touchInertiaFrame = void 0, this.touchInertiaLastAt = 0, this.finishTouchScroll = () => {
       this.touchScrollActive = !1, this.touchScrollLastY = 0, this.touchScrollStartY = 0, this.touchScrollRemainderY = 0, this.touchScrollLastAt = 0;
     }, this.handleTouchStart = (g) => {
       if (!this.canvas || !this.renderer || !this.wasmTerm || g.touches.length !== 1)
@@ -2368,6 +2374,7 @@ class IA {
           this.processScrollbarDrag(g);
           return;
         }
+        this.updateScrollbarHover(g.clientX);
         if (this.linkDetector) {
           if (this.mouseMoveThrottleTimeout) {
             this.pendingMouseMove = g;
@@ -2382,6 +2389,7 @@ class IA {
         }
       }
     }, this.handleMouseLeave = () => {
+      this.updateScrollbarHover(null);
       var g, E;
       if (this.renderer && this.wasmTerm) {
         const C = (this.renderer.hoveredHyperlinkId || 0) > 0 || this.renderer.hoveredLinkRange;
@@ -3002,7 +3010,7 @@ class IA {
    * Clean up components (called on dispose or error)
    */
   cleanupComponents() {
-    this.selectionManager && (this.selectionManager.dispose(), this.selectionManager = void 0), this.inputHandler && (this.inputHandler.dispose(), this.inputHandler = void 0), this.renderer && (this.renderer.dispose(), this.renderer = void 0), this.canvas && this.canvas.parentNode && (this.canvas.parentNode.removeChild(this.canvas), this.canvas = void 0), this.textarea && this.textarea.parentNode && (this.textarea.parentNode.removeChild(this.textarea), this.textarea = void 0), this.element && (this.element.removeEventListener("wheel", this.handleWheel), this.element.removeEventListener("mousedown", this.handleMouseDown, { capture: !0 }), this.element.removeEventListener("mousemove", this.handleMouseMove), this.element.removeEventListener("mouseleave", this.handleMouseLeave), this.element.removeEventListener("click", this.handleClick), this.element.removeEventListener("touchstart", this.handleTouchStart, { capture: !0 }), this.element.removeEventListener("touchmove", this.handleTouchMove, { capture: !0 }), this.element.removeEventListener("touchend", this.handleTouchEnd, { capture: !0 }), this.element.removeEventListener("touchcancel", this.handleTouchCancel, { capture: !0 }), this.element.removeAttribute("contenteditable"), this.element.removeAttribute("role"), this.element.removeAttribute("aria-label"), this.element.removeAttribute("aria-multiline")), this.isOpen && typeof document < "u" && document.removeEventListener("mouseup", this.handleMouseUp), this.scrollbarHideTimeout && (window.clearTimeout(this.scrollbarHideTimeout), this.scrollbarHideTimeout = void 0), this.linkDetector && (this.linkDetector.dispose(), this.linkDetector = void 0), this.wasmTerm && (this.wasmTerm.free(), this.wasmTerm = void 0), this.ghostty = void 0, this.element = void 0, this.textarea = void 0;
+    this.selectionManager && (this.selectionManager.dispose(), this.selectionManager = void 0), this.inputHandler && (this.inputHandler.dispose(), this.inputHandler = void 0), this.renderer && (this.renderer.dispose(), this.renderer = void 0), this.canvas && this.canvas.parentNode && (this.canvas.parentNode.removeChild(this.canvas), this.canvas = void 0), this.textarea && this.textarea.parentNode && (this.textarea.parentNode.removeChild(this.textarea), this.textarea = void 0), this.element && (this.element.removeEventListener("wheel", this.handleWheel), this.element.removeEventListener("mousedown", this.handleMouseDown, { capture: !0 }), this.element.removeEventListener("mousemove", this.handleMouseMove), this.element.removeEventListener("mouseleave", this.handleMouseLeave), this.element.removeEventListener("click", this.handleClick), this.element.removeEventListener("touchstart", this.handleTouchStart, { capture: !0 }), this.element.removeEventListener("touchmove", this.handleTouchMove, { capture: !0 }), this.element.removeEventListener("touchend", this.handleTouchEnd, { capture: !0 }), this.element.removeEventListener("touchcancel", this.handleTouchCancel, { capture: !0 }), this.element.removeAttribute("contenteditable"), this.element.removeAttribute("role"), this.element.removeAttribute("aria-label"), this.element.removeAttribute("aria-multiline")), this.isOpen && typeof document < "u" && document.removeEventListener("mouseup", this.handleMouseUp), this.scrollbarHoverAnimationFrame && (cancelAnimationFrame(this.scrollbarHoverAnimationFrame), this.scrollbarHoverAnimationFrame = void 0), this.scrollbarHideTimeout && (window.clearTimeout(this.scrollbarHideTimeout), this.scrollbarHideTimeout = void 0), this.linkDetector && (this.linkDetector.dispose(), this.linkDetector = void 0), this.wasmTerm && (this.wasmTerm.free(), this.wasmTerm = void 0), this.ghostty = void 0, this.element = void 0, this.textarea = void 0;
   }
   /**
    * Assert terminal is open (throw if not)
@@ -3065,6 +3073,20 @@ class IA {
       console.warn("Link detection error:", h);
     });
   }
+  updateScrollbarHover(A) {
+    if (!this.canvas || !this.renderer || !this.wasmTerm || this.wasmTerm.getScrollbackLength() === 0) A = null;
+    const Q = this.canvas == null ? void 0 : this.canvas.getBoundingClientRect(), B = A === null || !Q ? -1 / 0 : A - Q.left, g = B >= (Q?.width ?? 0) - this.SCROLLBAR_HOVER_SENSOR_SIZE, E = A !== null && g;
+    if (E === this.scrollbarHoverActive) return;
+    this.scrollbarHoverActive = E;
+    E && this.showScrollbar();
+    this.scrollbarHoverAnimationFrame && (cancelAnimationFrame(this.scrollbarHoverAnimationFrame), this.scrollbarHoverAnimationFrame = void 0);
+    const C = ((this.renderer?.getScrollbarWidth?.() ?? 8) - 8) / 8, I = E ? 1 : 0, D = performance.now(), i = (w) => {
+      if (!this.renderer) return;
+      const s = Math.min(1, (w - D) / this.SCROLLBAR_HOVER_ANIMATION_MS), N = s * (2 - s);
+      this.renderer.setScrollbarHoverProgress(C + (I - C) * N), this.requestRender({ full: !0, reason: "explicit" }), s < 1 ? this.scrollbarHoverAnimationFrame = requestAnimationFrame(i) : this.scrollbarHoverAnimationFrame = void 0;
+    };
+    this.scrollbarHoverAnimationFrame = requestAnimationFrame(i);
+  }
   /**
    * Process scrollbar drag movement
    */
@@ -3083,9 +3105,10 @@ class IA {
     const E = this.wasmTerm.getScrollbackLength();
     if (E === 0)
       return !1;
-    const C = this.canvas.getBoundingClientRect(), I = A - C.left, D = B - C.top, i = C.width, w = C.height, s = g.touch ? 18 : 3, N = i - s - 3, k = 4;
+    const C = this.canvas.getBoundingClientRect(), I = A - C.left, D = B - C.top, i = C.width, w = C.height, s = g.touch ? 18 : 8, N = i - s - 3, k = 4;
     if (I < N || I > i)
       return !1;
+    if (!g.touch) this.updateScrollbarHover(A);
     const M = w - k * 2, a = this.rows, h = E + a, G = Math.max(20, a / h * M), U = this.viewportY / E, t = k + (M - G) * (1 - U);
     if (D >= t && D <= t + G)
       this.isDraggingScrollbar = !0, this.scrollbarDragStart = D, this.scrollbarDragStartViewportY = this.viewportY, this.canvas && (this.canvas.style.userSelect = "none", this.canvas.style.webkitUserSelect = "none"), this.showScrollbar();
@@ -3128,7 +3151,7 @@ class IA {
    */
   showScrollbar() {
     this.scrollbarHideTimeout && (window.clearTimeout(this.scrollbarHideTimeout), this.scrollbarHideTimeout = void 0), this.scrollbarVisible ? this.scrollbarOpacity = 1 : (this.scrollbarVisible = !0, this.scrollbarOpacity = 0, this.fadeInScrollbar()), this.isDraggingScrollbar || (this.scrollbarHideTimeout = window.setTimeout(() => {
-      this.hideScrollbar();
+      this.scrollbarHoverActive ? this.showScrollbar() : this.hideScrollbar();
     }, this.SCROLLBAR_HIDE_DELAY_MS));
   }
   /**
