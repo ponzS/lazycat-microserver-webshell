@@ -6444,3 +6444,180 @@ body.mobile-keyboard-dock-moving .mobile-shortcuts {
     bottom: 20px;
   }
 }
+
+/* 强制 PC 模式只恢复媒体查询改变的外层布局，交互门禁由 main.js 统一处理。 */
+body.force-pc-mode .tabs-bar {
+  gap: 8px;
+  height: calc(38px + var(--lzc-safe-area-inset-top));
+  min-height: calc(38px + var(--lzc-safe-area-inset-top));
+  padding: var(--lzc-safe-area-inset-top) max(12px, var(--lzc-safe-area-inset-right)) 0 max(12px, var(--lzc-safe-area-inset-left));
+}
+
+body.force-pc-mode .tabs-strip {
+  align-items: stretch;
+  gap: 0;
+}
+
+body.force-pc-mode .tabs {
+  display: flex;
+}
+
+body.force-pc-mode .mobile-active-tab-title {
+  display: none !important;
+}
+
+body.force-pc-mode .tab-overview-grid {
+  --tab-overview-columns: 4;
+  --tab-overview-preview-ratio: 16 / 10;
+}
+
+body.force-pc-mode .settings-modal {
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+body.force-pc-mode .settings-panel {
+  width: min(72vw, calc(100vw - 48px));
+  height: min(70dvh, calc(100dvh - 48px));
+  min-width: min(560px, calc(100vw - 48px));
+  min-height: min(420px, calc(100dvh - 48px));
+  border: 1px solid var(--panel-border) !important;
+  border-radius: 8px !important;
+  box-shadow: 0 24px 72px var(--panel-shadow) !important;
+}
+
+body.force-pc-mode .settings-back,
+body.force-pc-mode .settings-mobile-nav {
+  display: none !important;
+}
+
+body.force-pc-mode .settings-close,
+body.force-pc-mode .settings-tabs {
+  display: inline-flex;
+}
+
+body.force-pc-mode .settings-tabs {
+  flex-direction: column;
+}
+
+body.force-pc-mode .settings-main {
+  flex-direction: row;
+}
+
+body.force-pc-mode .settings-panel[data-mobile-settings-view="index"] .settings-body {
+  display: flex;
+}
+
+body.force-pc-mode .device-panel {
+  width: min(520px, calc(100vw - 48px));
+  height: auto;
+  min-width: min(420px, calc(100vw - 48px));
+  max-height: min(70dvh, calc(100dvh - 48px));
+}
+
+body.force-pc-mode .attachment-browser-backdrop {
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+}
+
+body.force-pc-mode .attachment-browser-panel {
+  --attachment-browser-column-gap: 10px;
+  --attachment-browser-grid-columns: 18px minmax(0, 1fr) 104px 156px;
+  width: min(760px, 100%);
+  height: min(620px, calc(100dvh - 36px));
+  max-height: calc(100dvh - 36px);
+  border: 1px solid var(--panel-border) !important;
+  border-radius: 8px !important;
+  box-shadow: 0 18px 42px var(--panel-shadow) !important;
+}
+
+body.force-pc-mode .attachment-browser-header {
+  grid-template-columns: minmax(0, 1fr) 34px;
+  min-height: 54px;
+  padding: 0 10px;
+}
+
+body.force-pc-mode .attachment-browser-back {
+  display: none !important;
+}
+
+body.force-pc-mode .attachment-browser-close {
+  display: inline-flex;
+}
+
+body.force-pc-mode .attachment-browser-title {
+  display: block;
+}
+
+body.force-pc-mode .attachment-browser-path {
+  max-width: none;
+  margin-top: 3px;
+  font-size: 12px;
+  text-align: left;
+}
+
+body.force-pc-mode .attachment-browser-actions {
+  padding: 10px;
+  box-shadow: none;
+}
+
+body.force-pc-mode .mobile-shortcuts,
+body.force-pc-mode .mobile-action-sheet,
+body.force-pc-mode .mobile-close-confirm-sheet,
+body.force-pc-mode .mobile-selection-overlay {
+  display: none !important;
+}
+
+body.force-pc-mode .app-shell,
+body.force-pc-mode.mobile-shortcuts-empty .app-shell {
+  inset: 0 !important;
+}
+
+body.force-pc-mode .selection-sheet {
+  bottom: 54px;
+}
+
+body.force-pc-mode .network-banner {
+  bottom: 62px;
+}
+
+body.force-pc-mode .toast {
+  bottom: 20px;
+}
+
+body.force-pc-mode.desktop-shortcuts-bar-enabled .mobile-shortcuts {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 80;
+  display: flex !important;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  overflow: hidden;
+  border-top: 1px solid var(--chrome-line);
+  background: var(--terminal-bg);
+  color: var(--terminal-fg);
+  box-sizing: border-box;
+}
+
+body.force-pc-mode.desktop-shortcuts-bar-enabled .mobile-shortcuts.is-empty {
+  display: none !important;
+}
+
+body.force-pc-mode.desktop-shortcuts-bar-enabled .app-shell {
+  inset: 0 0 var(--mobile-shortcuts-total-height) 0 !important;
+}
+
+body.force-pc-mode.desktop-shortcuts-bar-enabled.mobile-shortcuts-empty .app-shell {
+  inset: 0 !important;
+}
+
+body.force-pc-mode.desktop-shortcuts-bar-enabled .selection-sheet,
+body.force-pc-mode.desktop-shortcuts-bar-enabled .network-banner,
+body.force-pc-mode.desktop-shortcuts-bar-enabled .toast {
+  bottom: calc(var(--mobile-shortcuts-total-height) + 12px);
+}

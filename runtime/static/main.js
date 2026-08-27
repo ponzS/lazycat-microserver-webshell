@@ -231,6 +231,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const settingsPerformanceMeterToggle = document.getElementById("settingsPerformanceMeterToggle");
   const settingsPerformanceTasksToggle = document.getElementById("settingsPerformanceTasksToggle");
   const settingsMobileRemoteDesktopToggle = document.getElementById("settingsMobileRemoteDesktopToggle");
+  const settingsForcePCModeToggle = document.getElementById("settingsForcePCModeToggle");
   const settingsDesktopMouseClipboardToggle = document.getElementById("settingsDesktopMouseClipboardToggle");
   const settingsDesktopShortcutsBarToggle = document.getElementById("settingsDesktopShortcutsBarToggle");
   const settingsMobilePixelScrollToggle = document.getElementById("settingsMobilePixelScrollToggle");
@@ -377,6 +378,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const networkMonitorStorageKey = `${storagePrefix}.networkMonitor`;
   const performanceMeterStorageKey = `${storagePrefix}.performanceMeter`;
   const performanceTasksStorageKey = `${storagePrefix}.performanceTasks`;
+  const forcePCModeStorageKey = `${storagePrefix}.forcePCMode`;
   const mobileRemoteDesktopStorageKey = "lightos-mobile-remote-desktop-enabled";
   const defaultFontSize = 16;
   const minFontSize = 10;
@@ -758,6 +760,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   let lastNetworkBannerState = null;
   let performanceMeterEnabled = window.localStorage.getItem(performanceMeterStorageKey) === "true";
   let performanceTasksEnabled = window.localStorage.getItem(performanceTasksStorageKey) === "true";
+  let forcePCModeEnabled = window.localStorage.getItem(forcePCModeStorageKey) === "true";
   let mobileRemoteDesktopEnabled = window.localStorage.getItem(mobileRemoteDesktopStorageKey) === "true";
   let fontEditMode = false;
   const selectedFontDeleteIDs = new Set();
@@ -2043,6 +2046,13 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
   };
 
+  const syncSettingsForcePCModeToggle = () => {
+    if (settingsForcePCModeToggle) {
+      settingsForcePCModeToggle.checked = forcePCModeEnabled;
+      settingsForcePCModeToggle.disabled = !debugModeEnabled;
+    }
+  };
+
   const syncSettingsDebugOptions = () => {
     syncSettingsDebugModeControls();
     syncSettingsDebugLogToggle();
@@ -2050,10 +2060,12 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     syncSettingsPerformanceMeterToggle();
     syncSettingsPerformanceTasksToggle();
     syncSettingsMobileRemoteDesktopToggle();
+    syncSettingsForcePCModeToggle();
   };
 
   const syncDebugModeState = () => {
     syncSettingsDebugOptions();
+    syncForcePCModeState();
     syncDebugLogCapture();
     applyPerformanceMeterVisibility();
     applyPerformanceTaskMeterVisibility();
@@ -4457,7 +4469,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     const userAgent = String(navigator.userAgent || "");
     return /\bAndroid\b/i.test(platform) || /\bAndroid\b/i.test(userAgent);
   };
-  const usesMobileViewportInsets = () => isIOSPlatform() || isAndroidPlatform();
+  const usesMobileViewportInsets = () => !isForcePCModeActive() && (isIOSPlatform() || isAndroidPlatform());
   const macShortcut = (mac, fallback) => isMacPlatform() ? mac : fallback;
   const shortcutDefinitions = {
     fullscreen: "F11",
@@ -6619,11 +6631,31 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     mobileActiveTabTitle.title = label;
   };
 
-  const isMobileLayout = () => Boolean(mobileLayoutQuery?.matches);
-  const isTouchShortcutLayout = () => Boolean(touchShortcutLayoutQuery?.matches);
+  const isForcePCModeActive = () => debugModeEnabled && forcePCModeEnabled;
+  const isMobileLayout = () => !isForcePCModeActive() && Boolean(mobileLayoutQuery?.matches);
+  const isTouchShortcutLayout = () => !isForcePCModeActive() && Boolean(touchShortcutLayoutQuery?.matches);
   const isDesktopShortcutBarLayout = () => desktopShortcutsBarEnabled && !isTouchShortcutLayout();
   const isTouchSelectionLayout = () => isMobileLayout() || isTouchShortcutLayout();
   const requiresTouchKeyboardDoubleTap = () => isTouchShortcutLayout();
+
+  const syncForcePCModeState = () => {
+    const active = isForcePCModeActive();
+    document.documentElement.dataset.forcePcMode = active ? "true" : "false";
+    document.body.classList.toggle("force-pc-mode", active);
+    syncSettingsForcePCModeToggle();
+    if (active) {
+      closeMobileActionSheet();
+      closeMobileCloseConfirm(false);
+      closeMobileCustomSelect();
+      hideSelectionSheet();
+      document.body.classList.remove("mobile-keyboard-visible", "mobile-keyboard-dock-moving");
+      settingsMobileView = "detail";
+    }
+    resizeActiveTabForCurrentDevice();
+    syncSettingsMobileNavigation();
+    updateMobileActiveTabTitle();
+    updateSelectionSheet();
+  };
 
   const isMobileCustomSelectLayout = () => isMobileLayout() || isTouchShortcutLayout();
   const shouldPreventMobileViewportZoom = () => isMobileLayout() || isTouchShortcutLayout() || usesMobileViewportInsets();
@@ -24691,6 +24723,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     mobileRemoteDesktopEnabled = settingsMobileRemoteDesktopToggle.checked;
     window.localStorage.setItem(mobileRemoteDesktopStorageKey, mobileRemoteDesktopEnabled ? "true" : "false");
     syncSettingsMobileRemoteDesktopToggle();
+  });
+  settingsForcePCModeToggle?.addEventListener("change", () => {
+    forcePCModeEnabled = settingsForcePCModeToggle.checked;
+    window.localStorage.setItem(forcePCModeStorageKey, forcePCModeEnabled ? "true" : "false");
+    syncForcePCModeState();
   });
   settingsMobilePixelScrollToggle?.addEventListener("change", () => {
     const previous = mobilePixelScrollEnabled;

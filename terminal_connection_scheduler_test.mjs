@@ -43,6 +43,29 @@ const createHarness = ({ capacity = 3, online = true } = {}) => {
 const session = (id) => ({ id });
 const demand = (priority, extra = {}) => ({ priority, generation: 1, ...extra });
 
+test("scheduler does not require iterator helper methods", () => {
+  const mapValues = Map.prototype.values;
+  Map.prototype.values = function valuesWithoutIteratorHelpers() {
+    const iterator = mapValues.call(this);
+    return {
+      next: () => iterator.next(),
+      [Symbol.iterator]() {
+        return this;
+      },
+    };
+  };
+  try {
+    const harness = createHarness({ capacity: 1 });
+    harness.scheduler.setGeneration(1);
+    const pane = session("pane");
+    harness.scheduler.register(pane);
+    harness.scheduler.request(pane, demand(1));
+    assert.equal(harness.connections.length, 1);
+  } finally {
+    Map.prototype.values = mapValues;
+  }
+});
+
 test("never grants more than capacity and connecting leases occupy slots", () => {
   const harness = createHarness();
   harness.scheduler.setGeneration(1);

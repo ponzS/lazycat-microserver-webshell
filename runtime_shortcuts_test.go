@@ -1258,6 +1258,60 @@ func TestRuntimeDebugModeControlsDebugTools(t *testing.T) {
 	}
 }
 
+func TestRuntimeForcePCModeOverridesTopLevelLayoutChecks(t *testing.T) {
+	indexData, err := os.ReadFile("runtime/static/index.html")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
+	}
+	index := string(indexData)
+	for _, want := range []string{
+		`id="settingsMobileRemoteDesktopToggle"`,
+		"允许移动端启用远程桌面",
+		`id="settingsForcePCModeToggle"`,
+		"强制 PC 模式",
+	} {
+		if !strings.Contains(index, want) {
+			t.Fatalf("runtime force PC option missing %q", want)
+		}
+	}
+
+	mainData, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	mainSource := string(mainData)
+	for _, want := range []string{
+		"const forcePCModeStorageKey = `${storagePrefix}.forcePCMode`;",
+		`let forcePCModeEnabled = window.localStorage.getItem(forcePCModeStorageKey) === "true";`,
+		"const isForcePCModeActive = () => debugModeEnabled && forcePCModeEnabled;",
+		"const isMobileLayout = () => !isForcePCModeActive() && Boolean(mobileLayoutQuery?.matches);",
+		"const isTouchShortcutLayout = () => !isForcePCModeActive() && Boolean(touchShortcutLayoutQuery?.matches);",
+		"const usesMobileViewportInsets = () => !isForcePCModeActive() && (isIOSPlatform() || isAndroidPlatform());",
+		`settingsForcePCModeToggle?.addEventListener("change", () => {`,
+		"syncForcePCModeState();",
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("runtime force PC top-level guard missing %q", want)
+		}
+	}
+
+	styleData, err := os.ReadFile("runtime/static/style.css")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/style.css) error = %v", err)
+	}
+	styleSource := string(styleData)
+	for _, want := range []string{
+		"body.force-pc-mode .tabs {",
+		"body.force-pc-mode .settings-modal {",
+		"body.force-pc-mode .mobile-shortcuts,",
+		"body.force-pc-mode .app-shell,",
+	} {
+		if !strings.Contains(styleSource, want) {
+			t.Fatalf("runtime force PC style guard missing %q", want)
+		}
+	}
+}
+
 func TestRuntimePerformanceMeterIsLazilyMounted(t *testing.T) {
 	indexData, err := os.ReadFile("runtime/static/index.html")
 	if err != nil {
@@ -2548,8 +2602,8 @@ func TestRuntimeTouchShortcutLayoutKeepsDesktopPCHidden(t *testing.T) {
 	mainWantSnippets := []string{
 		`const mobileLayoutQuery = window.matchMedia?.("(max-width: 640px)");`,
 		`const touchShortcutLayoutQuery = window.matchMedia?.("(hover: none), (pointer: coarse)");`,
-		`const isMobileLayout = () => Boolean(mobileLayoutQuery?.matches);`,
-		`const isTouchShortcutLayout = () => Boolean(touchShortcutLayoutQuery?.matches);`,
+		`const isMobileLayout = () => !isForcePCModeActive() && Boolean(mobileLayoutQuery?.matches);`,
+		`const isTouchShortcutLayout = () => !isForcePCModeActive() && Boolean(touchShortcutLayoutQuery?.matches);`,
 		`if (!mobileActionSheet || !mobileActionGrid || !isTouchShortcutLayout()) {`,
 		`if (!isTouchShortcutLayout()) {`,
 	}
@@ -2733,7 +2787,7 @@ func TestRuntimeMobileBottomSafeAreaKeepsShortcutsAboveControls(t *testing.T) {
 	mainSource := string(mainData)
 	for _, want := range []string{
 		`const isAndroidPlatform = () => {`,
-		`const usesMobileViewportInsets = () => isIOSPlatform() || isAndroidPlatform();`,
+		`const usesMobileViewportInsets = () => !isForcePCModeActive() && (isIOSPlatform() || isAndroidPlatform());`,
 		`const supportsViewportInsets = usesMobileViewportInsets();`,
 		`const useKeyboardInset = isIOSPlatform();`,
 		`const measuredBottomInset = measureMobileViewportBottomInset();`,

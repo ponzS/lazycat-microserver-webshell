@@ -195,7 +195,7 @@ export const createTerminalConnectionScheduler = ({
       // slot when the higher-priority replacement disappears. Without this
       // idle-pool recovery, the final surviving pane remains parked forever
       // and pending input eventually expires even though no lease is active.
-      const hasNonParkedDemand = records.values().some((record) => (
+      const hasNonParkedDemand = Array.from(records.values()).some((record) => (
         !record.disposed
         && !record.parkedByPreempt
         && !record.retryTimer

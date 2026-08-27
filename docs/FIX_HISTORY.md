@@ -1311,3 +1311,27 @@ git diff --check
 - 回归 guard：`CanvasRenderer > Scrollbar hover sizing` 固定 3px 默认、5.5px 中间值和 8px 展开值；`TestRuntimeTerminalCanvasResidueGuard` 固定感应区、动画参数、源码/运行 bundle 的展开 API、最大命中区域和离开收回路径。
 - 验证结果：`bun run typecheck`、`bun test lib/renderer.test.ts`（10/10）、`node --check runtime/static/ghostty-web.js`、`node --check runtime/static/main.js` 和 `git diff --check` 通过。尚未在真实桌面浏览器及 Lazycat WebView 进行鼠标/触摸视觉验收。
 - 禁止复现：不得只加宽绘制而保留窄命中区域；不得在动画中改变终端 Canvas 尺寸、列数、行数或滚动比例；不得无条件按最大展开宽度清理并覆盖终端内容；宽度过渡必须完整重绘以恢复旧区域；不得让滚动条 hover 动画进入触摸滚动或其他设置面板滚动条路径。
+
+### LCMD-20260827-01：调试模式增加强制 PC 模式
+
+- 日期：2026-08-27
+- 来源：用户需求
+- 影响模块：`runtime/static/index.html`、`runtime/static/main.js`、`runtime/static/style.css`
+- 错误现象：移动设备打开 WebShell 时，界面和交互会按触摸设备切换为移动端；调试场景缺少在同一设备上统一复现 PC 端布局和交互的选项。
+- 根因：移动端分支由现有顶层布局判断和 CSS 媒体查询共同控制，缺少独立的调试模式覆盖状态。
+- 实施方案：在调试选项中新增默认关闭的“强制 PC 模式”，使用独立 localStorage 保存；开启且调试总开关有效时，现有 `isMobileLayout()` 和 `isTouchShortcutLayout()` 统一返回 PC 结果，并通过根节点样式覆盖媒体查询改变的头部、设置、附件、总览和底部区域布局。切换时复用已有终端 resize 和视图刷新；原有“允许移动端启用远程桌面”选项及其独立状态保持不变。
+- Guard：`TestRuntimeForcePCModeOverridesTopLevelLayoutChecks` 固定两个调试选项同时存在、强制模式默认读取关闭且持久化、顶层布局判断和根节点样式覆盖；`node --check runtime/static/main.js`、`git diff --check` 固定资源语法和空白契约。
+- 验证结果：`go test ./... -count=1`、`node --test terminal_cache_v2_test.mjs terminal_resize_scheduler_test.mjs terminal_connection_scheduler_test.mjs terminal_queue_connection_test.mjs terminal_topology_controller_test.mjs`（81 项通过）、`node --check runtime/static/main.js`、`node --check runtime/static/service-worker.js` 和 `git diff --check` 通过；真实 Android WebView、iOS WebView 和触摸桌面浏览器仍需按设置切换、终端输入、滚动、选择、弹层、设置窗口、文件管理和终端尺寸变化步骤复验。
+- 禁止复现：不得删除或复用移动远程桌面开关；不得把强制 PC 逻辑散落到各个移动交互实现中；不得让强制模式默认开启；不得清除用户保存的强制模式状态或移动远程桌面状态。
+
+### LCMD-20260827-02：鸿蒙迭代器兼容性导致终端连接调度崩溃
+
+- 日期：2026-08-27
+- 来源：鸿蒙设备运行日志
+- 影响模块：`runtime/static/terminal_connection_scheduler.js`
+- 错误现象：页面初始化完成后，终端连接拓扑阶段抛出 `records.values(...).some is not a function`，终端持续出现 `render_blocked`，无法显示内容。
+- 根因：`Map.prototype.values()` 返回的是迭代器；当前 Node 测试环境提供了 Iterator Helpers，因此 `.some()` 未暴露问题，但鸿蒙运行时的迭代器没有该方法。
+- 实施方案：将 `records.values().some(...)` 改为 `Array.from(records.values()).some(...)`，只依赖通用的迭代器协议，保持连接调度和容量逻辑不变。
+- 回归 guard：`terminal_connection_scheduler_test.mjs` 新增“scheduler does not require iterator helper methods”，测试中主动替换 `Map.prototype.values()` 为不带 Iterator Helpers 的兼容迭代器；同时运行完整 Node 终端调度测试和 Go 测试。
+- 验证结果：`node --test terminal_connection_scheduler_test.mjs terminal_cache_v2_test.mjs terminal_resize_scheduler_test.mjs terminal_queue_connection_test.mjs terminal_topology_controller_test.mjs`（82 项通过）、定向 Go runtime guard、`node --check runtime/static/terminal_connection_scheduler.js` 和 `git diff --check` 已通过；鸿蒙设备仍需重新进入 WebShell，确认连接拓扑完成、终端首帧和持续输出正常。
+- 禁止复现：不得直接对 `Map`/`Set` 的 iterator 调用 `.some()`、`.filter()`、`.map()` 等 Iterator Helpers；跨 WebView、鸿蒙和旧浏览器的集合遍历必须使用 `Array.from(...)` 或普通 `for...of`。
