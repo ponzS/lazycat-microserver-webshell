@@ -2480,7 +2480,7 @@ func TestRuntimeMobileIMECompositionPreviewVisible(t *testing.T) {
 		`const normalizeTerminalCompositionTextCandidates = (...values) => {`,
 		`const terminalCompositionPreeditCandidates = (session, ...extraValues) => normalizeTerminalCompositionTextCandidates(`,
 		`const isTerminalPostCompositionInputAlreadySent = (session, committed) => {`,
-		`const armTerminalPostCompositionInput = (session, { preedit = "", preedits = [], committed = "", sent = false } = {}) => {`,
+		`const armTerminalPostCompositionInput = (session, { preedit = "", preedits = [], committed = "", sent = false, suppressSeparator = false } = {}) => {`,
 		`const preeditCandidates = normalizeTerminalCompositionTextCandidates(preedits, preedit);`,
 		`preedit: preeditCandidates[0] || "",`,
 		`preedits: preeditCandidates,`,
@@ -2512,7 +2512,7 @@ func TestRuntimeMobileIMECompositionPreviewVisible(t *testing.T) {
 		`preedits: preeditCandidates,`,
 		`committed: committedText,`,
 		`sent: Boolean(committedText),`,
-		`textarea.value = terminalInputSentinel;`,
+		`textarea.value = terminalInputDeleteBuffer;`,
 		`const fallbackValue = stripTerminalInputSentinel(textarea.value);`,
 		`const compositionValue = resolveTerminalPostCompositionInput(session, fallbackValue);`,
 		`if (committedText && !committedAlreadySent) {`,
@@ -4960,6 +4960,47 @@ func TestRuntimeTerminalInputChunksLargePaste(t *testing.T) {
 	}
 	if strings.Contains(source, "session.term.paste(value);") {
 		t.Fatal("runtime paste path should not send large clipboard content through terminal paste directly")
+	}
+}
+
+func TestRuntimeTerminalConfirmedIMEDeleteUsesNativeMutation(t *testing.T) {
+	data, err := os.ReadFile("runtime/static/main.js")
+	if err != nil {
+		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+	}
+	source := string(data)
+	deleteBranchStart := strings.Index(source, "if (\n      isBackwardDeleteInputType(type)")
+	compositionBranchStart := strings.Index(source, `if (type === "insertCompositionText" || type === "deleteCompositionText" || event.isComposing) {`)
+	if deleteBranchStart < 0 || compositionBranchStart < 0 || deleteBranchStart >= compositionBranchStart {
+		t.Fatal("confirmed IME native-delete branch must run before the generic composition branch")
+	}
+	deleteBranch := sourceBetween(t, source,
+		"if (\n      isBackwardDeleteInputType(type)",
+		`if (session?.nativeDeleteInputPending) {`,
+	)
+	for _, want := range []string{
+		`clearTerminalPostCompositionInput(session);`,
+		`const terminalInputDeleteBufferLength = 256;`,
+		`const terminalInputDeleteBuffer = terminalInputSentinel.repeat(terminalInputDeleteBufferLength);`,
+		`const terminalNativeDeleteIdleResetMs = 900;`,
+		`armTerminalNativeDeleteInput(session);`,
+		`sendTerminalTextInput(session, "\x7f");`,
+		`event.stopImmediatePropagation();`,
+		`const interceptTerminalTextareaBeforeInput = (event) => {`,
+		`handleTerminalBeforeInput(session, event);`,
+		`host.addEventListener("beforeinput", interceptTerminalTextareaBeforeInput, { capture: true });`,
+		`pending.suppressSeparator && rawValue === " "`,
+		`suppressSeparator: isTerminalASCIICompositionCommit(committedText),`,
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("runtime confirmed IME delete guard missing %q", want)
+		}
+	}
+	if strings.Contains(deleteBranch, "event.preventDefault()") {
+		t.Fatal("confirmed IME backspace must allow native textarea deletion")
+	}
+	if strings.Contains(deleteBranch, "textarea.value =") {
+		t.Fatal("confirmed IME backspace must not rewrite the textarea during auto-repeat")
 	}
 }
 

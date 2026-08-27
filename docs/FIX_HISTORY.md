@@ -1335,3 +1335,14 @@ git diff --check
 - 回归 guard：`terminal_connection_scheduler_test.mjs` 新增“scheduler does not require iterator helper methods”，测试中主动替换 `Map.prototype.values()` 为不带 Iterator Helpers 的兼容迭代器；同时运行完整 Node 终端调度测试和 Go 测试。
 - 验证结果：`node --test terminal_connection_scheduler_test.mjs terminal_cache_v2_test.mjs terminal_resize_scheduler_test.mjs terminal_queue_connection_test.mjs terminal_topology_controller_test.mjs`（82 项通过）、定向 Go runtime guard、`node --check runtime/static/terminal_connection_scheduler.js` 和 `git diff --check` 已通过；鸿蒙设备仍需重新进入 WebShell，确认连接拓扑完成、终端首帧和持续输出正常。
 - 禁止复现：不得直接对 `Map`/`Set` 的 iterator 调用 `.some()`、`.filter()`、`.map()` 等 Iterator Helpers；跨 WebView、鸿蒙和旧浏览器的集合遍历必须使用 `Array.from(...)` 或普通 `for...of`。
+
+### LCMD-20260827-04：Android 豆包确认英文后退格无法连续删除
+
+- 日期：2026-08-27
+- 来源：用户复现；英文处于预编辑状态时可连续删除，确认后末尾出现一个空格，长按退格最多删除一个字符后停止。
+- 影响模块：`runtime/static/main.js` 的 helper textarea、post-composition 去重和 Android `beforeinput`/`input` 事件链。
+- 根因：预编辑期间 textarea 由 Android IME 原生维护，里面有整段预编辑文本，所以长按删除始终有可编辑内容。确认后 WebShell 把 textarea 缩减为一个零宽哨兵；第一次退格删除这个唯一字符后，原生编辑缓冲到达起点，Android/豆包便停止本次长按自动重复。WebShell 每次重新聚焦或同步又补回一个哨兵，因此表现为“每次重新长按只能删一个”。确认后的空格是豆包在英文 composition 提交后独立派发的候选确认分隔符，原有 post-composition 去重只识别重复提交文本，未识别该分隔符，所以空格被发送到了 PTY。
+- 实施方案：把单字符哨兵改为 256 个零宽字符组成的原生删除缓冲区；这些字符会被现有 strip 逻辑全部剥离，不会进入 PTY。`terminal-host` 在 capture 阶段统一接管 helper textarea 的 `beforeinput`，确保比 Ghostty 原始同元素监听器更早消费事件。确认态后退删除在 `beforeinput` 阶段发送一个 `\x7f`，但保留原生 textarea 删除，不调用 `preventDefault()`；删除保持期间，`positionTerminalInput()`、`input` 和布局同步不得重写 textarea。连续删除事件每次延长保持窗口，约 900ms 无新删除后才一次性补满缓冲区，以覆盖 Android 长按从首个删除到自动重复开始的延迟；`input` 事件只作为没有 `beforeinput` 时的兜底并避免重复发送。composition 态仍交给 IME。英文 composition 提交后的 350ms post-composition 去重窗口额外识别一次独立 ASCII 空格，无论它在 `beforeinput` 是否仍标记 composing，都只作为候选确认分隔符消费；窗口外的普通终端空格不受影响。
+- 回归 guard：新增 `TestRuntimeTerminalConfirmedIMEDeleteUsesNativeMutation`，固定 256 字符删除缓冲、后退删除分支位于通用 composing 分支之前、删除路径不得调用 `preventDefault()` 或重写 textarea、必须使用删除保持定时器和 `\x7f` 输出，并固定 host capture 先于 Ghostty 同元素监听器接管 `beforeinput`。
+- 验证结果：已通过 JavaScript 语法检查、相关 Go runtime guard 和 `git diff --check`；真实 Android WebView/豆包输入法仍需复验英文确认、确认后的空格、长按退格连续删除和中文预编辑删除。
+- 禁止复现：确认态长按删除不得每次立即重写 textarea 哨兵；不得让页面 capture 与 Ghostty `InputHandler` 同时消费同一 `beforeinput`；不得以全局删除空格破坏用户在终端中输入的真实空格；不得破坏中文预编辑的原生 composition mutation。

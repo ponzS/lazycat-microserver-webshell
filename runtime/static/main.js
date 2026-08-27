@@ -894,8 +894,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
   const tabOverviewDragHoldDelayMs = 320;
   const tabOverviewDragAutoScrollEdgePx = 58;
   const tabOverviewDragAutoScrollMaxStepPx = 14;
-  // Mobile IMEs keep Backspace auto-repeat active only while the focused editable has text.
+  // Keep enough invisible text for Android IME Backspace auto-repeat to continue.
   const terminalInputSentinel = "\u200b";
+  const terminalInputDeleteBufferLength = 256;
+  const terminalInputDeleteBuffer = terminalInputSentinel.repeat(terminalInputDeleteBufferLength);
+  const terminalNativeDeleteIdleResetMs = 900;
   const backtabSequence = "\x1b[Z";
   const shiftedCharacterMap = new Map([
     ["`", "~"],
@@ -9652,11 +9655,11 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
 
   const prepareTerminalTextareaForInput = (session) => {
     const textarea = session?.term?.textarea;
-    if (!textarea || session.composingIME) {
+    if (!textarea || session.composingIME || session.nativeDeleteInputPending) {
       return;
     }
-    if (textarea.value !== terminalInputSentinel) {
-      textarea.value = terminalInputSentinel;
+    if (textarea.value !== terminalInputDeleteBuffer) {
+      textarea.value = terminalInputDeleteBuffer;
     }
     moveTerminalTextareaCaretToEnd(textarea);
   };
@@ -10048,7 +10051,15 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     return pending.committed === committedText;
   };
 
-  const armTerminalPostCompositionInput = (session, { preedit = "", preedits = [], committed = "", sent = false } = {}) => {
+  const isTerminalASCIICompositionCommit = (value) => {
+    const points = Array.from(stripTerminalInputSentinel(value));
+    return points.length > 0 && points.every((point) => {
+      const codePoint = point.codePointAt(0);
+      return Number.isFinite(codePoint) && codePoint >= 0x21 && codePoint <= 0x7e;
+    });
+  };
+
+  const armTerminalPostCompositionInput = (session, { preedit = "", preedits = [], committed = "", sent = false, suppressSeparator = false } = {}) => {
     if (!session) {
       return null;
     }
@@ -10058,6 +10069,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       preedits: preeditCandidates,
       committed: stripTerminalInputSentinel(committed),
       sent: Boolean(sent),
+      suppressSeparator: Boolean(suppressSeparator),
       expiresAt: performance.now() + 350,
     };
     session.pendingCompositionInput = pending;
@@ -10086,6 +10098,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         (committed && rawValue === committed)
         || preedits.includes(rawValue)
         || (committed && preedits.some((preedit) => rawValue === `${preedit}${committed}`))
+        || (pending.suppressSeparator && rawValue === " ")
       ) {
         data = "";
         handled = true;
@@ -10134,6 +10147,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       preedits: pending?.preedits || pending?.preedit || "",
       committed: committedText,
       sent: true,
+      suppressSeparator: Boolean(pending?.suppressSeparator),
     });
   };
 
@@ -10159,18 +10173,78 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
 
   const resetTerminalTextareaValue = (session) => {
     const textarea = session?.term?.textarea;
-    if (!textarea || session.composingIME) {
+    if (!textarea || session.composingIME || session.nativeDeleteInputPending) {
       return;
     }
-    textarea.value = terminalInputSentinel;
+    textarea.value = terminalInputDeleteBuffer;
     moveTerminalTextareaCaretToEnd(textarea);
     positionTerminalInput(session);
+  };
+
+  const endTerminalNativeDeleteInput = (session, { reset = true } = {}) => {
+    if (!session) {
+      return;
+    }
+    if (session.nativeDeleteResetTimer) {
+      window.clearTimeout(session.nativeDeleteResetTimer);
+      session.nativeDeleteResetTimer = 0;
+    }
+    session.nativeDeleteInputPending = false;
+    if (reset) {
+      resetTerminalTextareaValue(session);
+    }
+  };
+
+  const armTerminalNativeDeleteInput = (session) => {
+    if (!session) {
+      return;
+    }
+    session.nativeDeleteInputPending = true;
+    if (session.nativeDeleteResetTimer) {
+      window.clearTimeout(session.nativeDeleteResetTimer);
+    }
+    session.nativeDeleteResetTimer = window.setTimeout(() => {
+      endTerminalNativeDeleteInput(session);
+    }, terminalNativeDeleteIdleResetMs);
   };
 
   const handleTerminalBeforeInput = (session, event) => {
     reassertTerminalSize(session, { force: true });
     const type = String(event.inputType || "");
     const textarea = session?.term?.textarea;
+    if (
+      isBackwardDeleteInputType(type)
+      && (!session?.composingIME || session?.pendingCompositionInput?.sent)
+    ) {
+      clearTerminalPostCompositionInput(session);
+      if (session?.composingIME) {
+        setTerminalInputComposing(session, false);
+      }
+      armTerminalNativeDeleteInput(session);
+      sendTerminalTextInput(session, "\x7f");
+      event.stopImmediatePropagation();
+      return;
+    }
+    if (session?.nativeDeleteInputPending) {
+      endTerminalNativeDeleteInput(session);
+    }
+    if (
+      type === "insertText"
+      && event.data === " "
+      && session?.pendingCompositionInput?.sent
+      && session.pendingCompositionInput.suppressSeparator
+    ) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setTerminalInputComposing(session, false);
+      if (textarea) {
+        textarea.value = terminalInputDeleteBuffer;
+        moveTerminalTextareaCaretToEnd(textarea);
+      }
+      resetTerminalHostViewport(session, { clean: true });
+      positionTerminalInput(session);
+      return;
+    }
     if (type === "insertCompositionText" || type === "deleteCompositionText" || event.isComposing) {
       setTerminalInputComposing(session, true);
       if (typeof event.data === "string") {
@@ -10180,7 +10254,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       clearTerminalTextareaSentinel(session);
       positionTerminalInput(session);
       scheduleTerminalHostViewportReset(session, { clean: true });
-      event.stopPropagation();
+      event.stopImmediatePropagation();
       return;
     }
     positionTerminalInput(session);
@@ -10199,10 +10273,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         && session?.lastPasteText === text
         && performance.now() - Number(session?.lastPasteAt || 0) < 150;
       event.preventDefault();
-      event.stopPropagation();
+      event.stopImmediatePropagation();
       setTerminalInputComposing(session, false);
       if (textarea) {
-        textarea.value = terminalInputSentinel;
+        textarea.value = terminalInputDeleteBuffer;
         moveTerminalTextareaCaretToEnd(textarea);
       }
       if (text && !recentlyHandledPaste) {
@@ -10220,15 +10294,16 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       const textareaPreeditText = textarea ? stripTerminalInputSentinel(textarea.value) : "";
       const preeditCandidates = terminalCompositionPreeditCandidates(session, textareaPreeditText);
       event.preventDefault();
-      event.stopPropagation();
+      event.stopImmediatePropagation();
       setTerminalInputComposing(session, false);
       armTerminalPostCompositionInput(session, {
         preedits: preeditCandidates,
         committed: data,
         sent: true,
+        suppressSeparator: isTerminalASCIICompositionCommit(data),
       });
       if (textarea) {
-        textarea.value = terminalInputSentinel;
+        textarea.value = terminalInputDeleteBuffer;
         moveTerminalTextareaCaretToEnd(textarea);
       }
       sendTerminalTextInput(session, data, {
@@ -10243,10 +10318,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     const compositionValue = data ? resolveTerminalPostCompositionInput(session, data) : null;
     if (compositionValue !== null) {
       event.preventDefault();
-      event.stopPropagation();
+      event.stopImmediatePropagation();
       setTerminalInputComposing(session, false);
       if (textarea) {
-        textarea.value = terminalInputSentinel;
+        textarea.value = terminalInputDeleteBuffer;
         moveTerminalTextareaCaretToEnd(textarea);
       }
       if (compositionValue) {
@@ -10262,15 +10337,15 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     if (!data) {
       if (type.startsWith("insert") || type.startsWith("delete")) {
-        event.stopPropagation();
+        event.stopImmediatePropagation();
       }
       return;
     }
     event.preventDefault();
-    event.stopPropagation();
+    event.stopImmediatePropagation();
     setTerminalInputComposing(session, false);
     if (textarea) {
-      textarea.value = terminalInputSentinel;
+      textarea.value = terminalInputDeleteBuffer;
       moveTerminalTextareaCaretToEnd(textarea);
     }
     sendTerminalTextInput(session, data, {
@@ -10301,6 +10376,19 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     }
     if (!session.composingIME) {
       const value = stripTerminalInputSentinel(textarea.value);
+      if (
+        isBackwardDeleteInputType(type)
+        || (session.nativeDeleteInputPending && !type)
+      ) {
+        const handledByBeforeInput = Boolean(session.nativeDeleteInputPending);
+        if (!handledByBeforeInput) {
+          sendTerminalTextInput(session, "\x7f");
+        }
+        armTerminalNativeDeleteInput(session);
+        resetTerminalHostViewport(session, { clean: true });
+        positionTerminalInput(session);
+        return;
+      }
       const pendingComposition = session?.pendingCompositionInput;
       const compositionValue = (value || (!isBackwardDeleteInputType(type) && !isForwardDeleteInputType(type)))
         ? resolveTerminalPostCompositionInput(session, value)
@@ -10323,7 +10411,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
           applySticky: shouldApplyMobileStickyTextInput(value, type),
         });
       }
-      textarea.value = terminalInputSentinel;
+      textarea.value = terminalInputDeleteBuffer;
       moveTerminalTextareaCaretToEnd(textarea);
     }
     resetTerminalHostViewport(session, { clean: true });
@@ -10374,10 +10462,19 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       positionTerminalInput(session);
     };
     const blockedHostInputEvents = ["beforeinput", "input", "compositionstart", "compositionupdate", "compositionend"];
+    const interceptTerminalTextareaBeforeInput = (event) => {
+      if (event.target !== session?.term?.textarea) {
+        return;
+      }
+      handleTerminalBeforeInput(session, event);
+      event.stopImmediatePropagation();
+    };
+    host.addEventListener("beforeinput", interceptTerminalTextareaBeforeInput, { capture: true });
     for (const type of blockedHostInputEvents) {
       host.addEventListener(type, stopHostEditableInput, { capture: true });
     }
     addSessionCleanup(session, () => {
+      host.removeEventListener("beforeinput", interceptTerminalTextareaBeforeInput, { capture: true });
       for (const type of blockedHostInputEvents) {
         host.removeEventListener(type, stopHostEditableInput, { capture: true });
       }
@@ -10451,8 +10548,9 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
         preedits: preeditCandidates,
         committed: committedText,
         sent: Boolean(committedText),
+        suppressSeparator: isTerminalASCIICompositionCommit(committedText),
       });
-      textarea.value = terminalInputSentinel;
+      textarea.value = terminalInputDeleteBuffer;
       moveTerminalTextareaCaretToEnd(textarea);
       if (committedText && !committedAlreadySent) {
         sendTerminalTextInput(session, committedText, {
@@ -10492,7 +10590,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       session.lastPasteAt = performance.now();
       pasteIntoSession(session, text).catch((error) => showToast(error.message));
     }, { capture: true });
-    addSessionCleanup(session, () => releaseTerminalInputViewportLock(session, { resync: false }));
+    addSessionCleanup(session, () => {
+      endTerminalNativeDeleteInput(session, { reset: false });
+      releaseTerminalInputViewportLock(session, { resync: false });
+    });
     const isTerminalTouchTarget = (target) => target instanceof Element && target.closest(".terminal-host") === host;
     const claimCurrentDeviceTerminalSize = (event) => {
       if (
@@ -21457,6 +21558,8 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       suppressGeneratedTerminalInputUntil: 0,
       inputLocked: false,
       composingIME: false,
+      nativeDeleteInputPending: false,
+      nativeDeleteResetTimer: 0,
       terminalInputAnchor: null,
       inputViewportLock: null,
       exitExpected: false,
