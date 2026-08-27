@@ -4591,11 +4591,12 @@ func TestRuntimeOpencodeHerdrFullscreenTouchAdapterIsolation(t *testing.T) {
 	installClaude := strings.Index(source, `installClaudeTerminalTouchAdapter(session);`)
 	installOpencode := strings.Index(source, `installOpencodeTerminalTouchAdapter(session);`)
 	installHerdr := strings.Index(source, `installHerdrTerminalTouchAdapter(session);`)
+	installPi := strings.Index(source, `installPiTerminalTouchAdapter(session);`)
 	installMouse := strings.Index(source, `installTerminalMouseTracking(session);`)
-	if installSelection < 0 || installClaude < 0 || installOpencode < 0 || installHerdr < 0 || installMouse < 0 {
+	if installSelection < 0 || installClaude < 0 || installOpencode < 0 || installHerdr < 0 || installPi < 0 || installMouse < 0 {
 		t.Fatal("fullscreen TUI touch installation order is incomplete")
 	}
-	if !(installSelection < installClaude && installClaude < installOpencode && installOpencode < installHerdr && installHerdr < installMouse) {
+	if !(installSelection < installClaude && installClaude < installOpencode && installOpencode < installHerdr && installHerdr < installPi && installPi < installMouse) {
 		t.Fatal("tool-specific fullscreen TUI adapters must precede generic mouse tracking")
 	}
 }

@@ -40,6 +40,8 @@ const appShellAssets = [
   `${assetBase}opencode_fullscreen_touch_adapter.js`,
   `${assetBase}herdr_fullscreen_touch.js`,
   `${assetBase}herdr_fullscreen_touch_adapter.js`,
+  `${assetBase}pi_fullscreen_touch.js`,
+  `${assetBase}pi_fullscreen_touch_adapter.js`,
   `${assetBase}vendor/lzc-mobile-bridge-0.0.2.js`,
   `${assetBase}__vite-browser-external-2447137e.js`,
 ];

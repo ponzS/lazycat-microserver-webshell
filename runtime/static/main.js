@@ -14,6 +14,8 @@ import { isOpencodeFullscreenTouchCandidate } from "./opencode_fullscreen_touch.
 import { installOpencodeFullscreenTouchAdapter } from "./opencode_fullscreen_touch_adapter.js";
 import { isHerdrFullscreenTouchCandidate } from "./herdr_fullscreen_touch.js";
 import { installHerdrFullscreenTouchAdapter } from "./herdr_fullscreen_touch_adapter.js";
+import { isPiFullscreenTouchCandidate } from "./pi_fullscreen_touch.js";
+import { installPiFullscreenTouchAdapter } from "./pi_fullscreen_touch_adapter.js";
 import { createPerformanceTaskMonitor } from "./performance_tasks.js";
 import { createInstancesLoader } from "./instances_loader.js";
 import { createTerminalCacheV2 } from "./terminal_cache_v2.js";
@@ -15794,6 +15796,14 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     );
   };
 
+  const installPiTerminalTouchAdapter = (session) => {
+    installFullscreenTuiTerminalTouchAdapter(
+      session,
+      (currentSession, state) => isPiFullscreenTouchCandidate(currentSession, state),
+      installPiFullscreenTouchAdapter,
+    );
+  };
+
   const installClaudeTerminalContextMenuAdapter = (session) => {
     const shell = session?.shellEl;
     const host = session?.terminalHost;
@@ -21515,6 +21525,7 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
     installClaudeTerminalTouchAdapter(session);
     installOpencodeTerminalTouchAdapter(session);
     installHerdrTerminalTouchAdapter(session);
+    installPiTerminalTouchAdapter(session);
     installClaudeTerminalContextMenuAdapter(session);
     installClaudeTerminalDesktopSelectionAdapter(session);
     installTerminalMouseTracking(session);
