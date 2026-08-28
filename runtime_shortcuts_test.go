@@ -33,6 +33,60 @@ func TestTerminalReplayControllerBehavior(t *testing.T) {
 	}
 }
 
+func TestRuntimeClientTerminalRawReplayGuard(t *testing.T) {
+	readSource := func(path string) string {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", path, err)
+		}
+		return string(data)
+	}
+	mainSource := readSource("runtime/static/main.js")
+	adapterSource := readSource("runtime/static/client_terminal_replay.js")
+	workerSource := readSource("runtime/static/service-worker.js")
+
+	for _, want := range []string{
+		`import { ClientTerminalReplayAdapter } from "./client_terminal_replay.js";`,
+		`const isClientDirectTransport = channel === "fast" && isClientInstanceName(session.name);`,
+		`const clientReplayAdapter = isClientDirectTransport`,
+		`? new ClientTerminalReplayAdapter(replayController)`,
+		`clientReplayAdapter.begin({`,
+		`clientReplayAdapter.acceptBinary({`,
+		`clientReplayAdapter.complete({`,
+		`isClientDirectTransport && session.historyProtocolActive`,
+		`channel === "fast" && !isClientInstanceName(session.name) && session.fastIntegrityEnabled === true`,
+		`usesMultiplexedTransport && session.queueReplayControllerActive`,
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("client raw replay runtime guard missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"export class ClientTerminalReplayAdapter",
+		"this.controller.acceptBinary({",
+		"this.controller.complete({",
+		"endCursor = startCursor + BigInt(payload.byteLength)",
+	} {
+		if !strings.Contains(adapterSource, want) {
+			t.Fatalf("client raw replay adapter guard missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"decodeFastBinaryFrame",
+		"LCF1",
+		"usesMultiplexedTransport",
+		"terminalCacheV2",
+	} {
+		if strings.Contains(adapterSource, forbidden) {
+			t.Fatalf("client raw replay adapter must remain transport-isolated, found %q", forbidden)
+		}
+	}
+	if !strings.Contains(workerSource, `${assetBase}client_terminal_replay.js`) {
+		t.Fatal("service worker must precache the client terminal replay adapter")
+	}
+}
+
 func TestTerminalRenderSnapshotBehavior(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -675,7 +729,7 @@ func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
 	if !strings.Contains(mainSource, `resetSessionHistoryCache(session, historyGeneration, deltaFromCursor);`) || strings.Contains(mainSource, `;(session, historyGeneration, deltaFromCursor);`) {
 		t.Fatal("cold snapshot replay must reset its cache manifest before appending history")
 	}
-	if !strings.Contains(workerSource, "${assetBase}terminal_fast_integrity.js") || !strings.Contains(workerSource, "${assetBase}terminal_replay_controller.js") {
+	if !strings.Contains(workerSource, "${assetBase}terminal_fast_integrity.js") || !strings.Contains(workerSource, "${assetBase}terminal_replay_controller.js") || !strings.Contains(workerSource, "${assetBase}client_terminal_replay.js") {
 		t.Fatal("service worker must precache replay integrity modules")
 	}
 	if !strings.Contains(workerSource, "${assetBase}instances_loader.js") {
