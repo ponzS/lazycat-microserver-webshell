@@ -21,6 +21,7 @@ import { createInstancesLoader } from "./instances_loader.js";
 import { createTerminalCacheV2 } from "./terminal_cache_v2.js";
 import { decodeFastBinaryFrame } from "./terminal_fast_integrity.js";
 import { TerminalReplayController } from "./terminal_replay_controller.js";
+import { ClientTerminalReplayAdapter } from "./client_terminal_replay.js";
 import { TerminalResizeController } from "./terminal_resize_controller.js";
 import { terminalCheckpointCapabilitiesForTerminal } from "./terminal_checkpoint.js";
 import { createRenderSnapshot, RenderSnapshot } from "./terminal_render_snapshot.js";
@@ -19504,6 +19505,10 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
       openedAt: 0,
     };
     const replayController = session.replayController || (session.replayController = new TerminalReplayController());
+    const isClientDirectTransport = channel === "fast" && isClientInstanceName(session.name);
+    const clientReplayAdapter = isClientDirectTransport
+      ? new ClientTerminalReplayAdapter(replayController)
+      : null;
     session.fastIntegrityEnabled = false;
     replayController.reset();
     session.queueReplayControllerActive = false;
@@ -19957,7 +19962,20 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
                 session.fastIntegritySequence = 1;
                 session.fastIntegrityCursor = deltaFromCursor ?? 0n;
                 session.historyReplayTargetCursor = deltaToCursor;
-                if (channel === "fast" && !isClientInstanceName(session.name) && !usesMultiplexedTransport && session.fastIntegrityEnabled !== true) {
+                if (isClientDirectTransport) {
+                  clientReplayAdapter.begin({
+                    requestID: String(session.terminalReplayGeneration || ""),
+                    connectionEpoch,
+                    identity: {
+                      selector: session.name,
+                      paneID: session.id,
+                      historyGeneration,
+                    },
+                    startCursor: deltaFromCursor,
+                    targetCursor: deltaToCursor,
+                  });
+                  session.replayControllerLegacyActive = false;
+                } else if (channel === "fast" && !isClientInstanceName(session.name) && !usesMultiplexedTransport && session.fastIntegrityEnabled !== true) {
                   replayController.beginLegacy({
                     requestID: String(session.terminalReplayGeneration || ""),
                     connectionEpoch,
@@ -20135,22 +20153,37 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
                 const replayControllerRequired = (
                   channel === "fast" && !isClientInstanceName(session.name) && session.fastIntegrityEnabled === true
                 ) || (
+                  isClientDirectTransport && session.historyProtocolActive
+                ) || (
                   usesMultiplexedTransport && session.queueReplayControllerActive
                 );
                 if (replayControllerRequired && session.historyProtocolActive) {
                   try {
-                    replayController.complete({
-                      cursor: message.history_cursor,
-                      requestID: String(session.terminalReplayGeneration || ""),
-                      connectionEpoch,
-                      identity: {
-                        selector: session.name,
-                        paneID: session.id,
-                        historyGeneration: session.historyGeneration,
-                      },
-                    });
+                    if (isClientDirectTransport) {
+                      clientReplayAdapter.complete({
+                        cursor: message.history_cursor,
+                        requestID: String(session.terminalReplayGeneration || ""),
+                        connectionEpoch,
+                        identity: {
+                          selector: session.name,
+                          paneID: session.id,
+                          historyGeneration: session.historyGeneration,
+                        },
+                      });
+                    } else {
+                      replayController.complete({
+                        cursor: message.history_cursor,
+                        requestID: String(session.terminalReplayGeneration || ""),
+                        connectionEpoch,
+                        identity: {
+                          selector: session.name,
+                          paneID: session.id,
+                          historyGeneration: session.historyGeneration,
+                        },
+                      });
+                    }
                   } catch (error) {
-                    rejectHistorySync(error?.message || "Fast replay completion validation failed");
+                    rejectHistorySync(error?.message || "Replay completion validation failed");
                     return;
                   }
                 }
@@ -20301,6 +20334,23 @@ const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).the
             }
           } catch (error) {
             rejectHistorySync(error?.message || "Fast binary integrity validation failed");
+            return;
+          }
+        }
+        if (isClientDirectTransport && replayController.phase === "replaying" && session.historyProtocolActive) {
+          try {
+            clientReplayAdapter.acceptBinary({
+              data: outputPayload,
+              requestID: String(session.terminalReplayGeneration || ""),
+              connectionEpoch,
+              identity: {
+                selector: session.name,
+                paneID: session.id,
+                historyGeneration: session.historyGeneration,
+              },
+            });
+          } catch (error) {
+            rejectHistorySync(error?.message || "Client replay cursor validation failed");
             return;
           }
         }
