@@ -2456,7 +2456,7 @@ func TestRuntimeTerminalScrollbackSettingPersistence(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		`const defaultTerminalScrollback = 1000;`,
+		`const defaultTerminalScrollback = 2000;`,
 		`const applyTerminalScrollback = () => {`,
 		`pane.term.options.scrollback = terminalOptionsBase.scrollback;`,
 		`applyTerminalScrollback();`,

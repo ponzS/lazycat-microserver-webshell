@@ -1465,3 +1465,11 @@ git diff --check
 - 回归 guard：`terminal_replay_controller_test.mjs` 覆盖客户端 raw chunk 的连续 cursor、sequence 和 commit，以及 completion 失败时 sequence 不前进；`TestRuntimeTerminalOutputBatchingGuard` 固定客户端 adapter import、raw binary adapter 调用、客户端 completion gate 和容器 Fast/Unified 分支仍独立；Service Worker 预缓存新 adapter。
 - 验证结果：Node 全量 `146/146`、`go test ./... -count=1`、`go test -race ./... -count=1`、`node --input-type=module --check < runtime/static/main.js`、`node --check runtime/static/client_terminal_replay.js`、`node --check runtime/static/service-worker.js` 和 `git diff --check` 均通过；`lzc-cli project release` 已生成并核对新的 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，LPK SHA-256 为 `6c45fced56bfe6db41b014bb76f3c4e9c5f82812f8cc05088166bd17d2f060`，包内 content revision 为 `04527b6dd7dac9754fa5ee6ec00d67e282d4398d5bccd9de9b8d63b498b889c1`，且包内 `main.js` 与 adapter 哈希均与工作区一致。用户已在实际客户端实例完成手动测试，确认进入后不再黑屏且当前功能正常。
 - 禁止复现：不得把客户端裸 binary 当作已具备 Fast integrity；不得绕过 `acceptBinary()` 直接完成现代 replay；不得用放宽 cursor/generation 校验的方式消除黑屏；不得让客户端 adapter 改变容器 Unified 或 Cache API v2 状态机。
+
+### 2026-08-28：恢复终端滚动历史默认值为 2000 行
+- 来源：用户要求；阶段 A 客户端 replay 黑屏修复已完成并通过手动验收后，调整默认历史保留量。
+- 实施方案：前端和服务端默认 `terminal_scrollback` 从 1000 行调整为 2000 行；已有设置文件中的合法值不迁移、不覆盖，仅新安装、缺失/非法设置和“恢复默认”使用 2000 行。
+- 兼容边界：用户主动保存的其他合法值继续保留；设置变更仍会使不匹配的本地历史缓存失效并按新的 history window 重建。该调整不修改客户端代码，不改变客户端 v8 replay、容器 Unified、Cache API v2 或连接协议。
+- 回归 guard：`internal/pkg/fonts/store_test.go` 固定服务端默认值为 2000 且验证已有 5000 行设置不变；`TestRuntimeTerminalScrollbackSettingPersistence` 固定前端默认值为 2000；现有 workspace/agent 参数测试继续覆盖显式设置值向 PTY 传递。
+- 验证结果：已执行 `gofmt`、`go test ./... -count=1`、`go test -race ./... -count=1`、Node 全量测试 `146/146`、`node --input-type=module --check runtime/static/main.js` 和 `git diff --check`，均通过；已重新构建 LPK。最新 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk` SHA-256 为 `43d3cbd44fb70d2ab30716af120b9b70efc3a04d6ca2223edd522264c820e9ff`，包内 content revision 为 `f316adce4cec5abb0af35c07a2047b850831374c9ecde8b746b91c82c63b3359`，包内 `runtime/static/main.js` 与工作区哈希一致。
+- 禁止复现：不得通过升级直接覆盖已有用户的滚动历史设置；不得只修改前端或只修改服务端默认；不得修改 Ghostty 上游测试中的固定容量样例来代替 WebShell 默认配置。

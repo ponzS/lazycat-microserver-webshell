@@ -91,8 +91,8 @@ func TestStoreRejectsUploadedFontOverMaxBytes(t *testing.T) {
 
 func TestStoreDefaultsInvalidAndPersistsScrollback(t *testing.T) {
 	store := Store{Dir: t.TempDir()}
-	if DefaultTerminalScrollback != 1000 {
-		t.Fatalf("DefaultTerminalScrollback = %d, want 1000", DefaultTerminalScrollback)
+	if DefaultTerminalScrollback != 2000 {
+		t.Fatalf("DefaultTerminalScrollback = %d, want 2000", DefaultTerminalScrollback)
 	}
 
 	state, err := store.State()
