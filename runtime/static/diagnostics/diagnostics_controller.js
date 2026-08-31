@@ -8,6 +8,7 @@ import { createPerformanceMeter } from "./performance_meter.js";
 import { createPerformanceTaskMonitor } from "./performance_tasks.js";
 import {
   createTerminalTimeline,
+  createTerminalRuntimeTimeline,
   recordTerminalRuntimeMaxMetric,
   recordTerminalRuntimeMetric,
 } from "./terminal_timeline.js";
@@ -32,7 +33,7 @@ export function createDiagnosticsController({
   onDebugModeChange = () => {},
   now = defaultNow,
   networkModuleLoader,
-} = {}) {
+  } = {}) {
   const storageKeys = {
     debugMode: `${storagePrefix}.debugMode`,
     debugLog: `${storagePrefix}.debugLog`,
@@ -62,6 +63,7 @@ export function createDiagnosticsController({
   };
   let started = false;
   let disposed = false;
+  let resumeGeneration = 0;
   const view = createDiagnosticsView({ documentObject });
 
   const debugLog = createDebugLog({
@@ -111,7 +113,23 @@ export function createDiagnosticsController({
     now,
     appendLog,
     isLogEnabled: () => state.debugLog,
+    getRuntimeContext: () => ({ resumeGeneration }),
   });
+  const runtimeTimeline = createTerminalRuntimeTimeline({
+    now,
+    appendLog,
+    isLogEnabled: () => state.debugLog,
+  });
+  const recordRuntimeEvent = (type, details = {}) => {
+    const nextGeneration = Number(details?.resumeGeneration || 0);
+    if (nextGeneration > 0) {
+      resumeGeneration = Math.max(resumeGeneration, nextGeneration);
+    }
+    return runtimeTimeline.record(type, {
+      ...details,
+      resumeGeneration: nextGeneration || resumeGeneration,
+    });
+  };
 
   const applyState = ({ notifyDebugMode = false } = {}) => {
     view.syncControls(state);
@@ -207,6 +225,7 @@ export function createDiagnosticsController({
     recordTerminalRuntimeMaxMetric,
     recordTerminalRuntimeMetric,
     recordTerminalSessionEvent: terminalTimeline.record,
+    recordRuntimeEvent,
     refreshNetworkView() {
       networkMonitorLifecycle.refresh();
     },
@@ -230,6 +249,9 @@ export function createDiagnosticsController({
     },
     syncNetworkSockets(options = {}) {
       networkMonitorLifecycle.syncSockets(options);
+    },
+    runtimeTimelineSnapshot() {
+      return runtimeTimeline.snapshot();
     },
   };
 }

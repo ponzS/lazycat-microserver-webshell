@@ -63,7 +63,7 @@ export function createTerminalStartupErrorController({
     }
     if (isRetryableTerminalStartupError(text)) {
       session.connectionRetrying = true;
-      session.shellEl.dataset.connection = navigatorObject?.onLine === false ? "offline" : "reconnecting";
+      session.shellEl.dataset.connection = navigatorObject?.onLine === false ? "offline" : "network-error";
       appendDebugWarning("终端网络错误将自动重试", `${describeSession(session)}: ${text}`);
       return true;
     }

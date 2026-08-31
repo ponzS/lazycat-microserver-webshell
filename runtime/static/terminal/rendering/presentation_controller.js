@@ -13,6 +13,8 @@ export function createTerminalPresentationController({
   isReplayCommitPending = () => false,
   isPaneVisible = () => false,
   isPaneMeasurable = () => false,
+  isCurrentDeviceClaimRequired = () => false,
+  isViewportGeometryClaimPending = () => false,
   canvasMatchesExpectedSize = () => false,
   normalizeResizeEpoch = (value) => String(value || ""),
   scheduleResize = () => false,
@@ -239,19 +241,25 @@ export function createTerminalPresentationController({
     // same frame. Reuse its active hold instead of toggling canvases again.
     if (session.resizePresentationHold && !session.renderReady) {
       if (capture && session.hasPresentedFrame && !hasVisibleHeldFrame(session)) {
-        holdFrame(session);
+        if (!holdFrame(session)) {
+          recordEvent(session, "presentation_hold_unavailable", { capture });
+          trace(session, "begin_hold_unavailable", { capture, reused: true });
+          return false;
+        }
       }
       cancelPendingRender(session.term);
       trace(session, "begin_hold_reused", { capture });
       return true;
     }
     lifecycle.cancelFrameRelease(session);
+    if (capture && session.hasPresentedFrame && !hasVisibleHeldFrame(session) && !holdFrame(session)) {
+      recordEvent(session, "presentation_hold_unavailable", { capture });
+      trace(session, "begin_hold_unavailable", { capture, reused: false });
+      return false;
+    }
     session.presentationCommitPending = false;
     session.resizePresentationHold = true;
     recordEvent(session, "presentation_hold");
-    if (capture && session.hasPresentedFrame && !hasVisibleHeldFrame(session)) {
-      holdFrame(session);
-    }
     setReady(session, false, { preserveFrame: capture });
     cancelPendingRender(session.term);
     trace(session, "begin_hold_exit", { capture });
@@ -659,6 +667,14 @@ export function createTerminalPresentationController({
       return false;
     }
     if (session.activationFitPending || !canvasMatchesExpectedSize(session)) {
+      if (isCurrentDeviceClaimRequired(session) || isViewportGeometryClaimPending(session)) {
+        recordEvent(session, "presentation_wait_current_device_claim", { reason });
+        if (shouldScheduleValidation) {
+          scheduleValidation(session, { forceHistory });
+        }
+        scheduleRetry(session, { reason: `${reason}:viewport_geometry`, forceHistory });
+        return false;
+      }
       scheduleResize(session, {
         forceFullRender: true,
         hideUntilRender: true,

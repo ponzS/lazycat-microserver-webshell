@@ -504,7 +504,14 @@ export function createTerminalInputController({
       return false;
     }
     holdCursorVisible(session);
-    reassertSize(session);
+    if (
+      session.renderReady !== true
+      || session.sizeClaimRequired === true
+      || session.resizeAckPending === true
+      || session.activationFitPending === true
+    ) {
+      reassertSize(session);
+    }
     return sendOrQueue(session, data, { userInput: !generatedResponse(data) });
   };
 

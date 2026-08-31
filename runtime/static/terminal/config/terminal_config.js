@@ -27,6 +27,7 @@ export const TERMINAL_RUNTIME_CONFIG = Object.freeze({
   terminalUnifiedPaneRetryMaxDelayMs: 10 * 1000,
   terminalWebSocketHealthTimeoutMs: 25 * 1000,
   terminalResumeProbeTimeoutMs: 1500,
+  terminalResumeDeadlineMs: 2000,
   terminalUserRecoveryThrottleMs: 1500,
   terminalAttachReadyTimeoutMs: 8 * 1000,
   terminalAgentPrepareTimeoutMs: 45 * 1000,

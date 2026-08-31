@@ -13,7 +13,7 @@
 - `createStartupDiagnostics()`：维护页面启动指标和启动追踪队列。
 - `createDiagnosticsController()`：创建诊断模块唯一控制器。
 
-控制器公开日志、性能记录、终端事件记录、只读开关查询、网络 socket 快照同步、`start()` 和幂等 `dispose()`。外部不得深度导入本目录中的其他文件。
+控制器公开日志、性能记录、终端事件记录、运行时恢复事件记录、只读开关查询、网络 socket 快照同步、`start()` 和幂等 `dispose()`。外部不得深度导入本目录中的其他文件。
 
 ## 状态所有权
 
@@ -23,6 +23,7 @@
 - 调试日志记录、去重索引和 console/window 捕获状态。
 - 性能任务样本、FPS RAF、网络监视器动态模块 generation、采样 timer 和 socket instrumentation。
 - 每个终端 session 的诊断时间线。时间线保存在模块内部 `WeakMap`，不写入业务 session 对象。
+- 页面级运行时事件时间线和当前 `resumeGeneration`。运行时事件只保留有限条目，敏感字段在进入时间线前脱敏。
 
 状态通过显式方法、只读查询和回调交互，不通过 `window` 可变字段共享。
 
@@ -46,7 +47,7 @@
 - `performance_tasks.js`：无 DOM 的性能任务采样器。
 - `network_monitor.js`：无业务依赖的 WebSocket 字节与速率采样器，按需加载。
 - `startup_trace.js`：启动指标 owner 和追踪队列。
-- `terminal_timeline.js`：终端诊断时间线和 Ghostty runtime 计数适配。
+- `terminal_timeline.js`：终端/页面诊断时间线和 Ghostty runtime 计数适配。
 
 ## 依赖方向
 

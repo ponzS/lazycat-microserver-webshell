@@ -1,5 +1,7 @@
 export const normalizeViewportPixels = (value) => Math.max(0, Math.round(Number(value) || 0));
 
+const normalizeViewportScale = (value) => Math.max(0, Math.round((Number(value) || 0) * 1000) / 1000);
+
 export function currentMobileViewportOrientation({
   windowObject = globalThis.window,
   documentObject = globalThis.document,
@@ -44,6 +46,68 @@ export function currentMobileViewportOrientation({
     return viewportWidth > viewportHeight ? "landscape" : "portrait";
   }
   return "";
+}
+
+export function measureTerminalViewportGeometry({
+  windowObject = globalThis.window,
+  documentObject = globalThis.document,
+} = {}) {
+  const visualViewport = windowObject?.visualViewport;
+  const layoutWidth = normalizeViewportPixels(
+    windowObject?.innerWidth || documentObject?.documentElement?.clientWidth || 0,
+  );
+  const layoutHeight = normalizeViewportPixels(
+    windowObject?.innerHeight || documentObject?.documentElement?.clientHeight || 0,
+  );
+  return Object.freeze({
+    layoutWidth,
+    layoutHeight,
+    visualWidth: normalizeViewportPixels(visualViewport?.width || layoutWidth),
+    visualHeight: normalizeViewportPixels(visualViewport?.height || layoutHeight),
+    screenWidth: normalizeViewportPixels(windowObject?.screen?.width),
+    screenHeight: normalizeViewportPixels(windowObject?.screen?.height),
+    devicePixelRatio: normalizeViewportScale(windowObject?.devicePixelRatio || 1),
+    orientation: currentMobileViewportOrientation({ windowObject, documentObject }),
+  });
+}
+
+export function terminalViewportGeometryEqual(left, right) {
+  if (!left || !right) {
+    return false;
+  }
+  return (
+    left.layoutWidth === right.layoutWidth
+    && left.layoutHeight === right.layoutHeight
+    && left.visualWidth === right.visualWidth
+    && left.visualHeight === right.visualHeight
+    && left.screenWidth === right.screenWidth
+    && left.screenHeight === right.screenHeight
+    && left.devicePixelRatio === right.devicePixelRatio
+    && left.orientation === right.orientation
+  );
+}
+
+export function terminalViewportGeometryRequiresClaim(previous, next, {
+  keyboardActive = false,
+  resizeSuppressed = false,
+} = {}) {
+  if (!previous || !next) {
+    return false;
+  }
+  if (
+    previous.layoutWidth !== next.layoutWidth
+    || previous.layoutHeight !== next.layoutHeight
+    || previous.visualWidth !== next.visualWidth
+    || previous.screenWidth !== next.screenWidth
+    || previous.screenHeight !== next.screenHeight
+    || previous.devicePixelRatio !== next.devicePixelRatio
+    || previous.orientation !== next.orientation
+  ) {
+    return true;
+  }
+  return !keyboardActive
+    && !resizeSuppressed
+    && previous.visualHeight !== next.visualHeight;
 }
 
 export function measureMobileViewportBottomInset({

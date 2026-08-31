@@ -2,6 +2,16 @@ import { createTerminalSessionConnectionLifecycle } from "./session_connection_l
 
 const noop = () => {};
 
+const isNetworkFailureReason = (reason) => {
+  const normalized = String(reason || "").toLowerCase();
+  return normalized.includes("network")
+    || normalized.includes("websocket")
+    || normalized.includes("connection timed out")
+    || normalized.includes("connection reset")
+    || normalized.includes("connection aborted")
+    || normalized.includes("queue transport");
+};
+
 export function createTerminalSessionConnectionController({
   windowObject = globalThis.window,
   consoleObject = globalThis.console,
@@ -59,6 +69,9 @@ export function createTerminalSessionConnectionController({
     }
     session.connectionRetrying = true;
     if (session.shellEl?.dataset) {
+      // A retry is not evidence of a network fault.  Logical attach,
+      // replay, and resize recovery must remain on the gray indicator until
+      // the transport reports an actual network failure.
       session.shellEl.dataset.connection = "reconnecting";
     }
     if (session.connectionChannel === "unified") {
@@ -104,7 +117,9 @@ export function createTerminalSessionConnectionController({
     }
     session.connectionRetrying = true;
     if (session.shellEl?.dataset) {
-      session.shellEl.dataset.connection = "reconnecting";
+      session.shellEl.dataset.connection = isNetworkFailureReason(reason)
+        ? "network-error"
+        : "reconnecting";
     }
     consoleObject?.warn?.(reason);
     appendDebugError("终端连接异常，准备重试", reason);

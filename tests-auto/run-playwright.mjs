@@ -185,6 +185,7 @@ const createWindow = async (name, viewport, position) => {
   await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
   await page.addInitScript(() => {
     window.__testsAutoResizeFrames = [];
+    window.__testsAutoResizeTrace = [];
     window.__testsAutoTerminalOutput = "";
     window.__testsAutoSockets = [];
     window.__testsAutoSentMessages = [];
@@ -197,7 +198,12 @@ const createWindow = async (name, viewport, position) => {
           window.__testsAutoSentMessages.push(value);
           const resize = value?.type === "pane-control" ? value.control : value;
           if (resize?.type === "resize") {
-            window.__testsAutoResizeFrames.push({ cols: Number(resize.cols), rows: Number(resize.rows), resizeEpoch: resize.resize_epoch || "" });
+            window.__testsAutoResizeFrames.push({
+              cols: Number(resize.cols),
+              rows: Number(resize.rows),
+              resizeEpoch: resize.resize_epoch || "",
+              claim: resize.claim === true,
+            });
           }
         } catch {}
       }
@@ -305,10 +311,10 @@ const waitForResizeApplied = async (state, previous, action, frameCountBefore, r
     await syncObservedFrames();
   }
   if (state.framesSent.length <= frameCountBefore) {
-    throw new Error(`${action}: click did not send a new resize frame`);
+    throw new Error(`${action}: interaction did not send a new resize frame`);
   }
   if (!state.lastResize || state.lastResize.cols <= 0 || state.lastResize.rows <= 0) {
-    throw new Error(`${action}: no resize frame was sent after click`);
+    throw new Error(`${action}: no resize frame was sent after interaction`);
   }
   const resizeErrors = state.resizeErrors - resizeErrorsBefore;
   let candidates = state.framesSent.slice(frameCountBefore).filter((frame) => frame.cols > 0 && frame.rows > 0);
@@ -327,10 +333,10 @@ const waitForResizeApplied = async (state, previous, action, frameCountBefore, r
   }
   if (!expected || !applied) {
     const sent = candidates.map((frame) => `${frame.cols}x${frame.rows}`).join(", ");
-    throw new Error(`${action}: server size ${applied?.cols}x${applied?.rows || "?"} did not match click resize frames [${sent}] (resize-error events: ${resizeErrors})`);
+    throw new Error(`${action}: server size ${applied?.cols}x${applied?.rows || "?"} did not match resize frames [${sent}] (resize-error events: ${resizeErrors})`);
   }
   if (previous && previous.cols === expected.cols && previous.rows === expected.rows) {
-    throw new Error(`${action}: click did not change terminal geometry (${expected.cols}x${expected.rows})`);
+    throw new Error(`${action}: interaction did not change terminal geometry (${expected.cols}x${expected.rows})`);
   }
   return { expected, applied, resizeErrors };
 };

@@ -1598,7 +1598,7 @@ class $ {
     this.currentBuffer = A;
     const I = A.getCursor(), D = A.getDimensions(), i = E ? E.getScrollbackLength() : 0;
     const requestedViewportY = Number(g);
-    g = typeof (E == null ? void 0 : E.normalizeViewportBounds) == "function" ? E.normalizeViewportBounds(requestedViewportY) : Math.max(0, Math.min(i, Number.isFinite(requestedViewportY) ? requestedViewportY : 0));
+    g = Math.max(0, Math.min(i, Number.isFinite(requestedViewportY) ? requestedViewportY : 0));
     const usePixelScroll = Boolean(E?.options?.mobilePixelScroll), viewportLine = Math.max(0, Math.floor(g)), viewportFraction = usePixelScroll ? Math.max(0, Math.min(1, g - viewportLine)) : 0, viewportOffsetY = viewportFraction * this.metrics.height, hasFractionalViewport = viewportFraction > 0.001;
     const W = this.materializeViewportLines(A, D, g, i, E);
     if (!W)
@@ -2645,7 +2645,9 @@ class IA {
     this.renderSuppressionDepth += 1;
   }
   endRenderSuppression({ render: A = !0, full: Q = !0 } = {}) {
-    this.renderSuppressionDepth = Math.max(0, this.renderSuppressionDepth - 1), this.renderSuppressionDepth === 0 && A && this.isOpen && !this.isDisposed && this.requestRender({ full: Q });
+    if (this.renderSuppressionDepth <= 0) return;
+    this.renderSuppressionDepth -= 1;
+    this.renderSuppressionDepth === 0 && A && this.isOpen && !this.isDisposed && this.requestRender({ full: Q });
   }
   /**
    * Internal write implementation (extracted from write())
@@ -2945,7 +2947,6 @@ class IA {
       return;
     if (this.renderFullNextFrame = this.renderFullNextFrame || A.full === !0, this.renderSuppressionDepth > 0)
       return;
-    this.renderRetryTimer !== void 0 && (window.clearTimeout(this.renderRetryTimer), this.renderRetryTimer = void 0);
     if (A.throttle === !0) {
       const B = performance.now(), g = Math.max(0, GHOSTTY_OUTPUT_RENDER_INTERVAL_MS - (B - this.lastRenderAt));
       if (this.lastRenderAt > 0 && g > 0) {
@@ -2978,7 +2979,7 @@ class IA {
       return !1;
     if (this.renderSuppressionDepth > 0)
       return this.renderFullNextFrame = this.renderFullNextFrame || A, !1;
-    if (!this.renderer.render(this.wasmTerm, A, this.viewportY, this, this.scrollbarOpacity))
+    if (!this.renderer.render(this.wasmTerm, A, this.normalizeViewportBounds(this.viewportY), this, this.scrollbarOpacity))
       return this.renderFullNextFrame = !0, this.scheduleRenderRetry(), !1;
     this.renderRetryTimer !== void 0 && (window.clearTimeout(this.renderRetryTimer), this.renderRetryTimer = void 0), this.renderRetryDelayMs = 16, this.lastRenderAt = performance.now(), this.renderEmitter.fire();
     const B = this.wasmTerm.getCursor();

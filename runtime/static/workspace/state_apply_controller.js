@@ -164,7 +164,11 @@ export function createWorkspaceStateApplyController({
           ? tabs.get(restartTab) || tabs.get(stateActiveTab) || tabs.get(requestedTab) || tabs.get(savedTab) || tabs.values().next().value || null
           : tabs.get(restartTab) || tabs.get(requestedTab) || tabs.get(savedTab) || tabs.get(stateActiveTab) || tabs.values().next().value || null;
         if (nextActiveTab) {
-          setActiveTab(nextActiveTab.id, { focus, rememberRecent: !stateRecentTabIds });
+          setActiveTab(nextActiveTab.id, {
+            focus,
+            rememberRecent: !stateRecentTabIds,
+            claimCurrentDevice: false,
+          });
           const appliedRecentTabIds = getRecentTabIds();
           if (stateRecentTabIds && appliedRecentTabIds[0] !== nextActiveTab.id) {
             applyRecentTabIds([nextActiveTab.id, ...appliedRecentTabIds], { name: targetName });

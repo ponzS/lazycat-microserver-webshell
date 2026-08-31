@@ -77,16 +77,18 @@ test("terminal runtime reset keeps the existing terminal alive through fallback 
   assert.ok(failed.calls.some((value) => Array.isArray(value) && value[0] === "error"));
 });
 
-test("terminal runtime suppression is reference-counted by reason and fenced after dispose", () => {
+test("terminal runtime suppression keeps one scope per reason and rejects unknown releases", () => {
   const harness = createHarness();
   assert.equal(harness.controller.beginRenderSuppression(harness.session, "replay"), true);
   assert.equal(harness.controller.beginRenderSuppression(harness.session, "resize"), true);
   assert.equal(harness.controller.beginRenderSuppression(harness.session, "replay"), true);
   assert.equal(harness.calls.filter((value) => value === "suppress-begin").length, 1);
   assert.equal(harness.controller.endRenderSuppression(harness.session, { reason: "resize" }), true);
-  assert.equal(harness.calls.some((value) => Array.isArray(value) && value[0] === "suppress-end"), false);
+  assert.equal(harness.calls.filter((value) => Array.isArray(value) && value[0] === "suppress-end").length, 0);
   assert.equal(harness.controller.endRenderSuppression(harness.session, { reason: "replay", render: false }), true);
+  assert.equal(harness.calls.filter((value) => Array.isArray(value) && value[0] === "suppress-end").length, 1);
   assert.deepEqual(harness.calls.at(-1), ["suppress-end", { render: false, full: true }]);
+  assert.equal(harness.controller.endRenderSuppression(harness.session, { reason: "replay" }), false);
   assert.equal(harness.controller.dispose(), true);
   assert.equal(harness.controller.dispose(), false);
   assert.equal(harness.controller.clearBuffer(harness.session), false);

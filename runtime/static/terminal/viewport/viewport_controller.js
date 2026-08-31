@@ -2,8 +2,11 @@ import { createTerminalViewportLifecycle } from "./viewport_lifecycle.js";
 import {
   currentMobileViewportOrientation as readMobileViewportOrientation,
   isKeyboardLikeViewportHeightChange as keyboardLikeViewportHeightChange,
+  measureTerminalViewportGeometry,
   measureMobileViewportBottomInset as readMobileViewportBottomInset,
   normalizeViewportPixels,
+  terminalViewportGeometryEqual,
+  terminalViewportGeometryRequiresClaim,
   terminalViewportPanY,
 } from "./viewport_model.js";
 
@@ -22,7 +25,7 @@ export function createTerminalMobileViewportController({
   getActiveSession = () => null,
   getSessions = () => [],
   hasActivePanes = () => Boolean(getActiveSession()),
-  resizeActiveTabForCurrentDevice = noop,
+  claimActiveTabForCurrentDevice = noop,
   resetHostViewport = noop,
   positionInput = noop,
   updateSelectionHandles = noop,
@@ -35,13 +38,20 @@ export function createTerminalMobileViewportController({
   mobileKeyboardDockMoveSettleMs = 260,
   mobileKeyboardResizeSettleMs = mobileKeyboardDockMoveSettleMs + 140,
   mobileKeyboardDismissRecoveryDelays = [0, 80, 180, 360, 720, 1200],
-  mobileOrientationViewportRecoveryDelays = [0, 80, 180, 360, 720],
-  mobileOrientationFinalSettleMs = 900,
+  viewportGeometryRecoveryDelays = [0, 80, 180, 360, 720],
+  viewportGeometryFinalSettleMs = 180,
+  viewportGeometryStableFrameCount = 2,
   lifecycleFactory = createTerminalViewportLifecycle,
 } = {}) {
   let disposed = false;
   let started = false;
-  let mobileOrientationRecoverySeq = 0;
+  let viewportGeometryGeneration = 0;
+  let viewportGeometryStableFrames = 0;
+  let pendingViewportGeometry = null;
+  let pendingViewportClaimReason = "";
+  let pendingViewportStructuralChange = false;
+  let viewportClaimDeferred = false;
+  let viewportGeometryRecoveryGeneration = 0;
   let lastMobileViewportOrientation = "";
   let mobileViewportHeight = normalizeViewportPixels(
     windowObject?.visualViewport?.height || windowObject?.innerHeight || 0,
@@ -54,6 +64,7 @@ export function createTerminalMobileViewportController({
   let mobileKeyboardDismissRecoverySeq = 0;
   let terminalInputViewportLockSession = null;
   const lifecycle = lifecycleFactory({ windowObject, documentObject });
+  let lastViewportGeometry = measureTerminalViewportGeometry({ windowObject, documentObject });
   const now = () => Number(windowObject?.performance?.now?.() || Date.now());
   const isHTMLElement = (value) => {
     const HTMLElementImpl = windowObject?.HTMLElement || globalThis.HTMLElement;
@@ -63,6 +74,13 @@ export function createTerminalMobileViewportController({
   const usesMobileViewportInsets = () => (
     !isForcePCModeActive()
     && (isIOSPlatform(navigatorObject) || isAndroidPlatform(navigatorObject))
+  );
+
+  const viewportGeometryHasStructuralChange = (previous, current) => (
+    terminalViewportGeometryRequiresClaim(previous, current, {
+      keyboardActive: true,
+      resizeSuppressed: true,
+    })
   );
 
   const isMobileKeyboardResizeSuppressed = () => (
@@ -179,7 +197,7 @@ export function createTerminalMobileViewportController({
       return;
     }
     syncTerminalViewportPan(getActiveSession());
-    resizeActiveTabForCurrentDevice({ forceFullRender: true, hideUntilRender: true });
+    scheduleViewportGeometryClaim("mobile_keyboard_dismiss", { force: true });
   };
 
   const armMobileKeyboardResizeSuppression = () => {
@@ -218,47 +236,146 @@ export function createTerminalMobileViewportController({
     return true;
   };
 
-  const runMobileOrientationViewportRecoveryPass = (seq) => {
-    if (seq !== mobileOrientationRecoverySeq) {
-      return;
-    }
-    syncMobileVisualViewport({ detectOrientation: false });
-    resizeActiveTabForCurrentDevice();
-    updateActiveTabTitle();
-    updateSelection();
-  };
-
-  const scheduleMobileOrientationViewportRecovery = () => {
-    if (!isTouchShortcutLayout() || !hasActivePanes()) {
+  const commitViewportGeometryClaim = (generation) => {
+    if (generation !== viewportGeometryGeneration || disposed) {
       return false;
     }
-    mobileOrientationRecoverySeq += 1;
-    const seq = mobileOrientationRecoverySeq;
-    for (const delay of mobileOrientationViewportRecoveryDelays) {
+    if (isMobileKeyboardResizeSuppressed() && !pendingViewportStructuralChange) {
+      viewportClaimDeferred = true;
+      return false;
+    }
+    if (documentObject?.hidden === true || !hasActivePanes()) {
+      viewportClaimDeferred = true;
+      return false;
+    }
+    lifecycle.clearFrame("viewport-geometry-claim");
+    lifecycle.clearTimeout("viewport-geometry-final");
+    const reason = pendingViewportClaimReason || "viewport_geometry";
+    pendingViewportGeometry = null;
+    pendingViewportClaimReason = "";
+    pendingViewportStructuralChange = false;
+    viewportGeometryStableFrames = 0;
+    viewportClaimDeferred = false;
+    claimActiveTabForCurrentDevice({
+      forceFullRender: true,
+      hideUntilRender: true,
+      reason,
+    });
+    updateActiveTabTitle();
+    updateSelection();
+    return true;
+  };
+
+  const scheduleViewportGeometryValidation = (generation) => {
+    lifecycle.clearFrame("viewport-geometry-claim");
+    lifecycle.frame("viewport-geometry-claim", () => {
+      if (generation !== viewportGeometryGeneration || disposed) {
+        return;
+      }
+      const current = measureTerminalViewportGeometry({ windowObject, documentObject });
+      lastViewportGeometry = current;
+      if (!terminalViewportGeometryEqual(current, pendingViewportGeometry)) {
+        pendingViewportGeometry = current;
+        viewportGeometryStableFrames = 0;
+        scheduleViewportGeometryValidation(generation);
+        return;
+      }
+      viewportGeometryStableFrames += 1;
+      if (viewportGeometryStableFrames < Math.max(1, viewportGeometryStableFrameCount)) {
+        scheduleViewportGeometryValidation(generation);
+        return;
+      }
+      commitViewportGeometryClaim(generation);
+    });
+  };
+
+  const scheduleViewportGeometryClaim = (reason, { force = false } = {}) => {
+    if (disposed || !hasActivePanes()) {
+      return false;
+    }
+    const previous = lastViewportGeometry;
+    const current = measureTerminalViewportGeometry({ windowObject, documentObject });
+    lastViewportGeometry = current;
+    const structuralChange = viewportGeometryHasStructuralChange(previous, current);
+    const requiresClaim = force || terminalViewportGeometryRequiresClaim(previous, current, {
+      keyboardActive: mobileKeyboardViewportActive,
+      resizeSuppressed: isMobileKeyboardResizeSuppressed(),
+    });
+    if (!requiresClaim && !viewportClaimDeferred) {
+      return false;
+    }
+    if (structuralChange && terminalInputViewportLockSession) {
+      terminalInputViewportLockSession.terminalInputAnchor = null;
+      releaseTerminalInputViewportLock(terminalInputViewportLockSession, { resync: false });
+    }
+    viewportGeometryGeneration += 1;
+    const generation = viewportGeometryGeneration;
+    pendingViewportGeometry = current;
+    pendingViewportClaimReason = String(reason || "viewport_geometry");
+    pendingViewportStructuralChange = pendingViewportStructuralChange || structuralChange;
+    viewportGeometryStableFrames = 0;
+    if (isMobileKeyboardResizeSuppressed() && !pendingViewportStructuralChange) {
+      viewportClaimDeferred = true;
+      return true;
+    }
+    viewportClaimDeferred = false;
+    scheduleViewportGeometryValidation(generation);
+    lifecycle.timeout("viewport-geometry-final", () => {
+      if (generation !== viewportGeometryGeneration) {
+        return;
+      }
+      pendingViewportGeometry = measureTerminalViewportGeometry({ windowObject, documentObject });
+      lastViewportGeometry = pendingViewportGeometry;
+      commitViewportGeometryClaim(generation);
+    }, viewportGeometryFinalSettleMs);
+    return true;
+  };
+
+  const runViewportGeometryRecoveryProbe = (generation, reason) => {
+    if (disposed || generation !== viewportGeometryRecoveryGeneration) {
+      return false;
+    }
+    syncMobileVisualViewport({ detectOrientation: false });
+    return scheduleViewportGeometryClaim(reason);
+  };
+
+  const scheduleViewportGeometryRecovery = (reason) => {
+    if (disposed || !hasActivePanes()) {
+      return false;
+    }
+    viewportGeometryRecoveryGeneration += 1;
+    const generation = viewportGeometryRecoveryGeneration;
+    for (const delay of viewportGeometryRecoveryDelays) {
       lifecycle.timeout(
-        `mobile-orientation-pass:${seq}:${delay}`,
-        () => runMobileOrientationViewportRecoveryPass(seq),
+        `viewport-geometry-recovery:${delay}`,
+        () => runViewportGeometryRecoveryProbe(generation, reason),
         delay,
       );
     }
-    lifecycle.timeout("mobile-orientation-final", () => {
-      if (seq !== mobileOrientationRecoverySeq) {
-        return;
-      }
-      runMobileOrientationViewportRecoveryPass(seq);
-    }, mobileOrientationFinalSettleMs);
     return true;
+  };
+
+  const isGeometryClaimPending = () => {
+    if (disposed) {
+      return false;
+    }
+    if (pendingViewportGeometry || viewportClaimDeferred) {
+      return true;
+    }
+    const current = measureTerminalViewportGeometry({ windowObject, documentObject });
+    return terminalViewportGeometryRequiresClaim(lastViewportGeometry, current, {
+      keyboardActive: mobileKeyboardViewportActive,
+      resizeSuppressed: isMobileKeyboardResizeSuppressed(),
+    });
   };
 
   const handleMobileViewportResize = () => {
     if (isMobileKeyboardResizeSuppressed()) {
       syncActiveTerminalViewportForKeyboard();
-      if (rememberMobileViewportOrientationChange() || lifecycle.hasTimeout("mobile-orientation-final")) {
-        scheduleMobileOrientationViewportRecovery();
-      }
+      scheduleViewportGeometryClaim("mobile_viewport_suppressed", { force: viewportClaimDeferred });
       return;
     }
-    resizeActiveTabForCurrentDevice();
+    scheduleViewportGeometryClaim("mobile_viewport_resize", { force: true });
     const session = getActiveSession();
     positionInput(session);
     syncTerminalViewportPan(session);
@@ -268,9 +385,6 @@ export function createTerminalMobileViewportController({
       renderMobileMenu();
     }
     scheduleOverviewRender();
-    if (rememberMobileViewportOrientationChange() || lifecycle.hasTimeout("mobile-orientation-final")) {
-      scheduleMobileOrientationViewportRecovery();
-    }
   };
 
   const isTerminalTextareaFocused = () => {
@@ -364,6 +478,7 @@ export function createTerminalMobileViewportController({
   const applyMobileViewportInsets = (nextInset, nextSafeOffset, {
     animateDock = true,
     keyboardActive = null,
+    suppressResize = true,
   } = {}) => {
     const inset = normalizeViewportPixels(nextInset);
     const safeOffset = normalizeViewportPixels(nextSafeOffset);
@@ -372,7 +487,7 @@ export function createTerminalMobileViewportController({
     const keyboardIsActive = keyboardActive === null
       ? inset > mobileKeyboardInsetThresholdPx
       : keyboardActive === true;
-    if (keyboardWasActive || keyboardIsActive || dockChanged) {
+    if (suppressResize && (keyboardWasActive || keyboardIsActive || dockChanged)) {
       armMobileKeyboardResizeSuppression();
     }
     mobileKeyboardInsetBottom = inset;
@@ -401,17 +516,23 @@ export function createTerminalMobileViewportController({
     const visualViewport = windowObject?.visualViewport;
     const nextHeight = normalizeViewportPixels(visualViewport?.height || windowObject?.innerHeight || 0);
     const orientationChanged = detectOrientation && rememberMobileViewportOrientationChange();
-    const shouldRecoverOrientation = orientationChanged
-      || (detectOrientation && lifecycle.hasTimeout("mobile-orientation-final"));
-    if (orientationChanged && terminalInputViewportLockSession) {
+    const shouldRecoverOrientation = orientationChanged;
+    const currentGeometry = measureTerminalViewportGeometry({ windowObject, documentObject });
+    const structuralViewportChange = viewportGeometryHasStructuralChange(lastViewportGeometry, currentGeometry);
+    if ((orientationChanged || structuralViewportChange) && terminalInputViewportLockSession) {
       terminalInputViewportLockSession.terminalInputAnchor = null;
       releaseTerminalInputViewportLock(terminalInputViewportLockSession, { resync: false });
+    }
+    if (structuralViewportChange) {
+      mobileKeyboardResizeSuppressedUntil = 0;
+      lifecycle.clearTimeout("mobile-keyboard-resize-release");
     }
     let inputLock = ignoreTerminalInputLock ? null : activeTerminalInputViewportLock();
     const lockedViewportBottomInset = inputLock ? measureMobileViewportBottomInset() : 0;
     const keyboardOpenedAfterLock = Boolean(
       inputLock
       && !inputLock.keyboardActive
+      && !structuralViewportChange
       && documentObject?.activeElement === inputLock.session?.term?.textarea
       && (
         Number(inputLock.viewportHeight || 0) - nextHeight > mobileKeyboardInsetThresholdPx
@@ -478,12 +599,13 @@ export function createTerminalMobileViewportController({
         previousHeight,
         nextHeight,
         { orientationChanged },
-      );
+      ) && isTerminalTextareaFocused() && !structuralViewportChange;
       mobileViewportHeight = nextHeight;
       mobileViewportReferenceHeight = nextHeight;
       applyMobileViewportInsets(0, 0, {
         animateDock: false,
         keyboardActive: keyboardLikeHeightChange && nextHeight < previousHeight,
+        suppressResize: !structuralViewportChange,
       });
       if (keyboardLikeHeightChange) {
         armMobileKeyboardResizeSuppression();
@@ -492,7 +614,7 @@ export function createTerminalMobileViewportController({
         scheduleMobileViewportResize();
       }
       if (shouldRecoverOrientation) {
-        scheduleMobileOrientationViewportRecovery();
+        scheduleViewportGeometryClaim("orientation_change", { force: true });
       }
       return true;
     }
@@ -513,8 +635,10 @@ export function createTerminalMobileViewportController({
     );
     const nextKeyboardActive = measuredInset > mobileKeyboardInsetThresholdPx
       && !orientationChanged
+      && !structuralViewportChange
+      && isTerminalTextareaFocused()
       && isTouchShortcutLayout();
-    const nextInset = useKeyboardInset && measuredInset > mobileKeyboardInsetThresholdPx ? measuredInset : 0;
+    const nextInset = useKeyboardInset && nextKeyboardActive ? measuredInset : 0;
     const nextSafeOffset = nextInset === 0
       && measuredBottomInset > 0
       && measuredBottomInset <= mobileKeyboardInsetThresholdPx
@@ -527,7 +651,10 @@ export function createTerminalMobileViewportController({
       mobileViewportReferenceHeight = nextHeight;
     }
     mobileViewportHeight = nextHeight;
-    applyMobileViewportInsets(nextInset, nextSafeOffset, { keyboardActive: nextKeyboardActive });
+    applyMobileViewportInsets(nextInset, nextSafeOffset, {
+      keyboardActive: nextKeyboardActive,
+      suppressResize: !structuralViewportChange,
+    });
     if (
       heightChanged
       && !orientationChanged
@@ -540,7 +667,7 @@ export function createTerminalMobileViewportController({
       scheduleMobileViewportResize();
     }
     if (shouldRecoverOrientation) {
-      scheduleMobileOrientationViewportRecovery();
+      scheduleViewportGeometryClaim("orientation_change", { force: true });
     }
     return true;
   };
@@ -548,7 +675,8 @@ export function createTerminalMobileViewportController({
   const handleMobileOrientationChange = () => {
     syncMobileVisualViewport();
     rememberMobileViewportOrientationChange();
-    scheduleMobileOrientationViewportRecovery();
+    scheduleViewportGeometryClaim("orientation_event", { force: true });
+    scheduleViewportGeometryRecovery("orientation_recovery");
   };
 
   const shouldPreventMobileViewportZoom = () => (
@@ -573,16 +701,25 @@ export function createTerminalMobileViewportController({
       started = true;
       lifecycle.start({
         onPreventZoom: preventMobileViewportZoom,
-        onWindowResize: () => syncMobileVisualViewport(),
-        onVisualViewport: () => syncMobileVisualViewport(),
+        onWindowResize: () => {
+          syncMobileVisualViewport();
+          scheduleViewportGeometryClaim("window_resize");
+          scheduleViewportGeometryRecovery("window_resize_recovery");
+        },
+        onVisualViewport: () => {
+          syncMobileVisualViewport();
+          scheduleViewportGeometryClaim("visual_viewport");
+          scheduleViewportGeometryRecovery("visual_viewport_recovery");
+        },
         onOrientationChange: handleMobileOrientationChange,
-      }, { listenVisualViewport: usesMobileViewportInsets() });
+      }, { listenVisualViewport: Boolean(windowObject?.visualViewport) });
       syncMobileVisualViewport();
       return true;
     },
     usesInsets: usesMobileViewportInsets,
     isKeyboardActive: () => mobileKeyboardViewportActive,
     isResizeSuppressed: isMobileKeyboardResizeSuppressed,
+    isGeometryClaimPending,
     sync: syncMobileVisualViewport,
     syncPan: syncTerminalViewportPan,
     captureInputLock: captureTerminalInputViewportLock,
@@ -603,6 +740,9 @@ export function createTerminalMobileViewportController({
       keyboardActive: mobileKeyboardViewportActive,
       resizeSuppressed: isMobileKeyboardResizeSuppressed(),
       orientation: lastMobileViewportOrientation,
+      geometryGeneration: viewportGeometryGeneration,
+      geometryPending: Boolean(pendingViewportGeometry),
+      geometry: lastViewportGeometry,
       inputLocked: Boolean(activeTerminalInputViewportLock()),
     }),
     dispose() {
@@ -610,8 +750,13 @@ export function createTerminalMobileViewportController({
         return false;
       }
       disposed = true;
-      mobileOrientationRecoverySeq += 1;
+      viewportGeometryGeneration += 1;
+      viewportGeometryRecoveryGeneration += 1;
       mobileKeyboardDismissRecoverySeq += 1;
+      pendingViewportGeometry = null;
+      pendingViewportClaimReason = "";
+      pendingViewportStructuralChange = false;
+      viewportClaimDeferred = false;
       if (terminalInputViewportLockSession) {
         terminalInputViewportLockSession.inputViewportLock = null;
         terminalInputViewportLockSession = null;

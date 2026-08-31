@@ -209,6 +209,19 @@ test("controller marks generated payloads and suppresses replay or blocked callb
   assert.ok(runtime.session.suppressGeneratedTerminalInputUntil > harness.clock.value);
 });
 
+test("steady input does not reassert an already presented terminal size", () => {
+  const runtime = createSession();
+  runtime.session.renderReady = true;
+  runtime.session.sizeClaimRequired = false;
+  runtime.session.resizeAckPending = false;
+  runtime.session.activationFitPending = false;
+  const harness = createHarness({ sessions: [runtime.session] });
+  harness.controller.installSession(runtime.session);
+
+  runtime.emit("steady input");
+  assert.equal(harness.marks.some(([name]) => name === "resize"), false);
+});
+
 test("controller applies bounded backpressure and preserves pending input across replay readiness", () => {
   const runtime = createSession();
   const harness = createHarness({

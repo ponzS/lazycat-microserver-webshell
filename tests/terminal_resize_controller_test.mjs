@@ -95,6 +95,8 @@ const createRuntimeHarness = () => {
     requestFullRender: 0,
     commitNow: 0,
     termResize: 0,
+    flushOutputCalls: [],
+    queueEntriesAtTermResize: [],
   };
   const presentation = {
     beginHold(session) {
@@ -180,7 +182,19 @@ const createRuntimeHarness = () => {
     endRenderSuppression: (session) => {
       session.renderSuppressed = false;
     },
-    flushOutput: () => true,
+    flushOutput: (session, options = {}) => {
+      effects.flushOutputCalls.push({ ...options, queuedEntries: session.outputQueue.length });
+      const maxEntries = Math.max(0, Math.floor(Number(options.maxEntries) || 0));
+      const removeCount = maxEntries > 0
+        ? Math.min(maxEntries, session.outputQueue.length)
+        : session.outputQueue.length;
+      const removed = session.outputQueue.splice(0, removeCount);
+      session.outputQueueSize = Math.max(
+        0,
+        session.outputQueueSize - removed.reduce((total, entry) => total + Number(entry.byteLength || 0), 0),
+      );
+      return session.outputQueue.length === 0;
+    },
     scheduleOutputFlush() {},
     getOutputQueueEntryCount: (session) => session.outputQueue.length,
     getOutputQueuedBytes: (session) => session.outputQueueSize,
@@ -211,6 +225,7 @@ const createRuntimeHarness = () => {
     },
     resize(cols, rows) {
       effects.termResize += 1;
+      effects.queueEntriesAtTermResize.push(session.outputQueue.length);
       this.cols = cols;
       this.rows = rows;
       canvas.width = cols * 10;
@@ -296,7 +311,38 @@ test("runtime resize controller keeps the local grid on the old epoch until ACK"
   assert.ok(harness.ensures.some(({ options }) => options.reason === "resize_output_quiet"));
 });
 
-test("a newer remote resize epoch is adopted without automatically reclaiming local geometry", () => {
+test("matching resize ACK drains every pre-ACK output entry before changing the local grid", () => {
+  const harness = createRuntimeHarness();
+  const result = harness.controller.resizePane(harness.session, { forceSizeSync: true });
+  assert.equal(result.pending, true);
+  assert.equal(harness.session.resizeFenceDrainRemainingEntries, 0);
+
+  harness.session.outputQueue.push(
+    { byteLength: 11, marker: "old-grid-1" },
+    { byteLength: 13, marker: "old-grid-2" },
+  );
+  harness.session.outputQueueSize = 24;
+
+  harness.controller.handleApplied(harness.session, {
+    type: "resize-applied",
+    resize_epoch: harness.sent[0].resize_epoch,
+    cols: 100,
+    rows: 30,
+    pixel_width: 1000,
+    pixel_height: 600,
+  });
+
+  assert.deepEqual(harness.effects.queueEntriesAtTermResize, [0]);
+  assert.equal(harness.session.outputQueue.length, 0);
+  assert.equal(harness.session.outputQueueSize, 0);
+  assert.ok(harness.effects.flushOutputCalls.some((call) => (
+    call.queuedEntries === 2 && call.maxEntries === 2
+  )));
+  assert.equal(harness.session.term.cols, 100);
+  assert.equal(harness.session.term.rows, 30);
+});
+
+test("a newer remote resize epoch is observed without applying an intermediate remote grid", () => {
   const harness = createRuntimeHarness();
   assert.equal(harness.controller.sendSize(harness.session, { force: true }), true);
   const requestedEpoch = BigInt(harness.sent[0].resize_epoch);
@@ -311,10 +357,50 @@ test("a newer remote resize epoch is adopted without automatically reclaiming lo
   });
 
   assert.equal(harness.sent.length, 1);
-  assert.equal(harness.session.term.cols, 120);
-  assert.equal(harness.session.term.rows, 40);
+  assert.equal(harness.session.term.cols, 80);
+  assert.equal(harness.session.term.rows, 24);
   assert.equal(harness.session.sizeClaimRequired, true);
+  assert.equal(harness.controller.isCurrentDeviceClaimRequired(harness.session), true);
   assert.equal(harness.session.resizeAckPending, false);
+  assert.equal(harness.session.resizePresentationHold, true);
+});
+
+test("passive geometry correction waits for an explicit current-device claim after a remote owner is observed", () => {
+  const harness = createRuntimeHarness();
+  harness.session.sizeClaimRequired = true;
+
+  const result = harness.controller.resizePane(harness.session, { forceSizeSync: true });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.measurable, true);
+  assert.equal(harness.sent.length, 0);
+  assert.equal(harness.session.term.cols, 80);
+  assert.equal(harness.session.term.rows, 24);
+  assert.ok(harness.events.some(({ event, details }) => (
+    event === "resize_wait_current_device_claim"
+      && details.reason === "remote_owner_observed"
+  )));
+
+  assert.equal(harness.controller.claimForCurrentDevice(harness.session), true);
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.sent[0].claim, true);
+});
+
+test("forced passive size sync cannot reassert an identical geometry owned by another device", () => {
+  const harness = createRuntimeHarness();
+  harness.session.fitAddon.proposeDimensions = () => ({ cols: 80, rows: 24 });
+  harness.session.presentedFitGeneration = harness.session.measuredFitGeneration;
+  harness.session.sizeClaimRequired = true;
+
+  const result = harness.controller.resizePane(harness.session, { forceSizeSync: true });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.measurable, true);
+  assert.equal(harness.sent.length, 0);
+  assert.ok(harness.events.some(({ event, details }) => (
+    event === "resize_wait_current_device_claim"
+      && details.reason === "remote_owner_observed"
+  )));
 });
 
 test("default resize control serializer sends JSON through the session socket", () => {
@@ -425,6 +511,80 @@ test("current-device claim is sent once and repeated pending claims are deduplic
   assert.equal(harness.session.sizeClaimRequired, false);
   assert.equal(harness.controller.claimForCurrentDevice(harness.session), false);
   assert.equal(harness.sent.length, 1);
+});
+
+test("a current-device claim upgrades an in-flight passive resize after its ACK", () => {
+  const harness = createRuntimeHarness();
+  assert.equal(harness.controller.resizePane(harness.session, { forceSizeSync: true }).pending, true);
+  assert.equal(harness.sent[0].claim, undefined);
+
+  assert.equal(harness.controller.claimForCurrentDevice(harness.session), true);
+  assert.equal(harness.session.pendingSizeClaim, true);
+  assert.equal(harness.sent.length, 1);
+
+  harness.controller.handleApplied(harness.session, {
+    type: "resize-applied",
+    resize_epoch: harness.sent[0].resize_epoch,
+    cols: 100,
+    rows: 30,
+    pixel_width: 1000,
+    pixel_height: 600,
+  });
+
+  assert.equal(harness.sent.length, 2);
+  assert.equal(harness.sent[1].claim, true);
+  assert.equal(harness.session.pendingSizeClaim, false);
+});
+
+test("presentation geometry correction preserves current-device ownership", () => {
+  const harness = createRuntimeHarness();
+  harness.session.fitAddon.proposeDimensions = () => ({ cols: 80, rows: 24 });
+  harness.session.sizeClaimRequired = true;
+  assert.equal(harness.controller.claimForCurrentDevice(harness.session), true);
+  harness.controller.handleApplied(harness.session, {
+    type: "resize-applied",
+    resize_epoch: harness.sent[0].resize_epoch,
+    cols: 80,
+    rows: 24,
+    pixel_width: 800,
+    pixel_height: 480,
+  });
+
+  harness.session.fitAddon.proposeDimensions = () => ({ cols: 90, rows: 25 });
+  assert.equal(harness.controller.schedulePresentationResize(harness.session, {
+    forceFullRender: true,
+    hideUntilRender: true,
+  }, { immediate: true }), true);
+  assert.equal(harness.sent.length, 2);
+  assert.equal(harness.sent[1].claim, true);
+});
+
+test("owner rejection keeps the last frame and retries the queued explicit claim", () => {
+  const harness = createRuntimeHarness();
+  harness.controller.resizePane(harness.session, { forceSizeSync: true });
+  harness.controller.claimForCurrentDevice(harness.session);
+  const passiveEpoch = harness.sent[0].resize_epoch;
+
+  harness.controller.handleError(harness.session, {
+    type: "resize-error",
+    resize_epoch: passiveEpoch,
+    applied_epoch: String(BigInt(passiveEpoch) + 1n),
+    reason: "resize_owner_active",
+    cols: 120,
+    rows: 40,
+    pixel_width: 1200,
+    pixel_height: 800,
+  });
+
+  assert.equal(harness.session.term.cols, 80);
+  assert.equal(harness.session.term.rows, 24);
+  assert.equal(harness.session.terminalFrameHeld, true);
+  assert.equal(harness.sent.length, 2);
+  assert.equal(harness.sent[1].claim, true);
+  assert.deepEqual(
+    { cols: harness.sent[1].cols, rows: harness.sent[1].rows },
+    { cols: 100, rows: 30 },
+  );
 });
 
 test("resize lifecycle disconnects observers, terminal callbacks, timers, and RAF work", () => {

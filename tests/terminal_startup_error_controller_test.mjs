@@ -54,7 +54,7 @@ test("startup errors preserve retry and last-known-good frame behavior", async (
 
   assert.equal(await controller.show(session), true);
   assert.equal(session.connectionRetrying, true);
-  assert.equal(session.shellEl.dataset.connection, "reconnecting");
+  assert.equal(session.shellEl.dataset.connection, "network-error");
   assert.equal(calls.some((value) => Array.isArray(value) && value[0] === "write"), false);
 
   session.connectionRetrying = false;

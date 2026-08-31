@@ -161,6 +161,7 @@ test("target replacement waits for the prior physical close fence", async () => 
 
   first.resolveClosed();
   await harness.controller.waitForClosures();
+  assert.equal(harness.controller.snapshot().expectedCloseReason, "");
   const second = harness.controller.ensure("target-b");
   assert.ok(second);
   assert.equal(harness.connections.length, 2);
@@ -195,6 +196,33 @@ test("unexpected disconnect keeps its close fence until the old socket really cl
   assert.equal(harness.connections.length, 2);
 });
 
+test("physical disconnect releases logical streams and recovers after the short close fence", async () => {
+  const harness = createHarness();
+  const logicalSocket = {
+    readyState: 1,
+    closeCalls: [],
+    close(code, reason) {
+      this.readyState = 3;
+      this.closeCalls.push({ code, reason });
+    },
+  };
+  harness.sessions[0].socket = logicalSocket;
+  const first = harness.controller.ensure("target-a");
+
+  first.options.onPhysicalError({ message: "broken", connection: first });
+  assert.deepEqual(logicalSocket.closeCalls, [{ code: 4001, reason: "unified_retry" }]);
+  assert.equal(harness.timers.size, 1);
+
+  const recovery = harness.queuedMicrotasks.shift()();
+  const closeFenceCallback = harness.timers.values().next().value;
+  closeFenceCallback();
+  await recovery;
+
+  assert.equal(harness.controller.getClosingPromise(), null);
+  assert.deepEqual(harness.membershipRefreshes, [{ reason: "transport_recovery" }]);
+  assert.deepEqual(harness.reconnects, [{ allowHidden: true }]);
+});
+
 test("physical disconnect marking is owner-scoped and deduplicated", () => {
   const harness = createHarness();
   harness.sessions.push({
@@ -206,10 +234,17 @@ test("physical disconnect marking is owner-scoped and deduplicated", () => {
   const connection = harness.controller.ensure("target-a");
 
   assert.equal(harness.controller.handlePhysicalDisconnect(connection, "physical_failure"), true);
-  assert.equal(harness.sessions[0].shellEl.dataset.connection, "reconnecting");
-  assert.equal(harness.sessions[1].shellEl.dataset.connection, "reconnecting");
+  assert.equal(harness.sessions[0].shellEl.dataset.connection, "network-error");
+  assert.equal(harness.sessions[1].shellEl.dataset.connection, "network-error");
   assert.equal(connection.closeCalls.length, 0);
   assert.equal(harness.controller.handlePhysicalDisconnect(connection, "duplicate"), false);
+});
+
+test("logical unified disconnect keeps the gray indicator while physical network stays online", () => {
+  const harness = createHarness();
+  const connection = harness.controller.ensure("target-a");
+  assert.equal(harness.controller.handlePhysicalDisconnect(connection, "logical_attach_failed"), true);
+  assert.equal(harness.sessions[0].shellEl.dataset.connection, "reconnecting");
 });
 
 test("offline and client targets do not schedule physical recovery", () => {

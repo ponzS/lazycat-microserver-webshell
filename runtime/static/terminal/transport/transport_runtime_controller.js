@@ -4,6 +4,19 @@ import { createTerminalTransportRuntimeLifecycle } from "./transport_runtime_lif
 
 const noop = () => {};
 
+const isNetworkFailureReason = (reason) => {
+  const normalized = String(reason || "").toLowerCase();
+  return normalized.includes("network")
+    || normalized.includes("websocket")
+    || normalized.includes("transport")
+    || normalized.includes("physical")
+    || normalized.includes("connection timed out")
+    || normalized.includes("connection reset")
+    || normalized.includes("connection aborted")
+    || normalized.includes("queue transport")
+    || normalized.includes("eof");
+};
+
 const sessionHasKnownSize = (session) => Boolean(
   Number(session?.measuredFitGeneration || 0) > 0
     || (Number(session?.initialCols || 0) >= 2 && Number(session?.initialRows || 0) >= 1)
@@ -247,7 +260,9 @@ export function createTerminalTransportRuntimeController({
       : Math.min(unifiedRetryMaxDelayMs, unifiedRetryBaseDelayMs * (2 ** Math.min(attempt - 1, 8)));
     session.connectionRetrying = true;
     if (session.shellEl?.dataset) {
-      session.shellEl.dataset.connection = "reconnecting";
+      session.shellEl.dataset.connection = isNetworkFailureReason(reason)
+        ? "network-error"
+        : "reconnecting";
     }
     if (!lifecycle.scheduleUnifiedRetry(session, () => scheduleUnifiedSync({ reason: "pane_retry" }), delay)) {
       return false;
@@ -380,11 +395,6 @@ export function createTerminalTransportRuntimeController({
     }
     scheduleMeasurementPass(tab);
     scheduleUnifiedSync({ reason });
-    if (transport?.getConnection?.()) {
-      for (const { pane, priority } of result.priorities) {
-        transport.setPriority(pane.id, priority);
-      }
-    }
     return true;
   };
 
@@ -651,7 +661,9 @@ export function createTerminalTransportRuntimeController({
     }
     session.connectionRetrying = true;
     if (session.shellEl?.dataset) {
-      session.shellEl.dataset.connection = "reconnecting";
+      session.shellEl.dataset.connection = isNetworkFailureReason(reason)
+        ? "network-error"
+        : "reconnecting";
     }
     detachUnifiedSession(session, "unified_retry");
     scheduleUnifiedPaneRetry(session, reason, { immediate });

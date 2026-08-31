@@ -2,7 +2,7 @@
 
 ## 职责与边界
 
-当前目录维护 workspace API、恢复与活动 tab 持久化、refresh/retry、权威 state apply、布局、tab registry、标签标题/inline rename、页面与移动端标题、通知状态、tab 导航、tab/pane CRUD、tab DOM、activity、tab 激活编排和 pane 激活编排。workspace API 负责 Provider 边界；persistence 负责 URL/storage；refresh 负责 request/apply 请求阶段与退避；state apply controller 负责把已确认的权威 tab/pane snapshot 映射到现有 registry；presentation controller 负责 tab 自动标题、通知、空状态和 cursor blink；tab controller 负责本地权威 apply 与用户远端命令之间的 CRUD 边界；tab activation controller 负责保帧、视觉提交、active pane、resize、membership 与持久化的分阶段顺序；pane activation controller 负责单个 pane 的 active DOM、resize、连接优先级、focus 和远端持久化顺序。它们只通过注入命令调用 session/cache/resize/transport，不直接实现终端连接、历史或渲染算法。
+当前目录维护 workspace API、恢复与活动 tab 持久化、refresh/retry、权威 state apply、布局、tab registry、标签标题/inline rename、页面与移动端标题、通知状态、tab 导航、tab/pane CRUD、tab DOM、activity、tab 激活编排和 pane 激活编排。workspace API 负责 Provider 边界；persistence 负责 URL/storage；refresh 负责 request/apply 请求阶段与退避；state apply controller 负责把已确认的权威 tab/pane snapshot 映射到现有 registry；presentation controller 负责 tab 自动标题、通知、空状态和 cursor blink；tab controller 负责本地权威 apply 与用户远端命令之间的 CRUD 边界；tab activation controller 负责保帧、视觉提交、active pane、当前设备尺寸接管、membership 与持久化的分阶段顺序；pane activation controller 负责单个 pane 的 active DOM、明确用户交互 claim、连接优先级、focus 和远端持久化顺序。它们只通过注入命令调用 session/resize/transport，不直接实现终端连接、历史或渲染算法。
 
 目标 controller 负责当前实例 selector、generation 及实例切换事务；它不拥有实例列表或终端资源。
 
@@ -32,9 +32,9 @@ target lifecycle 唯一持有 active selector、generation 和 disposed 状态�
 - `tab_controller.js`：tab/pane 创建、分屏、关闭、重命名、移动、实例 reset，以及远端 action 与权威 apply 的分流编排。
 - `tab_view.js`：tab button、tab pane host、DOM 事件、上下文菜单绑定和 DOM 排序。
 - `tab_lifecycle.js`：tab context cleanup、延迟 rename RAF、单 tab 与模块级幂等销毁。
-- `tab_activation_controller.js`：tab 激活同步保帧/视觉提交和异步 active pane、resize、membership、持久化编排。
+- `tab_activation_controller.js`：tab 激活同步保帧/视觉提交和异步 active pane、用户切换时的可见 pane claim、membership、持久化编排；权威 state apply 必须显式关闭 claim。
 - `tab_activation_scheduler.js`：tab 激活的分阶段调度和生命周期。
-- `pane_activation_controller.js`：pane 激活、点击定位、resize/连接命令和 `activate_pane` 持久化编排。
+- `pane_activation_controller.js`：pane 激活、点击定位、用户 pane 切换/指针交互的 claim、被动 resize/连接命令和 `activate_pane` 持久化编排。
 - `pane_activation_lifecycle.js`：pane focus RAF 的唯一 owner，销毁时取消迟到 focus。
 - `target_controller.js`：实例目标切换、generation guard、workspace reset 与 refresh 编排。
 - `target_lifecycle.js`：活动 selector、generation 和目标生命周期状态。

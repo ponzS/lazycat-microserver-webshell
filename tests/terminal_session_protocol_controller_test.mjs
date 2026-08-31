@@ -109,7 +109,7 @@ const createSession = ({
   term: { cols: 100, rows: 30, focus() {} },
 });
 
-const createController = ({ session, unified = false, client = false, historyRange = null } = {}) => {
+const createController = ({ session, unified = false, client = false, historyRange = null, physicalLost = false } = {}) => {
   const events = [];
   const replay = createReplay({ range: historyRange, events });
   const clientHistory = createClientHistory(events);
@@ -130,7 +130,7 @@ const createController = ({ session, unified = false, client = false, historyRan
       return this;
     },
     matchesTarget: () => true,
-    isClosedConnection: () => false,
+    isClosedConnection: () => physicalLost,
   };
   const runtime = {
     hasKnownSize: () => true,
@@ -195,6 +195,12 @@ const createController = ({ session, unified = false, client = false, historyRan
     terminalPresentation,
     terminalResize,
     terminalInput,
+    detachSessionSocket: (targetSession, socket, { connection: nextConnection } = {}) => {
+      if (targetSession.socket === socket) {
+        targetSession.socket = null;
+        targetSession.shellEl.dataset.connection = nextConnection;
+      }
+    },
     TerminalReplayController,
     ClientTerminalReplayAdapter: class {},
     terminalCheckpointCapabilitiesForTerminal: () => [],
@@ -265,6 +271,18 @@ test("Unified protocol controller opens one logical stream with generation and i
   assert.equal(harness.events.includes("prepare"), false);
   assert.equal(harness.events.includes("range"), false);
   assert.equal(session.socket?.readyState, FakeSocket.OPEN);
+});
+
+test("a physical unified disconnect keeps the network-error indicator through logical close", async () => {
+  const session = createSession({ channel: "unified", leaseID: 0, channelGeneration: 3 });
+  const harness = createController({ session, unified: true, physicalLost: true });
+
+  assert.equal(await harness.controller.connectSession(session, { channel: "unified", channelGeneration: 3 }), true);
+  session.connectionCloseReason = "unified_transport_closed";
+  session.socket.emit("close", { code: 4001, reason: "unified_retry", wasClean: true });
+
+  assert.equal(session.shellEl.dataset.connection, "network-error");
+  assert.deepEqual(harness.closes, []);
 });
 
 test("client direct transport keeps the IndexedDB history range compatibility path", async () => {

@@ -6,7 +6,10 @@ import {
   createTerminalViewportLifecycle,
   currentMobileViewportOrientation,
   isKeyboardLikeViewportHeightChange,
+  measureTerminalViewportGeometry,
   measureMobileViewportBottomInset,
+  terminalViewportGeometryEqual,
+  terminalViewportGeometryRequiresClaim,
   terminalViewportPanY,
 } from "../runtime/static/terminal/viewport/index.js";
 
@@ -155,6 +158,7 @@ const createHarness = ({ ios = true, android = false, initialViewportHeight = 84
     HTMLElement: FakeElement,
     innerWidth: 390,
     innerHeight: 844,
+    devicePixelRatio: 2,
     visualViewport,
     screen: { width: 390, height: 844, orientation },
     performance: { now: () => clock.clock.value },
@@ -209,7 +213,7 @@ const createHarness = ({ ios = true, android = false, initialViewportHeight = 84
     getActiveSession: () => session,
     getSessions: () => [session],
     hasActivePanes: () => true,
-    resizeActiveTabForCurrentDevice: (options) => calls.push(["resize", options || null]),
+    claimActiveTabForCurrentDevice: (options) => calls.push(["claim", options || null]),
     resetHostViewport: () => calls.push(["reset-host"]),
     positionInput: () => calls.push(["position-input"]),
     updateSelectionHandles: () => calls.push(["selection-handles"]),
@@ -242,6 +246,15 @@ test("viewport model owns orientation, inset, keyboard change, and cursor pan ca
   assert.equal(measureMobileViewportBottomInset({ windowObject, documentObject }), 300);
   assert.equal(isKeyboardLikeViewportHeightChange(844, 544, { touchLayout: true }), true);
   assert.equal(isKeyboardLikeViewportHeightChange(844, 544, { touchLayout: true, orientationChanged: true }), false);
+  const geometry = measureTerminalViewportGeometry({ windowObject, documentObject });
+  const unfolded = { ...geometry, layoutWidth: 700, visualWidth: 700 };
+  assert.equal(terminalViewportGeometryEqual(geometry, { ...geometry }), true);
+  assert.equal(terminalViewportGeometryRequiresClaim(geometry, unfolded, { keyboardActive: true }), true);
+  assert.equal(terminalViewportGeometryRequiresClaim(
+    geometry,
+    { ...geometry, visualHeight: 544 },
+    { keyboardActive: true, resizeSuppressed: true },
+  ), false);
   const session = {
     terminalHost: { clientHeight: 400 },
     term: {
@@ -308,6 +321,7 @@ test("iOS keyboard viewport rebases the IME lock, pans the cursor, and restores 
   assert.equal(harness.mobileShortcuts.style.transform, "translate3d(0, -300px, 0)");
   assert.equal(harness.controller.syncPan(harness.session), 140);
   assert.equal(harness.session.term.canvas.style.transform, "translate3d(0, -140px, 0)");
+  assert.equal(harness.calls.some(([name]) => name === "claim"), false);
 
   harness.documentObject.activeElement = harness.documentObject.body;
   harness.controller.releaseInputLock(harness.session, { resync: false });
@@ -317,8 +331,11 @@ test("iOS keyboard viewport rebases the IME lock, pans the cursor, and restores 
   assert.equal(harness.mobileShortcuts.style.transform, "");
   harness.clock.clock.value += 500;
   harness.clock.runTimers();
+  harness.clock.runFrames();
+  harness.clock.runFrames();
+  harness.clock.runFrames();
   assert.ok(harness.calls.some(([name, options]) => (
-    name === "resize" && options?.forceFullRender === true && options?.hideUntilRender === true
+    name === "claim" && options?.forceFullRender === true && options?.hideUntilRender === true
   )));
   assert.equal(harness.session.term.canvas.style.transform, "");
 });
@@ -337,6 +354,120 @@ test("Android keeps the shortcut dock above a small client safe offset without t
   );
 });
 
+test("portrait-to-portrait fold geometry claims only the latest stable viewport", () => {
+  const harness = createHarness({ ios: true });
+  harness.controller.start();
+  harness.calls.length = 0;
+  assert.equal(harness.controller.isGeometryClaimPending(), false);
+
+  harness.windowObject.innerWidth = 600;
+  harness.documentObject.documentElement.clientWidth = 600;
+  harness.visualViewport.width = 600;
+  harness.windowObject.screen.width = 600;
+  assert.equal(harness.controller.isGeometryClaimPending(), true);
+  harness.windowObject.emit("resize");
+
+  harness.windowObject.innerWidth = 700;
+  harness.documentObject.documentElement.clientWidth = 700;
+  harness.visualViewport.width = 700;
+  harness.windowObject.screen.width = 700;
+  harness.windowObject.emit("resize");
+
+  harness.clock.runFrames();
+  harness.clock.runFrames();
+  const claims = harness.calls.filter(([name]) => name === "claim");
+  assert.equal(claims.length, 1);
+  assert.equal(claims[0][1].forceFullRender, true);
+  assert.equal(harness.controller.snapshot().geometry.layoutWidth, 700);
+  assert.equal(harness.controller.snapshot().orientation, "portrait");
+  assert.equal(harness.controller.isGeometryClaimPending(), false);
+});
+
+test("fold geometry overrides a focused textarea and stale keyboard inset", () => {
+  const harness = createHarness({ ios: true });
+  harness.controller.start();
+  harness.calls.length = 0;
+  harness.documentObject.activeElement = harness.session.term.textarea;
+  assert.equal(harness.controller.captureInputLock(harness.session), true);
+
+  harness.windowObject.innerWidth = 700;
+  harness.documentObject.documentElement.clientWidth = 700;
+  harness.visualViewport.width = 700;
+  harness.visualViewport.height = 600;
+  harness.windowObject.screen.width = 700;
+  harness.windowObject.emit("resize");
+
+  assert.equal(harness.controller.snapshot().keyboardActive, false);
+  assert.equal(harness.controller.snapshot().keyboardInsetBottom, 0);
+  assert.equal(harness.controller.snapshot().resizeSuppressed, false);
+  assert.equal(harness.session.inputViewportLock, null);
+  harness.clock.runFrames();
+  harness.clock.runFrames();
+  harness.clock.runFrames();
+  assert.equal(harness.calls.filter(([name]) => name === "claim").length, 1);
+  assert.equal(harness.controller.snapshot().geometry.layoutWidth, 700);
+});
+
+test("visual viewport events are observed on an unclassified foldable WebView", () => {
+  const harness = createHarness({ ios: false, android: false });
+  harness.controller.start();
+  harness.calls.length = 0;
+  harness.windowObject.innerWidth = 620;
+  harness.documentObject.documentElement.clientWidth = 620;
+  harness.visualViewport.width = 620;
+  harness.windowObject.screen.width = 620;
+  harness.visualViewport.emit("resize");
+  harness.clock.runFrames();
+  harness.clock.runFrames();
+  assert.equal(harness.calls.filter(([name]) => name === "claim").length, 1);
+});
+
+test("viewport recovery observes geometry that changes after the resize event", () => {
+  const harness = createHarness({ ios: true });
+  harness.controller.start();
+  harness.calls.length = 0;
+  harness.windowObject.emit("resize");
+  assert.equal(harness.calls.some(([name]) => name === "claim"), false);
+
+  harness.windowObject.innerWidth = 680;
+  harness.documentObject.documentElement.clientWidth = 680;
+  harness.visualViewport.width = 680;
+  harness.windowObject.screen.width = 680;
+  harness.clock.runTimers();
+  harness.clock.runFrames();
+  harness.clock.runFrames();
+  harness.clock.runFrames();
+
+  assert.equal(harness.calls.filter(([name]) => name === "claim").length, 1);
+  assert.equal(harness.controller.snapshot().geometry.layoutWidth, 680);
+});
+
+test("rapid fold events cancel stale probes and commit only the final geometry", () => {
+  const harness = createHarness({ ios: true });
+  harness.controller.start();
+  harness.calls.length = 0;
+
+  harness.windowObject.emit("resize");
+  harness.windowObject.innerWidth = 700;
+  harness.documentObject.documentElement.clientWidth = 700;
+  harness.visualViewport.width = 700;
+  harness.windowObject.screen.width = 700;
+  harness.windowObject.emit("resize");
+  harness.windowObject.innerWidth = 390;
+  harness.documentObject.documentElement.clientWidth = 390;
+  harness.visualViewport.width = 390;
+  harness.windowObject.screen.width = 390;
+  harness.windowObject.emit("resize");
+
+  harness.clock.runTimers();
+  harness.clock.runFrames();
+  harness.clock.runFrames();
+  harness.clock.runFrames();
+  assert.equal(harness.calls.filter(([name]) => name === "claim").length, 1);
+  assert.equal(harness.controller.snapshot().geometry.layoutWidth, 390);
+  assert.equal(harness.controller.isGeometryClaimPending(), false);
+});
+
 test("orientation recovery uses current terminal state and dispose rejects delayed work", () => {
   const harness = createHarness({ ios: true });
   harness.controller.start();
@@ -345,6 +476,10 @@ test("orientation recovery uses current terminal state and dispose rejects delay
 
   harness.orientation.type = "landscape-primary";
   harness.orientation.angle = 90;
+  harness.windowObject.innerWidth = 844;
+  harness.windowObject.innerHeight = 390;
+  harness.documentObject.documentElement.clientWidth = 844;
+  harness.documentObject.documentElement.clientHeight = 390;
   harness.windowObject.screen.width = 844;
   harness.windowObject.screen.height = 390;
   harness.visualViewport.width = 844;
@@ -352,7 +487,7 @@ test("orientation recovery uses current terminal state and dispose rejects delay
   harness.windowObject.emit("orientationchange");
   assert.ok(harness.clock.timers.size > 0);
   harness.clock.runTimers();
-  assert.ok(harness.calls.some(([name]) => name === "resize"));
+  assert.ok(harness.calls.some(([name]) => name === "claim"));
 
   harness.controller.scheduleKeyboardDismissRecovery();
   const callsBeforeDispose = harness.calls.length;

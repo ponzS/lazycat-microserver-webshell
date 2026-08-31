@@ -69,6 +69,7 @@ const createHarness = () => {
     syncCursorBlinkState: () => calls.push("cursor"),
     updateSelectionHandles: (pane) => calls.push(`selection:${pane.id}`),
     schedulePaneResize: (pane, options, scheduleOptions) => calls.push(["resize", pane.id, options, scheduleOptions]),
+    claimCurrentDeviceSize: (pane, options) => calls.push(["claim", pane.id, options]),
     presentationIsCurrent: () => false,
     cancelPendingRender: () => calls.push("cancel-render"),
     connectPendingSession: (pane) => calls.push(`connect:${pane.id}`),
@@ -112,7 +113,7 @@ test("pane activation preserves visual, resize, connection and persistence order
     "label",
     "cursor",
     "selection:pane-2",
-    ["resize", "pane-2", { forceFullRender: true, hideUntilRender: true }, { immediate: true }],
+    ["claim", "pane-2", { forceFullRender: true, hideUntilRender: true }],
     ["health", "pane-2", { connect: true, force: true }],
     ["sync", { reason: "active_pane_changed", interactionSession: null }],
     ["post", "activate_pane", { tab_id: "tab-1", pane_id: "pane-2" }],
@@ -153,4 +154,19 @@ test("re-activating the current pane does not schedule a resize by default", () 
 
   assert.equal(harness.controller.activate(harness.tab, harness.first.id, { resizeIfActive: true }), true);
   assert.equal(harness.calls.filter((entry) => Array.isArray(entry) && entry[0] === "resize").length, 1);
+});
+
+test("explicit interaction on the current pane claims without a passive resize", () => {
+  const harness = createHarness();
+  assert.equal(harness.controller.activate(harness.tab, harness.first.id, {
+    focus: false,
+    resize: false,
+    userInteraction: true,
+  }), true);
+
+  assert.deepEqual(
+    harness.calls.find((entry) => Array.isArray(entry) && entry[0] === "claim"),
+    ["claim", "pane-1", { forceFullRender: false, hideUntilRender: false }],
+  );
+  assert.equal(harness.calls.some((entry) => Array.isArray(entry) && entry[0] === "resize"), false);
 });

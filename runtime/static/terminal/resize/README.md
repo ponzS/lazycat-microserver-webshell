@@ -8,13 +8,17 @@
 
 当 fit 得出的 cols/rows、Canvas backing size、presentation generation 和 ACK/fence 状态都没有变化时，controller 必须走稳定几何快速路径：不捕获/恢复 viewport、不重置 host scroll、不重新定位 IME、不更新选区手柄，也不触发 full render。当前设备已经成功 claim 且没有新的 owner observation 时，重复点击、focus 和鼠标事件不得再次发送相同 claim；只有尺寸变化、远端 epoch/owner release 或明确的设备接管才重新进入 resize 事务。
 
-ACK 前不得切换本地 Ghostty 网格。远端尺寸只作为 observation，本设备只有在明确的 pointer、focus、viewport 或 owner release 边界才重新 claim。resize、snapshot、重连和历史恢复的任何中间过程都不得显示，也不得通过重新 replay 历史掩盖几何问题。
+当前设备接管必须使用 `claimForCurrentDevice()`、`claimTabForCurrentDevice()` 或 `claimActiveTabForCurrentDevice()`。如果显式 claim 到达时已有普通 resize 等待 ACK，controller 必须记录 latest-only pending claim，并在 ACK 或 `resize_owner_active` 后使用最新可测 DOM 几何升级为新的 claim；不得被同 target 去重吞掉，也不得先显示远端 owner 的过渡尺寸。`resizePane()` 统一拒绝在已有可见帧且观察到远端 owner 后发送被动 geometry/force-sync 帧；本设备已成功 claim 后，后续迟到几何修正必须继承 `claim:true`，不能降级为普通 resize。`isCurrentDeviceClaimRequired()` 只向 presentation 暴露远端 owner observation 的只读门禁；`schedulePresentationResize()` 在本设备已经 claim 后会为字体/行高等迟到 geometry 修正保留 claim 语义。tab、pane、页面恢复和 viewport 只发布使用意图，不能自行修改 claim/epoch 字段。
+
+ACK 前不得切换本地 Ghostty 网格。matching ACK 到达时必须重新冻结当前 output queue 的完整 entry 数量，把 ACK 前已经收到的全部字节先按旧网格排空；ACK handler 返回后收到的字节才属于新网格。不得沿用发送请求时的旧队列计数，否则 F11、切 tab 或折叠等场景中 ACK 前迟到字节会被新 cols/rows 解析，产生临时旧行、乱码或疑似串会话内容。
+
+远端尺寸只作为 observation，本设备只有在明确的 pointer、focus、viewport 或 owner release 边界才重新 claim。resize、snapshot、重连和历史恢复的任何中间过程都不得显示，也不得通过重新 replay 历史掩盖几何问题。
 
 ## 公开入口与契约
 
 外部只能从 `terminal/resize/index.js` 导入。
 
-- `createTerminalResizeController()`：模块单一编排入口。公开尺寸读取、可测量判断、resize/claim/reassert、协议 ACK/error/owner 处理、输出 settle、tab 调度、session 安装和幂等销毁。
+- `createTerminalResizeController()`：模块单一编排入口。公开尺寸读取、可测量判断、resize/claim/reassert、当前 pane/tab 设备接管、协议 ACK/error/owner 处理、输出 settle、tab 调度、session 安装和幂等销毁。
 - `TerminalResizeController`：单个 resize 请求的 epoch/ACK/settle 纯状态机，由高层 controller 持有。
 - `createTerminalResizeScheduler()`：latest-only 的 throttle/settle 调度器。
 - `shouldSendTerminalSize()`、`terminalSizeDiffersFromServer()`：无状态尺寸判断。
@@ -24,7 +28,7 @@ ACK 前不得切换本地 Ghostty 网格。远端尺寸只作为 observation，�
 
 ## 状态所有权
 
-`resize_controller.js` 是以下状态的唯一修改者：`requestedResizeEpoch`、`appliedResizeEpoch`、requested/server geometry、`resizeAckPending`、`resizeFence*`、`resizeOutputSettle*`、`measuredFitGeneration`、`sizeClaimRequired`、`sizeClaimed`、`requestedResizeClaim` 和 observer 记录尺寸。presentation 只读取这些门禁并在最终 render 成功后推进 `presentedResizeEpoch`。
+`resize_controller.js` 是以下状态的唯一修改者：`requestedResizeEpoch`、`appliedResizeEpoch`、requested/server geometry、`resizeAckPending`、`resizeFence*`、`resizeOutputSettle*`、`measuredFitGeneration`、`sizeClaimRequired`、`sizeClaimed`、`requestedResizeClaim`、`pendingSizeClaim*` 和 observer 记录尺寸。presentation 只读取这些门禁并在最终 render 成功后推进 `presentedResizeEpoch`。
 
 `resize_lifecycle.js` 独占 scheduler timer/RAF、ResizeObserver、Ghostty `onResize` disposable、owner/pending-target RAF 和 tab RAF。`geometry_state.js` 与 `viewport_controller.js` 不保存业务状态。
 
@@ -49,6 +53,6 @@ ACK 前不得切换本地 Ghostty 网格。远端尺寸只作为 observation，�
 
 模块依赖 Ghostty terminal/fit adapter 的机械 API、rendering 公开命令、output 的队列计数/queued bytes/有界 flush 命令和 transport resize 发送命令；不得读取 `session.outputQueue*`，也不得导入 history/cache/output/transport 内部实现。
 
-自动化测试：`terminal_resize_controller_test.mjs`（含默认控制帧 serializer）、`terminal_resize_scheduler_test.mjs`、`terminal_size_sync_test.go`、`TestRuntimeResizeEpochAckGuard`、`TestRuntimeCrossClientResizeDoesNotAutoReclaim`、`TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs` 和 resize 模块边界 guard。
+自动化测试：`terminal_resize_controller_test.mjs`（含默认控制帧 serializer、普通 resize 的 claim 升级、owner 拒绝保帧重试、matching ACK 前全部 output entry 使用旧网格排空）、`terminal_resize_scheduler_test.mjs`、`terminal_size_sync_test.go`、`TestRuntimeResizeEpochAckGuard`、`TestRuntimeCrossClientResizeDoesNotAutoReclaim`、`TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs` 和 resize 模块边界 guard。
 
 最小真实回归：在 `debug123` 同一 pane 持续输出时改变窗口尺寸、分屏比例、tab、字体和主题，确认 backing store 变化前 hold 已可见、ACK 前本地 cols/rows 不变、最终画面非空且没有 replay 中间帧；手机与桌面交替 claim 同一 pane 时远端 observation 不自动反抢；连续同设备点击不得新增 resize frame、改变 Canvas 几何或短暂隐藏已呈现画面（`tests-auto/08-terminal-click-jitter/test.mjs`）；全程普通容器页面只有一条 Unified 物理 WebSocket，console/pageerror/API error 为零。

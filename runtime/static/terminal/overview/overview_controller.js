@@ -1,4 +1,5 @@
 import { createTerminalOverviewLifecycle } from "./overview_lifecycle.js";
+import { createTerminalOverviewPreviewController } from "./preview_controller.js";
 import { createTerminalOverviewView } from "./overview_view.js";
 
 const noop = () => {};
@@ -15,6 +16,9 @@ export function createTerminalOverviewController({
   workspaceLocationURL = () => windowObject?.location?.href || "",
   isMobileLayout = () => false,
   isFrameHoldCurrent = () => false,
+  canPersistPreview = () => false,
+  previewController = null,
+  onPreviewError = noop,
   prepareOpen = noop,
   isBlockingOverlayOpen = () => false,
   createTab = async () => {},
@@ -47,6 +51,13 @@ export function createTerminalOverviewController({
   let dragTouchMoveCleanup = null;
   const ownedFrames = new Set();
   const tabOverviewReorderAnimationTimers = new Map();
+  const overviewPreview = previewController || createTerminalOverviewPreviewController({
+    documentObject,
+    windowObject,
+    canCapturePane: canPersistPreview,
+    onReady: () => scheduleTabOverviewRender(),
+    onError: onPreviewError,
+  });
 
   const orderedTabsSnapshot = () => Array.from(getOrderedTabs?.() || []);
   const hasTab = (tabId) => orderedTabsSnapshot().some((tab) => tab?.id === tabId);
@@ -81,7 +92,11 @@ export function createTerminalOverviewController({
     const liveCanvas = pane?.term?.canvas || pane?.term?.element?.querySelector?.("canvas");
     const liveFrame = pane?.renderReady && pane?.hasPresentedFrame ? liveCanvas : null;
     const heldFrame = isFrameHoldCurrent(pane) ? pane.terminalFrameHold : null;
-    return liveFrame || heldFrame;
+    const persistedFrame = overviewPreview.get(pane);
+    if (!liveFrame && !heldFrame && !persistedFrame) {
+      overviewPreview.prepare(pane);
+    }
+    return liveFrame || heldFrame || persistedFrame;
   };
 
   const renderTabOverview = () => measureTask("tab overview render", () => {
@@ -818,9 +833,13 @@ export function createTerminalOverviewController({
       }
       clearTabOverviewReorderAnimations();
       resetMobileOverviewEdgeSwipe();
+      overviewPreview.dispose();
       lifecycle.dispose?.();
       view.setOpen?.(false);
     },
+    capturePreview: (pane, options) => overviewPreview.capture(pane, options),
+    captureAllPreviews: (panes, options) => overviewPreview.captureAll(panes, options),
+    deletePreview: (pane) => overviewPreview.delete(pane),
     isOpen: isTabOverviewOpen,
     open: openTabOverview,
     scheduleRender: scheduleTabOverviewRender,
@@ -830,6 +849,7 @@ export function createTerminalOverviewController({
       }
       started = true;
       lifecycle.start?.();
+      overviewPreview.cleanup();
       ensureMobileOverviewHistoryGuard();
     },
     updateWorkspaceLocation,

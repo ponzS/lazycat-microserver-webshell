@@ -231,13 +231,24 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   await mobile.page.setViewportSize({ width: 390, height: 844 });
   await mobile.page.evaluate(() => window.dispatchEvent(new Event("orientationchange")));
   await mobile.page.waitForTimeout(1_250);
+  await mobile.page.setViewportSize({ width: 700, height: 900 });
+  await mobile.page.waitForTimeout(500);
+  await mobile.page.setViewportSize({ width: 390, height: 844 });
+  await mobile.page.waitForTimeout(650);
   const presentation = await stopAtomicPresentationObserver(mobile);
   if (presentation.count < 10 || presentation.unsafe > 0) {
     throw new Error(`viewport resize exposed an unsafe intermediate frame: ${JSON.stringify(presentation)}`);
   }
-  const resizeFramesAfterOrientation = await mobile.page.evaluate(() => (window.__testsAutoResizeFrames || []).length);
+  const resizeFramesAfterViewport = await mobile.page.evaluate(() => [...(window.__testsAutoResizeFrames || [])]);
+  const resizeFramesAfterOrientation = resizeFramesAfterViewport.length;
   if (resizeFramesAfterOrientation <= resizeFramesBeforeOrientation) {
     throw new Error("orientation changes did not send a terminal resize frame");
+  }
+  const currentDeviceClaims = resizeFramesAfterViewport
+    .slice(resizeFramesBeforeOrientation)
+    .filter((frame) => frame.claim === true);
+  if (currentDeviceClaims.length < 2) {
+    throw new Error(`fold/orientation recovery did not claim current-device geometry: ${JSON.stringify(currentDeviceClaims)}`);
   }
 
   const canvas = {
@@ -270,6 +281,7 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     keyboardFrames,
     resizeFramesBeforeOrientation,
     resizeFramesAfterOrientation,
+    currentDeviceClaims,
     resources,
     canvas,
     socketsBefore,

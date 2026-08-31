@@ -119,11 +119,16 @@ export function createTerminalRuntimeController({
       return false;
     }
     const reasons = session.terminalRenderSuppressionReasons;
-    if (reasons instanceof Set) {
-      reasons.delete(String(reason || "generic"));
-      if (reasons.size > 0) {
-        return true;
-      }
+    if (!(reasons instanceof Set)) {
+      return false;
+    }
+    const key = String(reason || "generic");
+    if (!reasons.has(key)) {
+      return false;
+    }
+    reasons.delete(key);
+    if (reasons.size > 0) {
+      return true;
     }
     if (typeof session.term.endRenderSuppression === "function") {
       session.term.endRenderSuppression({ render, full });

@@ -151,6 +151,8 @@ const createResizeState = () => ({
   requestedPixelWidth: 0,
   requestedPixelHeight: 0,
   requestedResizeClaim: false,
+  pendingSizeClaim: false,
+  pendingSizeClaimOptions: null,
   resizeEpochSupported: null,
   resizeAckPending: false,
   suppressTerminalResizeSend: false,
