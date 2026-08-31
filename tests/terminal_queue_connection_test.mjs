@@ -171,6 +171,42 @@ test("unified connection multiplexes three live panes over one physical socket",
   assert.equal(FakeWebSocket.instances.length, 1);
 });
 
+test("an opened physical transport publishes a new logical subscription before priority updates", async () => {
+  const connection = createTerminalUnifiedConnection({
+    url: "/ws?mode=unified&transport_role=unified",
+    WebSocketImpl: FakeWebSocket,
+  });
+  connection.open({ ...subscription("pane-1"), priority: 0 });
+  const physical = FakeWebSocket.instances[0];
+  physical.emit("open");
+  await Promise.resolve();
+  physical.sent.length = 0;
+
+  connection.open({ ...subscription("pane-2", 2), priority: 3 });
+  assert.equal(connection.setPriority("pane-2", 1), true);
+  assert.equal(connection.setPriority("pane-1", 2), true);
+  assert.deepEqual(physical.sent, []);
+
+  await Promise.resolve();
+  const frames = physical.sent.map((payload) => JSON.parse(payload));
+  assert.equal(frames[0].type, "replace-subscriptions");
+  assert.deepEqual(frames[0].subscriptions.map((item) => ({
+    paneID: item.pane_id,
+    priority: item.priority,
+  })), [
+    { paneID: "pane-1", priority: 2 },
+    { paneID: "pane-2", priority: 1 },
+  ]);
+  assert.deepEqual(frames.slice(1), [{
+    type: "set-priority",
+    protocol_version: terminalQueueProtocolVersion,
+    pane_id: "pane-1",
+    stream_id: "stream-pane-1-1",
+    channel_generation: 1,
+    priority: 2,
+  }]);
+});
+
 
 test("closing one unified logical stream preserves the physical socket and siblings", async () => {
   const connection = createTerminalUnifiedConnection({
