@@ -1,0 +1,235 @@
+import { createDebugLog } from "./debug_log.js";
+import {
+  createDiagnosticsLifecycle,
+  createNetworkMonitorLifecycle,
+} from "./diagnostics_lifecycle.js";
+import { createDiagnosticsView } from "./diagnostics_view.js";
+import { createPerformanceMeter } from "./performance_meter.js";
+import { createPerformanceTaskMonitor } from "./performance_tasks.js";
+import {
+  createTerminalTimeline,
+  recordTerminalRuntimeMaxMetric,
+  recordTerminalRuntimeMetric,
+} from "./terminal_timeline.js";
+
+const defaultNow = () => (
+  globalThis.performance && typeof globalThis.performance.now === "function"
+    ? globalThis.performance.now()
+    : Date.now()
+);
+
+export function createDiagnosticsController({
+  documentObject = globalThis.document,
+  windowObject = globalThis.window,
+  consoleObject = globalThis.console,
+  storage = windowObject?.localStorage,
+  storagePrefix = "webshell",
+  terminalArea = null,
+  startupDiagnostics = null,
+  getNetworkContext = () => ({}),
+  copyText = async () => false,
+  showToast = () => {},
+  onDebugModeChange = () => {},
+  now = defaultNow,
+  networkModuleLoader,
+} = {}) {
+  const storageKeys = {
+    debugMode: `${storagePrefix}.debugMode`,
+    debugLog: `${storagePrefix}.debugLog`,
+    networkMonitor: `${storagePrefix}.networkMonitor`,
+    performanceMeter: `${storagePrefix}.performanceMeter`,
+    performanceTasks: `${storagePrefix}.performanceTasks`,
+  };
+  const readStoredFlag = (key) => {
+    try {
+      return storage?.getItem?.(key) === "true";
+    } catch (error) {
+      return false;
+    }
+  };
+  const writeStoredFlag = (key, enabled) => {
+    try {
+      storage?.setItem?.(key, enabled ? "true" : "false");
+    } catch (error) {
+    }
+  };
+  const state = {
+    debugMode: readStoredFlag(storageKeys.debugMode),
+    debugLog: readStoredFlag(storageKeys.debugLog),
+    networkMonitor: readStoredFlag(storageKeys.networkMonitor),
+    performanceMeter: readStoredFlag(storageKeys.performanceMeter),
+    performanceTasks: readStoredFlag(storageKeys.performanceTasks),
+  };
+  let started = false;
+  let disposed = false;
+  const view = createDiagnosticsView({ documentObject });
+
+  const debugLog = createDebugLog({
+    windowObject,
+    consoleObject,
+    onChange: (entries) => view.renderDebugLog(entries, {
+      visible: state.debugMode && state.debugLog && !disposed,
+    }),
+  });
+  const performanceTaskMonitor = createPerformanceTaskMonitor({
+    onChange: () => view.renderPerformanceTasks(
+      performanceTaskMonitor.snapshot({ limit: 10 }),
+      { visible: state.debugMode && state.performanceTasks && started && !disposed },
+    ),
+  });
+  const performanceMeter = createPerformanceMeter({
+    documentObject,
+    windowObject,
+    container: terminalArea,
+  });
+  const networkMonitorLifecycle = createNetworkMonitorLifecycle({
+    windowObject,
+    moduleLoader: networkModuleLoader,
+    getContext: getNetworkContext,
+    onRender: (snapshot, context) => view.renderNetworkMonitor(snapshot, {
+      ...context,
+      visible: state.debugMode && state.networkMonitor && started && !disposed,
+    }),
+    onError: (error) => debugLog.append("error", "网络监视器加载失败", error?.message || String(error)),
+  });
+
+  const appendLog = (level, message, details = "", options = {}) => (
+    debugLog.append(level, message, details, options)
+  );
+  const appendError = (message, details = "") => appendLog("error", message, details);
+  const appendWarning = (message, details = "") => appendLog("warn", message, details);
+  const appendStartupTrace = (event, details = "", { dedupeKey = event } = {}) => {
+    const moduleStartedAt = startupDiagnostics?.getMetric?.("moduleStartedAt") || 0;
+    const elapsed = Math.max(0, Math.round(now() - moduleStartedAt));
+    appendLog("info", `[startup +${elapsed}ms] ${event}`, details, {
+      dedupeKey: `startup:${dedupeKey}`,
+      retainWhenDisabled: true,
+    });
+  };
+  const detachStartupTrace = startupDiagnostics?.setTraceSink?.(appendStartupTrace) || (() => {});
+  const terminalTimeline = createTerminalTimeline({
+    now,
+    appendLog,
+    isLogEnabled: () => state.debugLog,
+  });
+
+  const applyState = ({ notifyDebugMode = false } = {}) => {
+    view.syncControls(state);
+    const debugLogActive = state.debugMode && state.debugLog && !disposed;
+    debugLog.setState({ capture: debugLogActive, show: debugLogActive });
+    const runtimeActive = started && !disposed && state.debugMode;
+    performanceMeter.setActive(runtimeActive && state.performanceMeter);
+    performanceTaskMonitor.setEnabled(runtimeActive && state.performanceTasks);
+    view.renderPerformanceTasks(performanceTaskMonitor.snapshot({ limit: 10 }), {
+      visible: runtimeActive && state.performanceTasks,
+    });
+    networkMonitorLifecycle.setActive(runtimeActive && state.networkMonitor);
+    if (notifyDebugMode) {
+      onDebugModeChange(state.debugMode);
+    }
+  };
+
+  const updateFlag = (key, element, { notifyDebugMode = false } = {}) => {
+    state[key] = element?.checked === true;
+    writeStoredFlag(storageKeys[key], state[key]);
+    applyState({ notifyDebugMode });
+  };
+
+  const lifecycle = createDiagnosticsLifecycle({
+    elements: view.elements,
+    handlers: {
+      onDebugModeChange: () => updateFlag("debugMode", view.elements.settingsDebugModeToggle, { notifyDebugMode: true }),
+      onDebugLogChange: () => {
+        updateFlag("debugLog", view.elements.settingsDebugLogToggle);
+        if (state.debugLog) {
+          appendLog("info", "错误日志已启用");
+        }
+      },
+      onNetworkMonitorChange: () => updateFlag("networkMonitor", view.elements.settingsNetworkMonitorToggle),
+      onPerformanceMeterChange: () => updateFlag("performanceMeter", view.elements.settingsPerformanceMeterToggle),
+      onPerformanceTasksChange: () => updateFlag("performanceTasks", view.elements.settingsPerformanceTasksToggle),
+      onDebugLogCopy: async () => {
+        const text = debugLog.clipboardText();
+        if (!text) {
+          showToast("暂无可复制的调试日志。");
+          return;
+        }
+        try {
+          if (await copyText(text)) {
+            showToast("调试日志已复制。");
+            return;
+          }
+        } catch (error) {
+        }
+        showToast("复制调试日志失败。");
+      },
+      onDebugLogClear: () => debugLog.clear(),
+    },
+  });
+
+  // Restore early error capture before bootstrap starts; timers and RAF wait for start().
+  debugLog.setState({
+    capture: state.debugMode && state.debugLog,
+    show: state.debugMode && state.debugLog,
+  });
+  view.syncControls(state);
+
+  return {
+    appendError,
+    appendLog,
+    appendStartupTrace,
+    appendWarning,
+    dispose() {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
+      lifecycle.dispose();
+      networkMonitorLifecycle.dispose();
+      performanceTaskMonitor.setEnabled(false);
+      performanceMeter.dispose();
+      debugLog.dispose();
+      detachStartupTrace();
+    },
+    isDebugLogEnabled() {
+      return state.debugLog;
+    },
+    isDebugModeEnabled() {
+      return state.debugMode;
+    },
+    measurePerformanceTask(name, fn) {
+      return performanceTaskMonitor.measure(name, fn);
+    },
+    now,
+    recordPerformanceTask(name, durationMs) {
+      performanceTaskMonitor.record(name, durationMs);
+    },
+    recordTerminalRuntimeMaxMetric,
+    recordTerminalRuntimeMetric,
+    recordTerminalSessionEvent: terminalTimeline.record,
+    refreshNetworkView() {
+      networkMonitorLifecycle.refresh();
+    },
+    start() {
+      if (started || disposed) {
+        return;
+      }
+      started = true;
+      lifecycle.start();
+      applyState({ notifyDebugMode: true });
+    },
+    syncControls() {
+      view.syncControls(state);
+      view.renderDebugLog(debugLog.snapshot(), {
+        visible: state.debugMode && state.debugLog && !disposed,
+      });
+      view.renderPerformanceTasks(performanceTaskMonitor.snapshot({ limit: 10 }), {
+        visible: started && state.debugMode && state.performanceTasks && !disposed,
+      });
+      networkMonitorLifecycle.refresh();
+    },
+    syncNetworkSockets(options = {}) {
+      networkMonitorLifecycle.syncSockets(options);
+    },
+  };
+}

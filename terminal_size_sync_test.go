@@ -16,7 +16,7 @@ func TestTerminalSizeSyncBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Getwd() error = %v", err)
 	}
-	modulePath := filepath.Join(workingDirectory, "runtime", "static", "terminal_size_sync.js")
+	modulePath := filepath.Join(workingDirectory, "runtime", "static", "terminal", "resize", "terminal_size_sync.js")
 	runnerPath := filepath.Join(t.TempDir(), "terminal_size_sync_test.mjs")
 	runner := `
 import assert from "node:assert/strict";

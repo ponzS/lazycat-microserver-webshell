@@ -47,7 +47,7 @@ LightOS WebShell 的目标是为懒猫微服提供一个开箱即用的网页终
 
 ### 设置和外观
 
-- 支持主题切换，主题列表来自 `runtime/static/themes.json`。
+- 支持主题切换，主题列表来自 `runtime/static/appearance/themes.json`。
 - 支持内置字体、自定义字体上传、字体删除和系统默认字体恢复。
 - 支持滚动历史行数设置，范围为 100 到 100000 行。
 - 支持桌面端鼠标选区自动复制开关。
@@ -112,6 +112,16 @@ lzc-cli project deploy
 ```
 
 安装完成后，在 LightOS Admin 的 WebShell Provider 列表中应能看到 `LCMD WebShell`。
+
+## 测试
+
+Node 行为测试统一位于 `tests/`，从仓库根目录运行：
+
+```sh
+node --test tests/*.mjs
+```
+
+真实浏览器和设备回归用例位于 `tests-auto/`，运行方式见 [tests-auto/README.md](tests-auto/README.md)。
 
 ## 技术说明
 

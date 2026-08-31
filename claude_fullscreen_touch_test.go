@@ -16,8 +16,8 @@ func TestClaudeFullscreenTouchBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Getwd() error = %v", err)
 	}
-	statePath := filepath.Join(workingDirectory, "runtime", "static", "claude_fullscreen_touch.js")
-	adapterPath := filepath.Join(workingDirectory, "runtime", "static", "claude_fullscreen_touch_adapter.js")
+	statePath := filepath.Join(workingDirectory, "runtime", "static", "terminal", "tui_adapters", "claude", "claude_fullscreen_touch.js")
+	adapterPath := filepath.Join(workingDirectory, "runtime", "static", "terminal", "tui_adapters", "claude", "claude_fullscreen_touch_adapter.js")
 	runnerPath := filepath.Join(t.TempDir(), "claude_fullscreen_touch_test.mjs")
 	runner := `
 import assert from "node:assert/strict";

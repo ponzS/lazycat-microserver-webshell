@@ -62,7 +62,7 @@
 - 浏览器：`runtime/static/main.js` 的 `resizePane()`、`sendTerminalSize()`、presentation hold、replay/render generation。
 - Provider/agent：`workspace.go` 的 WebSocket 控制、`agent.go` 的 attach 控制、`terminalPane.resizeWithPixels()`、`readLoop()/appendOutput()`。
 - 浏览器终端：`runtime/static/ghostty-web.js` 的 `Terminal.resize()`、renderer canvas resize 和 viewport materialization。
-- 历史缓存：`runtime/static/terminal_cache_v2.js` 及 `main.js` 的 cache-v2 replay。
+- 历史缓存：`runtime/static/terminal/history/terminal_cache_v2.js` 及 `main.js` 的 cache-v2 replay。
 
 ### 3.2 已确认缺口
 
@@ -255,9 +255,9 @@ MEASURED
 预计涉及：
 
 - `runtime/static/main.js`：拆分 requested/applied/presented size，resize ACK 处理，old/new epoch 输出队列，跨客户端 claim，presentation hold 门禁。
-- `runtime/static/terminal_size_sync.js`：从单客户端去重扩展为 epoch/owner/服务端确认判断。
-- `runtime/static/terminal_queue_connection.js`：保留 channel generation，同时透传 resize epoch 和控制帧顺序。
-- `runtime/static/terminal_cache_v2.js`：manifest/chunk metadata 增加可选 geometry timeline fingerprint；发现 generation/epoch 不连续时拒绝拼接。
+- `runtime/static/terminal/resize/terminal_size_sync.js`：从单客户端去重扩展为 epoch/owner/服务端确认判断。
+- `runtime/static/terminal/transport/terminal_queue_connection.js`：保留 channel generation，同时透传 resize epoch 和控制帧顺序。
+- `runtime/static/terminal/history/terminal_cache_v2.js`：manifest/chunk metadata 增加可选 geometry timeline fingerprint；发现 generation/epoch 不连续时拒绝拼接。
 - `runtime/static/style.css`：仅调整旧 frame/preview 的显示门禁，不增加新的视觉 fallback。
 
 ### 7.3 Ghostty renderer

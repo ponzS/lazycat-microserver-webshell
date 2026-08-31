@@ -16,12 +16,12 @@ func TestOpencodeAndHerdrFullscreenTouchAdapters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Getwd() error = %v", err)
 	}
-	gesturePath := filepath.Join(workingDirectory, "runtime", "static", "fullscreen_tui_touch.js")
-	adapterPath := filepath.Join(workingDirectory, "runtime", "static", "fullscreen_tui_touch_adapter.js")
-	opencodePath := filepath.Join(workingDirectory, "runtime", "static", "opencode_fullscreen_touch.js")
-	opencodeAdapterPath := filepath.Join(workingDirectory, "runtime", "static", "opencode_fullscreen_touch_adapter.js")
-	herdrPath := filepath.Join(workingDirectory, "runtime", "static", "herdr_fullscreen_touch.js")
-	herdrAdapterPath := filepath.Join(workingDirectory, "runtime", "static", "herdr_fullscreen_touch_adapter.js")
+	gesturePath := filepath.Join(workingDirectory, "runtime", "static", "terminal", "tui_adapters", "common", "fullscreen_tui_touch.js")
+	adapterPath := filepath.Join(workingDirectory, "runtime", "static", "terminal", "tui_adapters", "common", "fullscreen_tui_touch_adapter.js")
+	opencodePath := filepath.Join(workingDirectory, "runtime", "static", "terminal", "tui_adapters", "opencode", "opencode_fullscreen_touch.js")
+	opencodeAdapterPath := filepath.Join(workingDirectory, "runtime", "static", "terminal", "tui_adapters", "opencode", "opencode_fullscreen_touch_adapter.js")
+	herdrPath := filepath.Join(workingDirectory, "runtime", "static", "terminal", "tui_adapters", "herdr", "herdr_fullscreen_touch.js")
+	herdrAdapterPath := filepath.Join(workingDirectory, "runtime", "static", "terminal", "tui_adapters", "herdr", "herdr_fullscreen_touch_adapter.js")
 	runnerPath := filepath.Join(t.TempDir(), "fullscreen_tui_touch_test.mjs")
 	runner := `
 import assert from "node:assert/strict";

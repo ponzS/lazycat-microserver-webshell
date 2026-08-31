@@ -22,6 +22,28 @@ cd lazycat-microserver-webshell
 ./tests-auto/test-all.sh
 ```
 
+## 展示模式
+
+需要向他人展示自动化过程时，使用显式的前台 Chrome 入口。它会强制关闭无头模式，并默认把当前工作区的 `runtime/static` 映射到测试页面：
+
+```sh
+./tests-auto/run-visible.sh
+```
+
+不传参数时运行终端几何稳定性用例；也可以指定某个用例目录或 `test.mjs` 文件：
+
+```sh
+./tests-auto/run-visible.sh tests-auto/09-terminal-interaction-jitter
+```
+
+如需依次展示全部用例，使用 `--all`：
+
+```sh
+./tests-auto/run-visible.sh --all
+```
+
+运行环境需要可用的 X11 `DISPLAY`。测试结束后 Chrome 窗口会自动关闭；测试失败时可在对应用例的 `artifacts/` 目录查看截图、事件日志和 trace。
+
 配置文件：
 
 - `tests-auto/.env` 是所有真机用例的统一配置入口，默认账号为 `debug123`、密码为 `123456`，默认 `TEST_FOREGROUND=1`。
@@ -35,5 +57,7 @@ cd lazycat-microserver-webshell
 - `HEADLESS=1`：兼容旧调用方式，强制无头模式；真机回归默认不要设置。
 - `TEST_ROUNDS`：PC/移动端交替点击轮数，默认 `3`。
 - `PW_CHANNEL`：Chrome channel，默认 `chrome`。
+- `WEBSHELL_LOCAL_STATIC_DIR`：可选。设置为 `runtime/static` 的绝对路径后，测试仍使用测试机的真实 API/WebSocket/PTY，但把版本化静态资源映射到当前工作区，并阻止 Service Worker；用于验证尚未安装的前端改动。
+- `WEBSHELL_MOBILE_USER_AGENT`：可选。仅覆盖移动测试窗口的 User-Agent，用于在桌面 Chrome 中进入 Android/iOS 平台专属 visualViewport、键盘或宿主分支。
 
 总入口按目录名排序后逐组串行执行；任何一组失败会立即停止并返回非零退出码。
