@@ -78,8 +78,7 @@ func readRuntimeBootstrapSource(t *testing.T) string {
 		"runtime/static/app/bootstrap/index.js",
 		"runtime/static/app/bootstrap/bootstrap_controller.js",
 		"runtime/static/app/bootstrap/bootstrap_lifecycle.js",
-		"runtime/static/app/bootstrap/storage_persistence_controller.js",
-		"runtime/static/app/bootstrap/service_worker_controller.js",
+		"runtime/static/app/bootstrap/legacy_storage_cleanup_controller.js",
 	)
 }
 
@@ -157,63 +156,27 @@ func readRuntimeProtocolSource(t *testing.T) string {
 	return readRuntimeSources(t, "runtime/static/terminal/transport/session_protocol_controller.js")
 }
 
-func TestTerminalCacheV2Behavior(t *testing.T) {
+func TestClientTerminalHistoryControllerBehavior(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node is unavailable")
 	}
-	command := exec.Command(node, "--test", "tests/terminal_cache_v2_test.mjs")
+	command := exec.Command(node, "--test", "tests/client_terminal_history_controller_test.mjs")
 	output, err := command.CombinedOutput()
 	if err != nil {
-		t.Fatalf("terminal cache-v2 tests failed: %v\n%s", err, output)
+		t.Fatalf("client terminal history controller tests failed: %v\n%s", err, output)
 	}
 }
 
-func TestTerminalCacheControllerBehavior(t *testing.T) {
+func TestLegacyWebShellStorageCleanupControllerBehavior(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node is unavailable")
 	}
-	command := exec.Command(node, "--test", "tests/terminal_cache_controller_test.mjs")
+	command := exec.Command(node, "--test", "tests/legacy_storage_cleanup_controller_test.mjs")
 	output, err := command.CombinedOutput()
 	if err != nil {
-		t.Fatalf("terminal cache controller tests failed: %v\n%s", err, output)
-	}
-}
-
-func TestTerminalCachePersistenceControllerBehavior(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is unavailable")
-	}
-	command := exec.Command(node, "--test", "tests/terminal_cache_persistence_controller_test.mjs")
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("terminal cache persistence controller tests failed: %v\n%s", err, output)
-	}
-}
-
-func TestTerminalCacheRecoveryControllerBehavior(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is unavailable")
-	}
-	command := exec.Command(node, "--test", "tests/terminal_cache_recovery_controller_test.mjs")
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("terminal cache recovery controller tests failed: %v\n%s", err, output)
-	}
-}
-
-func TestTerminalCacheReplayControllerBehavior(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is unavailable")
-	}
-	command := exec.Command(node, "--test", "tests/terminal_cache_replay_controller_test.mjs")
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("terminal cache replay controller tests failed: %v\n%s", err, output)
+		t.Fatalf("legacy storage cleanup controller tests failed: %v\n%s", err, output)
 	}
 }
 
@@ -314,7 +277,6 @@ func TestRuntimeClientTerminalRawReplayGuard(t *testing.T) {
 	protocolSource := readRuntimeProtocolSource(t)
 	runtimeSource := mainSource + "\n" + protocolSource
 	adapterSource := readSource("runtime/static/terminal/history/client_terminal_replay.js")
-	workerSource := readSource("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`from "./terminal/history/index.js";`,
@@ -352,376 +314,46 @@ func TestRuntimeClientTerminalRawReplayGuard(t *testing.T) {
 			t.Fatalf("client raw replay adapter must remain transport-isolated, found %q", forbidden)
 		}
 	}
-	if !strings.Contains(workerSource, `${assetBase}terminal/history/client_terminal_replay.js`) {
-		t.Fatal("service worker must precache the client terminal replay adapter")
-	}
 }
 
-func TestRuntimeTerminalHistoryCacheModuleBoundary(t *testing.T) {
-	read := func(path string) string {
-		t.Helper()
-		data, err := readRuntimeSource(path)
-		if err != nil {
-			t.Fatalf("ReadFile(%s) error = %v", path, err)
-		}
-		return string(data)
-	}
-
-	mainSource := read("runtime/static/global-runtime.js")
-	protocolSource := readRuntimeProtocolSource(t)
-	stateApplySource := read("runtime/static/workspace/state_apply_controller.js")
-	installationSource := read("runtime/static/terminal/session/session_installation_controller.js")
-	runtimeSource := mainSource + "\n" + protocolSource + "\n" + stateApplySource + "\n" + installationSource
-	indexSource := read("runtime/static/terminal/history/index.js")
-	controllerSource := read("runtime/static/terminal/history/cache_controller.js")
-	asyncSource := read("runtime/static/terminal/history/cache_async.js")
-	identitySource := read("runtime/static/terminal/history/cache_identity.js")
-	lifecycleSource := read("runtime/static/terminal/history/cache_lifecycle.js")
-	persistenceSource := read("runtime/static/terminal/history/cache_persistence_controller.js")
-	previewViewSource := read("runtime/static/terminal/history/cache_preview_view.js")
-	recoverySource := read("runtime/static/terminal/history/cache_recovery_controller.js")
-	replaySource := read("runtime/static/terminal/history/cache_replay_controller.js")
-	sessionReplayControllerSource := read("runtime/static/terminal/history/session_replay_controller.js")
-	sessionReplayLifecycleSource := read("runtime/static/terminal/history/session_replay_lifecycle.js")
-	sessionReplayStateSource := read("runtime/static/terminal/history/session_replay_state.js")
-	sessionLifecycleSource := read("runtime/static/terminal/history/cache_session_lifecycle.js")
-	readmeSource := read("runtime/static/terminal/history/README.md")
-	workerSource := read("runtime/static/service-worker.js")
-
+func TestRuntimeTerminalHistoryModuleBoundary(t *testing.T) {
+	mainSource := string(mustReadRuntimeSource(t, "runtime/static/global-runtime.js"))
+	protocolSource := string(mustReadRuntimeSource(t, "runtime/static/terminal/transport/session_protocol_controller.js"))
+	indexSource := string(mustReadRuntimeSource(t, "runtime/static/terminal/history/index.js"))
+	clientHistorySource := string(mustReadRuntimeSource(t, "runtime/static/terminal/history/client_history_controller.js"))
 	for _, want := range []string{
-		`createTerminalCacheController,`,
-		`terminalCachePreviewFingerprint,`,
-		`from "./terminal/history/index.js";`,
-		`const terminalCache = createTerminalCacheController({`,
-		`cacheV2: createTerminalCacheV2(),`,
-		`legacyCache: createTerminalHistoryCache({ orphanTTL: terminalHistoryCacheOrphanTTL }),`,
-		`getTabs: () => tabs.values(),`,
-		`getCacheV2Epoch: () => terminalCache.getWorkspaceEpoch(),`,
-		`getCacheV2WorkspaceIdentity: () => terminalCache.getWorkspaceIdentity(),`,
-		`terminalCache.setWorkspaceIdentity(`,
-		`scheduleOrphanPreviewCleanup: () => terminalCache.scheduleOrphanPreviewCleanup(),`,
-		`terminalCache.queueWrite(session, data, startCursor, endCursor)`,
-		`prepareCachedSession(activePane).catch((error) => {`,
-		`terminalCache.showLocalPreview(session, cacheV2WarmSnapshot).catch((error) => {`,
-		`terminalCache.validateMessageIdentity(session, message, historyGeneration)`,
-		`terminalCache.validateReplayIdentity(session, message, snapshot, deltaFromCursor)`,
-		`terminalCache.startWarmReplay(session, cacheV2WarmSnapshot)`,
-		`terminalCache.warmReplayMatchesSnapshot(session, snapshot)`,
-		`terminalCache.beginReplay(session, snapshot, deltaFromCursor, currentSocket, rejectHistorySync)`,
-		`terminalCache.applyServerSnapshot(session, currentSocket, rejectHistorySync)`,
-		`flushHistoryCacheWrites: (session) => terminalCache.flushSession(session),`,
-		`clearHistoryCacheWriteSchedule: (session) => terminalCache.clearSessionSchedule(session),`,
-		`terminalCache.dispose();`,
-		`terminalReplay = createTerminalSessionReplayController({`,
-		`terminalReplay.finishIfReady(session)`,
-		`terminalReplay.schedulePresentationCheckpoint(session)`,
-		`terminalReplay.dispose();`,
-		`getPreviewFingerprint: () => terminalCachePreviewFingerprint({`,
+		`createClientTerminalHistoryController,`,
+		`const clientHistory = createClientTerminalHistoryController({`,
+		`historyStore: createTerminalHistoryCache({ orphanTTL: terminalHistoryCacheOrphanTTL })`,
+		`clientHistory.queueWrite(session, data, startCursor, endCursor)`,
+		`workspace_generation: isClientInstanceName(session.name) ? "" : session.workspaceGeneration`,
 	} {
-		if !strings.Contains(runtimeSource, want) {
-			t.Fatalf("main.js terminal history cache integration missing %q", want)
+		if !strings.Contains(mainSource+"\n"+protocolSource, want) {
+			t.Fatalf("terminal history integration missing %q", want)
 		}
 	}
-	for _, forbidden := range []string{
-		`let activeWorkspaceCacheV2Identity`,
-		`let activeWorkspaceCacheV2Epoch`,
-		`let terminalCacheV2OrphanPreviewCleanupScheduled`,
-		`const workspaceCacheV2IdentityFromState`,
-		`const storedSessionTerminalCacheV2Identity`,
-		`const sessionHasTerminalCacheV2Protocol`,
-		`const startSessionCacheV2RecoveryMetrics`,
-		`const scheduleTerminalCacheV2OrphanPreviewCleanup`,
-		`const prepareSessionHistoryCache`,
-		`const flushSessionHistoryCacheWrites`,
-		`const queueSessionHistoryCacheWrite`,
-		`const resetSessionHistoryCache`,
-		`const captureSessionCacheV2Preview`,
-		`const scheduleSessionCacheV2Compaction`,
-		`const cacheV2ReplayIdentityFromMessage`,
-		`const prepareSessionCacheV2Preview`,
-		`const showSessionCacheV2Preview`,
-		`const revealSessionCacheV2Preview`,
-		`const sessionCacheV2WarmReplayMatchesSnapshot`,
-		`const drainSessionCacheV2NetworkQueue`,
-		`const failSessionCacheV2WarmReplay`,
-		`const stageSessionCacheV2WarmReplay`,
-		`const runSessionCacheV2WarmReplay`,
-		`const startSessionCacheV2WarmReplay`,
-		`const applySessionCacheV2ServerSnapshot`,
-		`const beginSessionCacheV2Replay`,
-		`const parseHistoryCursor`,
-		`const sessionHistoryRangeForConnect`,
-		`const setSessionReplayAuthorization`,
-		`const sessionReplayAuthorization`,
-		`const sessionReplayIsAuthorized`,
-		`const sessionReplayHasIdentifiedAuthorization`,
-		`const sessionReplayCommitIsPending`,
-		`const sessionReplayIsCommitted`,
-		`const finishSessionHistoryReplayIfReady`,
-		`const scheduleReplayPresentationCheckpoint`,
-		`const noteSessionReplayFailure`,
-		`const resumeSessionReplayRetry`,
-		`const replayRetryIsPaused`,
-	} {
-		if strings.Contains(mainSource, forbidden) {
-			t.Fatalf("main.js must not retain terminal history cache owner %q", forbidden)
-		}
-	}
-
 	for _, want := range []string{
-		`export * from "./cache_async.js";`,
-		`export * from "./cache_controller.js";`,
-		`export * from "./cache_identity.js";`,
-		`export * from "./cache_lifecycle.js";`,
-		`export * from "./cache_persistence_controller.js";`,
-		`export * from "./cache_preview_view.js";`,
-		`export * from "./cache_recovery_controller.js";`,
-		`export * from "./cache_replay_controller.js";`,
-		`export * from "./cache_session_lifecycle.js";`,
+		`export * from "./client_history_controller.js";`,
+		`export * from "./client_terminal_replay.js";`,
 		`export * from "./session_replay_controller.js";`,
-		`export * from "./session_replay_lifecycle.js";`,
-		`export * from "./session_replay_state.js";`,
 	} {
 		if !strings.Contains(indexSource, want) {
 			t.Fatalf("terminal history public entry missing %q", want)
 		}
 	}
 	for _, want := range []string{
-		`export function createTerminalSessionReplayController({`,
-		`const finishIfReady = (session) => {`,
-		`const noteFailure = (session, reason = "replay_failed") => {`,
-		`const resumeRetry = (session, reason = "user_recovery") => {`,
-		`const discardSession = (session) => {`,
-		`setPresentationReady(session, false);`,
-		`ensurePresentation(session, {`,
+		`export function createClientTerminalHistoryController({`,
+		`const uses = (session) => Boolean(!disposed && session && !session.closed && isClientTarget(session.name));`,
+		`historyStore.load(session.name, session.id)`,
+		`historyStore.append(session.name, session.id, generation, chunks`,
 	} {
-		if !strings.Contains(sessionReplayControllerSource, want) {
-			t.Fatalf("terminal session replay controller missing %q", want)
+		if !strings.Contains(clientHistorySource, want) {
+			t.Fatalf("client terminal history controller missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`export function createTerminalSessionReplayLifecycle({`,
-		`const scheduleCheckpoint = (session) => {`,
-		`Number(session.terminalReplayGeneration || 0) !== replayGeneration`,
-		`Number(session.connectionEpoch || 0) !== connectionEpoch`,
-		`const disposeSession = (session) => clearCheckpoint(session);`,
-	} {
-		if !strings.Contains(sessionReplayLifecycleSource, want) {
-			t.Fatalf("terminal session replay lifecycle missing %q", want)
-		}
-	}
-	for _, want := range []string{
-		`export const parseTerminalHistoryCursor = (value) => {`,
-		`export const terminalSessionHistoryRangeForConnect = (session) => {`,
-		`export const setTerminalReplayAuthorization = (session, authorization = false) => {`,
-		`export const terminalReplayIsCommitted = (session) => Boolean(`,
-	} {
-		if !strings.Contains(sessionReplayStateSource, want) {
-			t.Fatalf("terminal session replay state missing %q", want)
-		}
-	}
-	for _, forbidden := range []string{
-		`new WebSocket(`,
-		`.socket.close(`,
-		`.term.write(`,
-		`.requestRender(`,
-		`terminalPresentation`,
-		`terminalOutput`,
-	} {
-		if strings.Contains(sessionReplayControllerSource, forbidden) || strings.Contains(sessionReplayLifecycleSource, forbidden) || strings.Contains(sessionReplayStateSource, forbidden) {
-			t.Fatalf("terminal session replay module crosses an ownership boundary with %q", forbidden)
-		}
-	}
-	for _, want := range []string{
-		`export function createTerminalCacheController({`,
-		`let workspaceIdentity = null;`,
-		`let workspaceEpoch = 0;`,
-		`const setWorkspaceIdentity = (identity) => {`,
-		`const hasProtocol = (session) => Boolean(`,
-		`const scheduleOrphanPreviewCleanup = () => {`,
-		`const startRecoveryMetrics = (session) => {`,
-		`const reportRecoveryMetrics = (session) => {`,
-		`const persistence = createTerminalCachePersistenceController({`,
-		`const recovery = createTerminalCacheRecoveryController({`,
-		`const replay = createTerminalCacheReplayController({`,
-		`persistence.dispose();`,
-		`const dispose = () => {`,
-	} {
-		if !strings.Contains(controllerSource, want) {
-			t.Fatalf("terminal cache controller missing %q", want)
-		}
-	}
-	for _, want := range []string{
-		`export function createTerminalCacheReplayController({`,
-		`const warmReplayMatchesSnapshot = (session, snapshot) => Boolean(`,
-		`const drainNetworkQueue = (session) => {`,
-		`const failWarmReplay = (session, replaySeq, error) => {`,
-		`const stageWarmReplay = (session, snapshot) => {`,
-		`const runWarmReplay = (session, snapshot) => {`,
-		`const applyServerSnapshot = (session, currentSocket, rejectHistorySync) => {`,
-		`const beginReplay = (session, snapshot, deltaFromCursor, currentSocket, rejectHistorySync) => {`,
-	} {
-		if !strings.Contains(replaySource, want) {
-			t.Fatalf("terminal cache replay controller missing %q", want)
-		}
-	}
-	for _, forbidden := range []string{
-		`new WebSocket(`,
-		`.socket.close(`,
-		`.term.write(`,
-		`requestAnimationFrame(`,
-		`terminalPresentation`,
-		`terminalOutput`,
-	} {
-		if strings.Contains(replaySource, forbidden) {
-			t.Fatalf("terminal cache replay controller crosses an ownership boundary with %q", forbidden)
-		}
-	}
-	for _, want := range []string{
-		`export function createTerminalCacheAsync({`,
-		`const withTimeout = (promise, timeoutMs, message) => new Promise(`,
-		`const withProgressTimeout = (operation, timeoutMs, message) => new Promise(`,
-	} {
-		if !strings.Contains(asyncSource, want) {
-			t.Fatalf("terminal cache async helper missing %q", want)
-		}
-	}
-	for _, want := range []string{
-		`export function createTerminalCachePersistenceController({`,
-		`const prepareSession = async (session) => {`,
-		`const flushSession = (session) => {`,
-		`const queueWrite = (session, data, startCursor, endCursor) => {`,
-		`const resetSession = (session, generation, cursor, { preservePreview = false } = {}) => {`,
-		`const destroySession = async (session) => {`,
-		`const touchAll = () => {`,
-		`async function capturePreview(session, captureSeq) {`,
-		`const scheduleCompaction = (session) => {`,
-	} {
-		if !strings.Contains(persistenceSource, want) {
-			t.Fatalf("terminal cache persistence controller missing %q", want)
-		}
-	}
-	for _, forbidden := range []string{
-		`new WebSocket(`,
-		`.socket.close(`,
-		`terminalPresentation`,
-		`terminalResize`,
-		`terminalOutput`,
-	} {
-		if strings.Contains(persistenceSource, forbidden) {
-			t.Fatalf("terminal cache persistence controller crosses an ownership boundary with %q", forbidden)
-		}
-	}
-	for _, want := range []string{
-		`export function createTerminalCacheRecoveryController({`,
-		`const replayIdentityFromMessage = (message) => ({`,
-		`const validateMessageIdentity = (session, message, historyGeneration) => {`,
-		`const validateReplayIdentity = (session, message, snapshot, deltaFromCursor) => {`,
-		`const validatePreviewIdentity = (`,
-		`const preparePreview = (session, snapshot) => {`,
-		`const showPreview = async (session, snapshot, currentSocket, replayGeneration) => {`,
-		`const showLocalPreview = async (session, snapshot) => {`,
-		`const revealPreview = (`,
-	} {
-		if !strings.Contains(recoverySource, want) {
-			t.Fatalf("terminal cache recovery controller missing %q", want)
-		}
-	}
-	for _, forbidden := range []string{
-		`new WebSocket(`,
-		`.socket.close(`,
-		`.term.write(`,
-		`requestAnimationFrame(`,
-	} {
-		if strings.Contains(recoverySource, forbidden) {
-			t.Fatalf("terminal cache recovery controller crosses an ownership boundary with %q", forbidden)
-		}
-	}
-	for _, forbidden := range []string{
-		`new WebSocket(`,
-		`requestAnimationFrame(`,
-		`.term.write`,
-		`.socket.close(`,
-	} {
-		if strings.Contains(controllerSource, forbidden) {
-			t.Fatalf("terminal cache controller crosses an ownership boundary with %q", forbidden)
-		}
-	}
-
-	for _, want := range []string{
-		`export const normalizeTerminalCacheWorkspaceIdentity = (`,
-		`export const terminalCacheWorkspaceIdentityKey = (identity) =>`,
-		`export const storedTerminalCacheSessionIdentity = (`,
-		`export const terminalCachePreviewFingerprint = ({`,
-	} {
-		if !strings.Contains(identitySource, want) {
-			t.Fatalf("terminal cache identity model missing %q", want)
-		}
-	}
-	if strings.Contains(mainSource, `getPreviewFingerprint: () => JSON.stringify({`) {
-		t.Fatal("global-runtime.js must delegate preview fingerprint serialization to the history identity module")
-	}
-	for _, want := range []string{
-		`export function createTerminalCacheLifecycle({`,
-		`windowObject?.cancelIdleCallback?.(handle);`,
-		`windowObject?.clearTimeout?.(handle);`,
-		`const dispose = () => {`,
-	} {
-		if !strings.Contains(lifecycleSource, want) {
-			t.Fatalf("terminal cache lifecycle missing %q", want)
-		}
-	}
-	for _, want := range []string{
-		`export function createTerminalCacheSessionLifecycle({`,
-		`windowObject?.cancelAnimationFrame?.(session.historyCacheWriteFrame);`,
-		`windowObject?.cancelIdleCallback?.(session.cacheV2PreviewCaptureIdle);`,
-		`const disposeSession = (session) => {`,
-		`const dispose = () => {`,
-	} {
-		if !strings.Contains(sessionLifecycleSource, want) {
-			t.Fatalf("terminal cache session lifecycle missing %q", want)
-		}
-	}
-	for _, want := range []string{
-		`export function createTerminalCachePreviewView({`,
-		`const clearPrepared = (session) => {`,
-		`const hide = (session) => {`,
-		`const decode = (objectURL) => new Promise(`,
-		`const canvasBlob = (canvas) => new Promise(`,
-	} {
-		if !strings.Contains(previewViewSource, want) {
-			t.Fatalf("terminal cache preview view missing %q", want)
-		}
-	}
-	for _, want := range []string{
-		"## 职责",
-		"## 公开入口与契约",
-		"## 状态所有权",
-		"## 生命周期",
-		"## 文件清单",
-		"任何 history replay、snapshot、缓存恢复、resize 或重连中间过程都不得",
-		"普通容器页面始终只有一条 Unified 物理 WebSocket",
-	} {
-		if !strings.Contains(readmeSource, want) {
-			t.Fatalf("terminal history README missing %q", want)
-		}
-	}
-	for _, want := range []string{
-		`${assetBase}terminal/history/cache_async.js`,
-		`${assetBase}terminal/history/cache_controller.js`,
-		`${assetBase}terminal/history/cache_identity.js`,
-		`${assetBase}terminal/history/cache_lifecycle.js`,
-		`${assetBase}terminal/history/cache_persistence_controller.js`,
-		`${assetBase}terminal/history/cache_preview_view.js`,
-		`${assetBase}terminal/history/cache_recovery_controller.js`,
-		`${assetBase}terminal/history/cache_replay_controller.js`,
-		`${assetBase}terminal/history/cache_session_lifecycle.js`,
-		`${assetBase}terminal/history/session_replay_controller.js`,
-		`${assetBase}terminal/history/session_replay_lifecycle.js`,
-		`${assetBase}terminal/history/session_replay_state.js`,
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker terminal history cache app-shell guard missing %q", want)
+	for _, forbidden := range []string{"cacheV2", "terminalCacheV2", "CacheStorage", "caches.open", "startWarmReplay", "schedulePreviewCapture"} {
+		if strings.Contains(mainSource+"\n"+protocolSource+"\n"+clientHistorySource, forbidden) {
+			t.Fatalf("removed container cache logic returned: %q", forbidden)
 		}
 	}
 }
@@ -1621,15 +1253,11 @@ func TestRuntimeDiagnosticsModuleBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(runtime/static/diagnostics/network_context.js) error = %v", err)
 	}
-	serviceWorkerData, err := readRuntimeSource("runtime/static/service-worker.js")
-	if err != nil {
-		t.Fatalf("ReadFile(runtime/static/service-worker.js) error = %v", err)
-	}
+
 	mainSource := string(mainData)
 	indexSource := string(indexData)
 	readmeSource := string(readmeData)
 	networkContextSource := string(networkContextData)
-	serviceWorkerSource := string(serviceWorkerData)
 
 	if !strings.Contains(mainSource, `from "./diagnostics/index.js";`) {
 		t.Fatal("main.js must consume diagnostics through its public entry")
@@ -1699,20 +1327,7 @@ func TestRuntimeDiagnosticsModuleBoundary(t *testing.T) {
 			t.Fatalf("diagnostics README missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`${assetBase}diagnostics/index.js`,
-		`${assetBase}diagnostics/diagnostics_controller.js`,
-		`${assetBase}diagnostics/network_context.js`,
-		`${assetBase}diagnostics/diagnostics_lifecycle.js`,
-		`${assetBase}diagnostics/performance_tasks.js`,
-	} {
-		if !strings.Contains(serviceWorkerSource, want) {
-			t.Fatalf("service worker diagnostics app-shell guard missing %q", want)
-		}
-	}
-	if strings.Contains(serviceWorkerSource, `${assetBase}diagnostics/network_monitor.js`) {
-		t.Fatal("opt-in diagnostics network monitor must stay out of the app-shell precache")
-	}
+
 	for _, legacyPath := range []string{
 		"runtime/static/performance_tasks.js",
 		"runtime/static/terminal_network_monitor.js",
@@ -1749,7 +1364,6 @@ func TestRuntimeTerminalConfigModuleBoundary(t *testing.T) {
 	indexSource := read("runtime/static/terminal/config/index.js")
 	configSource := read("runtime/static/terminal/config/terminal_config.js")
 	readmeSource := read("runtime/static/terminal/config/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	if !strings.Contains(mainSource, `from "./terminal/config/index.js";`) {
 		t.Fatal("global runtime must consume terminal config through its public entry")
@@ -1794,14 +1408,7 @@ func TestRuntimeTerminalConfigModuleBoundary(t *testing.T) {
 			t.Fatalf("terminal config README missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`${assetBase}terminal/config/index.js`,
-		`${assetBase}terminal/config/terminal_config.js`,
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker terminal config app-shell guard missing %q", want)
-		}
-	}
+
 }
 
 func TestRuntimeAppLifecycleModuleBoundary(t *testing.T) {
@@ -1819,7 +1426,6 @@ func TestRuntimeAppLifecycleModuleBoundary(t *testing.T) {
 	lifecycleSource := read("runtime/static/app/app_lifecycle.js")
 	mobileSelectSource := read("runtime/static/app/mobile_select_controller.js")
 	readmeSource := read("runtime/static/app/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`createAppLifecycle,`,
@@ -1880,16 +1486,7 @@ func TestRuntimeAppLifecycleModuleBoundary(t *testing.T) {
 			t.Fatalf("app lifecycle must not own terminal implementation %q", forbidden)
 		}
 	}
-	for _, want := range []string{
-		"app/index.js",
-		"app/app_lifecycle.js",
-		"app/mobile_select_controller.js",
-		"app/dialog_controller.js",
-	} {
-		if !strings.Contains(workerSource, `${assetBase}`+want) {
-			t.Fatalf("service worker app lifecycle asset missing %q", want)
-		}
-	}
+
 	for _, want := range []string{
 		"应用启动入口",
 		"start()",
@@ -1929,7 +1526,6 @@ func TestRuntimeAppRecoveryModuleBoundary(t *testing.T) {
 	controllerSource := read("runtime/static/app/runtime_recovery_controller.js")
 	lifecycleSource := read("runtime/static/app/runtime_recovery_lifecycle.js")
 	readmeSource := read("runtime/static/app/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`createAppRuntimeRecoveryController,`,
@@ -1994,14 +1590,7 @@ func TestRuntimeAppRecoveryModuleBoundary(t *testing.T) {
 			t.Fatalf("app README recovery boundary missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`${assetBase}app/runtime_recovery_controller.js`,
-		`${assetBase}app/runtime_recovery_lifecycle.js`,
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker app recovery asset missing %q", want)
-		}
-	}
+
 }
 
 func TestAppDOMRegistryBehavior(t *testing.T) {
@@ -2044,7 +1633,6 @@ func TestRuntimeAppServerRevisionModuleBoundary(t *testing.T) {
 	apiSource := read("runtime/static/app/server_revision/server_revision_api.js")
 	lifecycleSource := read("runtime/static/app/server_revision/server_revision_lifecycle.js")
 	readmeSource := read("runtime/static/app/server_revision/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`createServerRevisionController,`,
@@ -2127,16 +1715,7 @@ func TestRuntimeAppServerRevisionModuleBoundary(t *testing.T) {
 			t.Fatalf("server revision README missing %q", want)
 		}
 	}
-	for _, asset := range []string{
-		"app/server_revision/index.js",
-		"app/server_revision/server_revision_api.js",
-		"app/server_revision/server_revision_controller.js",
-		"app/server_revision/server_revision_lifecycle.js",
-	} {
-		if !strings.Contains(workerSource, `${assetBase}`+asset) {
-			t.Fatalf("service worker server revision asset missing %q", asset)
-		}
-	}
+
 }
 
 func TestRuntimeAppDOMRegistryModuleBoundary(t *testing.T) {
@@ -2153,7 +1732,6 @@ func TestRuntimeAppDOMRegistryModuleBoundary(t *testing.T) {
 	indexSource := read("runtime/static/app/index.js")
 	registrySource := read("runtime/static/app/dom_registry.js")
 	readmeSource := read("runtime/static/app/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`createAppDOMRegistry,`,
@@ -2192,9 +1770,7 @@ func TestRuntimeAppDOMRegistryModuleBoundary(t *testing.T) {
 			t.Fatalf("app DOM registry must not own runtime behavior %q", forbidden)
 		}
 	}
-	if !strings.Contains(workerSource, `${assetBase}app/dom_registry.js`) {
-		t.Fatal("service worker DOM registry asset missing")
-	}
+
 	for _, want := range []string{"DOM", "workspace", "只读", "不注册事件"} {
 		if !strings.Contains(readmeSource, want) {
 			t.Fatalf("app README missing DOM registry contract %q", want)
@@ -2228,7 +1804,6 @@ func TestRuntimeDialogModuleBoundary(t *testing.T) {
 	indexSource := read("runtime/static/app/index.js")
 	dialogSource := read("runtime/static/app/dialog_controller.js")
 	readmeSource := read("runtime/static/app/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`createDialogController,`,
@@ -2289,9 +1864,7 @@ func TestRuntimeDialogModuleBoundary(t *testing.T) {
 			t.Fatalf("app README missing dialog contract %q", want)
 		}
 	}
-	if !strings.Contains(workerSource, `${assetBase}app/dialog_controller.js`) {
-		t.Fatal("service worker dialog module asset missing")
-	}
+
 }
 
 func TestAppShortcutControllerBehavior(t *testing.T) {
@@ -2321,7 +1894,6 @@ func TestRuntimeAppShortcutModuleBoundary(t *testing.T) {
 	shortcutSource := read("runtime/static/app/shortcuts/shortcut_controller.js")
 	lifecycleSource := read("runtime/static/app/shortcuts/shortcut_lifecycle.js")
 	readmeSource := read("runtime/static/app/shortcuts/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`createAppShortcutController,`,
@@ -2384,15 +1956,7 @@ func TestRuntimeAppShortcutModuleBoundary(t *testing.T) {
 			t.Fatalf("app shortcut module crosses terminal ownership boundary %q", forbidden)
 		}
 	}
-	for _, want := range []string{
-		"app/shortcuts/index.js",
-		"app/shortcuts/shortcut_controller.js",
-		"app/shortcuts/shortcut_lifecycle.js",
-	} {
-		if !strings.Contains(workerSource, `${assetBase}`+want) {
-			t.Fatalf("service worker app shortcut asset missing %q", want)
-		}
-	}
+
 	for _, want := range []string{"快捷键", "handleKeydown", "dispose()"} {
 		if !strings.Contains(readmeSource, want) {
 			t.Fatalf("app shortcut README missing %q", want)
@@ -2427,7 +1991,6 @@ func TestRuntimeAppCommandModuleBoundary(t *testing.T) {
 	controllerSource := read("runtime/static/app/commands/command_controller.js")
 	lifecycleSource := read("runtime/static/app/commands/command_lifecycle.js")
 	readmeSource := read("runtime/static/app/commands/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`createAppCommandController,`,
@@ -2492,15 +2055,7 @@ func TestRuntimeAppCommandModuleBoundary(t *testing.T) {
 			t.Fatalf("app command module crosses terminal ownership boundary %q", forbidden)
 		}
 	}
-	for _, asset := range []string{
-		"app/commands/index.js",
-		"app/commands/command_controller.js",
-		"app/commands/command_lifecycle.js",
-	} {
-		if !strings.Contains(workerSource, `${assetBase}`+asset) {
-			t.Fatalf("service worker app command asset missing %q", asset)
-		}
-	}
+
 	for _, want := range []string{"应用命令", "runAction", "createUserTab", "dispose"} {
 		if !strings.Contains(readmeSource, want) {
 			t.Fatalf("app command README missing %q", want)
@@ -2545,17 +2100,13 @@ func TestRuntimeServiceForwardingModuleBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(runtime/static/service_forwarding/README.md) error = %v", err)
 	}
-	serviceWorkerData, err := readRuntimeSource("runtime/static/service-worker.js")
-	if err != nil {
-		t.Fatalf("ReadFile(runtime/static/service-worker.js) error = %v", err)
-	}
+
 	mainSource := string(mainData) + "\n" + readRuntimeBootstrapSource(t)
 	indexSource := string(indexData)
 	controllerSource := string(controllerData)
 	apiSource := string(apiData)
 	lifecycleSource := string(lifecycleData)
 	readmeSource := string(readmeData)
-	serviceWorkerSource := string(serviceWorkerData)
 
 	for _, want := range []string{
 		`from "./service_forwarding/index.js";`,
@@ -2640,18 +2191,7 @@ func TestRuntimeServiceForwardingModuleBoundary(t *testing.T) {
 			t.Fatalf("service forwarding README missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`${assetBase}service_forwarding/index.js`,
-		`${assetBase}service_forwarding/service_forwarding_api.js`,
-		`${assetBase}service_forwarding/service_forwarding_controller.js`,
-		`${assetBase}service_forwarding/service_forwarding_lifecycle.js`,
-		`${assetBase}service_forwarding/service_forwarding_model.js`,
-		`${assetBase}service_forwarding/service_forwarding_view.js`,
-	} {
-		if !strings.Contains(serviceWorkerSource, want) {
-			t.Fatalf("service worker service forwarding app-shell guard missing %q", want)
-		}
-	}
+
 }
 
 func TestRuntimeBootstrapFailureWaitsForGhostty(t *testing.T) {
@@ -2729,7 +2269,6 @@ func TestRuntimeInstancesModuleBoundary(t *testing.T) {
 	lifecycleSource := read("runtime/static/instances/instances_lifecycle.js")
 	navigationSource := read("runtime/static/instances/instances_navigation.js")
 	readmeSource := read("runtime/static/instances/README.md")
-	serviceWorkerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`from "./instances/index.js";`,
@@ -2887,19 +2426,7 @@ func TestRuntimeInstancesModuleBoundary(t *testing.T) {
 			t.Fatalf("instances README missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`${assetBase}instances/index.js`,
-		`${assetBase}instances/instances_controller.js`,
-		`${assetBase}instances/instances_lifecycle.js`,
-		`${assetBase}instances/instances_loader.js`,
-		`${assetBase}instances/instances_model.js`,
-		`${assetBase}instances/instances_navigation.js`,
-		`${assetBase}instances/instances_view.js`,
-	} {
-		if !strings.Contains(serviceWorkerSource, want) {
-			t.Fatalf("service worker instances app-shell guard missing %q", want)
-		}
-	}
+
 	if _, err := os.Stat("runtime/static/instances_loader.js"); !os.IsNotExist(err) {
 		t.Fatalf("legacy root instances loader must be removed, stat error = %v", err)
 	}
@@ -2925,7 +2452,6 @@ func TestRuntimeAppearanceModuleBoundary(t *testing.T) {
 	previewSource := read("runtime/static/appearance/theme_preview.js")
 	runtimeSource := read("runtime/static/appearance/runtime_controller.js")
 	readmeSource := read("runtime/static/appearance/README.md")
-	serviceWorkerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`from "./appearance/index.js";`,
@@ -3072,21 +2598,6 @@ func TestRuntimeAppearanceModuleBoundary(t *testing.T) {
 			t.Fatalf("appearance README missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`${assetBase}appearance/index.js`,
-		`${assetBase}appearance/appearance_controller.js`,
-		`${assetBase}appearance/appearance_lifecycle.js`,
-		`${assetBase}appearance/appearance_view.js`,
-		`${assetBase}appearance/theme_catalog.js`,
-		`${assetBase}appearance/theme_model.js`,
-		`${assetBase}appearance/theme_preview.js`,
-		`${assetBase}appearance/runtime_controller.js`,
-		`${assetBase}appearance/themes.json`,
-	} {
-		if !strings.Contains(serviceWorkerSource, want) {
-			t.Fatalf("service worker appearance app-shell guard missing %q", want)
-		}
-	}
 
 	applyBlock := sourceBetween(t, runtimeSource,
 		"const applyThemeToSession = (session, theme = getActiveTheme()) => {",
@@ -3142,517 +2653,46 @@ func TestKittyGraphicsBehavior(t *testing.T) {
 	}
 }
 
-func TestRuntimeContainerCacheV2AndPWAContract(t *testing.T) {
-	mainData, err := readRuntimeSource("runtime/static/global-runtime.js")
-	if err != nil {
-		t.Fatalf("ReadFile(main.js) error = %v", err)
-	}
-	protocolData, err := readRuntimeSource("runtime/static/terminal/transport/session_protocol_controller.js")
-	if err != nil {
-		t.Fatalf("ReadFile(session_protocol_controller.js) error = %v", err)
-	}
-	cacheData, err := readRuntimeSource("runtime/static/terminal/history/terminal_cache_v2.js")
-	if err != nil {
-		t.Fatalf("ReadFile(terminal_cache_v2.js) error = %v", err)
-	}
-	cacheControllerData, err := readRuntimeSource("runtime/static/terminal/history/cache_controller.js")
-	if err != nil {
-		t.Fatalf("ReadFile(cache_controller.js) error = %v", err)
-	}
-	cachePersistenceData, err := readRuntimeSource("runtime/static/terminal/history/cache_persistence_controller.js")
-	if err != nil {
-		t.Fatalf("ReadFile(cache_persistence_controller.js) error = %v", err)
-	}
-	configData, err := readRuntimeSource("runtime/static/terminal/config/terminal_config.js")
-	if err != nil {
-		t.Fatalf("ReadFile(terminal_config.js) error = %v", err)
-	}
-	cacheReplayData, err := readRuntimeSource("runtime/static/terminal/history/cache_replay_controller.js")
-	if err != nil {
-		t.Fatalf("ReadFile(cache_replay_controller.js) error = %v", err)
-	}
-	sessionReplayControllerData, err := readRuntimeSource("runtime/static/terminal/history/session_replay_controller.js")
-	if err != nil {
-		t.Fatalf("ReadFile(session_replay_controller.js) error = %v", err)
-	}
-	overviewLifecycleData, err := readRuntimeSource("runtime/static/terminal/overview/overview_lifecycle.js")
-	if err != nil {
-		t.Fatalf("ReadFile(overview_lifecycle.js) error = %v", err)
-	}
-	sessionReplayData, err := readRuntimeSource("runtime/static/terminal/history/session_replay_controller.js")
-	if err != nil {
-		t.Fatalf("ReadFile(session_replay_controller.js) error = %v", err)
-	}
-	workerData, err := readRuntimeSource("runtime/static/service-worker.js")
-	if err != nil {
-		t.Fatalf("ReadFile(service-worker.js) error = %v", err)
-	}
-	indexData, err := readRuntimeSource("runtime/static/index.html")
-	if err != nil {
-		t.Fatalf("ReadFile(index.html) error = %v", err)
-	}
-	overviewPreviewData, err := readRuntimeSource("runtime/static/terminal/overview/terminal_overview_preview.js")
-	if err != nil {
-		t.Fatalf("ReadFile(terminal_overview_preview.js) error = %v", err)
-	}
-	overviewControllerData, err := readRuntimeSource("runtime/static/terminal/overview/overview_controller.js")
-	if err != nil {
-		t.Fatalf("ReadFile(overview_controller.js) error = %v", err)
-	}
-	overviewViewData, err := readRuntimeSource("runtime/static/terminal/overview/overview_view.js")
-	if err != nil {
-		t.Fatalf("ReadFile(overview_view.js) error = %v", err)
-	}
-	styleData, err := readRuntimeSource("runtime/static/style.css")
-	if err != nil {
-		t.Fatalf("ReadFile(style.css) error = %v", err)
-	}
-	sessionStateData, err := readRuntimeSource("runtime/static/terminal/session/session_state.js")
-	if err != nil {
-		t.Fatalf("ReadFile(runtime/static/terminal/session/session_state.js) error = %v", err)
-	}
-	presentationControllerData, err := readRuntimeSource("runtime/static/terminal/rendering/presentation_controller.js")
-	if err != nil {
-		t.Fatalf("ReadFile(presentation_controller.js) error = %v", err)
-	}
-	metricsData, err := readRuntimeSource("runtime/static/terminal/metrics/metrics_controller.js")
-	if err != nil {
-		t.Fatalf("ReadFile(metrics_controller.js) error = %v", err)
-	}
-	stateApplyData, err := readRuntimeSource("runtime/static/workspace/state_apply_controller.js")
-	if err != nil {
-		t.Fatalf("ReadFile(state_apply_controller.js) error = %v", err)
-	}
-	mainSource := strings.Join([]string{
-		string(mainData),
-		string(configData),
-		string(metricsData),
-		readRuntimeBootstrapSource(t),
-		string(stateApplyData),
-		string(protocolData),
-		readRuntimeInputSource(t),
-		readRuntimeOutputSource(t),
-		string(sessionStateData),
-		string(overviewControllerData),
-		string(overviewViewData),
-		string(presentationControllerData),
-		string(cacheControllerData),
-		string(cachePersistenceData),
-		string(cacheReplayData),
-		string(sessionReplayData),
-		string(sessionReplayControllerData),
-		string(overviewLifecycleData),
-	}, "\n")
+func TestRuntimeSnapshotOnlyAndPWARemovalContract(t *testing.T) {
+	mainSource := string(mustReadRuntimeSource(t, "runtime/static/global-runtime.js"))
+	protocolSource := string(mustReadRuntimeSource(t, "runtime/static/terminal/transport/session_protocol_controller.js"))
+	indexSource := string(mustReadRuntimeSource(t, "runtime/static/index.html"))
+	cleanupSource := string(mustReadRuntimeSource(t, "runtime/static/app/bootstrap/legacy_storage_cleanup_controller.js"))
 	for _, want := range []string{
-		`from "./instances/index.js";`,
-		`from "./terminal/history/index.js";`,
-		`from "./terminal/resize/index.js";`,
-		`isClientInstanceName(session.name)`,
-		`terminalCache.hasProtocol(session)`,
-		`const usesLegacy = (session) => Boolean(session && isClientTarget(session.name));`,
-		`socketUrl.searchParams.set("cache_protocol_version"`,
-		`socketUrl.searchParams.set("workspace_generation"`,
-		`terminalCache.validateReplayIdentity(session, message, snapshot, deltaFromCursor)`,
-		`terminalCache.startWarmReplay(session, cacheV2WarmSnapshot)`,
-		`session.cacheV2WarmReplayReady`,
-		`[terminal-cache-v2] warm replay ready`,
-		"export const TERMINAL_REPLAY_WRITE_BATCH_BYTES = 512 * 1024;",
-		`terminalCacheV2FlushBytes: 1 * 1024 * 1024,`,
-		`terminalCacheV2ReplayTimeoutMs: 2 * 1000,`,
-		`terminalCacheV2CompactionTargetBytes: 1 * 1024 * 1024,`,
-		`prepareTabOverviewCachePreviews`,
-		`pane.tabId !== activeTabId || !pane.renderReady || !pane.hasPresentedFrame`,
-		`const liveFrame = pane?.renderReady && pane?.hasPresentedFrame ? liveCanvas : null;`,
-		`const heldFrame = isFrameHoldCurrent(pane) ? pane.terminalFrameHold : null;`,
-		`terminalFrameHoldIdentity`,
-		`scheduleWorkspaceTabOverviewCachePreviews();`,
-		`const loadPaneTabOverviewPreviewManifest = async (pane) => {`,
-		`terminalCacheV2.loadManifest(identity)`,
-		`Terminal cache overview manifest read timed out.`,
-		`const canCapturePreview = (session) => {`,
-		`schedulePreviewCapture(session, { immediate: true });`,
-		`const allowRecentOutput = session.cacheV2PreviewCaptureAllowRecentOutput === true;`,
-		`const schedulePreviewCapture = (session, { immediate = false } = {}) => {`,
-		`session.cacheV2PreviewCaptureAllowRecentOutput = true;`,
-		`session.connectionChannel !== "unified"`,
-		`const scheduleOrphanPreviewCleanup = () => {`,
-		`cacheV2.cleanupOrphanedPreviews({`,
-		`clearOverviewPreview: (session) => terminalOverview?.clearSessionPreview(session),`,
-		`scheduleOverviewRender: () => terminalOverview?.scheduleRender(),`,
-		`sessionCacheV2OverviewPreviewMatches`,
-		`[terminal-cache-v2] overview preview load failed`,
-		`terminalCache.applyServerSnapshot(session, currentSocket, rejectHistorySync)`,
-		`session.cacheV2ServerSnapshotPending`,
-		`terminalCache.beginReplay(session, snapshot, deltaFromCursor, currentSocket, rejectHistorySync)`,
-		`|| !isReplayCommitted(session)`,
-		`session.renderReady`,
-		`session?.shellEl?.dataset?.previewReady !== "true"`,
-		`requestTerminalStoragePersistence`,
-		`[terminal-cache-v2] recovery metrics`,
-		`workspaceReadyMs`,
-		`localReplayBytes`,
-		`serverReplayBytes`,
-		`previewPreparedMs`,
-		`previewLayoutMatch`,
-		`previewMissReason`,
-		`pageRealCanvasVisibleMs`,
-		`const ghosttyInitPromise = initGhostty`,
-		`settings.load({ deferFontLoad: true })`,
-		`const requestBootstrapWorkspace = () => {`,
-		`const workspacePromise = (`,
-		`instancesPromise.then(requestBootstrapWorkspace)`,
-		`applyWorkspace: (result, options) => applyWorkspaceRefresh(result, options),`,
-		`prepareCachedSession(activePane)`,
-		`scheduleWorkspaceTabOverviewCachePreviews`,
-		`connectPendingSessionsForTab(nextActiveTab, { allowHidden: true });`,
-		`cacheV2.compact(cacheIdentity`,
-		`navigatorObject.serviceWorker.register(scriptURL`,
-		`withProgressTimeout((reportProgress) => cacheV2.readChunks`,
-		`Terminal warm cache replay made no progress.`,
-		`Terminal cache replay made no progress.`,
-		`historyCacheReplayCommitSeq: 0,`,
-	} {
-		if !strings.Contains(mainSource, want) {
-			t.Fatalf("runtime cache-v2 guard missing %q", want)
-		}
-	}
-	overviewPreviewSource := string(overviewPreviewData)
-	for _, want := range []string{
-		`const preview = await this.cache.loadPreview(snapshot);`,
-		`(currentHistoryGeneration && currentHistoryGeneration !== String(snapshot.historyGeneration || "").trim())`,
-		`this.matches(pane, prepared)`,
-	} {
-		if !strings.Contains(overviewPreviewSource, want) {
-			t.Fatalf("terminal overview preview isolation guard missing %q", want)
-		}
-	}
-	finishReplayBlock := sourceBetween(t, string(sessionReplayData),
-		"  const finishIfReady = (session) => {",
-		"  const noteFailure = (session, reason = \"replay_failed\") => {")
-	commitIndex := strings.Index(finishReplayBlock, "const commit = flushCache(session);")
-	replayReadyIndex := strings.Index(finishReplayBlock, "session.replayComplete = true;")
-	if commitIndex < 0 || replayReadyIndex <= commitIndex {
-		t.Fatal("runtime history replay must start cache persistence before presenting the final canvas")
-	}
-	for _, want := range []string{
-		`const commitSeq = Number(session.historyCacheReplayCommitSeq || 0) + 1;`,
-		`session.historyCacheReplayCommitSeq === commitSeq`,
-		`session.historyCacheReplayCommitSeq = Number(session.historyCacheReplayCommitSeq || 0) + 1;`,
-	} {
-		if !strings.Contains(finishReplayBlock, want) && !strings.Contains(mainSource, want) {
-			t.Fatalf("runtime background cache commit generation guard missing %q", want)
-		}
-	}
-	if strings.Contains(finishReplayBlock[commitIndex:replayReadyIndex], "return false;") || strings.Contains(finishReplayBlock, "finishIfReady(session);") {
-		t.Fatal("runtime final canvas must not wait for the background cache commit")
-	}
-	cacheSource := string(cacheData)
-	appendBlock := sourceBetween(t, cacheSource,
-		"const append = async (sourceIdentity, generation, chunks, { limitBytes, historyWindowLines = null } = {}) => {",
-		"const readChunks = async (manifest, onChunk) => {")
-	chunkPut := strings.Index(appendBlock, "await putChunk(store, identity, stored);")
-	manifestPut := strings.Index(appendBlock, "await putManifest(store, manifest);")
-	if chunkPut < 0 || manifestPut < 0 {
-		t.Fatal("cache-v2 must write immutable bytes before committing its manifest")
-	}
-	if chunkPut > manifestPut {
-		t.Fatal("cache-v2 append must commit its byte block before the manifest")
-	}
-	for _, want := range []string{
-		`cacheScopeID: requiredText`,
-		`workspaceGeneration: requiredText`,
-		`tabID: requiredText`,
-		`paneID: requiredText`,
-		`historyGeneration: source.historyGeneration`,
-		`checkpointCursor > endCursor`,
-		`preview: previous.preview`,
-		`const defaultReadConcurrency = 8;`,
-		`const defaultWriteBlockBytes = 1 * 1024 * 1024;`,
-		`const defaultCompactionMinChunks = 2;`,
-		`const pending = new Map();`,
-		`const fillReadAhead = () => {`,
-		`pending.set(chunkIndex, loadChunk(normalized.chunks[chunkIndex]).then(`,
-		`pending.delete(chunkIndex);`,
-		`batchEnd: chunkIndex === normalized.chunks.length - 1`,
-		`const compact = (sourceIdentity, {`,
-		`compactedFromChunks: manifest.chunks.length`,
-	} {
-		if !strings.Contains(cacheSource, want) {
-			t.Fatalf("cache-v2 isolation guard missing %q", want)
-		}
-	}
-	workerSource := string(workerData)
-	if !strings.Contains(workerSource, "${assetBase}workspace/tab_activation_scheduler.js") {
-		t.Fatal("service worker must precache the tab activation scheduler")
-	}
-	if !strings.Contains(workerSource, "${assetBase}workspace/tab_activation_controller.js") {
-		t.Fatal("service worker must precache the tab activation controller")
-	}
-	if !strings.Contains(workerSource, "${assetBase}terminal/rendering/terminal_frame_release_scheduler.js") {
-		t.Fatal("service worker must precache the terminal frame release scheduler")
-	}
-	if !strings.Contains(workerSource, "${assetBase}terminal/rendering/renderer_adapter.js") {
-		t.Fatal("service worker must precache the terminal renderer adapter")
-	}
-	if !strings.Contains(workerSource, "${assetBase}terminal/resize/terminal_resize_scheduler.js") {
-		t.Fatal("service worker must precache the terminal resize scheduler")
-	}
-	if !strings.Contains(workerSource, "${assetBase}terminal/resize/terminal_resize_controller.js") {
-		t.Fatal("service worker must precache the terminal resize controller")
-	}
-	if !strings.Contains(workerSource, "${assetBase}terminal/rendering/terminal_render_snapshot.js") {
-		t.Fatal("service worker must precache terminal render snapshots")
-	}
-	if !strings.Contains(workerSource, "${assetBase}terminal/overview/terminal_overview_preview.js") {
-		t.Fatal("service worker must precache the terminal overview preview controller")
-	}
-	if !strings.Contains(mainSource, `from "./terminal/overview/index.js";`) {
-		t.Fatal("runtime must isolate terminal overview preview lifecycle in its controller module")
-	}
-	if !strings.Contains(mainSource, `terminalCache.resetSession(session, historyGeneration, deltaFromCursor);`) {
-		t.Fatal("cold snapshot replay must reset its cache manifest before appending history")
-	}
-	if !strings.Contains(workerSource, "${assetBase}terminal/transport/terminal_fast_integrity.js") || !strings.Contains(workerSource, "${assetBase}terminal/history/terminal_replay_controller.js") || !strings.Contains(workerSource, "${assetBase}terminal/history/client_terminal_replay.js") {
-		t.Fatal("service worker must precache replay integrity modules")
-	}
-	if !strings.Contains(workerSource, "${assetBase}instances/instances_loader.js") {
-		t.Fatal("service worker must precache the instances loader")
-	}
-	if !strings.Contains(workerSource, "${assetBase}terminal/rendering/kitty_graphics.js") {
-		t.Fatal("service worker must precache Kitty Graphics support")
-	}
-	for _, want := range []string{
-		`${assetBase}terminal/tui_adapters/common/fullscreen_tui_touch.js`,
-		`${assetBase}terminal/tui_adapters/common/fullscreen_tui_touch_adapter.js`,
-		`${assetBase}terminal/tui_adapters/opencode/opencode_fullscreen_touch.js`,
-		`${assetBase}terminal/tui_adapters/opencode/opencode_fullscreen_touch_adapter.js`,
-		`${assetBase}terminal/tui_adapters/herdr/herdr_fullscreen_touch.js`,
-		`${assetBase}terminal/tui_adapters/herdr/herdr_fullscreen_touch_adapter.js`,
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker must precache fullscreen TUI asset %q", want)
-		}
-	}
-	for _, want := range []string{
-		`url.pathname.includes("/api/")`,
-		`url.pathname.endsWith("/ws")`,
-		`url.pathname.includes("/__terminal_cache__/")`,
-		`request.mode === "navigate"`,
-		`url.pathname.includes("/assets/")`,
-		`const assetVersion = "__LCMD_ASSET_VERSION__";`,
-		`const assetBase = "__LCMD_ASSET_BASE__";`,
-		`credentials: "same-origin"`,
-		`const cached = await cache.match(request);`,
-		`const currentVersionAsset = url.pathname.startsWith(assetBase);`,
-		`if (currentVersionAsset && cached) {`,
-		`const response = await fetch(request);`,
-		`return cached || response;`,
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker network-only guard missing %q", want)
-		}
-	}
-	if !strings.Contains(string(indexData), `rel="manifest" href="__LCMD_ASSET_BASE__manifest.webmanifest" crossorigin="use-credentials"`) {
-		t.Fatal("PWA manifest link is missing")
-	}
-	if !strings.Contains(string(indexData), `rel="apple-touch-icon" href="__LCMD_ASSET_BASE__icon-192.png"`) {
-		t.Fatal("PWA Apple touch icon link is missing")
-	}
-	if strings.Contains(string(indexData), `./static/`) {
-		t.Fatal("runtime index must not reference the legacy unversioned static path")
-	}
-	manifestData, err := readRuntimeSource("runtime/static/manifest.webmanifest")
-	if err != nil {
-		t.Fatalf("ReadFile(manifest.webmanifest) error = %v", err)
-	}
-	for _, want := range []string{`"icon-192.png"`, `"icon-512.png"`, `"display": "standalone"`} {
-		if !strings.Contains(string(manifestData), want) {
-			t.Fatalf("PWA manifest guard missing %q", want)
-		}
-	}
-	for _, path := range []string{"runtime/static/icon-192.png", "runtime/static/icon-512.png"} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("PWA icon %s is unavailable: %v", path, err)
-		}
-	}
-	if !strings.Contains(string(styleData), ".terminal-cache-preview") {
-		t.Fatal("terminal cache preview layer CSS is missing")
-	}
-	historyRangeIndex := strings.Index(mainSource, `const historyConnectRange = terminalReplay.rangeForConnect(session);`)
-	warmStartIndex := strings.Index(mainSource, `const cacheV2WarmReplayStarted = cacheV2WarmSnapshot`)
-	fastSocketStartIndex := strings.Index(mainSource, `currentSocket = new WebSocket(socketUrl.toString());`)
-	multiplexedSocketStartIndex := strings.Index(mainSource, `currentSocket = multiplexedConnection.open({`)
-	if historyRangeIndex < 0 || warmStartIndex < 0 || fastSocketStartIndex < 0 || multiplexedSocketStartIndex < 0 || historyRangeIndex > warmStartIndex || warmStartIndex > fastSocketStartIndex || warmStartIndex > multiplexedSocketStartIndex {
-		t.Fatal("cache-v2 byte replay must start from the validated local range before WebSocket construction")
-	}
-	cacheV2ReplayBlock := sourceBetween(t, mainSource,
-		`} else if (historyConnectRange.source === "cache-v2") {`,
-		"} else {\n                    rejectHistorySync(\"unknown local history source\");")
-	for _, want := range []string{
-		`if (terminalCache.warmReplayMatchesSnapshot(session, snapshot)) {`,
-		`terminalReplay.setAuthorization(session, "identified");`,
-		`} else {`,
-		`terminalCache.beginReplay(session, snapshot, deltaFromCursor, currentSocket, rejectHistorySync);`,
-	} {
-		if !strings.Contains(cacheV2ReplayBlock, want) {
-			t.Fatalf("cache-v2 warm delta reuse guard missing %q", want)
-		}
-	}
-	snapshotReplayBlock := sourceBetween(t, mainSource,
+		`const historyConnectRange = isClientInstanceName(session.name)`,
+		`? terminalReplay.rangeForConnect(session)`,
+		`workspace_generation: isClientInstanceName(session.name) ? "" : session.workspaceGeneration`,
 		`if (syncMode === "snapshot") {`,
-		`} else {
-                  if (!historyConnectRange`)
-	for _, want := range []string{
-		`const keepWarmState = Boolean(`,
-		`terminalCache.warmReplayMatchesSnapshot(session, snapshot)`,
-		`snapshot.historyGeneration === historyGeneration`,
-		`snapshot.endCursor <= serverEndCursor`,
-		`const stageServerSnapshot = keepWarmState || session.hasPresentedFrame;`,
-		`session.cacheV2ServerSnapshotPending = true;`,
+		`if (!resetTerminalForHistoryReplay(session)) {`,
+		`clientHistory.resetSession(session, historyGeneration, deltaFromCursor);`,
+		`session.replayCompletionPending = true;`,
 	} {
-		if !strings.Contains(snapshotReplayBlock, want) {
-			t.Fatalf("snapshot staged-state guard missing %q", want)
+		if !strings.Contains(protocolSource, want) {
+			t.Fatalf("snapshot-only transport guard missing %q", want)
 		}
 	}
-	completeReplayBlock := sourceBetween(t, mainSource,
-		`case "history-replay-complete":`,
-		`case "agent-preparing":`)
-	if !strings.Contains(completeReplayBlock, `terminalCache.applyServerSnapshot(session, currentSocket, rejectHistorySync);`) {
-		t.Fatal("completed server snapshot must atomically replace the staged terminal state")
-	}
-	warmReplayBlock := string(cacheReplayData)
-	for _, want := range []string{
-		`const runWarmReplay = (session, snapshot) => {`,
-		`const startWarmReplay = (session, snapshot) => {`,
-		`cacheV2.readChunks(snapshot`,
-		`flushOutput(session, { force: true });`,
-		`session.cacheV2WarmReplayReady = true;`,
-		`markRecoveryMetric(session, "localReplayCompleteAt");`,
-		`if (!session.cacheV2ServerSnapshotPending) {`,
-		`drainNetworkQueue(session);`,
-	} {
-		if !strings.Contains(warmReplayBlock, want) {
-			t.Fatalf("warm byte replay guard missing %q", want)
+	for _, forbidden := range []string{"cache_protocol_version", "cacheV2", "warmReplay", "showLocalPreview", "applyServerSnapshot", "local_base_cursor: historyConnectRange", "local_end_cursor: historyConnectRange", "history_generation: historyConnectRange"} {
+		if strings.Contains(protocolSource, forbidden) {
+			t.Fatalf("container transport still contains removed cache path %q", forbidden)
 		}
 	}
-	for _, forbidden := range []string{
-		`batchEnd`,
-		`cacheV2WarmFrameReady`,
-		`terminalHasVisibleContent`,
-		`localFirstFrameAt`,
-		`terminalPresentation.renderFullNow(session);`,
-		`warm canvas`,
-	} {
-		if strings.Contains(warmReplayBlock, forbidden) {
-			t.Fatalf("warm byte replay must stay hidden and unrendered, found %q", forbidden)
-		}
-	}
-	presentationSource := string(presentationControllerData)
-	if !strings.Contains(presentationSource, `&& isReplayCommitted(session)`) ||
-		!strings.Contains(presentationSource, `|| !renderAllowed(session)`) {
-		t.Fatal("completed replay presentation guard must reject uncommitted replay state")
-	}
-	inputReadyBlock := sourceBetween(t, readRuntimeInputSource(t),
-		"const isReady = (session) => Boolean(",
-		"const isGeneratedReady = (session) => isReady(session);")
-	if !strings.Contains(inputReadyBlock, `isReplayCommitted(session)`) ||
-		strings.Contains(inputReadyBlock, `session.renderReady`) ||
-		strings.Contains(inputReadyBlock, `cacheV2WarmReplayReady`) {
-		t.Fatal("terminal input readiness must not depend on the presentation frame")
-	}
-	prepareCacheBlock := sourceBetween(t, mainSource,
-		"const prepareSession = async (session) => {",
-		"const schedulePreviewCapture = (session, { immediate = false } = {}) => {")
-	failWarmReplayBlock := string(cacheReplayData)
-	for _, want := range []string{
-		`beginPresentationHold(session);`,
-		`disableSession(session, error);`,
-		`noteReplayFailure(session, error?.message || "local_cache_replay_failed")`,
-	} {
-		if !strings.Contains(failWarmReplayBlock, want) {
-			t.Fatalf("cache warm failure fallback missing %q", want)
-		}
-	}
-	queueAckResetBlock := sourceBetween(t, mainSource,
-		"session.replayComplete = false;",
-		"if (!cacheV2WarmReplayStarted) {")
-	if !strings.Contains(queueAckResetBlock, `terminalOutput?.resetQueueTurn(session);`) {
-		t.Fatal("queue ACK boundary reset must delegate to the terminal output controller")
-	}
-	if strings.Contains(prepareCacheBlock, `preparePreview(session, snapshot)`) {
-		t.Fatal("container startup must replay cached bytes instead of waiting on a visual preview")
-	}
-	overviewBlock := string(overviewControllerData)
-	for _, want := range []string{
-		`const historyGeneration = String(pane?.historyGeneration || "").trim();`,
-		`const expected = cacheIdentityFor(pane, historyGeneration);`,
-		`cache?.identityMatches?.(expected, snapshot, { requireHistory: Boolean(historyGeneration) })`,
-	} {
-		if !strings.Contains(overviewBlock, want) {
-			t.Fatalf("tab overview cache preview guard missing %q", want)
-		}
-	}
-	if strings.Contains(overviewBlock, `if (!historyGeneration || !sessionUsesTerminalCacheV2(pane))`) {
-		t.Fatal("cold-start overview preview must load the pane manifest before hidden panes receive a history generation")
-	}
-	drawOverviewBlock := string(overviewControllerData)
-	for _, want := range []string{
-		`const liveFrame = pane?.renderReady && pane?.hasPresentedFrame ? liveCanvas : null;`,
-		`const heldFrame = isFrameHoldCurrent(pane) ? pane.terminalFrameHold : null;`,
-		`pane?.tabId === activeTabId`,
-		`liveFrame || cachedPreview || heldFrame`,
-		`cachedPreview || heldFrame || (!canUseCache(pane) ? liveFrame : null)`,
-		`sessionCacheV2OverviewPreviewMatches(pane, prepared)`,
-	} {
-		if !strings.Contains(drawOverviewBlock, want) {
-			t.Fatalf("tab overview must use an identity-checked cached preview for unopened tabs: missing %q", want)
-		}
-	}
-
-	metricsSource := string(metricsData)
-	fontAdapters := []struct {
-		start      string
-		end        string
-		fontUpdate string
-	}{
-		{
-			start:      `  const applyFontFamily = (value) => {`,
-			end:        `  const applyFontSize = (value) => {`,
-			fontUpdate: `session.term.options.fontFamily = fontFamily;`,
-		},
-		{
-			start:      `  const applyFontSize = (value) => {`,
-			end:        `  const applyScrollbackChange = (previousValue, nextValue) => {`,
-			fontUpdate: `session.term.options.fontSize = value;`,
-		},
-	}
-	for _, adapter := range fontAdapters {
-		body := sourceBetween(t, metricsSource, adapter.start, adapter.end)
-		holdIndex := strings.Index(body, `getPresentation()?.beginHold?.(session);`)
-		fontIndex := strings.Index(body, adapter.fontUpdate)
-		if holdIndex < 0 || fontIndex < 0 || holdIndex > fontIndex {
-			t.Fatalf("font changes must hold the prior terminal frame before updating Ghostty options")
-		}
-		if strings.Contains(adapter.start, "FontSize") {
-			for _, want := range []string{
-				`const metricsGeneration = Number(session.fontMetricsGeneration || 0) + 1;`,
-				`windowObject?.requestAnimationFrame?.(callback)`,
-				`const retries = [`,
-				`{ kind: "timeout", delay: 240, forceSizeSync: true },`,
-				`schedule(next.kind, next.delay, next.forceSizeSync,`,
-			} {
-				if !strings.Contains(metricsSource, want) {
-					t.Fatalf("font resize stabilization guard missing %q", want)
-				}
-			}
-		}
+	if strings.Contains(indexSource, `rel="manifest"`) || strings.Contains(indexSource, `apple-touch-icon`) {
+		t.Fatal("runtime index must not advertise PWA assets")
 	}
 	for _, want := range []string{
-		`onTerminalFontFamilyChange: (fontFamily) => terminalMetrics?.applyFontFamily(fontFamily),`,
-		`onTerminalFontSizeChange: (fontSize) => terminalMetrics?.applyFontSize(fontSize),`,
+		`legacyTerminalCacheName = "lcmd-webshell-terminal-v2"`,
+		`legacyAppShellCachePrefix = "lcmd-webshell-app-shell-"`,
+		`return url.href === expectedScriptURL.href;`,
+		`registration.unregister()`,
+		`cacheStorage.delete(name)`,
 	} {
-		if !strings.Contains(mainSource, want) {
-			t.Fatalf("settings must delegate live font adaptation to terminal metrics: missing %q", want)
+		if !strings.Contains(cleanupSource, want) {
+			t.Fatalf("legacy PWA cleanup guard missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"createAppServiceWorkerController", "serviceWorkerController.register", "createTerminalCacheV2"} {
+		if strings.Contains(mainSource, forbidden) {
+			t.Fatalf("removed PWA/Cache API runtime returned: %q", forbidden)
 		}
 	}
 }
@@ -3678,7 +2718,6 @@ func TestRuntimeSettingsModuleBoundary(t *testing.T) {
 	shortcutEditorSource := read("runtime/static/settings/shortcut_editor.js")
 	metricsSource := read("runtime/static/terminal/metrics/metrics_controller.js")
 	readmeSource := read("runtime/static/settings/README.md")
-	serviceWorkerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`from "./settings/index.js";`,
@@ -3839,20 +2878,6 @@ func TestRuntimeSettingsModuleBoundary(t *testing.T) {
 			t.Fatalf("settings README missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`${assetBase}settings/index.js`,
-		`${assetBase}settings/settings_controller.js`,
-		`${assetBase}settings/settings_api.js`,
-		`${assetBase}settings/settings_model.js`,
-		`${assetBase}settings/settings_view.js`,
-		`${assetBase}settings/settings_lifecycle.js`,
-		`${assetBase}settings/font_registry.js`,
-		`${assetBase}settings/shortcut_editor.js`,
-	} {
-		if !strings.Contains(serviceWorkerSource, want) {
-			t.Fatalf("service worker settings app-shell guard missing %q", want)
-		}
-	}
 
 	fontFamilyAdapter := sourceBetween(t, metricsSource,
 		`  const applyFontFamily = (value) => {`,
@@ -3901,7 +2926,6 @@ func TestRuntimeTerminalSessionModuleBoundary(t *testing.T) {
 	tabControllerSource := read("runtime/static/workspace/tab_controller.js")
 	readmeSource := read("runtime/static/terminal/session/README.md")
 	terminalReadmeSource := read("runtime/static/terminal/README.md")
-	serviceWorkerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`createTerminalSessionController,`,
@@ -3915,7 +2939,7 @@ func TestRuntimeTerminalSessionModuleBoundary(t *testing.T) {
 		"terminalSessionController = createTerminalSessionController({",
 		"createResources: terminalSessionResources.create,",
 		"detachLogicalStream: (session, reason) => terminalTransportRuntime?.detachUnifiedSession(session, reason),",
-		"disposeHistoryCache: (session) => terminalCache.disposeSession(session),",
+		"disposeHistoryCache: (session) => clientHistory.disposeSession(session),",
 		"unregisterConnection: (session, reason) => terminalTransportRuntime?.unregisterSession(session, reason),",
 		"terminalSessionInstallation = createTerminalSessionInstallationController({",
 		"onReady: (session, details) => terminalSessionInstallation?.handlePresentationReady(session, details),",
@@ -3984,9 +3008,6 @@ func TestRuntimeTerminalSessionModuleBoundary(t *testing.T) {
 		"transportRuntime?.registerSession",
 		"transportRuntime?.connectPendingSession",
 		"const handlePresentationReady = (session, { becameReady = false } = {}) => {",
-		"cache?.hidePreview?.(session);",
-		"cache?.clearPreparedPreview?.(session);",
-		"cache?.schedulePreviewCapture?.(session);",
 		"clearUnifiedRetry(session, { resetAttempts: true });",
 	} {
 		if !strings.Contains(installationSource, want) {
@@ -4103,7 +3124,6 @@ func TestRuntimeTerminalSessionModuleBoundary(t *testing.T) {
 		"FitAddonCtor",
 		"shellEl.dataset.renderReady = \"false\";",
 		"term.open(terminalHost);",
-		"terminalPreview.className = \"terminal-cache-preview\";",
 		"terminalFrameHold.className = \"terminal-frame-hold\";",
 		"compositionPreview.className = \"terminal-composition-preview\";",
 		"return Object.freeze({ create });",
@@ -4137,7 +3157,6 @@ func TestRuntimeTerminalSessionModuleBoundary(t *testing.T) {
 		"pendingConnect: Boolean(connect),",
 		"replayController: new TerminalReplayController(),",
 		"historyCacheWriteQueue: [],",
-		"cacheV2NetworkQueue: [],",
 		"pendingInput: [],",
 		"outputQueue: [],",
 		"...createTerminalPresentationState(),",
@@ -4228,22 +3247,7 @@ func TestRuntimeTerminalSessionModuleBoundary(t *testing.T) {
 			t.Fatalf("terminal README missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`${assetBase}terminal/session/index.js`,
-		`${assetBase}terminal/session/resource_factory.js`,
-		`${assetBase}terminal/session/session_controller.js`,
-		`${assetBase}terminal/session/session_lifecycle.js`,
-		`${assetBase}terminal/session/session_state.js`,
-		`${assetBase}terminal/session/session_installation_controller.js`,
-		`${assetBase}terminal/session/session_installation_lifecycle.js`,
-		`${assetBase}terminal/session/startup_error_api.js`,
-		`${assetBase}terminal/session/startup_error_controller.js`,
-		`${assetBase}terminal/session/startup_error_lifecycle.js`,
-	} {
-		if !strings.Contains(serviceWorkerSource, want) {
-			t.Fatalf("service worker terminal session app-shell guard missing %q", want)
-		}
-	}
+
 }
 
 func TestRuntimeStaticModulesAreGroupedByResponsibility(t *testing.T) {
@@ -4257,7 +3261,7 @@ func TestRuntimeStaticModulesAreGroupedByResponsibility(t *testing.T) {
 	}
 
 	mainSource := read("runtime/static/global-runtime.js")
-	workerSource := read("runtime/static/service-worker.js")
+
 	indexHTML := read("runtime/static/index.html")
 
 	for _, path := range []string{
@@ -4369,24 +3373,6 @@ func TestRuntimeStaticModulesAreGroupedByResponsibility(t *testing.T) {
 		}
 	}
 
-	for _, want := range []string{
-		`${assetBase}workspace/index.js`,
-		`${assetBase}terminal/history/index.js`,
-		`${assetBase}terminal/transport/index.js`,
-		`${assetBase}terminal/rendering/index.js`,
-		`${assetBase}terminal/resize/index.js`,
-		`${assetBase}terminal/viewport/index.js`,
-		`${assetBase}terminal/input/index.js`,
-		`${assetBase}terminal/overview/index.js`,
-		`${assetBase}terminal/screenshot/index.js`,
-		`${assetBase}terminal/tui_adapters/index.js`,
-		`${assetBase}terminal/input/ime/ios_terminal_host.js`,
-		`${assetBase}appearance/themes.json`,
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker grouped module path missing %q", want)
-		}
-	}
 	if !strings.Contains(indexHTML, `__LCMD_ASSET_BASE__terminal/input/ime/ios_terminal_host.js`) {
 		t.Fatal("runtime HTML must load the grouped iOS terminal host path")
 	}
@@ -4413,7 +3399,6 @@ func TestRuntimeTerminalInputModuleBoundary(t *testing.T) {
 	keyOverridesSource := read("runtime/static/terminal/input/key_overrides/key_overrides_controller.js")
 	keyOverridesIndexSource := read("runtime/static/terminal/input/key_overrides/index.js")
 	readmeSource := read("runtime/static/terminal/input/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`createTerminalInputController,`,
@@ -4571,18 +3556,6 @@ func TestRuntimeTerminalInputModuleBoundary(t *testing.T) {
 		}
 	}
 
-	for _, want := range []string{
-		`${assetBase}terminal/input/index.js`,
-		`${assetBase}terminal/input/input_controller.js`,
-		`${assetBase}terminal/input/input_lifecycle.js`,
-		`${assetBase}terminal/input/input_model.js`,
-		`${assetBase}terminal/input/key_overrides/index.js`,
-		`${assetBase}terminal/input/key_overrides/key_overrides_controller.js`,
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker terminal input app-shell guard missing %q", want)
-		}
-	}
 }
 
 func TestRuntimeTerminalMobileShortcutsModuleBoundary(t *testing.T) {
@@ -4600,7 +3573,6 @@ func TestRuntimeTerminalMobileShortcutsModuleBoundary(t *testing.T) {
 	controllerSource := read("runtime/static/terminal/input/mobile_shortcuts/mobile_shortcuts_controller.js")
 	lifecycleSource := read("runtime/static/terminal/input/mobile_shortcuts/mobile_shortcuts_lifecycle.js")
 	readmeSource := read("runtime/static/terminal/input/mobile_shortcuts/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`createMobileShortcutsController,`,
@@ -4686,15 +3658,7 @@ func TestRuntimeTerminalMobileShortcutsModuleBoundary(t *testing.T) {
 			t.Fatalf("mobile shortcuts README missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`${assetBase}terminal/input/mobile_shortcuts/index.js`,
-		`${assetBase}terminal/input/mobile_shortcuts/mobile_shortcuts_controller.js`,
-		`${assetBase}terminal/input/mobile_shortcuts/mobile_shortcuts_lifecycle.js`,
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker mobile shortcuts asset missing %q", want)
-		}
-	}
+
 }
 
 func TestRuntimeTerminalOutputModuleBoundary(t *testing.T) {
@@ -4719,7 +3683,6 @@ func TestRuntimeTerminalOutputModuleBoundary(t *testing.T) {
 	readmeSource := read("runtime/static/terminal/output/README.md")
 	resizeSource := read("runtime/static/terminal/resize/resize_controller.js")
 	sessionLifecycleSource := read("runtime/static/terminal/session/session_lifecycle.js")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`createTerminalOutputController,`,
@@ -4838,16 +3801,7 @@ func TestRuntimeTerminalOutputModuleBoundary(t *testing.T) {
 			t.Fatalf("terminal output README missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`${assetBase}terminal/output/index.js`,
-		`${assetBase}terminal/output/output_controller.js`,
-		`${assetBase}terminal/output/output_lifecycle.js`,
-		`${assetBase}terminal/output/output_model.js`,
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker terminal output app-shell guard missing %q", want)
-		}
-	}
+
 }
 
 func TestRuntimeTerminalViewportModuleBoundary(t *testing.T) {
@@ -4866,7 +3820,6 @@ func TestRuntimeTerminalViewportModuleBoundary(t *testing.T) {
 	lifecycleSource := read("runtime/static/terminal/viewport/viewport_lifecycle.js")
 	modelSource := read("runtime/static/terminal/viewport/viewport_model.js")
 	readmeSource := read("runtime/static/terminal/viewport/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`import { createTerminalMobileViewportController } from "./terminal/viewport/index.js";`,
@@ -4993,16 +3946,6 @@ func TestRuntimeTerminalViewportModuleBoundary(t *testing.T) {
 		}
 	}
 
-	for _, want := range []string{
-		`${assetBase}terminal/viewport/index.js`,
-		`${assetBase}terminal/viewport/viewport_controller.js`,
-		`${assetBase}terminal/viewport/viewport_lifecycle.js`,
-		`${assetBase}terminal/viewport/viewport_model.js`,
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker terminal viewport app-shell guard missing %q", want)
-		}
-	}
 }
 
 func TestRuntimeTerminalOverviewModuleBoundary(t *testing.T) {
@@ -5022,24 +3965,18 @@ func TestRuntimeTerminalOverviewModuleBoundary(t *testing.T) {
 	controllerSource := read("runtime/static/terminal/overview/overview_controller.js")
 	lifecycleSource := read("runtime/static/terminal/overview/overview_lifecycle.js")
 	viewSource := read("runtime/static/terminal/overview/overview_view.js")
-	previewSource := read("runtime/static/terminal/overview/terminal_overview_preview.js")
 	readmeSource := read("runtime/static/terminal/overview/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`import { createTerminalOverviewController } from "./terminal/overview/index.js";`,
 		`terminalOverview = createTerminalOverviewController({`,
-		`getTabs: () => tabs.values(),`,
 		`getOrderedTabs,`,
 		`getActiveTabId,`,
-		`canUseCache: terminalCache.usesV2,`,
-		`cacheIdentityFor: terminalCache.identity,`,
 		`isFrameHoldCurrent: (session) => terminalPresentation.frameHoldIsCurrent(session),`,
 		`moveTab: (tabId, position) => moveTab(tabId, position),`,
 		`terminalOverview,`,
 		`terminalOverview?.dispose();`,
 		`scheduleOverviewRender: () => terminalOverview?.scheduleRender(),`,
-		`clearOverviewPreview: (session) => terminalOverview?.clearSessionPreview(session),`,
 		`openOverview: () => terminalOverview?.open(),`,
 		`terminalOverview?.close();`,
 		`terminalOverview?.isOpen() === true`,
@@ -5070,7 +4007,6 @@ func TestRuntimeTerminalOverviewModuleBoundary(t *testing.T) {
 		`export { createTerminalOverviewController } from "./overview_controller.js";`,
 		`export { createTerminalOverviewLifecycle } from "./overview_lifecycle.js";`,
 		`export { createTerminalOverviewView } from "./overview_view.js";`,
-		`export * from "./terminal_overview_preview.js";`,
 	} {
 		if !strings.Contains(indexSource, want) {
 			t.Fatalf("terminal overview public entry missing %q", want)
@@ -5080,9 +4016,11 @@ func TestRuntimeTerminalOverviewModuleBoundary(t *testing.T) {
 	for _, want := range []string{
 		`let tabOverviewDragState = null;`,
 		`let mobileOverviewEdgeSwipe = null;`,
-		`const scheduleWorkspaceTabOverviewCachePreviews = () => {`,
-		`const loadPaneTabOverviewPreviewManifest = async (pane) => {`,
 		`const renderTabOverview = () => measureTask("tab overview render", () => {`,
+		`const paneOverviewSource = (pane) => {`,
+		`const liveFrame = pane?.renderReady && pane?.hasPresentedFrame ? liveCanvas : null;`,
+		`const heldFrame = isFrameHoldCurrent(pane) ? pane.terminalFrameHold : null;`,
+		`return liveFrame || heldFrame;`,
 		`const moveTabToOverviewIndex = async`,
 		`const animateTabOverviewReorder = (beforeRects) => {`,
 		`const updateTabOverviewDragAutoScroll = (state) => {`,
@@ -5090,7 +4028,6 @@ func TestRuntimeTerminalOverviewModuleBoundary(t *testing.T) {
 		`const openTabOverviewFromHistoryBack = () => {`,
 		`const handleMobileOverviewEdgeSwipeStart = (event) => {`,
 		`const handleMobileOverviewEdgeSwipeMove = (event) => {`,
-		`overviewPreviewController.clear?.(pane);`,
 		`lifecycle.dispose?.();`,
 	} {
 		if !strings.Contains(controllerSource, want) {
@@ -5134,16 +4071,6 @@ func TestRuntimeTerminalOverviewModuleBoundary(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		`(currentHistoryGeneration && currentHistoryGeneration !== String(snapshot.historyGeneration || "").trim())`,
-		`this.cache.identityMatches(expected, prepared.identity, { requireHistory: true })`,
-		`image?.close?.();`,
-	} {
-		if !strings.Contains(previewSource, want) {
-			t.Fatalf("terminal overview preview identity guard missing %q", want)
-		}
-	}
-
-	for _, want := range []string{
 		"## 职责",
 		"## 公开入口与契约",
 		"## 状态所有权",
@@ -5157,17 +4084,7 @@ func TestRuntimeTerminalOverviewModuleBoundary(t *testing.T) {
 			t.Fatalf("terminal overview README missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`${assetBase}terminal/overview/index.js`,
-		`${assetBase}terminal/overview/overview_controller.js`,
-		`${assetBase}terminal/overview/overview_lifecycle.js`,
-		`${assetBase}terminal/overview/overview_view.js`,
-		`${assetBase}terminal/overview/terminal_overview_preview.js`,
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker terminal overview app-shell guard missing %q", want)
-		}
-	}
+
 }
 
 func sourceBetween(t *testing.T, source, start, end string) string {
@@ -5280,10 +4197,7 @@ func TestRuntimeShowsClientSettingsOnlyInIndependentClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(runtime/static/style.css) error = %v", err)
 	}
-	workerData, err := readRuntimeSource("runtime/static/service-worker.js")
-	if err != nil {
-		t.Fatalf("ReadFile(runtime/static/service-worker.js) error = %v", err)
-	}
+
 	bridgeData, err := readRuntimeSource("runtime/static/vendor/lzc-mobile-bridge-0.0.2.js")
 	if err != nil {
 		t.Fatalf("ReadFile(lzc-mobile-bridge) error = %v", err)
@@ -5326,9 +4240,7 @@ func TestRuntimeShowsClientSettingsOnlyInIndependentClient(t *testing.T) {
 	if !strings.Contains(string(styleData), `.instance-switcher-action[hidden]`) {
 		t.Fatal("hidden client settings entry must stay out of the switcher layout")
 	}
-	if !strings.Contains(string(workerData), `${assetBase}vendor/lzc-mobile-bridge-0.0.2.js`) {
-		t.Fatal("service worker must cache the mobile bridge module with the app shell")
-	}
+
 	if !strings.Contains(string(bridgeData), `isIndependentClient: "IsIndependentClient"`) ||
 		!strings.Contains(string(bridgeData), `openConfigurationPage: "OpenConfigurationPage"`) {
 		t.Fatal("vendored lzc-mobile-bridge must expose client configuration methods")
@@ -5464,10 +4376,6 @@ func TestRuntimeDeviceManagementStaticGuards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(runtime/static/devices/README.md) error = %v", err)
 	}
-	serviceWorkerData, err := readRuntimeSource("runtime/static/service-worker.js")
-	if err != nil {
-		t.Fatalf("ReadFile(runtime/static/service-worker.js) error = %v", err)
-	}
 
 	mainSource := string(mainData) + "\n" + readRuntimeBootstrapSource(t)
 	for _, want := range []string{
@@ -5589,18 +4497,6 @@ func TestRuntimeDeviceManagementStaticGuards(t *testing.T) {
 	} {
 		if !strings.Contains(string(readmeData), want) {
 			t.Fatalf("devices README missing %q", want)
-		}
-	}
-	for _, want := range []string{
-		`${assetBase}devices/index.js`,
-		`${assetBase}devices/devices_api.js`,
-		`${assetBase}devices/devices_controller.js`,
-		`${assetBase}devices/devices_lifecycle.js`,
-		`${assetBase}devices/devices_model.js`,
-		`${assetBase}devices/devices_view.js`,
-	} {
-		if !strings.Contains(string(serviceWorkerData), want) {
-			t.Fatalf("service worker devices app-shell guard missing %q", want)
 		}
 	}
 
@@ -6260,10 +5156,6 @@ func TestRuntimeAttachmentsModuleBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(runtime/static/attachments/README.md) error = %v", err)
 	}
-	serviceWorkerData, err := readRuntimeSource("runtime/static/service-worker.js")
-	if err != nil {
-		t.Fatalf("ReadFile(runtime/static/service-worker.js) error = %v", err)
-	}
 
 	mainSource := string(mainData) + "\n" + readRuntimeBootstrapSource(t)
 	for _, want := range []string{
@@ -6346,19 +5238,6 @@ func TestRuntimeAttachmentsModuleBoundary(t *testing.T) {
 	} {
 		if !strings.Contains(string(readmeData), want) {
 			t.Fatalf("attachments README missing %q", want)
-		}
-	}
-	for _, want := range []string{
-		`${assetBase}attachments/index.js`,
-		`${assetBase}attachments/attachments_api.js`,
-		`${assetBase}attachments/attachments_clipboard.js`,
-		`${assetBase}attachments/attachments_controller.js`,
-		`${assetBase}attachments/attachments_lifecycle.js`,
-		`${assetBase}attachments/attachments_model.js`,
-		`${assetBase}attachments/attachments_view.js`,
-	} {
-		if !strings.Contains(string(serviceWorkerData), want) {
-			t.Fatalf("service worker attachments app-shell guard missing %q", want)
 		}
 	}
 
@@ -6703,24 +5582,19 @@ func TestRuntimeTouchKeyboardFocusPrecedesTouchConsumers(t *testing.T) {
 		t.Fatal("runtime touch keyboard focus must run before cancelling the Android touchend default action")
 	}
 }
-func TestRuntimeAndroidKeyboardFocusStaysAboveCachedFrame(t *testing.T) {
-	mainSource := readRuntimeSources(t, "runtime/static/global-runtime.js")
-	resourceSource := readRuntimeSources(t, "runtime/static/terminal/session/resource_factory.js")
+func TestRuntimeAndroidKeyboardFocusStaysAboveTerminalLayers(t *testing.T) {
 	imeSource := readRuntimeIMESource(t)
 	styleSource := readRuntimeSources(t, "runtime/static/style.css")
 	rendererSource := readRuntimeSources(t, "runtime/static/ghostty-web.js")
 
 	if !strings.Contains(imeSource, `textarea.style.zIndex = "3";`) {
-		t.Fatal("terminal helper textarea must stay above cached frame layers")
-	}
-	if !strings.Contains(mainSource+"\n"+resourceSource, `terminalPreview.className = "terminal-cache-preview"`) {
-		t.Fatal("terminal cache preview element is missing")
+		t.Fatal("terminal helper textarea must stay above terminal presentation layers")
 	}
 	for _, want := range []string{
 		`.terminal-host textarea {`,
 		`position: absolute;`,
 		`z-index: 3;`,
-		`.terminal-cache-preview,`,
+		`.terminal-frame-hold {`,
 		`z-index: 1;`,
 		`.terminal-composition-preview {`,
 		`z-index: 2;`,
@@ -7057,7 +5931,6 @@ func TestRuntimeTerminalRendererAdapterModuleBoundary(t *testing.T) {
 	indexSource := read("runtime/static/terminal/rendering/index.js")
 	adapterSource := read("runtime/static/terminal/rendering/renderer_adapter.js")
 	readmeSource := read("runtime/static/terminal/rendering/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`export { createTerminalRendererAdapter } from "./renderer_adapter.js";`,
@@ -7113,9 +5986,7 @@ func TestRuntimeTerminalRendererAdapterModuleBoundary(t *testing.T) {
 			t.Fatalf("terminal rendering README missing %q", want)
 		}
 	}
-	if !strings.Contains(workerSource, `${assetBase}terminal/rendering/renderer_adapter.js`) {
-		t.Fatal("service worker must precache the terminal renderer adapter")
-	}
+
 }
 
 func TestTerminalRuntimeControllerBehavior(t *testing.T) {
@@ -7144,7 +6015,6 @@ func TestRuntimeTerminalRuntimeModuleBoundary(t *testing.T) {
 	indexSource := read("runtime/static/terminal/rendering/index.js")
 	controllerSource := read("runtime/static/terminal/rendering/runtime_controller.js")
 	readmeSource := read("runtime/static/terminal/rendering/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`export { createTerminalRuntimeController } from "./runtime_controller.js";`,
@@ -7207,9 +6077,7 @@ func TestRuntimeTerminalRuntimeModuleBoundary(t *testing.T) {
 			t.Fatalf("terminal rendering README runtime boundary missing %q", want)
 		}
 	}
-	if !strings.Contains(workerSource, `${assetBase}terminal/rendering/runtime_controller.js`) {
-		t.Fatal("service worker must precache the terminal runtime controller")
-	}
+
 }
 
 func TestRuntimeTerminalPresentationModuleBoundary(t *testing.T) {
@@ -7232,7 +6100,6 @@ func TestRuntimeTerminalPresentationModuleBoundary(t *testing.T) {
 	viewSource := read("runtime/static/terminal/rendering/presentation_view.js")
 	readmeSource := read("runtime/static/terminal/rendering/README.md")
 	sessionStateSource := read("runtime/static/terminal/session/session_state.js")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`export { createTerminalPresentationController } from "./presentation_controller.js";`,
@@ -7357,16 +6224,7 @@ func TestRuntimeTerminalPresentationModuleBoundary(t *testing.T) {
 			t.Fatalf("terminal rendering README presentation boundary missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`${assetBase}terminal/rendering/presentation_controller.js`,
-		`${assetBase}terminal/rendering/presentation_lifecycle.js`,
-		`${assetBase}terminal/rendering/presentation_state.js`,
-		`${assetBase}terminal/rendering/presentation_view.js`,
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker terminal presentation asset missing %q", want)
-		}
-	}
+
 }
 
 func TestRuntimeTerminalLineHeightSetting(t *testing.T) {
@@ -7558,7 +6416,7 @@ func TestRuntimeTerminalScrollbackSettingPersistence(t *testing.T) {
 			t.Fatalf("main scrollback adapter guard missing %q", want)
 		}
 	}
-	beforeUnload := sourceBetween(t, mainSource, `onBeforeUnload: (event) => {`, `onStoragePersistenceGesture:`)
+	beforeUnload := sourceBetween(t, mainSource, `onBeforeUnload: (event) => {`, `onHeartbeat:`)
 	if !strings.Contains(beforeUnload, `settings?.flushPending();`) {
 		t.Fatal("beforeunload must flush pending scrollback before any early return")
 	}
@@ -7617,7 +6475,6 @@ func TestRuntimeMobileIMECompositionPreviewVisible(t *testing.T) {
 		`const keep = new Set([`,
 		`session.term?.canvas,`,
 		`session.term?.textarea,`,
-		`session.terminalPreview,`,
 		`session.terminalFrameHold,`,
 		`session.compositionPreview,`,
 		`const scheduleHostViewportReset = (session, options = {}) => {`,
@@ -8084,7 +6941,7 @@ func TestRuntimePersistsWorkspaceForLightOSHomeReload(t *testing.T) {
 		`clearWorkspaceRestoreState();`,
 		`onHeartbeat: () => {`,
 		`heartbeatTimer = windowObject.setInterval`,
-		`terminalCache.touchAll();`,
+		`clientHistory.touchAll();`,
 	} {
 		if !strings.Contains(runtimeSource, want) {
 			t.Fatalf("runtime Lazycat shell reload guard missing %q", want)
@@ -8316,7 +7173,7 @@ func TestRuntimeTerminalOutputBatchingGuard(t *testing.T) {
 	}
 }
 
-func TestRuntimeTerminalHistoryRangeSyncAndCache(t *testing.T) {
+func TestRuntimeClientTerminalHistoryRangeSyncAndIndexedDB(t *testing.T) {
 	mainData, err := readRuntimeSource("runtime/static/global-runtime.js")
 	if err != nil {
 		t.Fatalf("ReadFile(runtime/static/global-runtime.js) error = %v", err)
@@ -8339,7 +7196,7 @@ func TestRuntimeTerminalHistoryRangeSyncAndCache(t *testing.T) {
 	}
 	mainSource := string(mainData) + "\n" + string(protocolData) + "\n" + string(sessionStateData) + "\n" + readRuntimeOutputSource(t)
 	mainSource += "\n" + readRuntimeTerminalConfig(t)
-	mainSource += "\n" + readRuntimeSources(t, "runtime/static/terminal/history/cache_persistence_controller.js")
+	mainSource += "\n" + readRuntimeSources(t, "runtime/static/terminal/history/client_history_controller.js")
 	mainSource += "\n" + readRuntimeSources(t, "runtime/static/workspace/tab_controller.js")
 	cacheSource := string(cacheData)
 	metricsSource := string(metricsData)
@@ -8357,17 +7214,18 @@ func TestRuntimeTerminalHistoryRangeSyncAndCache(t *testing.T) {
 		`socketUrl.searchParams.set("local_base_cursor", historyConnectRange.baseCursor.toString());`,
 		`socketUrl.searchParams.set("local_end_cursor", historyConnectRange.endCursor.toString());`,
 		`const modernHistoryProtocol = Boolean(historyGeneration && syncMode);`,
-		`const historyConnectRange = terminalReplay.rangeForConnect(session);`,
+		`const historyConnectRange = isClientInstanceName(session.name)`,
+		`? terminalReplay.rangeForConnect(session)`,
 		`const trackHistory = kind === "bytes" && state.historyProtocolActive;`,
-		`terminalCache.disableSession(session);`,
+		`clientHistory.disableSession(session);`,
 		`["snapshot", "delta", "current"].includes(syncMode)`,
 		`historyConnectRange.source === "memory"`,
 		`historyConnectRange.source === "cache"`,
 		`queueHistoryCacheWrite(state, data, batch.historyStartCursor, batch.historyEndCursor);`,
 		`postWorkspaceAction("close_pane"`,
 		`.then(() => destroyCachedSession(pane))`,
-		`destroyCachedSession: (pane) => terminalCache.destroySession(pane),`,
-		`terminalCache.flushAll();`,
+		`destroyCachedSession: (pane) => clientHistory.destroySession(pane),`,
+		`clientHistory.flushAll();`,
 	}
 	for _, want := range mainSnippets {
 		if !strings.Contains(mainSource, want) {
@@ -8415,6 +7273,15 @@ func TestRuntimeTerminalHistoryRangeSyncAndCache(t *testing.T) {
 	for _, want := range cacheSnippets {
 		if !strings.Contains(cacheSource, want) {
 			t.Fatalf("runtime terminal history cache guard missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		`history_generation: historyConnectRange`,
+		`local_base_cursor: historyConnectRange`,
+		`local_end_cursor: historyConnectRange`,
+	} {
+		if strings.Contains(string(protocolData), forbidden) {
+			t.Fatalf("ordinary Unified open must not contain a local browser history range: %q", forbidden)
 		}
 	}
 }
@@ -8480,14 +7347,6 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(presentation_view.js) error = %v", err)
 	}
-	cachePersistenceData, err := readRuntimeSource("runtime/static/terminal/history/cache_persistence_controller.js")
-	if err != nil {
-		t.Fatalf("ReadFile(cache_persistence_controller.js) error = %v", err)
-	}
-	cacheSessionLifecycleData, err := readRuntimeSource("runtime/static/terminal/history/cache_session_lifecycle.js")
-	if err != nil {
-		t.Fatalf("ReadFile(cache_session_lifecycle.js) error = %v", err)
-	}
 	resizeSource := readRuntimeResizeSource(t)
 	configSource := readRuntimeTerminalConfig(t)
 	imeSource := readRuntimeIMESource(t)
@@ -8501,8 +7360,6 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	)
 	mainSource := string(mainData)
 	tabActivationSource := readRuntimeSources(t, "runtime/static/workspace/tab_activation_controller.js")
-	cachePersistenceSource := string(cachePersistenceData)
-	cacheSessionLifecycleSource := string(cacheSessionLifecycleData)
 	runtimeSource := strings.Join([]string{
 		mainSource,
 		configSource,
@@ -8902,7 +7759,6 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"const resetHostViewport = (session, { clean = false } = {}) => {",
 		"const scheduleHostViewportReset = (session, options = {}) => {")
 	for _, want := range []string{
-		"session.terminalPreview,",
 		"session.terminalFrameHold,",
 	} {
 		if !strings.Contains(viewportResetBlock, want) {
@@ -8994,7 +7850,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		`selector: String(session?.name || "").trim()`,
 		`tabID: String(session?.tabId || "").trim()`,
 		`paneID: String(session?.id || "").trim()`,
-		`workspaceIdentity: getWorkspaceIdentityKey(session?.cacheV2WorkspaceIdentity)`,
+		`workspaceGeneration: String(session?.workspaceGeneration || "").trim()`,
 		`historyGeneration: String(session?.historyGeneration || "").trim()`,
 		`session.terminalFrameHoldIdentity = frameIdentity(session);`,
 		`session.terminalFrameHoldIdentity = null;`,
@@ -9042,36 +7898,6 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		if !strings.Contains(setReadyBlock, want) {
 			t.Fatalf("render readiness must coordinate delayed held-frame release: missing %q", want)
 		}
-	}
-	previewBlock := sourceBetween(t, cachePersistenceSource,
-		"const sessionHasCurrentPresentedFrame = (session) => {",
-		"const scheduleCompaction = (session) => {")
-	for _, want := range []string{
-		"terminalCacheV2PreviewDelayMs: 3000,",
-		"terminalCacheV2PreviewRefreshMs: 2000,",
-		"const sessionHasCurrentPresentedFrame = (session) => {",
-		"session.hasPresentedFrame !== true",
-		"session.presentedHistoryCursor !== session.appliedHistoryCursor",
-		"if (!sessionHasCurrentPresentedFrame(session)) {",
-		"const renderGeneration = Number(session.renderGeneration || 0);",
-		"Number(session.renderGeneration || 0) !== renderGeneration",
-		"now() - Number(session.lastTerminalOutputAt || 0) < previewDelayMs",
-		"await cacheV2.savePreview(cacheIdentity, session.historyGeneration, cursor, blob, {",
-		"clearOverviewPreview(session);",
-		"scheduleOverviewRender();",
-		"session.cacheV2PreviewCapturePending = true;",
-		"session.cacheV2PreviewCaptureRunning",
-		"session.cacheV2PreviewCapturePending && !session.closed && !disposed",
-	} {
-		if !strings.Contains(previewBlock, want) && !strings.Contains(mainSource, want) && !strings.Contains(cachePersistenceSource, want) && !strings.Contains(configSource, want) {
-			t.Fatalf("cache preview must stay outside the active output render path: missing %q", want)
-		}
-	}
-	if !strings.Contains(cacheSessionLifecycleSource, `windowObject.requestIdleCallback(callback, { timeout: idleTimeoutMs });`) {
-		t.Fatal("cache preview lifecycle must own idle callback scheduling")
-	}
-	if strings.Count(previewBlock, "now() - Number(session.lastTerminalOutputAt || 0) < previewDelayMs") < 2 {
-		t.Fatal("cache preview must recheck terminal output activity before and after image encoding")
 	}
 	if strings.Contains(rendererSource, "this.requestRender({ full: s })") {
 		t.Fatal("terminal writes must not depend on scrollback generation alone for full redraws")
@@ -9124,7 +7950,6 @@ func TestRuntimeOfflineFrameAndWorkspaceRetryGuard(t *testing.T) {
 		"runtime/static/terminal/transport/session_connection_controller.js",
 		"runtime/static/terminal/transport/session_connection_lifecycle.js",
 		"runtime/static/terminal/history/session_replay_controller.js",
-		"runtime/static/terminal/history/cache_replay_controller.js",
 	)
 	for _, want := range []string{
 		"baseDelayMs = 500,",
@@ -9134,11 +7959,10 @@ func TestRuntimeOfflineFrameAndWorkspaceRetryGuard(t *testing.T) {
 		"retryAttempts = Math.min(maxAttempts, retryAttempts + 1);",
 		"schedule(context);",
 		"case \"connection-error\":",
-		"scheduleReconnect(session, { immediate: true });",
+		"scheduleReconnect(session, { immediate: true, allowHidden });",
 		"session.workspaceExitPending = true;",
 		"refreshWorkspaceWithRetry({ focus: shouldFocusAfterExit })",
-		"const stageServerSnapshot = keepWarmState || session.hasPresentedFrame;",
-		"holdPresentationFrame(session);",
+		"terminalPresentation.beginHold(session);",
 		"reconnectWorkspaceSessions({ allowHidden: true });",
 	} {
 		if !strings.Contains(runtimeSource, want) {
@@ -9285,10 +8109,6 @@ func TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard(t *testing.T) 
 	if err != nil {
 		t.Fatalf("ReadFile(transport_runtime_controller.js) error = %v", err)
 	}
-	cachePersistenceData, err := readRuntimeSource("runtime/static/terminal/history/cache_persistence_controller.js")
-	if err != nil {
-		t.Fatalf("ReadFile(cache_persistence_controller.js) error = %v", err)
-	}
 	configData, err := readRuntimeSource("runtime/static/terminal/config/terminal_config.js")
 	if err != nil {
 		t.Fatalf("ReadFile(terminal_config.js) error = %v", err)
@@ -9312,7 +8132,6 @@ func TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard(t *testing.T) 
 		string(sessionConnectionControllerData),
 		string(sessionConnectionLifecycleData),
 		string(transportRuntimeData),
-		string(cachePersistenceData),
 	}, "\n")
 	styleSource := string(styleData)
 	indexSource := string(indexData)
@@ -9344,7 +8163,6 @@ func TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard(t *testing.T) 
 		"appendDebugError(\"终端连接建立失败\"",
 		"session.startupTraceActive = true;",
 		"if (state.startupTraceActive) {",
-		"[preview] PNG capture 完成",
 		"scheduleInitialCheck(callback, delayMs = 1000) {",
 		"initialCheckTimer = windowObject?.setTimeout?.(() => {",
 		"serverRevision.scheduleInitialCheck();",
@@ -9456,7 +8274,6 @@ func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
 	membershipSource := readSource("runtime/static/terminal/transport/terminal_unified_membership.js")
 	queueSource := readSource("runtime/static/terminal/transport/terminal_queue_connection.js")
 	transportReadmeSource := readSource("runtime/static/terminal/transport/README.md")
-	serviceWorkerSource := readSource("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`from "./terminal/transport/index.js";`,
@@ -9590,9 +8407,7 @@ func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
 	if !strings.Contains(transportReadmeSource, "theme_controller.js") {
 		t.Fatal("terminal transport README must document theme controller")
 	}
-	if !strings.Contains(serviceWorkerSource, `${assetBase}terminal/transport/theme_controller.js`) {
-		t.Fatal("service worker terminal theme controller asset missing")
-	}
+
 	for _, want := range []string{
 		"export function createTerminalTransportRuntimeController({",
 		"const membership = createMembership();",
@@ -9779,23 +8594,7 @@ func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
 	if strings.Contains(unifiedTransportSource, "if (state.physicalReadyState === socketOpen) {\n          healthWatchdog?.probe(\"transport_open\");") {
 		t.Fatal("Unified owner must not probe on every OPEN snapshot")
 	}
-	if !strings.Contains(serviceWorkerSource, "terminal_unified_membership.js") {
-		t.Fatal("service worker must precache terminal_unified_membership.js")
-	}
-	for _, want := range []string{
-		`${assetBase}terminal/transport/session_connection_controller.js`,
-		`${assetBase}terminal/transport/session_connection_lifecycle.js`,
-		`${assetBase}terminal/transport/transport_runtime_controller.js`,
-		`${assetBase}terminal/transport/transport_runtime_lifecycle.js`,
-		`${assetBase}terminal/transport/unified_transport_controller.js`,
-	} {
-		if !strings.Contains(serviceWorkerSource, want) {
-			t.Fatalf("service worker terminal session connection asset missing %q", want)
-		}
-	}
-	if strings.Contains(serviceWorkerSource, "terminal_topology_controller.js") {
-		t.Fatal("service worker must not retain the deleted topology controller")
-	}
+
 	for _, want := range []string{
 		"Unified 物理连接、target、close fence、恢复任务和 watchdog 的 owner",
 		"异常断线建立的 close fence 在旧 socket 真正关闭或 fence 超时前不得清除",
@@ -9845,16 +8644,13 @@ func TestRuntimeTerminalNetworkMonitorIsOptIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(runtime/static/style.css) error = %v", err)
 	}
-	serviceWorkerData, err := readRuntimeSource("runtime/static/service-worker.js")
-	if err != nil {
-		t.Fatalf("ReadFile(runtime/static/service-worker.js) error = %v", err)
-	}
+
 	mainSource := string(mainData)
 	monitorSource := string(monitorData)
 	queueSource := string(queueData)
 	indexSource := string(indexData)
 	styleSource := string(styleData)
-	serviceWorkerSource := string(serviceWorkerData)
+
 	diagnosticsSource := strings.Join([]string{string(controllerData), string(lifecycleData), string(viewData)}, "\n")
 	networkContextSource := string(networkContextData)
 
@@ -9919,9 +8715,7 @@ func TestRuntimeTerminalNetworkMonitorIsOptIn(t *testing.T) {
 			t.Fatalf("main.js must only use the diagnostics public entry and must not deep import %q", forbidden)
 		}
 	}
-	if strings.Contains(serviceWorkerSource, "diagnostics/network_monitor.js") {
-		t.Fatal("service worker must not prefetch the opt-in terminal network monitor")
-	}
+
 	for _, want := range []string{
 		"export const terminalNetworkPayloadBytes = (payload) => {",
 		"const renderedChannels = () => currentLayout === \"direct\" ? channels : [];",
@@ -10037,7 +8831,6 @@ func TestRuntimeTerminalMouseTrackingSequences(t *testing.T) {
 	modelSource := read("runtime/static/terminal/mouse/mouse_model.js")
 	lifecycleSource := read("runtime/static/terminal/mouse/mouse_lifecycle.js")
 	readmeSource := read("runtime/static/terminal/mouse/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`import { createTerminalMouseController } from "./terminal/mouse/index.js";`,
@@ -10141,16 +8934,7 @@ func TestRuntimeTerminalMouseTrackingSequences(t *testing.T) {
 			t.Fatalf("terminal mouse README missing %q", want)
 		}
 	}
-	for _, asset := range []string{
-		"terminal/mouse/index.js",
-		"terminal/mouse/mouse_controller.js",
-		"terminal/mouse/mouse_lifecycle.js",
-		"terminal/mouse/mouse_model.js",
-	} {
-		if !strings.Contains(workerSource, asset) {
-			t.Fatalf("service worker terminal mouse asset missing %q", asset)
-		}
-	}
+
 }
 
 func TestRuntimeClaudeFullscreenTouchAdapterIsolation(t *testing.T) {
@@ -11299,22 +10083,16 @@ func TestRuntimeTerminalLongScreenshotContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
 	}
-	workerData, err := readRuntimeSource("runtime/static/service-worker.js")
-	if err != nil {
-		t.Fatalf("ReadFile(runtime/static/service-worker.js) error = %v", err)
-	}
+
 	mainSource := string(mainData)
 	moduleSource := string(moduleData)
 	interactionSource := string(interactionData)
 	shortcutSource := string(shortcutData)
 	indexSource := string(indexData)
-	workerSource := string(workerData)
+
 	contractSource := mainSource + "\n" + moduleSource + "\n" + interactionSource + "\n" + shortcutSource
 	if strings.Contains(indexSource, `class="mobile-shortcuts-brand"`) {
 		t.Fatal("brand text must be screenshot-only, not live footer DOM")
-	}
-	if !strings.Contains(workerSource, "`${assetBase}terminal/screenshot/terminal_long_screenshot.js`,") {
-		t.Fatal("service worker must precache terminal_long_screenshot.js")
 	}
 
 	for _, want := range []string{
@@ -11390,7 +10168,6 @@ func TestRuntimeTerminalInteractionModuleBoundary(t *testing.T) {
 	linkControllerSource := read("runtime/static/terminal/interaction/link_controller.js")
 	linkModelSource := read("runtime/static/terminal/interaction/link_model.js")
 	readmeSource := read("runtime/static/terminal/interaction/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`buildTerminalLogicalLines as buildLogicalLines,`,
@@ -11747,26 +10524,7 @@ func TestRuntimeTerminalInteractionModuleBoundary(t *testing.T) {
 			t.Fatalf("terminal interaction README missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`${assetBase}terminal/interaction/index.js`,
-		`${assetBase}terminal/interaction/context_menu_controller.js`,
-		`${assetBase}terminal/interaction/context_menu_view.js`,
-		`${assetBase}terminal/interaction/interaction_lifecycle.js`,
-		`${assetBase}terminal/interaction/clipboard_adapter.js`,
-		`${assetBase}terminal/interaction/clipboard_controller.js`,
-		`${assetBase}terminal/interaction/clipboard_lifecycle.js`,
-		`${assetBase}terminal/interaction/search_controller.js`,
-		`${assetBase}terminal/interaction/search_lifecycle.js`,
-		`${assetBase}terminal/interaction/search_model.js`,
-		`${assetBase}terminal/interaction/search_view.js`,
-		`${assetBase}terminal/interaction/terminal_text_model.js`,
-		`${assetBase}terminal/interaction/link_controller.js`,
-		`${assetBase}terminal/interaction/link_model.js`,
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker terminal interaction asset missing %q", want)
-		}
-	}
+
 }
 
 func TestRuntimeTerminalSelectionModuleBoundary(t *testing.T) {
@@ -11791,7 +10549,6 @@ func TestRuntimeTerminalSelectionModuleBoundary(t *testing.T) {
 	sessionStateSource := read("runtime/static/terminal/session/session_state.js")
 	clipboardSource := read("runtime/static/terminal/interaction/clipboard_controller.js")
 	contextMenuSource := read("runtime/static/terminal/interaction/context_menu_controller.js")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`import { createTerminalSelectionController } from "./terminal/selection/index.js";`,
@@ -11937,17 +10694,7 @@ func TestRuntimeTerminalSelectionModuleBoundary(t *testing.T) {
 			t.Fatalf("terminal selection README missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`${assetBase}terminal/selection/index.js`,
-		`${assetBase}terminal/selection/selection_controller.js`,
-		`${assetBase}terminal/selection/selection_lifecycle.js`,
-		`${assetBase}terminal/selection/selection_model.js`,
-		`${assetBase}terminal/selection/selection_view.js`,
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker terminal selection asset missing %q", want)
-		}
-	}
+
 }
 
 func TestTerminalSelectionControllerBehavior(t *testing.T) {
@@ -12066,7 +10813,6 @@ func TestRuntimeUIIconsModuleBoundary(t *testing.T) {
 	indexSource := read("runtime/static/ui/icons/index.js")
 	controllerSource := read("runtime/static/ui/icons/icon_controller.js")
 	readmeSource := read("runtime/static/ui/icons/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`import { createSVGIconFactory } from "./ui/icons/index.js";`,
@@ -12120,14 +10866,7 @@ func TestRuntimeUIIconsModuleBoundary(t *testing.T) {
 			t.Fatalf("UI icon README missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`${assetBase}ui/icons/index.js`,
-		`${assetBase}ui/icons/icon_controller.js`,
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker UI icon asset missing %q", want)
-		}
-	}
+
 }
 
 func TestRuntimeAppLayoutModuleBoundary(t *testing.T) {
@@ -12143,7 +10882,6 @@ func TestRuntimeAppLayoutModuleBoundary(t *testing.T) {
 	indexSource := read("runtime/static/app/layout/index.js")
 	controllerSource := read("runtime/static/app/layout/layout_controller.js")
 	readmeSource := read("runtime/static/app/layout/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`createAppLayoutController,`,
@@ -12196,11 +10934,7 @@ func TestRuntimeAppLayoutModuleBoundary(t *testing.T) {
 			t.Fatalf("app layout README missing %q", want)
 		}
 	}
-	for _, want := range []string{`${assetBase}app/layout/index.js`, `${assetBase}app/layout/layout_controller.js`} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker app layout asset missing %q", want)
-		}
-	}
+
 }
 
 func TestRuntimeTerminalPolicyModuleBoundary(t *testing.T) {
@@ -12216,7 +10950,6 @@ func TestRuntimeTerminalPolicyModuleBoundary(t *testing.T) {
 	indexSource := read("runtime/static/terminal/policy/index.js")
 	controllerSource := read("runtime/static/terminal/policy/policy_controller.js")
 	readmeSource := read("runtime/static/terminal/policy/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`import { createTerminalPolicyController } from "./terminal/policy/index.js";`,
@@ -12278,14 +11011,7 @@ func TestRuntimeTerminalPolicyModuleBoundary(t *testing.T) {
 			t.Fatalf("terminal policy README missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`${assetBase}terminal/policy/index.js`,
-		`${assetBase}terminal/policy/policy_controller.js`,
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker terminal policy asset missing %q", want)
-		}
-	}
+
 }
 
 func TestRuntimeTerminalMetricsModuleBoundary(t *testing.T) {
@@ -12301,7 +11027,6 @@ func TestRuntimeTerminalMetricsModuleBoundary(t *testing.T) {
 	indexSource := read("runtime/static/terminal/metrics/index.js")
 	controllerSource := read("runtime/static/terminal/metrics/metrics_controller.js")
 	readmeSource := read("runtime/static/terminal/metrics/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`import { createTerminalMetricsController } from "./terminal/metrics/index.js";`,
@@ -12371,14 +11096,7 @@ func TestRuntimeTerminalMetricsModuleBoundary(t *testing.T) {
 			t.Fatalf("terminal metrics README missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`${assetBase}terminal/metrics/index.js`,
-		`${assetBase}terminal/metrics/metrics_controller.js`,
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker terminal metrics asset missing %q", want)
-		}
-	}
+
 }
 
 func TestRuntimeAppFeedbackModuleBoundary(t *testing.T) {
@@ -12394,7 +11112,6 @@ func TestRuntimeAppFeedbackModuleBoundary(t *testing.T) {
 	indexSource := read("runtime/static/app/feedback/index.js")
 	controllerSource := read("runtime/static/app/feedback/feedback_controller.js")
 	readmeSource := read("runtime/static/app/feedback/README.md")
-	workerSource := read("runtime/static/service-worker.js")
 
 	for _, want := range []string{
 		`createAppFeedbackController,`,
@@ -12450,14 +11167,7 @@ func TestRuntimeAppFeedbackModuleBoundary(t *testing.T) {
 			t.Fatalf("app feedback README missing %q", want)
 		}
 	}
-	for _, want := range []string{
-		`${assetBase}app/feedback/index.js`,
-		`${assetBase}app/feedback/feedback_controller.js`,
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker app feedback asset missing %q", want)
-		}
-	}
+
 }
 
 func TestWorkspaceLayoutControllerBehavior(t *testing.T) {
@@ -12499,7 +11209,6 @@ func TestRuntimeWorkspaceModuleBoundary(t *testing.T) {
 	targetControllerSource := string(mustReadRuntimeSource(t, "runtime/static/workspace/target_controller.js"))
 	targetLifecycleSource := string(mustReadRuntimeSource(t, "runtime/static/workspace/target_lifecycle.js"))
 	readmeSource := string(mustReadRuntimeSource(t, "runtime/static/workspace/README.md"))
-	workerSource := string(mustReadRuntimeSource(t, "runtime/static/service-worker.js"))
 
 	if strings.Contains(mainSource, "workspaceLayout") || strings.Contains(mainSource, "createWorkspace") {
 		t.Fatal("main.js must not own or wire workspace implementation directly")
@@ -13069,33 +11778,7 @@ func TestRuntimeWorkspaceModuleBoundary(t *testing.T) {
 			t.Fatalf("app controller must not retain tab activation implementation %q", forbidden)
 		}
 	}
-	for _, want := range []string{
-		"layout_view_controller.js",
-		"layout_controller.js",
-		"tab_registry.js",
-		"activity_controller.js",
-		"tab_label_controller.js",
-		"tab_label_lifecycle.js",
-		"tab_navigation_controller.js",
-		"tab_controller.js",
-		"tab_view.js",
-		"tab_lifecycle.js",
-		"tab_activation_controller.js",
-		"pane_activation_controller.js",
-		"pane_activation_lifecycle.js",
-		"workspace_api.js",
-		"persistence_controller.js",
-		"refresh_controller.js",
-		"refresh_lifecycle.js",
-		"state_apply_controller.js",
-		"state_apply_lifecycle.js",
-		"target_controller.js",
-		"target_lifecycle.js",
-	} {
-		if !strings.Contains(workerSource, want) {
-			t.Fatalf("service worker workspace asset missing %q", want)
-		}
-	}
+
 	for _, want := range []string{
 		"布局 DOM",
 		"inline rename",

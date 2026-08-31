@@ -60,6 +60,6 @@ controller 对外提供只读快照/getter、`start()`、`load()`、`open()`、`
 
 依赖方向为 `global-runtime.js -> settings/index.js -> controller -> api/model/view/lifecycle/font_registry/shortcut_editor`。内部文件不得被模块外深度导入。
 
-相关 guard：`settings_controller_test.mjs`、`workspace_test.go` 的 PATCH 语义测试、`TestRuntimeSettingsModuleBoundary`、终端快捷键/字体/scrollback 静态契约和 Service Worker 预缓存检查。
+相关 guard：`settings_controller_test.mjs`、`workspace_test.go` 的 PATCH 语义测试、`TestRuntimeSettingsModuleBoundary`、终端快捷键/字体/scrollback 静态契约和版本化资源/LPK 内容检查。
 
 最小回归步骤：加载设置、切换布尔项、修改字号/行高/scrollback、上传和删除字体、保存/重置/清空两套快捷键、关闭并重新打开面板、触发 pagehide，再确认终端当前画面没有出现历史回放中间过程。

@@ -778,7 +778,6 @@ body.split-resize-active * {
   user-select: none;
 }
 
-.terminal-cache-preview,
 .terminal-frame-hold {
   position: absolute;
   inset: 0;
@@ -800,7 +799,6 @@ body.split-resize-active * {
   object-position: left top;
 }
 
-.terminal-cache-preview[hidden],
 .terminal-frame-hold[hidden] {
   display: none;
 }

@@ -75,10 +75,8 @@ test("workspace state apply reconciles authoritative tabs and panes in applying 
     readRestartTabForName: () => "",
     clearRestartTabForReload: () => calls.push(["clear-restart"]),
     readRequestedTab: () => "tab-1",
-    setWorkspaceIdentityFromState: () => false,
-    destroyCachedSession: (pane) => { calls.push(["destroy-cache", pane.id]); return Promise.resolve(); },
-    prepareCachedSession: (pane) => { calls.push(["prepare-cache", pane.id]); return Promise.resolve(); },
-    scheduleOrphanPreviewCleanup: () => calls.push(["orphan-cleanup"]),
+    setWorkspaceGenerationFromState: () => false,
+    destroyLocalHistory: (pane) => { calls.push(["destroy-history", pane.id]); return Promise.resolve(); },
     closeTab,
     createTab,
     recreateTabButton: (tab) => calls.push(["button", tab.id]),
@@ -136,7 +134,7 @@ test("workspace state apply reconciles authoritative tabs and panes in applying 
   assert.equal(retainedPane.workspaceExitPending, false);
   assert.equal(retainedPane.exitExpected, false);
   assert.equal(retainedPane.pendingConnect, true);
-  assert.ok(calls.some(([name, id]) => name === "destroy-cache" && id === "pane-stale"));
+  assert.ok(calls.some(([name, id]) => name === "destroy-history" && id === "pane-stale"));
   assert.ok(calls.some(([name, id]) => name === "dispose-pane" && id === "pane-old"));
   assert.ok(calls.some(([name, id]) => name === "active" && id === "tab-1"));
   assert.deepEqual(calls.at(-1), ["flush", "workspace_restored"]);
@@ -144,8 +142,6 @@ test("workspace state apply reconciles authoritative tabs and panes in applying 
   windowObject.flush();
   assert.ok(calls.some(([name]) => name === "resize"));
   assert.ok(calls.some(([name, id]) => name === "connect" && id === "tab-1"));
-  await Promise.resolve();
-  assert.ok(calls.some(([name, id]) => name === "prepare-cache" && id === "pane-1"));
 });
 
 test("workspace state apply rejects stale state and runApplying always restores the flag", () => {

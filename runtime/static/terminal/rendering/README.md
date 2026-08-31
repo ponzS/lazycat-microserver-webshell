@@ -10,7 +10,7 @@
 
 外部只能从 `terminal/rendering/index.js` 导入 API。`createTerminalRendererAdapter()` 是 renderer patch 的唯一安装入口；`createTerminalPresentationController()` 是 presentation 状态、提交门禁和生命周期的唯一 owner；`createTerminalPresentationState()` 只提供 session 初始化快照；`RenderSnapshot` 持有一次呈现身份；frame scheduler 持有 latest-only RAF；Kitty graphics 模块只维护图片协议 patch 所需状态。
 
-renderer adapter 只读取注入的字号、字体族和行高 getter。presentation controller 只读取注入的 replay/resize/visibility 门禁，并通过显式命令请求 resize 或 transport 恢复；它不能自行推进 history cursor、发送 WebSocket 帧、声明 resize owner 或修改输入队列。`onReady` 只发出“当前画面已提交”的信号，跨模块的 cache preview、pending input、恢复指标和 retry reset 由 `terminal/session/session_installation_controller.js` 接收并编排。controller 的 `installSession()` 独占 Canvas context 和 Ghostty `onRender` listener，session 销毁或模块 dispose 时统一取消 validation/retry timer、RAF、frame release 和 listener。
+renderer adapter 只读取注入的字号、字体族和行高 getter。presentation controller 只读取注入的 replay/resize/visibility 门禁，并通过显式命令请求 resize 或 transport 恢复；它不能自行推进 history cursor、发送 WebSocket 帧、声明 resize owner 或修改输入队列。`onReady` 只发出“当前画面已提交”的信号，pending input、startup trace 和 retry reset 由 `terminal/session/session_installation_controller.js` 接收并编排。controller 的 `installSession()` 独占 Canvas context 和 Ghostty `onRender` listener，session 销毁或模块 dispose 时统一取消 validation/retry timer、RAF、frame release 和 listener。
 
 本目录不建立 WebSocket、不访问业务 API，也不直接执行 history 写入、`term.resize()` 或输入发送；这些能力只能由运行时 owner 通过受限回调注入。
 

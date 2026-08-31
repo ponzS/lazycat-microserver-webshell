@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -28,10 +27,8 @@ import (
 )
 
 const (
-	defaultTerminalCols          = 120
-	defaultTerminalRows          = 32
-	terminalCacheProtocolVersion = 2
-
+	defaultTerminalCols        = 120
+	defaultTerminalRows        = 32
 	averageHistoryBytesPerLine = 350
 	historyChunkMaxBytes       = 32 << 10
 	clientQueueLimit           = 8 << 20
@@ -50,7 +47,6 @@ type workspaceManager struct {
 type terminalWorkspace struct {
 	manager             *workspaceManager
 	selector            string
-	cacheScopeID        string
 	workspaceGeneration string
 	username            string
 	rootDir             string
@@ -167,26 +163,23 @@ type paneHistorySnapshot struct {
 }
 
 type historySyncRequest struct {
-	generation           string
-	workspaceGeneration  string
-	localBase            uint64
-	localEnd             uint64
-	cacheProtocolVersion int
-	hasRange             bool
-	forceSnapshot        bool
-	integrityProtocol    string
+	generation          string
+	workspaceGeneration string
+	localBase           uint64
+	localEnd            uint64
+	hasRange            bool
+	forceSnapshot       bool
+	integrityProtocol   string
 }
 
 type workspaceState struct {
-	Selector             string     `json:"selector"`
-	ServerRevision       string     `json:"server_revision,omitempty"`
-	AgentNotice          string     `json:"agent_notice,omitempty"`
-	CacheProtocolVersion int        `json:"cache_protocol_version,omitempty"`
-	CacheScopeID         string     `json:"cache_scope_id,omitempty"`
-	WorkspaceGeneration  string     `json:"workspace_generation,omitempty"`
-	ActiveTabID          string     `json:"active_tab_id"`
-	RecentTabIDs         []string   `json:"recent_tab_ids"`
-	Tabs                 []tabState `json:"tabs"`
+	Selector            string     `json:"selector"`
+	ServerRevision      string     `json:"server_revision,omitempty"`
+	AgentNotice         string     `json:"agent_notice,omitempty"`
+	WorkspaceGeneration string     `json:"workspace_generation,omitempty"`
+	ActiveTabID         string     `json:"active_tab_id"`
+	RecentTabIDs        []string   `json:"recent_tab_ids"`
+	Tabs                []tabState `json:"tabs"`
 }
 
 type tabState struct {
@@ -465,9 +458,6 @@ func historySyncRequestFromQuery(r *http.Request) historySyncRequest {
 		forceSnapshot:       strings.TrimSpace(query.Get("history_replay_mode")) == "snapshot",
 		integrityProtocol:   strings.TrimSpace(query.Get("integrity_protocol")),
 	}
-	if version, err := strconv.Atoi(strings.TrimSpace(query.Get("cache_protocol_version"))); err == nil && version > 0 {
-		request.cacheProtocolVersion = version
-	}
 	baseText := strings.TrimSpace(query.Get("local_base_cursor"))
 	endText := strings.TrimSpace(query.Get("local_end_cursor"))
 	if request.generation == "" || len(request.generation) > 128 || baseText == "" || endText == "" {
@@ -606,15 +596,11 @@ func (w *terminalWorkspace) snapshot() workspaceState {
 	w.pruneRecentTabsLocked()
 
 	state := workspaceState{
-		Selector:     w.selector,
-		ActiveTabID:  w.activeTab,
-		RecentTabIDs: append([]string{}, w.recentTabs...),
-		Tabs:         make([]tabState, 0, len(w.tabs)),
-	}
-	if w.cacheScopeID != "" && w.workspaceGeneration != "" {
-		state.CacheProtocolVersion = terminalCacheProtocolVersion
-		state.CacheScopeID = w.cacheScopeID
-		state.WorkspaceGeneration = w.workspaceGeneration
+		Selector:            w.selector,
+		WorkspaceGeneration: w.workspaceGeneration,
+		ActiveTabID:         w.activeTab,
+		RecentTabIDs:        append([]string{}, w.recentTabs...),
+		Tabs:                make([]tabState, 0, len(w.tabs)),
 	}
 	for _, tab := range w.tabs {
 		nextTab := tabState{
@@ -1191,33 +1177,22 @@ func (w *terminalWorkspace) getPane(paneID string) *terminalPane {
 }
 
 type terminalReplayIdentity struct {
-	cacheProtocolVersion int
-	cacheScopeID         string
-	selector             string
-	workspaceGeneration  string
-	tabID                string
-	paneID               string
+	selector            string
+	workspaceGeneration string
+	tabID               string
+	paneID              string
 }
 
 func (w *terminalWorkspace) paneForAttach(paneID string, syncRequest historySyncRequest) (*terminalPane, terminalReplayIdentity, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	identity := terminalReplayIdentity{
-		cacheScopeID:        w.cacheScopeID,
 		selector:            w.selector,
 		workspaceGeneration: w.workspaceGeneration,
 		paneID:              paneID,
 	}
-	if identity.cacheScopeID != "" && identity.workspaceGeneration != "" {
-		identity.cacheProtocolVersion = terminalCacheProtocolVersion
-	}
-	if syncRequest.cacheProtocolVersion != 0 {
-		if syncRequest.cacheProtocolVersion != terminalCacheProtocolVersion || identity.cacheProtocolVersion != terminalCacheProtocolVersion {
-			return nil, identity, fmt.Errorf("unsupported terminal cache protocol %d", syncRequest.cacheProtocolVersion)
-		}
-		if syncRequest.workspaceGeneration == "" || syncRequest.workspaceGeneration != w.workspaceGeneration {
-			return nil, identity, errors.New("workspace generation mismatch")
-		}
+	if syncRequest.workspaceGeneration != "" && syncRequest.workspaceGeneration != w.workspaceGeneration {
+		return nil, identity, errors.New("workspace generation mismatch")
 	}
 	pane := w.panes[paneID]
 	if pane == nil {
@@ -2265,15 +2240,6 @@ func newHistoryGeneration() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(data), nil
-}
-
-func terminalCacheScopeID(accountID string) string {
-	accountID = strings.TrimSpace(accountID)
-	if accountID == "" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte("lcmd-webshell-terminal-cache-scope-v1\x00" + accountID))
-	return hex.EncodeToString(sum[:])
 }
 
 func (p *terminalPane) attachClient(syncRequest historySyncRequest) (paneHistorySnapshot, *paneClient, bool, error) {

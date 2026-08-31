@@ -12,13 +12,9 @@ export function createTerminalSessionInstallationController({
   sessionController,
   lifecycleFactory = createTerminalSessionInstallationLifecycle,
   getActiveTheme = () => null,
-  getCacheV2Epoch = () => 0,
-  getCacheV2WorkspaceIdentity = () => null,
-  cache = null,
+  getWorkspaceGeneration = () => "",
   isReplayCommitted = () => false,
-  markRecoveryMetric = noop,
   appendStartupTrace = noop,
-  reportRecoveryMetrics = noop,
   clearUnifiedRetry = noop,
   presentation = null,
   output = null,
@@ -159,26 +155,20 @@ export function createTerminalSessionInstallationController({
     if (disposed || !session || session.closed) {
       return false;
     }
-    cache?.hidePreview?.(session);
-    cache?.clearPreparedPreview?.(session);
     input?.flushPending?.(session);
-    cache?.schedulePreviewCapture?.(session);
     if (isReplayCommitted(session)) {
-      markRecoveryMetric(session, "inputReadyAt");
       appendStartupTrace(
         "终端输入已就绪",
         `pane=${session.id}`,
         { dedupeKey: `input-ready:${session.id}:${session.terminalReplayGeneration}` },
       );
     }
-    markRecoveryMetric(session, "realCanvasVisibleAt");
     appendStartupTrace(
       "真实终端 Canvas 已显示",
       `pane=${session.id}`,
       { dedupeKey: `canvas-visible:${session.id}:${session.terminalReplayGeneration}` },
     );
     session.startupTraceActive = false;
-    reportRecoveryMetrics(session);
     if (becameReady && session.connectionChannel === "unified") {
       clearUnifiedRetry(session, { resetAttempts: true });
     }
@@ -196,14 +186,13 @@ export function createTerminalSessionInstallationController({
     }
     const session = sessionController.create({
       baseTheme: getActiveTheme(),
-      cacheV2Epoch: getCacheV2Epoch(),
-      cacheV2WorkspaceIdentity: getCacheV2WorkspaceIdentity(),
       cols,
       connect,
       id,
       name: instanceName,
       rows,
       tabId: tab.id,
+      workspaceGeneration: getWorkspaceGeneration(),
     });
 
     installFeatureControllers(session);

@@ -47,7 +47,6 @@ type terminalQueueSubscription struct {
 	Rows                   int                                 `json:"rows,omitempty"`
 	PixelWidth             int                                 `json:"pixel_width,omitempty"`
 	PixelHeight            int                                 `json:"pixel_height,omitempty"`
-	CacheProtocol          int                                 `json:"cache_protocol_version,omitempty"`
 	WorkspaceGeneration    string                              `json:"workspace_generation,omitempty"`
 	HistoryGeneration      string                              `json:"history_generation,omitempty"`
 	LocalBaseCursor        string                              `json:"local_base_cursor,omitempty"`
@@ -532,10 +531,9 @@ func validateTerminalQueueSubscription(subscription terminalQueueSubscription) (
 		return subscription, historySyncRequest{}, errors.New("invalid queue history identity")
 	}
 	syncRequest := historySyncRequest{
-		cacheProtocolVersion: subscription.CacheProtocol,
-		workspaceGeneration:  subscription.WorkspaceGeneration,
-		generation:           subscription.HistoryGeneration,
-		forceSnapshot:        subscription.HistoryReplayMode == "snapshot",
+		workspaceGeneration: subscription.WorkspaceGeneration,
+		generation:          subscription.HistoryGeneration,
+		forceSnapshot:       subscription.HistoryReplayMode == "snapshot",
 	}
 	baseText := strings.TrimSpace(subscription.LocalBaseCursor)
 	endText := strings.TrimSpace(subscription.LocalEndCursor)

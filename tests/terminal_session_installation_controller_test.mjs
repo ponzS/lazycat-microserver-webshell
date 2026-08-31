@@ -198,30 +198,17 @@ test("session installation owns presentation-ready cross-feature side effects", 
       create: () => session,
       addCleanup: () => {},
     },
-    cache: {
-      hidePreview: () => events.push("cache:hide"),
-      clearPreparedPreview: () => events.push("cache:clear"),
-      schedulePreviewCapture: () => events.push("cache:capture"),
-    },
     isReplayCommitted: () => true,
-    markRecoveryMetric: (_target, key) => events.push(`metric:${key}`),
     appendStartupTrace: (title) => events.push(`trace:${title}`),
-    reportRecoveryMetrics: () => events.push("metrics:report"),
     clearUnifiedRetry: () => events.push("transport:retry-reset"),
     input: { flushPending: () => events.push("input:flush") },
   });
 
   assert.equal(controller.handlePresentationReady(session, { becameReady: true }), true);
   assert.deepEqual(events, [
-    "cache:hide",
-    "cache:clear",
     "input:flush",
-    "cache:capture",
-    "metric:inputReadyAt",
     "trace:终端输入已就绪",
-    "metric:realCanvasVisibleAt",
     "trace:真实终端 Canvas 已显示",
-    "metrics:report",
     "transport:retry-reset",
   ]);
   assert.equal(session.startupTraceActive, false);

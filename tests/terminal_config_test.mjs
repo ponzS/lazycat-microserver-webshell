@@ -10,7 +10,8 @@ test("terminal config exposes stable defaults and is immutable", () => {
   assert.equal(TERMINAL_STORAGE_PREFIX, "webshell");
   assert.equal(TERMINAL_RUNTIME_CONFIG.touchShortcutMoveThresholdPx, 8);
   assert.equal(TERMINAL_RUNTIME_CONFIG.terminalClientDirectWebSocketCapacity, 3);
-  assert.equal(TERMINAL_RUNTIME_CONFIG.terminalCacheV2ReplayTimeoutMs, 2000);
+  assert.equal(TERMINAL_RUNTIME_CONFIG.terminalHistoryCacheFlushDelayMs, 50);
+  assert.equal(Object.hasOwn(TERMINAL_RUNTIME_CONFIG, "terminalCacheV2ReplayTimeoutMs"), false);
   assert.equal(Object.isFrozen(TERMINAL_RUNTIME_CONFIG), true);
 
   assert.throws(() => {

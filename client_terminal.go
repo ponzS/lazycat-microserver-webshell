@@ -65,7 +65,7 @@ func (s *pluginServer) handleClientWorkspace(w http.ResponseWriter, r *http.Requ
 			writeClientTerminalError(w, err)
 			return
 		}
-		disableWorkspaceCacheV2(&state)
+		disableClientWorkspaceGeneration(&state)
 		state.ServerRevision = s.currentServerRevision()
 		log.Printf("client terminal workspace state ready: selector=%s tabs=%d active_tab=%s", selector, len(state.Tabs), state.ActiveTabID)
 		writeJSON(w, state)
@@ -83,7 +83,7 @@ func (s *pluginServer) handleClientWorkspace(w http.ResponseWriter, r *http.Requ
 			writeClientTerminalError(w, err)
 			return
 		}
-		disableWorkspaceCacheV2(&state)
+		disableClientWorkspaceGeneration(&state)
 		state.ServerRevision = s.currentServerRevision()
 		log.Printf("client terminal workspace action ready: selector=%s action=%s tabs=%d active_tab=%s", selector, request.Action, len(state.Tabs), state.ActiveTabID)
 		writeJSON(w, state)
@@ -93,12 +93,10 @@ func (s *pluginServer) handleClientWorkspace(w http.ResponseWriter, r *http.Requ
 	}
 }
 
-func disableWorkspaceCacheV2(state *workspaceState) {
+func disableClientWorkspaceGeneration(state *workspaceState) {
 	if state == nil {
 		return
 	}
-	state.CacheProtocolVersion = 0
-	state.CacheScopeID = ""
 	state.WorkspaceGeneration = ""
 }
 

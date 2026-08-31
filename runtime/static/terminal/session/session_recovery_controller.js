@@ -21,7 +21,6 @@ export function createTerminalSessionRecoveryController({
   hasKnownSize = () => false,
   resetHostViewport = () => {},
   positionInput = () => {},
-  hidePreview = () => {},
   recycleUnifiedSession = () => {},
   closeSocketForReconnect = () => {},
   requestConnection = () => {},
@@ -48,14 +47,6 @@ export function createTerminalSessionRecoveryController({
     session.historyCacheReplayCommitPending = false;
     session.allowGeneratedInputDuringReplay = false;
     session.agentPreparing = false;
-    session.cacheV2ServerSnapshotPending = false;
-    session.cacheV2ServerSnapshotStartCursor = 0n;
-    session.cacheV2ReplayActive = session.cacheV2WarmReplayActive === true;
-    session.cacheV2NetworkQueue = [];
-    session.cacheV2NetworkQueueBytes = 0;
-    if (connection !== "parked") {
-      hidePreview(session);
-    }
     session.attachStartedAt = 0;
     session.attachReadyTimeoutMs = 0;
     session.lastSocketHealthAt = 0;
@@ -140,16 +131,6 @@ export function createTerminalSessionRecoveryController({
     session.queueReplayControllerLegacy = false;
     session.replayControllerLegacyActive = false;
     session.resetOnNextReplay = true;
-    session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
-    session.cacheV2WarmReplayActive = false;
-    session.cacheV2WarmReplayReady = false;
-    session.cacheV2WarmReplayPromise = null;
-    session.cacheV2WarmReplaySnapshot = null;
-    session.cacheV2ServerSnapshotPending = false;
-    session.cacheV2ReplayActive = false;
-    session.cacheV2NetworkQueue = [];
-    session.cacheV2NetworkQueueBytes = 0;
-    hidePreview(session);
     discardOutput(session);
     const socket = session.socket;
     if (session.connectionChannel === "unified") {

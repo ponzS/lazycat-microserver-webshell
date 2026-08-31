@@ -78,12 +78,9 @@ test("resource factory creates isolated pane DOM and Ghostty resources", () => {
   assert.equal(first.shellEl.dataset.connection, "idle");
   assert.equal(first.shellEl.dataset.renderReady, "false");
   assert.equal(first.shellEl.dataset.hasPresentedFrame, "false");
-  assert.equal(first.shellEl.dataset.previewReady, "false");
   assert.equal(first.shellEl.attributes.get("tabindex"), "-1");
-  assert.equal(first.terminalHost.children.length, 3);
-  assert.equal(first.terminalPreview.className, "terminal-cache-preview");
-  assert.equal(first.terminalPreview.hidden, true);
-  assert.equal(first.terminalPreview.draggable, false);
+  assert.equal(first.terminalHost.children.length, 2);
+  assert.equal(Object.hasOwn(first, "terminalPreview"), false);
   assert.equal(first.terminalFrameHold.className, "terminal-frame-hold");
   assert.equal(first.terminalFrameHold.hidden, true);
   assert.equal(first.compositionPreview.className, "terminal-composition-preview");

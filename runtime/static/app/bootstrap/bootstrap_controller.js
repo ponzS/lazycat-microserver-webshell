@@ -14,7 +14,6 @@ export function createAppBootstrapController({
   refreshWorkspaceWithRetry = () => Promise.resolve(false),
   scheduleWorkspaceRetry = () => {},
   applyWorkspace = () => {},
-  requestStoragePersistence = () => Promise.resolve(false),
   startWorkspaceActivity = () => {},
   refreshWorkspaceActivity = () => Promise.resolve(),
   getTabCount = () => 0,
@@ -108,7 +107,6 @@ export function createAppBootstrapController({
     } else {
       applyWorkspace(workspaceOutcome.result, { focus: true });
     }
-    Promise.resolve(requestStoragePersistence()).catch(() => {});
     appendStartupTrace(
       "应用 bootstrap 完成",
       `active=${getActiveName() || "无"} tabs=${getTabCount()}`,

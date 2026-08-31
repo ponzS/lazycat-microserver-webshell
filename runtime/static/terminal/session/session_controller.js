@@ -41,8 +41,7 @@ export function createTerminalSessionController({
       connect = true,
       cols = 0,
       rows = 0,
-      cacheV2WorkspaceIdentity = null,
-      cacheV2Epoch = 0,
+      workspaceGeneration = "",
       baseTheme = null,
     } = {}) {
       const normalizedID = allocatePaneID(id);
@@ -60,8 +59,6 @@ export function createTerminalSessionController({
       });
       return stateFactory({
         baseTheme,
-        cacheV2Epoch,
-        cacheV2WorkspaceIdentity,
         connect: Boolean(connect),
         id: normalizedID,
         initialCols,
@@ -69,6 +66,7 @@ export function createTerminalSessionController({
         name,
         resources,
         tabId,
+        workspaceGeneration,
       });
     },
     dispose: lifecycle.dispose,

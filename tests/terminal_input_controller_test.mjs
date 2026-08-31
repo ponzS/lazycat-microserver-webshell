@@ -64,7 +64,7 @@ const createSession = ({ id = "pane-1", replayCommitted = true } = {}) => {
     connectionChannelGeneration: 7,
     connectionLeaseID: 0,
     connectionLeaseClosing: false,
-    shellEl: { dataset: { previewReady: "false" } },
+    shellEl: { dataset: {} },
     socketOpen: true,
     bufferedAmount: 0,
     pendingInput: [],

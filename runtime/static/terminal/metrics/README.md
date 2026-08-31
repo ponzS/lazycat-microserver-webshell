@@ -10,7 +10,7 @@
 
 ## 状态所有权与生命周期
 
-controller 唯一持有 metrics retry 的 RAF/timer 集合，并以 session generation 拒绝迟到回调；session cleanup 会取消该 session 的 timer。字体变化先调用 presentation hold，再更新 live pane options、renderer metrics 并请求 resize；scrollback 变化通过显式 history callback 通知缓存 owner。`dispose()` 取消所有资源，之后不再修改 session。
+controller 唯一持有 metrics retry 的 RAF/timer 集合，并以 session generation 拒绝迟到回调；session cleanup 会取消该 session 的 timer。字体变化先调用 presentation hold，再更新 live pane options、renderer metrics 并请求 resize；scrollback 变化通过显式 history callback 只通知 `client:` IndexedDB 兼容 owner，普通容器不创建浏览器历史任务。`dispose()` 取消所有资源，之后不再修改 session。
 
 ## 文件清单
 

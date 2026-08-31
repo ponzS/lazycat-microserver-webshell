@@ -55,7 +55,7 @@ diagnostics 只通过 `setDebugMode()` 控制是否允许启动，不保存或�
 ## 测试与回归
 
 - `devices_controller_test.mjs` 覆盖心跳单 in-flight、超时/abort、调试总控关闭、迟到列表拒绝、Provider 路由、beacon 条件和 listener 清理。
-- `TestRuntimeDeviceManagementStaticGuards` 固定公开入口、README、Service Worker 资源、`global-runtime.js` 集成和禁止旧实现残留。
+- `TestRuntimeDeviceManagementStaticGuards` 固定公开入口、README、版本化静态资源、`global-runtime.js` 集成和禁止旧实现残留。
 - `devices_test.go` 继续覆盖服务端账号隔离、短 TTL、heartbeat 和 offline 行为。
 
 最小回归：开启调试模式和设备心跳，确认在线设备面板定时刷新；关闭面板、关闭调试模式、切换页面显隐和离开页面后，确认无残留 interval、无迟到列表覆盖，且离线 beacon 只在心跳 active、浏览器在线并支持 `sendBeacon` 时发送。任何验证都不得触发或展示终端历史回放过程。

@@ -46,6 +46,6 @@ resize 只能调用 `isResizeSuppressed()`，不能写 viewport 状态。IME 只
 
 模块通过显式注入依赖 resize、IME DOM 命令、selection、overview、移动菜单和工作区只读查询；不得导入这些模块的内部实现，不得访问 transport/history/cache。
 
-自动化测试：`terminal_viewport_controller_test.mjs` 和 `TestRuntimeTerminalViewportModuleBoundary`。静态 guard 固定单一公开入口、Service Worker 资源、main 接线和旧 viewport 状态/实现不得回流入口文件。
+自动化测试：`terminal_viewport_controller_test.mjs` 和 `TestRuntimeTerminalViewportModuleBoundary`。静态 guard 固定单一公开入口、版本化静态资源、main 接线和旧 viewport 状态/实现不得回流入口文件。
 
 最小真实回归：在 `debug123` 的桌面与移动页面加载当前工作区资源；移动端打开/收起软键盘并旋转视口，确认快捷键栏和光标可见、终端最终 Canvas 非空、没有 replay 中间帧或 `pageerror`；桌面 resize 保持正常；每个页面始终只有 1 条 Unified 物理 WebSocket。

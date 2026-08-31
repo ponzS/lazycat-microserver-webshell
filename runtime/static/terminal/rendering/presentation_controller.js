@@ -8,7 +8,6 @@ export function createTerminalPresentationController({
   windowObject = globalThis.window,
   getActiveName = () => "",
   getActiveTabId = () => "",
-  getWorkspaceIdentityKey = () => "",
   getBackground = () => "#000000",
   isReplayCommitted = () => false,
   isReplayCommitPending = () => false,
@@ -111,8 +110,7 @@ export function createTerminalPresentationController({
     selector: String(session?.name || "").trim(),
     tabID: String(session?.tabId || "").trim(),
     paneID: String(session?.id || "").trim(),
-    cacheV2Epoch: Number(session?.cacheV2Epoch || 0),
-    workspaceIdentity: getWorkspaceIdentityKey(session?.cacheV2WorkspaceIdentity),
+    workspaceGeneration: String(session?.workspaceGeneration || "").trim(),
     historyGeneration: String(session?.historyGeneration || "").trim(),
   });
 
@@ -133,8 +131,7 @@ export function createTerminalPresentationController({
     return held.selector === current.selector
       && held.tabID === current.tabID
       && held.paneID === current.paneID
-      && held.cacheV2Epoch === current.cacheV2Epoch
-      && held.workspaceIdentity === current.workspaceIdentity
+      && held.workspaceGeneration === current.workspaceGeneration
       && held.historyGeneration === current.historyGeneration;
   };
 

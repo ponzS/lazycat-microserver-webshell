@@ -21,7 +21,6 @@ export {
 export {
   createAppBootstrapController,
   createAppBootstrapLifecycle,
-  createBrowserStoragePersistenceController,
-  createAppServiceWorkerController,
+  createLegacyWebShellStorageCleanupController,
 } from "./bootstrap/index.js";
 export { createAppFeedbackController } from "./feedback/index.js";

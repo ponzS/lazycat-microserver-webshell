@@ -64,11 +64,6 @@ export function createAppLifecycle({
     listen(windowObject, "pageshow", handlers.onPageShow);
     listen(windowObject, "pagehide", handlers.onPageHide);
     listen(windowObject, "beforeunload", handlers.onBeforeUnload);
-    listen(documentObject, "pointerdown", handlers.onStoragePersistenceGesture, {
-      capture: true,
-      once: true,
-    });
-
     const startGeneration = generation;
     if (fonts?.ready && typeof fonts.ready.then === "function") {
       Promise.resolve(fonts.ready).then(() => {

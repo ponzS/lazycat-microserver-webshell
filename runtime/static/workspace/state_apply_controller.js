@@ -11,10 +11,8 @@ export function createWorkspaceStateApplyController({
   readRestartTabForName = () => "",
   clearRestartTabForReload = () => {},
   readRequestedTab = () => "",
-  setWorkspaceIdentityFromState = () => false,
-  destroyCachedSession = () => Promise.resolve(false),
-  prepareCachedSession = () => Promise.resolve(false),
-  scheduleOrphanPreviewCleanup = () => {},
+  setWorkspaceGenerationFromState = () => false,
+  destroyLocalHistory = () => Promise.resolve(false),
   closeTab = () => {},
   createTab = () => null,
   recreateTabButton = () => {},
@@ -36,7 +34,6 @@ export function createWorkspaceStateApplyController({
   connectPendingSessionsForTab = () => {},
   flushPendingMembershipRefresh = () => {},
   measureTask = (name, task) => task(),
-  logWarning = () => {},
   lifecycleFactory = createWorkspaceStateApplyLifecycle,
   lifecycleOptions = {},
 } = {}) {
@@ -76,11 +73,11 @@ export function createWorkspaceStateApplyController({
     const restartTab = readRestartTabForName(targetName);
     const requestedTab = String(readRequestedTab() || "").trim();
     const tabs = getTabs();
-    const cacheIdentityChanged = setWorkspaceIdentityFromState(state, targetName);
+    const workspaceGenerationChanged = setWorkspaceGenerationFromState(state, targetName);
     const previousApplying = applying;
     applying = true;
     try {
-        if (cacheIdentityChanged) {
+        if (workspaceGenerationChanged) {
           for (const tab of [...tabs.values()]) {
             closeTab(tab.id, { remember: false });
           }
@@ -90,7 +87,7 @@ export function createWorkspaceStateApplyController({
           if (!nextTabIDs.has(tab.id)) {
             for (const pane of tab.panes.values()) {
               if (pane.name === targetName) {
-                destroyCachedSession(pane);
+                destroyLocalHistory(pane);
               }
             }
             closeTab(tab.id, { remember: false });
@@ -121,7 +118,7 @@ export function createWorkspaceStateApplyController({
           for (const pane of [...tab.panes.values()]) {
             if (!wantedPaneIDs.has(pane.id)) {
               if (pane.name === targetName) {
-                destroyCachedSession(pane);
+                destroyLocalHistory(pane);
               }
               disposePane(pane);
               tab.panes.delete(pane.id);
@@ -177,16 +174,6 @@ export function createWorkspaceStateApplyController({
         }
         updateEmptyState();
         scheduleOverviewRender();
-        const activePane = nextActiveTab?.panes.get(nextActiveTab.activePaneId) || null;
-        if (activePane) {
-          prepareCachedSession(activePane).catch((error) => {
-            logWarning("[terminal-cache-v2] active manifest preload failed", {
-              name: activePane.name,
-              pane: activePane.id,
-              error: error?.message || String(error),
-            });
-          });
-        }
         lifecycle.scheduleFrame(() => {
           if (!isCurrentRequest(targetName, generation)) {
             return;
@@ -194,7 +181,6 @@ export function createWorkspaceStateApplyController({
           resizeActiveTabForCurrentDevice();
           connectPendingSessionsForTab(nextActiveTab, { allowHidden: true });
         });
-        scheduleOrphanPreviewCleanup();
       return true;
     } finally {
       clearRestartTabForReload();

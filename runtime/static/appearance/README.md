@@ -72,7 +72,7 @@ Controller 的主要公开 API：
 相关 guard：
 
 - `appearance_controller_test.mjs` 覆盖 catalog 单飞、stored theme、不可变快照、主题提交、终端颜色、dispose、listener、滚动/触摸和迟到请求。
-- `TestRuntimeAppearanceModuleBoundary` 固定公开入口、README、controller/lifecycle 状态边界、Service Worker 资源、版本化 catalog URL、`global-runtime.js` 公开集成和旧实现删除。
-- 现有终端 presentation、OSC 颜色、Cache v2 fingerprint、IME preview 和设置测试继续保护外部适配行为。
+- `TestRuntimeAppearanceModuleBoundary` 固定公开入口、README、controller/lifecycle 状态边界、版本化 catalog URL、`global-runtime.js` 公开集成和旧实现删除。
+- 现有终端 presentation、OSC 颜色、IME composition preview 和设置测试继续保护外部适配行为。
 
 最小回归：桌面设置页切换主题；移动主题 picker 点击、左边缘右滑关闭和自定义滚动条拖动；刷新后确认选择持久化；切换主题时确认全部 pane 保留旧帧直至当前内存状态完成 full render，且网络、断线或主题变化期间都不出现历史回放过程。

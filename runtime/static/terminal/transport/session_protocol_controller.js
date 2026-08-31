@@ -13,7 +13,7 @@ export function createTerminalSessionProtocolController({
   terminalSessionConnection = null,
   terminalUnifiedTransport = null,
   terminalReplay = null,
-  terminalCache = null,
+  clientHistory = null,
   terminalOutput = null,
   terminalPresentation = null,
   terminalResize = null,
@@ -21,8 +21,6 @@ export function createTerminalSessionProtocolController({
   TerminalReplayController = null,
   ClientTerminalReplayAdapter = null,
   terminalCheckpointCapabilitiesForTerminal = () => [],
-  maxQueuedTerminalOutputBytes = 0,
-  terminalCacheV2CommitTimeoutMs = 3000,
   terminalAgentPrepareTimeoutMs = 45 * 1000,
   serverRevisionClientID = "",
   webSocketURL = () => {
@@ -55,7 +53,6 @@ export function createTerminalSessionProtocolController({
   const navigator = navigatorObject;
   const WebSocket = WebSocketCtor;
   const currentTab = (...args) => getCurrentTab(...args);
-  const MAX_QUEUED_TERMINAL_OUTPUT_BYTES = maxQueuedTerminalOutputBytes;
   const connectSession = async (session, {
     allowHidden = false,
     leaseID = 0,
@@ -96,19 +93,11 @@ export function createTerminalSessionProtocolController({
       }
       return false;
     }
-    terminalCache.startRecoveryMetrics(session);
     session.startupTraceActive = true;
-    await terminalCache.prepareSession(session);
-    terminalCache.markRecoveryMetric(session, "cacheManifestReadyAt");
-    appendStartupTrace("终端缓存 manifest 准备完成", `pane=${session.id}`, { dedupeKey: `cache-manifest:${session.id}:${session.terminalReplayGeneration}` });
-    terminalOutput.flush(session, { force: true });
-    try {
-      const flush = terminalCache.flushSession(session);
-      await (terminalCache.usesV2(session)
-        ? terminalCache.withTimeout(flush, terminalCacheV2CommitTimeoutMs, "Terminal cache flush before connect timed out.")
-        : flush);
-    } catch (error) {
-      terminalCache.disableSession(session, error);
+    if (isClientInstanceName(session.name)) {
+      await clientHistory.prepareSession(session);
+      terminalOutput.flush(session, { force: true });
+      await clientHistory.flushSession(session);
     }
     if (
       !session ||
@@ -150,23 +139,12 @@ export function createTerminalSessionProtocolController({
       socketUrl.searchParams.set("bg", themePayload.background);
       socketUrl.searchParams.set("cursor", themePayload.cursor);
     }
-    const cacheV2Identity = terminalCache.protocolIdentity(session);
-    if (cacheV2Identity) {
-      if (!usesMultiplexedTransport) {
-        socketUrl.searchParams.set("cache_protocol_version", String(cacheV2Identity.cacheProtocolVersion));
-        socketUrl.searchParams.set("workspace_generation", cacheV2Identity.workspaceGeneration);
-      }
+    if (!isClientInstanceName(session.name) && session.workspaceGeneration && !usesMultiplexedTransport) {
+      socketUrl.searchParams.set("workspace_generation", session.workspaceGeneration);
     }
-    const historyConnectRange = terminalReplay.rangeForConnect(session);
-    const cacheV2WarmSnapshot = historyConnectRange?.source === "cache-v2"
-      ? session.historyCacheSnapshot
+    const historyConnectRange = isClientInstanceName(session.name)
+      ? terminalReplay.rangeForConnect(session)
       : null;
-    const cacheV2WarmReplayStarted = cacheV2WarmSnapshot
-      ? terminalCache.startWarmReplay(session, cacheV2WarmSnapshot)
-      : false;
-    if (session.cacheV2RecoveryMetrics) {
-      session.cacheV2RecoveryMetrics.historySource = historyConnectRange?.source || "snapshot";
-    }
     if (historyConnectRange) {
       if (!usesMultiplexedTransport) {
         socketUrl.searchParams.set("history_generation", historyConnectRange.generation);
@@ -267,11 +245,7 @@ export function createTerminalSessionProtocolController({
         rows: size.rows || session.term.rows || 32,
         pixel_width: size.pixelWidth,
         pixel_height: size.pixelHeight,
-        cache_protocol_version: cacheV2Identity?.cacheProtocolVersion || 0,
-        workspace_generation: cacheV2Identity?.workspaceGeneration || "",
-        history_generation: historyConnectRange?.generation || "",
-        local_base_cursor: historyConnectRange?.baseCursor?.toString?.() || "",
-        local_end_cursor: historyConnectRange?.endCursor?.toString?.() || "",
+        workspace_generation: isClientInstanceName(session.name) ? "" : session.workspaceGeneration,
         history_replay_mode: session.resetOnNextReplay ? "snapshot" : "",
         flow_control: "turn-ack-v1",
         foreground: themePayload.foreground,
@@ -298,28 +272,10 @@ export function createTerminalSessionProtocolController({
     session.replayCompletionPending = false;
     terminalOutput?.resetQueueTurn(session);
     session.allowGeneratedInputDuringReplay = false;
-    if (!cacheV2WarmReplayStarted) {
-      session.cacheV2ReplayActive = false;
-      session.cacheV2NetworkQueue = [];
-      session.cacheV2NetworkQueueBytes = 0;
-    }
-    if (!cacheV2WarmReplayStarted) {
-      terminalCache.hidePreview(session);
-    }
     invalidateSessionStartupError(session);
     session.shellEl.dataset.connection = sessionConnectingState(session);
     currentSocket.binaryType = "arraybuffer";
     terminalSessionConnection.startSocketConnectTimer(session, currentSocket);
-
-    if (cacheV2WarmSnapshot) {
-      terminalCache.showLocalPreview(session, cacheV2WarmSnapshot).catch((error) => {
-        console.warn("[terminal-cache-v2] local preview load failed", {
-          name: session.name,
-          pane: session.id,
-          error: error?.message || String(error),
-        });
-      });
-    }
 
     const replayMessageHasIdentity = (message) => {
       const selector = String(message?.selector || "").trim();
@@ -334,6 +290,16 @@ export function createTerminalSessionProtocolController({
       // is present must independently match this terminal owner.
       return (!selector || selector === session.name)
         && (!paneID || paneID === session.id);
+    };
+
+    const validateWorkspaceReplayMessage = (message) => {
+      if (isClientInstanceName(session.name)) {
+        return true;
+      }
+      const expectedGeneration = String(session.workspaceGeneration || "").trim();
+      return expectedGeneration !== ""
+        && String(message?.workspace_generation || "").trim() === expectedGeneration
+        && String(message?.tab_id || "").trim() === String(session.tabId || "").trim();
     };
 
     // Multiplexed transports already route frames by logical stream, but keep
@@ -365,11 +331,6 @@ export function createTerminalSessionProtocolController({
     const rejectMismatchedReplay = (message) => {
       const selector = String(message?.selector || "").trim() || "unknown";
       const paneID = String(message?.pane_id || message?.paneId || "").trim() || "unknown";
-      session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
-      session.cacheV2WarmReplayActive = false;
-      session.cacheV2WarmReplayReady = false;
-      session.cacheV2WarmReplayPromise = null;
-      session.cacheV2WarmReplaySnapshot = null;
       terminalPresentation.invalidate(session);
       console.warn("[client-terminal] rejected terminal replay", {
         selector,
@@ -427,14 +388,10 @@ export function createTerminalSessionProtocolController({
       session.queueReplayControllerActive = false;
       session.queueReplayControllerLegacy = false;
       session.replayControllerLegacyActive = false;
-      session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
-      session.cacheV2WarmReplayActive = false;
-      session.cacheV2WarmReplayReady = false;
-      session.cacheV2WarmReplayPromise = null;
-      session.cacheV2WarmReplaySnapshot = null;
-      session.cacheV2ServerSnapshotPending = false;
       terminalPresentation.markSyncPending(session);
-      terminalCache.deleteSession(session);
+      if (isClientDirectTransport) {
+        clientHistory.deleteSession(session);
+      }
       console.warn("[terminal-history] rejected history sync", {
         name: session.name,
         pane: session.id,
@@ -459,7 +416,6 @@ export function createTerminalSessionProtocolController({
         terminalTransportRuntime?.notifyDirectOpen(session, leaseID);
       }
       socketDebug.openedAt = Date.now();
-      terminalCache.markRecoveryMetric(session, "websocketOpenAt");
       appendStartupTrace("终端 WebSocket 已打开", `pane=${session.id} channel=${channel}`, { dedupeKey: `socket-open:${session.id}:${session.terminalReplayGeneration}:${channel}` });
       console.info("[client-terminal] websocket open", {
         name: session.name,
@@ -586,7 +542,9 @@ export function createTerminalSessionProtocolController({
                   session.persistedHistoryCursor = 0n;
                   session.historyReplayTargetCursor = 0n;
                   session.serverBaseCursor = 0n;
-                  terminalCache.disableSession(session);
+                  if (isClientDirectTransport) {
+                    clientHistory.disableSession(session);
+                  }
                   if (!resetTerminalForHistoryReplay(session)) {
                     terminalSessionConnection.closeSocketForReconnect(session, currentSocket, "Terminal reset for legacy replay failed.");
                     return;
@@ -613,18 +571,14 @@ export function createTerminalSessionProtocolController({
                   rejectHistorySync("invalid server history range");
                   return;
                 }
-                if (!terminalCache.validateMessageIdentity(session, message, historyGeneration)) {
-                  rejectHistorySync("terminal cache-v2 replay identity does not match");
+                if (!validateWorkspaceReplayMessage(message)) {
+                  rejectHistorySync("terminal workspace replay identity does not match");
                   return;
                 }
                 session.historyProtocolActive = true;
                 session.historyGeneration = historyGeneration;
                 session.historySyncMode = syncMode;
-                if (session.cacheV2RecoveryMetrics) {
-                  session.cacheV2RecoveryMetrics.syncMode = syncMode;
-                  terminalCache.markRecoveryMetric(session, "replayStartAt");
-                appendStartupTrace("PTY replay 开始", `pane=${session.id} mode=${syncMode || "legacy"} source=${session.cacheV2RecoveryMetrics?.historySource || "unknown"}`, { dedupeKey: `replay-start:${session.id}:${session.terminalReplayGeneration}` });
-                }
+                appendStartupTrace("PTY replay 开始", `pane=${session.id} mode=${syncMode || "legacy"}`, { dedupeKey: `replay-start:${session.id}:${session.terminalReplayGeneration}` });
                 session.fastIntegritySequence = 1;
                 session.fastIntegrityCursor = deltaFromCursor ?? 0n;
                 session.historyReplayTargetCursor = deltaToCursor;
@@ -667,34 +621,21 @@ export function createTerminalSessionProtocolController({
                 session.serverBaseCursor = serverBaseCursor;
                 session.resetOnNextReplay = false;
                 if (syncMode === "snapshot") {
-                  const snapshot = session.historyCacheSnapshot;
-                  const keepWarmState = Boolean(
-                    terminalCache.warmReplayMatchesSnapshot(session, snapshot)
-                    && snapshot.historyGeneration === historyGeneration
-                    && snapshot.endCursor <= serverEndCursor
-                  );
-                  const stageServerSnapshot = keepWarmState || session.hasPresentedFrame;
-                  if (stageServerSnapshot) {
-                    session.cacheV2ServerSnapshotPending = true;
-                    session.cacheV2ServerSnapshotStartCursor = deltaFromCursor;
-                    session.cacheV2ReplayActive = true;
-                    session.cacheV2NetworkQueue = [];
-                    terminalReplay.setAuthorization(session, "identified");
-                  } else {
-                    if (!resetTerminalForHistoryReplay(session)) {
-                      rejectHistorySync("terminal reset failed");
-                      return;
-                    }
-                    session.historyGeneration = historyGeneration;
-                    session.historyProtocolActive = true;
-                    session.historySyncMode = syncMode;
-                    session.serverBaseCursor = serverBaseCursor;
-                    session.localBaseCursor = serverBaseCursor;
-                    session.receivedHistoryCursor = deltaFromCursor;
-                    session.appliedHistoryCursor = deltaFromCursor;
-                    session.persistedHistoryCursor = deltaFromCursor;
-                    terminalReplay.setAuthorization(session, "identified");
-                    terminalCache.resetSession(session, historyGeneration, deltaFromCursor);
+                  if (!resetTerminalForHistoryReplay(session)) {
+                    rejectHistorySync("terminal reset failed");
+                    return;
+                  }
+                  session.historyGeneration = historyGeneration;
+                  session.historyProtocolActive = true;
+                  session.historySyncMode = syncMode;
+                  session.serverBaseCursor = serverBaseCursor;
+                  session.localBaseCursor = serverBaseCursor;
+                  session.receivedHistoryCursor = deltaFromCursor;
+                  session.appliedHistoryCursor = deltaFromCursor;
+                  session.persistedHistoryCursor = deltaFromCursor;
+                  terminalReplay.setAuthorization(session, "identified");
+                  if (isClientDirectTransport) {
+                    clientHistory.resetSession(session, historyGeneration, deltaFromCursor);
                   }
                 } else {
                   if (!historyConnectRange || historyConnectRange.generation !== historyGeneration || historyConnectRange.endCursor !== deltaFromCursor) {
@@ -737,38 +678,6 @@ export function createTerminalSessionProtocolController({
                       rejectHistorySync("cached terminal history did not reach requested cursor");
                       return;
                     }
-                  } else if (historyConnectRange.source === "cache-v2") {
-                    const snapshot = session.historyCacheSnapshot;
-                    if (
-                      !snapshot
-                      || snapshot.historyGeneration !== historyGeneration
-                      || snapshot.baseCursor !== historyConnectRange.baseCursor
-                      || !terminalCache.validateReplayIdentity(session, message, snapshot, deltaFromCursor)
-                    ) {
-                      rejectHistorySync("cached terminal cache-v2 history is unavailable");
-                      return;
-                    }
-                    if (terminalCache.warmReplayMatchesSnapshot(session, snapshot)) {
-                      session.historyGeneration = historyGeneration;
-                      session.historyProtocolActive = true;
-                      session.historySyncMode = syncMode;
-                      session.serverBaseCursor = serverBaseCursor;
-                      terminalReplay.setAuthorization(session, "identified");
-                    } else {
-                      if (!resetTerminalForHistoryReplay(session)) {
-                        rejectHistorySync("terminal reset for cache-v2 history failed");
-                        return;
-                      }
-                      session.historyGeneration = historyGeneration;
-                      session.historyProtocolActive = true;
-                      session.historySyncMode = syncMode;
-                      session.serverBaseCursor = serverBaseCursor;
-                      session.localBaseCursor = snapshot.baseCursor;
-                      session.receivedHistoryCursor = snapshot.baseCursor;
-                      session.appliedHistoryCursor = snapshot.baseCursor;
-                      terminalReplay.setAuthorization(session, "identified");
-                      terminalCache.beginReplay(session, snapshot, deltaFromCursor, currentSocket, rejectHistorySync);
-                    }
                   } else {
                     rejectHistorySync("unknown local history source");
                     return;
@@ -788,17 +697,12 @@ export function createTerminalSessionProtocolController({
                 if (session.historyProtocolActive) {
                   const completeGeneration = String(message.history_generation || "").trim();
                   const completeCursor = terminalReplay.parseCursor(message.history_cursor);
-                  const completeCacheV2IdentityValid = !terminalCache.hasProtocol(session) || (
-                    Number(message.cache_protocol_version || 0) === 2
-                    && String(message.workspace_generation || "").trim() === session.cacheV2WorkspaceIdentity.workspaceGeneration
-                    && String(message.tab_id || "").trim() === session.tabId
-                  );
                   if (
                     completeGeneration !== session.historyGeneration
                     || completeCursor === null
                     || completeCursor !== session.historyReplayTargetCursor
-                    || (!session.cacheV2ReplayActive && session.receivedHistoryCursor < completeCursor)
-                    || !completeCacheV2IdentityValid
+                    || session.receivedHistoryCursor < completeCursor
+                    || !validateWorkspaceReplayMessage(message)
                   ) {
                     rejectHistorySync("history replay completion range does not match");
                     return;
@@ -853,14 +757,9 @@ export function createTerminalSessionProtocolController({
                     return;
                   }
                 }
-                terminalCache.markRecoveryMetric(session, "historyReplayCompleteAt");
                 recordTerminalSessionEvent(session, "history_replay_complete", {
                   cursor: message.history_cursor || "",
                 });
-                if (session.cacheV2ServerSnapshotPending) {
-                  terminalCache.applyServerSnapshot(session, currentSocket, rejectHistorySync);
-                  return;
-                }
                 session.replayCompletionPending = true;
                 terminalReplay.finishIfReady(session) || terminalOutput.flush(session);
                 return;
@@ -1032,22 +931,7 @@ export function createTerminalSessionProtocolController({
           }
           return;
         }
-        if (session.cacheV2ReplayActive) {
-          const data = outputPayload;
-          if (session.cacheV2RecoveryMetrics) {
-            session.cacheV2RecoveryMetrics.serverReplayBytes += data.byteLength;
-          }
-          session.cacheV2NetworkQueue.push(data);
-          session.cacheV2NetworkQueueBytes += data.byteLength;
-          if (session.cacheV2NetworkQueueBytes > MAX_QUEUED_TERMINAL_OUTPUT_BYTES) {
-            rejectHistorySync("terminal cache-v2 network delta queue exceeded its limit");
-          }
-          return;
-        }
         try {
-          if (session.cacheV2RecoveryMetrics) {
-            session.cacheV2RecoveryMetrics.serverReplayBytes += outputPayload.byteLength;
-          }
           if (usesMultiplexedTransport) {
             const metadata = event.queueMetadata || {};
           terminalOutput?.noteQueueTurnFrame(session, metadata);

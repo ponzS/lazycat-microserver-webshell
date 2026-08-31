@@ -199,14 +199,12 @@ func TestClientTerminalAttachURLForwardsScrollbackAndHistoryRange(t *testing.T) 
 	}
 }
 
-func TestDisableWorkspaceCacheV2(t *testing.T) {
+func TestDisableClientWorkspaceGeneration(t *testing.T) {
 	state := workspaceState{
-		CacheProtocolVersion: terminalCacheProtocolVersion,
-		CacheScopeID:         "scope-one",
-		WorkspaceGeneration:  "workspace-one",
+		WorkspaceGeneration: "workspace-one",
 	}
-	disableWorkspaceCacheV2(&state)
-	if state.CacheProtocolVersion != 0 || state.CacheScopeID != "" || state.WorkspaceGeneration != "" {
-		t.Fatalf("client workspace cache-v2 identity was not removed: %+v", state)
+	disableClientWorkspaceGeneration(&state)
+	if state.WorkspaceGeneration != "" {
+		t.Fatalf("client workspace generation was not removed: %+v", state)
 	}
 }

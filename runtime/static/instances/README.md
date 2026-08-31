@@ -67,7 +67,7 @@ Controller 的主要公开 API：
 
 - `instances_loader_test.mjs` 覆盖退避、单飞、授权错误、Provider 详情、无效 JSON 和 dispose。
 - `instances_controller_test.mjs` 覆盖列表 owner、切换命令、默认/回退目标、首页导航、listener 和迟到结果清理。
-- `TestRuntimeInstancesModuleBoundary` 固定公开入口、README、Service Worker 资源、`global-runtime.js` 集成和旧实现删除。
+- `TestRuntimeInstancesModuleBoundary` 固定公开入口、README、版本化静态资源、`global-runtime.js` 集成和旧实现删除。
 - `instances_test.go` 与 `workspace_test.go` 继续保护服务端实例可见性、账号隔离和 Provider/Admin 边界。
 
 最小回归：打开切换器并确认运行/停止实例状态；切换实例后确认 URL、工作区和选中态一致；模拟 `/api/instances` 502 后恢复及 401 不重试；返回首页时确认移动远程桌面偏好参数；销毁页面后确认无残留请求或 listener。任何验证都不得触发或展示终端历史回放过程。

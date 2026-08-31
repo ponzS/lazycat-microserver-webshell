@@ -32,7 +32,7 @@
 - `start()` 绑定设置控件并启动当前已启用的采样器。
 - 调试总控关闭时，FPS RAF、性能采样、网络采样 timer、socket 包装、console 包装和 window 错误监听必须全部停止。
 - `dispose()` 可重复调用；所有 listener、timer、RAF、动态加载 generation 和 socket instrumentation 都必须清理。
-- 网络监视器保持按需动态加载，未启用时不得由 Service Worker 预取。
+- 网络监视器保持按需动态加载，未启用时不得进入 bootstrap 预加载或其他静态资源预取路径。
 
 ## 文件清单
 
@@ -56,6 +56,6 @@
 
 - `diagnostics_controller_test.mjs`：开关持久化、生命周期清理、迟到动态加载和业务回调边界。
 - `terminal_network_monitor_test.mjs`：WebSocket 字节、通道、速率和 dispose 行为。
-- `runtime_shortcuts_test.go`：公开入口、Service Worker 资源和 `global-runtime.js` 不再持有诊断实现的静态契约。
+- `runtime_shortcuts_test.go`：公开入口、版本化静态资源和 `global-runtime.js` 不再持有诊断实现的静态契约。
 
 最小回归步骤：开启调试模式后分别启用错误日志、网络监视器、FPS 和性能任务；产生一次 console error 和终端流量；关闭调试总控，确认全部面板隐藏且不再采样；重新开启后确认子开关仍保持；离开页面后确认 WebSocket 方法、console 方法和全局监听均恢复。

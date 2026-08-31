@@ -7,7 +7,7 @@ export function createWorkspaceTargetController({
   isDisposed = () => false,
   clearRefreshRetry = () => {},
   hideStartupError = () => {},
-  invalidateWorkspaceIdentity = () => {},
+  invalidateWorkspaceGeneration = () => {},
   syncNetworkSockets = () => {},
   onTargetChange = () => {},
   resetWorkspace = () => {},
@@ -28,7 +28,7 @@ export function createWorkspaceTargetController({
     const generation = targetLifecycle.setName(name);
     const nextName = getActiveName();
     if (nextName !== previousName) {
-      invalidateWorkspaceIdentity();
+      invalidateWorkspaceGeneration();
       syncNetworkSockets({ reset: true });
       onTargetChange({ previousName, name: nextName, generation });
     }

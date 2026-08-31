@@ -4,10 +4,19 @@
 
 ## 当前快照
 
-- `runtime/static/main.js` 在建立模块地图时为 25165 行；当前仅保留 3 行应用入口。原入口实现已移入 `global-runtime.js`，并继续按责任域迁移；已完成低风险业务模块、terminal session/overview/interaction/selection/mouse、renderer adapter、presentation、resize、输入队列、IME、移动快捷键、移动 viewport、output、history/cache/replay transaction、session connection、Unified 物理 transport 与 logical/direct runtime 编排。当前根 runtime 不再直接序列化 ping、resize、input 或 Queue ACK，也不直接实现 presentation-ready 的业务副作用。
+- `runtime/static/main.js` 在建立模块地图时为 25165 行；当前仅保留 3 行应用入口。原入口实现已移入 `global-runtime.js`，并继续按责任域迁移；已完成低风险业务模块、terminal session/overview/interaction/selection/mouse、renderer adapter、presentation、resize、输入队列、IME、移动快捷键、移动 viewport、output、history/replay transaction、session connection、Unified 物理 transport 与 logical/direct runtime 编排。当前根 runtime 不再直接序列化 ping、resize、input 或 Queue ACK，也不直接实现 presentation-ready 的业务副作用。
 - 页面级 online/offline、显隐、焦点、页面进入/离开、全局 resize/键盘恢复和 heartbeat listener 已由 `app/app_lifecycle.js` 统一拥有；确认、prompt 和移动关闭 sheet 的 DOM/resolver 生命周期已由 `app/dialog_controller.js` 统一拥有；桌面快捷键命令路由已由 `app/shortcuts/` 统一拥有；移动快捷键和页面外壳按钮的应用命令路由已由 `app/commands/` 统一拥有。`global-runtime.js` 只导入并调用 `startGlobalRuntime()`；全局 active target/generation、feature controller 实例、Ghostty/DOM 资源工厂、启动/恢复/页面销毁顺序统一由同级的 `global-runtime.js` 持有。workspace API、恢复/活动 tab 持久化、refresh/retry、权威 state apply、布局、registry/activity、tab label/navigation、tab/pane CRUD 及 tab 激活运行时编排已分别由 `workspace/` 中的独立 controller/view/lifecycle 公开维护。
-- 已独立成文件的连接、回放、缓存、截图、TUI 适配、iOS 宿主、tab 激活调度器、终端配置和 diagnostics 网络快照 adapter 已从静态根目录归档到对应模块目录，并通过公开 `index.js` 引用；`connectSession()`、workspace 和 app lifecycle 的实现迁移均已完成。
-- `createPaneSession()` 当前只请求 session controller 创建状态，再按固定顺序安装各模块；presentation-ready 的 cache/input/diagnostics/transport 局部接线也由 session installation controller 维护。后续只能通过 transport、history、output、IME、workspace 和 app 公开入口继续收敛，不能把算法重新堆回 session controller 或入口文件。
+- 已独立成文件的连接、回放、截图、TUI 适配、iOS 宿主、tab 激活调度器、终端配置和 diagnostics 网络快照 adapter 已从静态根目录归档到对应模块目录，并通过公开 `index.js` 引用；`connectSession()`、workspace 和 app lifecycle 的实现迁移均已完成。
+- `createPaneSession()` 当前只请求 session controller 创建状态，再按固定顺序安装各模块；presentation-ready 的 input/diagnostics/transport 局部接线也由 session installation controller 维护。后续只能通过 transport、history、output、IME、workspace 和 app 公开入口继续收敛，不能把算法重新堆回 session controller 或入口文件。
+
+### 2026-08-31：PWA、Cache API v2 与普通容器本地历史移除
+
+- 页面不再注册 Service Worker，不再发布 Web App Manifest/PWA 图标，也不申请浏览器持久存储。静态资源仅通过 Provider 注入的内容寻址 `/assets/<asset-version>/` URL 和 HTTP immutable cache 发布。
+- 普通容器不再创建 Cache API v2 identity、manifest/chunk、warm replay、preview、compaction 或本地 cursor range。Unified logical stream 只携带 `workspace_generation`，并直接消费 persistent agent 的权威 `snapshot + live`。
+- `client:` target 继续由 `terminal/history/client_history_controller.js` 独占 IndexedDB load/write/flush/reset/delete；所有入口都以 `isClientTarget()` 为硬 guard，普通容器调用必须无副作用。
+- 总览不再读取缓存缩略图。缩略图只来自已提交 live Canvas 或仍有效的 last-known-good hold frame；从未呈现的 pane 保持空缩略图，不触发 replay。
+- bootstrap 只保留一次性旧 Worker/已知 Cache 名称清理器，用于升级迁移；该清理器不读取终端数据、不参与首屏、离线 fallback 或资源调度。
+- 本节取代下方旧迁移记录中关于 Service Worker 预缓存、Cache API v2、warm replay 和缓存 preview 的现行描述。旧记录只保留当时的架构背景，不得作为新实现依据。
 
 ## 已完成迁移
 
@@ -160,9 +169,9 @@
 
 - 已建立 `runtime/static/terminal/` 聚合说明和 `runtime/static/terminal/session/`，包含独立 README、公开入口、controller、state 和 lifecycle。
 - pane ID 序列、初始 cols/rows 归一化、完整 session 初始状态、replay/resize/render snapshot 子控制器创建已从原入口实现迁出；当前字段暂时保持扁平，避免在同一批中改写 transport、history、input、output、resize 和 presentation 算法。
-- lifecycle 使用模块私有 `WeakMap`/`WeakSet` 持有 cleanup 与 disposed 状态。销毁先 flush 历史写入，再标记 `closed`，随后只 detach 当前 Unified logical stream、注销 `client:` scheduler、清 timer/queue/preview/frame、运行 cleanup、dispose Ghostty 和移除 DOM；单个和批量销毁共用同一顺序。
+- lifecycle 使用模块私有 `WeakMap`/`WeakSet` 持有 cleanup 与 disposed 状态。销毁先对 `client:` flush IndexedDB 写入（普通容器无副作用），再标记 `closed`，随后只 detach 当前 Unified logical stream、注销 `client:` scheduler、清 timer/queue/frame、运行 cleanup、dispose Ghostty 和移除 DOM；单个和批量销毁共用同一顺序。
 - `global-runtime.js` 只提供 Ghostty/DOM resource factory 和各责任域 lifecycle adapter，通过公开 controller 执行 `create()`、`addCleanup()`、`dispose()` 和 `disposeAll()`；不再维护 `nextPaneSeq`、巨大状态字面量、cleanup 数组、pane 字段或 pane 销毁顺序。
-- `terminal_session_controller_test.mjs` 覆盖状态隔离、显式 pane ID 推进、初始尺寸、cache identity 副本、`closed` 先于 logical detach、幂等销毁、迟到 cleanup 和兄弟 session 不受影响，并由 `TestTerminalSessionControllerBehavior` 纳入 Go 全量入口；`TestRuntimeTerminalSessionModuleBoundary` 固定公开入口、文件职责、Service Worker 资源和禁止物理连接/历史算法侵入 lifecycle。
+- `terminal_session_controller_test.mjs` 覆盖状态隔离、显式 pane ID 推进、初始尺寸、workspace generation、`closed` 先于 logical detach、幂等销毁、迟到 cleanup 和兄弟 session 不受影响，并由 `TestTerminalSessionControllerBehavior` 纳入 Go 全量入口；`TestRuntimeTerminalSessionModuleBoundary` 固定公开入口、文件职责、版本化静态资源和禁止物理连接/历史算法侵入 lifecycle。
 
 ### 2026-08-30：静态根目录独立模块归档
 
@@ -174,12 +183,12 @@
 
 ### 2026-08-30：`terminal/overview/`
 
-- 已建立完整的 `overview_controller.js`、`overview_view.js` 和 `overview_lifecycle.js`，保留既有 `terminal_overview_preview.js`，并统一从 `terminal/overview/index.js` 公开。
-- 总览打开状态、render/focus RAF、cache preview idle 预热、拖拽/长按/placeholder/自动滚动、重排 timer、移动端双侧边缘手势和浏览器历史 guard 已从原入口实现迁出。
+- 已建立完整的 `overview_controller.js`、`overview_view.js` 和 `overview_lifecycle.js`，并统一从 `terminal/overview/index.js` 公开。
+- 总览打开状态、render/focus RAF、拖拽/长按/placeholder/自动滚动、重排 timer、移动端双侧边缘手势和浏览器历史 guard 已从原入口实现迁出。
 - controller 只读取注入的 tab/pane 视图，并通过新建、激活、关闭、移动标签命令协调工作区；不拥有 tab registry、布局树、Ghostty、WebSocket、history cursor、resize 或输入状态。
-- view 独占总览 DOM 查询、卡片构建、响应式网格和分屏 Canvas 绘制；lifecycle 独占永久与临时 listener。dispose 会取消 RAF、idle、timer、拖拽和迟到 preview，并释放已解码图片。
-- cache-v2 preview 继续要求完整 account/selector/workspace/tab/pane/history identity，只用于总览；未激活 pane 不需要先展示 live canvas，缩略图不得进入终端恢复或 input ready。
-- `terminal_overview_controller_test.mjs`、`terminal_overview_preview_test.mjs` 和 `TestRuntimeTerminalOverviewModuleBoundary` 固定行为、资源清理、公开入口、Service Worker 和禁止逻辑回流 `global-runtime.js`。
+- view 独占总览 DOM 查询、卡片构建、响应式网格和分屏 Canvas 绘制；lifecycle 独占永久与临时 listener。dispose 会取消 RAF、timer、拖拽和迟到回调。
+- preview 只允许复制已提交 live Canvas 或有效 hold frame；未激活且从未呈现的 pane 使用空缩略图，不读取 Cache API/IndexedDB，也不进入终端恢复或 input ready。
+- `terminal_overview_controller_test.mjs` 和 `TestRuntimeTerminalOverviewModuleBoundary` 固定行为、资源清理、公开入口、版本化静态资源和禁止逻辑回流 `global-runtime.js`。
 
 ### 2026-08-30：`terminal/interaction/` 上下文菜单子域
 
@@ -244,7 +253,7 @@
 
 - 已新增 `presentation_controller.js`、`presentation_state.js`、`presentation_view.js` 和 `presentation_lifecycle.js`，统一由 `terminal/rendering/index.js` 公开；render/presentation generation、RenderSnapshot、full-render gate、last-known-good frame、Canvas context 恢复、validation/retry/stall timer 和 RAF/listener 生命周期已从原入口实现迁出。
 - controller 只读取注入的 replay/resize/visibility/geometry 门禁，并通过显式回调请求 resize 或 transport 恢复；不推进 history cursor、不发送 WebSocket、不声明 resize owner，也不修改输入或输出队列。
-- view 独占 live/hold Canvas 与 shell dataset 适配。host viewport 清理必须保留 Cache preview 和 frame hold；抓帧前还会恢复意外脱离的模块自有 hold Canvas，确保 live backing store 变化前旧帧已经覆盖当前 pane。
+- view 独占 live/hold Canvas 与 shell dataset 适配。host viewport 清理必须保留 frame hold；抓帧前还会恢复意外脱离的模块自有 hold Canvas，确保 live backing store 变化前旧帧已经覆盖当前 pane。
 - lifecycle 独占 presentation RAF、validation/retry timer、双 RAF frame release、Canvas context listener 和 Ghostty `onRender` disposable；session cleanup 与模块 dispose 后迟到回调不能继续提交画面。
 - `terminal_presentation_controller_test.mjs`、`TestRuntimeTerminalCanvasResidueGuard`、`TestTerminalPresentationControllerBehavior` 和 `TestRuntimeTerminalPresentationModuleBoundary` 固定 replay/resize 中间帧不可见、资源恢复、完整提交、stall 恢复、公开入口和禁止实现回流。
 - `debug123` 真实浏览器回归覆盖 resize、tab 切换和主题变化：live Canvas 尺寸变化前 hold 已完成复制，所有 pending resize 采样均有旧帧覆盖，API/console/page error 为零，单页只有一条 Unified WebSocket。
@@ -288,17 +297,13 @@
 - output lifecycle 独占 RAF/timeout，session dispose 会递增 generation 并清空队列和 pending ACK；旧 connection epoch、channel generation、selector/pane/history generation 的条目不能写入当前 Ghostty。
 - `terminal_output_controller_test.mjs`、`TestTerminalOutputControllerBehavior` 和 `TestRuntimeTerminalOutputModuleBoundary` 覆盖 Unicode/UTF-8 分片、字节顺序、bounded drain、stale generation、overload resync、Queue ACK 和资源清理；`tests-auto/05-terminal-output` 覆盖真实大输出、隐藏 tab、resize、Canvas 原子呈现、版本化资源和单 Unified 连接。
 
-### 2026-08-30：`terminal/history/` cache identity、persistence 与 replay transaction
+### 2026-08-31：`terminal/history/` 服务端 replay 与 `client:` IndexedDB 兼容
 
-- 已新增 `cache_controller.js`、`cache_async.js`、`cache_identity.js`、`cache_lifecycle.js`、`cache_persistence_controller.js`、`cache_preview_view.js`、`cache_recovery_controller.js`、`cache_replay_controller.js` 和 `cache_session_lifecycle.js`，统一从 `terminal/history/index.js` 公开。
-- workspace cache identity/epoch、session Cache API v2/`client:` 协议判定、完整 session identity、恢复指标和 orphan preview cleanup 已从原入口实现迁出。
-- controller 返回 workspace identity 副本；workspace 变化会取消旧 idle cleanup 并推进 epoch，旧 session、Promise 和 preview cleanup 不能作用于新工作区。
-- session persistence controller 独占 manifest load/reset、immutable chunk 写入队列、persisted cursor、preview capture、compaction、touch/delete；session lifecycle 独占 write RAF/timer、preview timer/idle 和 compaction idle/timeout。
-- recovery controller 独占 replay/cache 身份映射、preview prepare/decode、授权、显示与迟到 Promise guard；preview 仍只作为 last-known-good/总览画面，不进入 Ghostty 恢复或 input ready。
-- replay controller 独占 warm cache replay、恢复期间网络字节队列、server snapshot 原子 reset/replay 和 replay Promise 的 generation/socket guard；presentation/output/transport 仅通过注入命令协作，单 pane cache 失败不得关闭 Unified 物理连接。
-- session replay controller 与 lifecycle 已接管 cursor/connect range、authorization、失败暂停、presentation checkpoint timer、cache commit barrier 和最终 full presentation 请求；checkpoint 只做诊断，replay commit 前仍禁止任何 Canvas 提交。
-- `global-runtime.js` 只注入 active selector、tab/pane 只读视图、诊断输出和总览刷新命令；session 创建只读取 epoch/identity 快照。
-- `terminal_cache_controller_test.mjs`、`terminal_cache_persistence_controller_test.mjs`、`terminal_cache_recovery_controller_test.mjs`、`terminal_cache_replay_controller_test.mjs`、`terminal_session_replay_controller_test.mjs` 和 `TestRuntimeTerminalHistoryCacheModuleBoundary` 覆盖身份拒绝、epoch、协议路由、manifest/write、preview capture/reveal、warm/server replay 原子边界、authorization/commit、checkpoint generation、单 pane 失败隔离、资源取消、迟到 Promise/idle callback、幂等 dispose、指标单次上报、公开入口和 Service Worker 资源。
+- 当前文件为 `terminal_replay_controller.js`、`session_replay_controller.js`、`session_replay_lifecycle.js`、`session_replay_state.js`、`client_terminal_replay.js`、`client_history_controller.js`、`terminal_history_cache.js` 和 `terminal_checkpoint.js`，统一从 `terminal/history/index.js` 公开。
+- 普通容器只维护服务端 replay identity、cursor、sequence、authorization、checkpoint 和最终 commit transaction；不创建浏览器本地 history identity、manifest、chunk、preview、compaction 或 warm replay。
+- `client_history_controller.js` 独占 `client:` IndexedDB load/reset/write/flush/touch/delete 及其 timer/Promise generation。`session_replay_controller.js` 只有在 `isClientTarget(session.name)` 成立时才允许 flush 浏览器历史。
+- transport 负责 envelope/checksum 校验并把权威 snapshot/live 字节交给 history/output；snapshot reset 必须处于 render suppression，replay commit 前禁止任何 Canvas 提交。
+- `terminal_session_replay_controller_test.mjs`、`terminal_session_protocol_controller_test.mjs`、`client_terminal_history_controller_test.mjs`、`terminal_replay_controller_test.mjs`、`terminal_checkpoint_test.mjs` 和 `TestRuntimeSnapshotOnlyAndPWARemovalContract` 固定普通容器无本地 range/存储副作用、`client:` 兼容范围、迟到 generation 拒绝和中间帧不可见。
 
 ### 2026-08-30：`terminal/transport/` session、logical/direct runtime 与 Unified 物理 owner
 
@@ -314,15 +319,15 @@
 以下边界来自 `docs/FIX_HISTORY.md`，任何模块迁移都必须继续成立：
 
 1. 普通容器页面只有一条 Unified 物理终端 WebSocket；全部 pane 是独立 logical stream。tab 切换、聚焦、输入和 resize 只能更新逻辑状态，不得关闭物理连接。
-2. `client:` target 继续使用最多三条独立直连，不能未经协议升级套用容器 Unified 或 Cache API v2 假设。
-3. persistent agent 的原始 PTY 字节是终端历史权威；浏览器 Canvas、缩略图和缓存都不是会话权威。
+2. `client:` target 继续使用最多三条独立直连和隔离的 IndexedDB 兼容历史，不能未经协议升级套用容器 Unified 假设。
+3. persistent agent 的原始 PTY 字节是普通容器终端历史权威；浏览器 Canvas、缩略图和本地存储都不是会话权威。
 4. 历史、断线恢复和 resize 中间过程不得显示。历史字节必须完整解析，只有 replay commit、实时队列追平、合法几何和最终 full render 成功后才能提交画面。
 5. 已经呈现且身份仍有效的 last-known-good frame 在网络错误、502、重连和 snapshot 等待期间必须保留。
 6. resize 必须保持 requested、applied、presented 三阶段及 epoch/owner 边界。ACK 前不得切换本地网格，远端尺寸观察不得自动变成本机 claim。
 7. 用户输入、generated response、IME composition、输入锁和 replay 抑制属于同一条有序链，但 Canvas 是否可见不得阻塞已经合法连接的普通输入。
-8. Cache API v2 必须按 account、selector、workspace、tab、pane、history generation 和 cursor 完整隔离；`client:` IndexedDB 路径保持独立。
+8. 普通容器不得查询或发送浏览器本地 history range，不得创建 Cache API 历史；`client:` IndexedDB 路径必须由 target guard 完整隔离。
 9. 单 pane 的身份、cursor、sequence、checksum、resize 或 replay 错误不得关闭其他 logical stream 或 Unified 物理连接。
-10. 模块移动后仍必须通过版本化相对 import、Service Worker 资源策略和 LPK 打包校验。
+10. 模块移动后仍必须通过版本化相对 import、HTTP 静态资源契约和 LPK 打包校验。
 
 ## 目标入口
 
@@ -349,7 +354,7 @@ startGlobalRuntime();
 | 物理与逻辑连接 | `terminal/transport/transport_controller.js` | Unified socket、client leases、stream/channel generation、重试 | 输出已验证的控制帧和二进制帧 |
 | 历史回放 | `terminal/history/replay_controller.js` | history generation、cursor、replay phase、authorization | 请求 render suppression、提交已验证字节 |
 | 输出流水线 | `terminal/output/output_controller.js` | output queue、queue generation、drain budget、turn ACK | 向终端运行时按序写入，不拥有 WebSocket |
-| 缓存 | `terminal/history/cache_controller.js` | manifest、persisted cursor、preview、compaction | 只提供身份校验后的数据和提交结果 |
+| `client:` 历史兼容 | `terminal/history/client_history_controller.js` | IndexedDB snapshot、persisted cursor、写入队列与 timer | 仅接受 `client:` session；普通容器调用无副作用 |
 | resize | `terminal/resize/resize_controller.js` | requested/applied/presented epoch、fence、settle、owner observation | 向 transport 发控制，向 rendering 提交几何变更 |
 | 移动 viewport | `terminal/viewport/viewport_controller.js` | visual viewport、键盘 inset、安全偏移、resize suppression、input viewport lock、方向 generation | 向 resize/IME/selection/overview 发显式命令，不读取历史或连接状态 |
 | 渲染与呈现 | `terminal/rendering/presentation_controller.js` | render generation、RenderSnapshot、hold frame、presentation gate | 只消费当前终端状态，不决定 history/transport 权威 |
@@ -451,7 +456,7 @@ runtime/static/
 - 过渡边界：session state 仍保留各责任域需要的扁平字段以兼容现有协议，但 connection、replay、cache、input、output、resize、presentation 和 activity 的算法与生命周期均由对应 feature owner 实现；不得在 session controller 或 global runtime 中复制这些算法。
 - 资源边界：Ghostty/DOM 创建与现有事件 adapter 暂留 `global-runtime.js` 的显式 resource factory；session lifecycle 只通过注入 adapter 清理资源，不读取应用全局状态。
 - 销毁边界：先 flush，再设置 `closed`，然后只 detach 当前 logical stream；不得关闭 Unified 物理连接或修改兄弟 session。迟到 cleanup 必须立即执行，重复 dispose 必须无副作用。
-- 局部编排边界：`session_installation_controller.js` 接收 rendering 的 ready 信号，负责隐藏/清理 preview、flush pending input、记录恢复指标、安排 preview capture 和清理 Unified retry；这些副作用不得回流 `global-runtime.js`。
+- 局部编排边界：`session_installation_controller.js` 接收 rendering 的 ready 信号，负责 flush pending input、记录恢复指标和清理 Unified retry；这些副作用不得回流 `global-runtime.js`。
 
 ### 6. WebSocket 与连接生命周期
 
@@ -473,25 +478,24 @@ runtime/static/
 ### 7. 历史协议、回放与 checkpoint
 
 - 状态：已完成迁移，原入口中的 replay、checkpoint、身份校验和 commit transaction 已归档到 `terminal/history/`，根 runtime 只注入公开命令和生命周期依赖。
-- 当前目录：`terminal/history/`；`session_replay_controller.js`、`cache_replay_controller.js`、`session_replay_lifecycle.js`、`session_replay_state.js` 和既有 replay/checkpoint 原语分别维护协议状态、缓存恢复和 checkpoint 生命周期。
+- 当前目录：`terminal/history/`；`session_replay_controller.js`、`session_replay_lifecycle.js`、`session_replay_state.js` 和 replay/checkpoint 原语维护普通容器协议状态与 checkpoint；`client_history_controller.js`、`terminal_history_cache.js` 仅维护 `client:` IndexedDB 兼容历史。
 - 状态 owner：history generation、base/received/applied/presented cursor、replay request、authorization 和 commit phase 由 history controller 独占；Canvas presentation 仍由 rendering/presentation owner 提交。
 - 边界：Fast/Unified envelope 的解析和 checksum 校验归 transport protocol；history 只接收通过传输校验的身份、sequence、cursor 和 payload。replay 可以请求 rendering suppression，但不得直接管理 Canvas；历史过程永远不可见。
 
-### 8. 浏览器历史缓存与预览持久化
+### 8. 浏览器历史兼容与旧存储清理
 
-- 当前目录：缓存实现位于 `terminal/history/`，总览 preview controller 位于 `terminal/overview/`。
-- 已建立文件：`cache_controller.js`、`cache_async.js`、`cache_identity.js`、`cache_lifecycle.js`、`cache_persistence_controller.js`、`cache_preview_view.js`、`cache_recovery_controller.js`、`cache_session_lifecycle.js`、`terminal_cache_v2.js`、`terminal_history_cache.js`；总览侧保留 `terminal_overview_preview.js`。
-- 已迁移 owner：workspace cache identity/epoch、session identity 与 preview fingerprint 序列化、协议可用性、恢复指标、orphan cleanup、manifest load/reset、immutable chunk queue、persisted cursor、preview capture/decode/reveal、compaction 和 session cache lifecycle。
-- 已迁移 owner：warm replay、server snapshot replacement、history protocol 和 replay commit transaction。缓存失败只降级到服务端权威 replay，不改变 presentation 或输入 ready 门禁。
+- 普通容器没有浏览器历史缓存或 preview 持久化模块；服务端 snapshot/live 是唯一恢复路径。
+- `terminal/history/client_history_controller.js` 与 `terminal_history_cache.js` 仅为 `client:` 保留 IndexedDB 兼容能力，外部不得绕过 target guard 深度调用 store。
+- `app/bootstrap/legacy_storage_cleanup_controller.js` 只精确注销旧 WebShell Worker 并删除已知旧 Cache 名称；它是迁移清理器，不是运行时缓存 owner。
 
 ### 2026-08-30：`terminal/transport/` session connection lifecycle
 
 - 已新增 `session_connection_controller.js` 和 `session_connection_lifecycle.js`，统一从 `terminal/transport/index.js` 公开。
 - pane 的 connect/health/attach-ready/resume-probe/reconnect timer、ping 健康检查、direct scheduler 失败通知和 Unified logical recycle 已从原入口实现迁出。
-- lifecycle 按当前 socket、target、dispose 状态和 timer generation 拒绝迟到回调；warm cache replay 期间 attach timer 只能延期，不能把已解析字节当作可见帧。
+- lifecycle 按当前 socket、target、dispose 状态和 timer generation 拒绝迟到回调；服务端 replay 期间 attach timer 与可见性门禁必须保持一致，不能把已解析字节当作可见帧。
 - Unified pane 失败只调用 logical recycle，不直接关闭页面级物理连接；direct `client:` pane 继续由三槽 scheduler 持有 lease 和 close fence。
-- `terminal_session_connection_controller_test.mjs` 与 `TestRuntimeTerminalConnectionSchedulerGuard` 覆盖 timer 清理、stale socket、health timeout、warm replay 延期、offline/direct/unified 分流和 Service Worker 资源。
-- 边界：缓存失败只能降级网络 replay，不能阻止最终 Canvas；preview 只用于总览或 last-known-good 展示，不参与终端状态恢复。
+- `terminal_session_connection_controller_test.mjs` 与 `TestRuntimeTerminalConnectionSchedulerGuard` 覆盖 timer 清理、stale socket、health timeout、服务端 replay、offline/direct/unified 分流和版本化静态资源。
+- 边界：网络失败必须保留 last-known-good frame，不能显示 replay 中间 Canvas；单 pane 恢复不得关闭兄弟 stream。
 
 ### 9. 实时输出、批处理与背压
 
@@ -508,7 +512,7 @@ runtime/static/
 - renderer adapter 状态 owner：只持有模块 dispose 状态，并通过注入 getter 读取字体、字号和行高；patch 状态跟随具体 Ghostty renderer/terminal 实例，不拥有 tab/pane registry、history、resize、transport 或 presentation generation。
 - `global-runtime.js` 接线边界：只创建 renderer/presentation controller，注入现有 history、resize、transport 和工作区只读门禁，并在对应事件边界调用公开命令；不得保留 renderer patch、presentation 状态机、timer、RAF、Canvas listener 或 hold DOM 实现。
 - presentation 状态 owner：`presentation_state.js` 定义 session 字段，`presentation_controller.js` 唯一修改 render/presentation generation、RenderSnapshot、frame hold 状态、full render validation 和 stall recovery；`presentation_lifecycle.js` 唯一维护相关资源生命周期。
-- presentation-ready 边界：`presentation_controller.js` 只报告 ready 信号；cache preview、pending input、恢复指标、startup trace 和 Unified retry reset 的跨模块副作用由 `terminal/session/session_installation_controller.js` 的 `handlePresentationReady()` 编排。
+- presentation-ready 边界：`presentation_controller.js` 只报告 ready 信号；pending input、恢复指标、startup trace 和 Unified retry reset 的跨模块副作用由 `terminal/session/session_installation_controller.js` 的 `handlePresentationReady()` 编排。
 - 边界：不得决定历史或连接权威；只在完整可见 viewport 物化成功后提交；失败保留 last-known-good frame。
 
 ### 11. resize、几何与移动 viewport
@@ -606,10 +610,10 @@ runtime/static/
 
 - 状态：总览和长截图均已完成迁移。总览 controller/view/lifecycle 独占总览状态、DOM 和资源；长截图工具只通过公开命令接收当前 session、移动快捷键和对话框依赖。
 - 当前目录：`terminal/overview/` 和 `terminal/screenshot/`。
-- 总览文件：`overview_controller.js`、`overview_view.js`、`overview_lifecycle.js`、`terminal_overview_preview.js` 和公开 `index.js`。
-- 总览状态 owner：controller 独占打开状态、RAF/idle/timer、拖拽、移动端边缘手势、历史 guard 和 preview 协调；view/lifecycle 分别独占 DOM 与 listener 生命周期。
-- `global-runtime.js` 只注入只读工作区视图、cache/last-known-good frame 适配和显式 tab 命令，并调用总览和长截图公开 API。
-- 边界：总览图片不能参与 Ghostty 恢复或输入 ready；截图必须冻结几何并在变化时中止。
+- 总览文件：`overview_controller.js`、`overview_view.js`、`overview_lifecycle.js` 和公开 `index.js`。
+- 总览状态 owner：controller 独占打开状态、RAF/timer、拖拽、移动端边缘手势和历史 guard；view/lifecycle 分别独占 DOM 与 listener 生命周期。
+- `global-runtime.js` 只注入只读工作区视图、last-known-good frame 查询和显式 tab 命令，并调用总览和长截图公开 API。
+- 边界：总览只使用已提交 live/hold Canvas，不能读取存储、触发 replay 或参与 Ghostty/input ready；截图必须冻结几何并在变化时中止。
 
 ### 17. 主题、字体与终端外观
 
@@ -675,12 +679,12 @@ Node 行为测试统一归档在仓库根目录的 `tests/` 文件夹中，文�
 
 | 目标模块 | 现有主要 guard |
 | --- | --- |
-| `app/` | `main_test.go` 的版本化资源与 Service Worker 测试；`app_lifecycle_controller_test.mjs`、`app_dialog_controller_test.mjs`、`app_shortcut_controller_test.mjs` 和 `runtime_shortcuts_test.go` 的 bootstrap、生命周期、快捷键和静态资源契约 |
+| `app/` | `main_test.go` 的版本化资源测试；`app_bootstrap_controller_test.mjs`、`legacy_storage_cleanup_controller_test.mjs`、`app_lifecycle_controller_test.mjs`、`app_dialog_controller_test.mjs`、`app_shortcut_controller_test.mjs` 和 `runtime_shortcuts_test.go` 的 bootstrap、旧 PWA 清理、生命周期、快捷键和静态资源契约 |
 | `instances/` | `instances_loader_test.mjs`、`instances_controller_test.mjs`、`TestRuntimeInstancesModuleBoundary`、`instances_test.go`、`workspace_test.go` 的实例可见性测试 |
 | `workspace/` | `workspace_api_controller_test.mjs`、`workspace_persistence_controller_test.mjs`、`workspace_refresh_controller_test.mjs`、`workspace_state_apply_controller_test.mjs`、`workspace_tab_controller_test.mjs`、`workspace_tab_activation_controller_test.mjs`、`tab_activation_scheduler_test.mjs`、`workspace_layout_controller_test.mjs`、`workspace_layout_view_controller_test.mjs`、`workspace_tab_registry_test.mjs`、`workspace_activity_controller_test.mjs`、`workspace_tab_label_controller_test.mjs`、`workspace_tab_navigation_controller_test.mjs`、`workspace_test.go` 与 `TestRuntimeWorkspaceModuleBoundary` |
 | `terminal/session/` | `terminal_session_controller_test.mjs`、`TestTerminalSessionControllerBehavior`、`TestRuntimeTerminalSessionModuleBoundary`，以及 runtime 中连接身份、presentation 和 input/output cleanup guard |
 | `terminal/transport/` | `terminal_queue_connection_test.mjs`、`terminal_unified_health_test.mjs`、`terminal_unified_membership_test.mjs`、`terminal_connection_scheduler_test.mjs`、`terminal_queue_test.go` |
-| `terminal/history/` | `terminal_replay_controller_test.mjs`、`terminal_checkpoint_test.mjs`、`terminal_cache_v2_test.mjs`、`workspace_test.go` 的 history/cursor/agent replay 测试 |
+| `terminal/history/` | `terminal_replay_controller_test.mjs`、`terminal_session_replay_controller_test.mjs`、`terminal_session_protocol_controller_test.mjs`、`client_terminal_history_controller_test.mjs`、`terminal_checkpoint_test.mjs`、`workspace_test.go` 的 snapshot/cursor/agent replay 测试 |
 | `terminal/output/` | `terminal_output_controller_test.mjs`、`TestRuntimeTerminalOutputModuleBoundary`、Queue turn ACK/bounded chunk guard、`tests-auto/05-terminal-output` |
 | `terminal/rendering/` | `terminal_renderer_adapter_test.mjs`、`TestTerminalRendererAdapterBehavior`、`terminal_render_snapshot_test.mjs`、`terminal_frame_release_scheduler_test.mjs`、Ghostty renderer/terminal 测试、`TestRuntimeTerminalCanvasResidueGuard` |
 | `terminal/resize/` | `terminal_resize_controller_test.mjs`、`terminal_resize_scheduler_test.mjs`、`terminal_size_sync_test.go`、`scripts/test-multi-device-resize.sh` |
@@ -688,14 +692,14 @@ Node 行为测试统一归档在仓库根目录的 `tests/` 文件夹中，文�
 | `terminal/input/` | `terminal_input_controller_test.mjs`、`terminal_ime_controller_test.mjs`、`terminal_mobile_shortcuts_controller_test.mjs`、`TestTerminalInputControllerBehavior`、`TestTerminalMobileShortcutsControllerBehavior`、`TestRuntimeTerminalInputModuleBoundary` 和 `TestRuntimeTerminalMobileShortcutsModuleBoundary`，以及 runtime 的 Android keyboard、large paste、input lock、composition 和 sticky modifier guard |
 | `terminal/interaction/` | `terminal_context_menu_controller_test.mjs`、`TestTerminalContextMenuControllerBehavior`、`TestRuntimeTerminalInteractionModuleBoundary`、Claude fullscreen 右键隔离和触摸选择 guard |
 | `terminal/tui_adapters/` | Claude、opencode、herdr、pi 的 Node/Go 行为与隔离测试 |
-| `terminal/overview/` | `terminal_overview_controller_test.mjs`、`terminal_overview_preview_test.mjs`、`TestTerminalOverviewControllerBehavior`、`TestRuntimeTerminalOverviewModuleBoundary`、Cache v2 preview 及移动端手势/拖拽 guard |
+| `terminal/overview/` | `terminal_overview_controller_test.mjs`、`TestTerminalOverviewControllerBehavior`、`TestRuntimeTerminalOverviewModuleBoundary`、live/hold Canvas 来源及移动端手势/拖拽 guard |
 | `terminal/screenshot/` | `terminal_long_screenshot_test.mjs` 和 `TestRuntimeTerminalLongScreenshotContract` |
 | `diagnostics/` | `diagnostics_controller_test.mjs`、`terminal_network_monitor_test.mjs` 和 runtime debug 总控/模块边界 guard |
-| `terminal/config/` | `terminal_config_test.mjs`、`TestRuntimeTerminalConfigModuleBoundary` 和 Service Worker 配置资源 guard |
+| `terminal/config/` | `terminal_config_test.mjs`、`TestRuntimeTerminalConfigModuleBoundary` 和版本化配置资源 guard |
 | `service_forwarding/` | `service_forwarding_controller_test.mjs`、`TestRuntimeServiceForwardingModuleBoundary` 和 `workspace_test.go` 的发布代理测试 |
 | `attachments/` | `attachments_test.go` 和 runtime attachment browser guard |
 | `devices/` | `devices_controller_test.mjs`、`devices_test.go` 和 `TestRuntimeDeviceManagementStaticGuards` |
-| `appearance/` | `appearance_controller_test.mjs`、`TestRuntimeAppearanceModuleBoundary`、OSC 主题协议、Cache v2 fingerprint、IME preview 和 presentation hold guard |
+| `appearance/` | `appearance_controller_test.mjs`、`TestRuntimeAppearanceModuleBoundary`、OSC 主题协议、IME composition preview 和 presentation hold guard |
 | `settings/` | `settings_controller_test.mjs`、`TestRuntimeSettingsModuleBoundary`、`workspace_test.go` 的 PATCH 语义测试，以及 runtime 字体、scrollback、line-height、快捷键设置 guard |
 
 Node 测试的物理位置统一保持在 `tests/`；按模块归属通过文件命名、测试名称和本表体现。跨模块协议与静态资源契约也放在 `tests/` 或 Go 测试中，测试名称必须指出所保护的模块边界；`tests-auto/` 只承载真实浏览器/设备回归。
@@ -707,7 +711,7 @@ Node 测试的物理位置统一保持在 `tests/`；按模块归属通过文件
 3. appearance 主题域和 settings 已完成，并建立“设置协调领域 API”的依赖方向。
 4. 现有独立文件已完成目录归档；tab overview、context menu、搜索、剪贴板、链接、选择、mouse controller/lifecycle 和桌面快捷键动作已完成迁移。
 5. `terminal/session/` 状态模型和统一 cleanup 已完成，协议、历史、渲染与输入算法保持原行为。
-6. rendering、resize、input/IME、viewport 和 output 已完成；后续按 history/cache -> transport 的顺序迁移终端核心，每一步保留现有行为 guard。
+6. rendering、resize、input/IME、viewport、output、服务端 history replay、`client:` history 兼容和 transport 已完成迁移，每一步保留现有行为 guard。
 7. 迁移 workspace controller 和 app lifecycle，最后把 `main.js` 收敛为单一 `startGlobalRuntime()` 调用；该入口收敛已完成。
 
 `connectSession()` 的协议实现已归入 `terminal/transport/session_protocol_controller.js`；后续只允许继续把协议/业务实现放入对应 feature owner，`global-runtime.js` 保留调用接线和全局生命周期顺序，不再回填实现。
@@ -723,7 +727,7 @@ Node 测试的物理位置统一保持在 `tests/`；按模块归属通过文件
 5. 迟到 Promise、timer、RAF、observer、listener 和 socket callback 有 generation/dispose guard。
 6. 相关 Node/Go guard 已迁移或新增行为测试；不能只依赖字符串存在性检查。
 7. `node --check runtime/static/main.js runtime/static/global-runtime.js`、相关模块语法检查、定向测试、`go test ./...` 和 `git diff --check` 通过。
-8. 若移动静态资源，Service Worker、版本化 import、构建产物和 LPK 内容已核对。
+8. 若移动静态资源，版本化 import、HTTP 资源映射、构建产物和 LPK 内容已核对。
 9. 涉及终端核心时，至少验证正常路径和一个重连、隐藏、失败或跨设备路径，并确认历史中间过程始终不可见。
 
 ## 第一批建议
@@ -738,10 +742,10 @@ Node 测试的物理位置统一保持在 `tests/`；按模块归属通过文件
 6. `appearance/` 主题域：已完成，验证了 catalog/persistence owner、picker 与 settings theme DOM、timer/RAF/touch/pointer 生命周期和终端 presentation 回调边界。
 7. `settings/`：已完成，验证了字段级 PATCH、pending overlay、字体注册、两套快捷键编辑器、面板导航、timer/listener/dispose 和终端适配边界。
 8. `terminal/session/`：已完成，验证了 pane ID、完整初始状态、私有 cleanup、closed-before-detach、幂等销毁和兄弟 logical stream 隔离边界。
-9. 静态根目录独立模块归档：已完成，验证了公开入口、README、相对 import、Service Worker 路径和既有行为测试不变；该步骤不代表核心 controller/lifecycle 迁移完成。
-10. `terminal/overview/`：已完成，验证了总览状态唯一 owner、DOM/lifecycle 隔离、cache-v2 preview 身份、拖拽/手势/历史 guard 和资源清理。
+9. 静态根目录独立模块归档：已完成，验证了公开入口、README、相对 import、版本化资源路径和既有行为测试不变；该步骤不代表核心 controller/lifecycle 迁移完成。
+10. `terminal/overview/`：已完成，验证了总览状态唯一 owner、DOM/lifecycle 隔离、live/hold Canvas 来源、拖拽/手势/历史 guard 和资源清理。
 11. `terminal/interaction/` 上下文菜单子域：已完成，验证了 desktop/mobile target、动作分派、触摸合成菜单抑制、动态 pane/tab listener 和销毁清理边界。
 
-renderer adapter、presentation、resize、输入队列、IME、移动快捷键、移动 viewport、output、history/cache/replay transaction、session connection、Unified 物理 transport、应用命令和主题发送适配均已完成迁移。`global-runtime.js` 当前只保留全局状态声明、feature controller 创建、跨模块依赖接线、启动/恢复/页面生命周期和统一销毁顺序；其中的 `connectSession()` 仅是对 transport public API 的转发。后续新增功能仍需按独立 owner、controller、lifecycle 和行为 guard 落入对应目录。
+renderer adapter、presentation、resize、输入队列、IME、移动快捷键、移动 viewport、output、服务端 history replay、`client:` IndexedDB 兼容、session connection、Unified 物理 transport、应用命令和主题发送适配均已完成迁移。`global-runtime.js` 当前只保留全局状态声明、feature controller 创建、跨模块依赖接线、启动/恢复/页面生命周期和统一销毁顺序；其中的 `connectSession()` 仅是对 transport public API 的转发。后续新增功能仍需按独立 owner、controller、lifecycle 和行为 guard 落入对应目录。
 
-下一步重点是继续缩减全局 runtime 中的重复接线和隐式共享引用（不移动全局状态 owner），并为每个新增责任域补齐 README、公开入口、Service Worker 资源契约和真实环境回归；任何路径都必须保持输入分类、output/resize/presentation 门禁、单 Unified 连接和历史过程不可见边界。
+下一步重点是继续缩减全局 runtime 中的重复接线和隐式共享引用（不移动全局状态 owner），并为每个新增责任域补齐 README、公开入口、版本化静态资源契约和真实环境回归；任何路径都必须保持输入分类、output/resize/presentation 门禁、单 Unified 连接和历史过程不可见边界。
