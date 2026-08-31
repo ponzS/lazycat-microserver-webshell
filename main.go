@@ -107,6 +107,7 @@ const webshellDeviceTTL = 1500 * time.Millisecond
 const assetBasePlaceholder = "__LCMD_ASSET_BASE__"
 const contentRevisionFileName = ".lpk-content-revision"
 const assetRevisionLength = 24
+const legacyServiceWorkerRetirementPath = "runtime/static/app/bootstrap/legacy_service_worker_retirement.js"
 
 var errInstanceForbidden = errors.New("instance is not accessible by current account")
 var errInvalidPublishCreatePayload = errors.New("invalid publish create payload")
@@ -377,6 +378,7 @@ func (s *pluginServer) run(ctx context.Context) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
+	mux.HandleFunc("/service-worker.js", s.handleLegacyServiceWorkerRetirement)
 	mux.HandleFunc("/api/instances", s.handleInstances)
 	mux.HandleFunc("/api/lightos-admin-info", s.handleLightOSAdminInfo)
 	mux.HandleFunc("/api/publish/", s.handlePublishProxy)
@@ -449,6 +451,25 @@ func versionedStaticFileServer(root string, currentAssetVersion func() string) h
 		}
 		http.StripPrefix(prefix, files).ServeHTTP(w, r)
 	})
+}
+
+func (s *pluginServer) handleLegacyServiceWorkerRetirement(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(s.rootDir, legacyServiceWorkerRetirementPath))
+	if err != nil {
+		http.Error(w, "service worker retirement script is unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.Header().Set("Service-Worker-Allowed", "/")
+	if r.Method == http.MethodHead {
+		return
+	}
+	_, _ = w.Write(data)
 }
 
 func (s *pluginServer) serveHTTP(ctx context.Context, listener net.Listener, mux http.Handler) error {

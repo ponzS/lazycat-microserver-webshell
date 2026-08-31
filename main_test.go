@@ -408,6 +408,81 @@ func TestHandleIndexInjectsLPKVersionedAssetBase(t *testing.T) {
 	}
 }
 
+func TestHandleIndexForcesLegacyWorkerUpdateBeforeAssets(t *testing.T) {
+	root := t.TempDir()
+	staticDir := filepath.Join(root, "runtime", "static")
+	if err := os.MkdirAll(staticDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	index := `<script data-legacy-service-worker-update>navigator.serviceWorker.getRegistration("./").then((registration) => registration?.update())</script><script src="__LCMD_ASSET_BASE__main.js"></script>`
+	if err := os.WriteFile(filepath.Join(staticDir, "index.html"), []byte(index), 0o600); err != nil {
+		t.Fatalf("WriteFile(index.html) error = %v", err)
+	}
+	server := &pluginServer{rootDir: root, assetVersion: "2.0.0-abcdef0123456789abcdef01"}
+	recorder := httptest.NewRecorder()
+
+	server.handleIndex(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	body := recorder.Body.String()
+	updateIndex := strings.Index(body, `data-legacy-service-worker-update`)
+	assetIndex := strings.Index(body, `./assets/2.0.0-abcdef0123456789abcdef01/main.js`)
+	if updateIndex < 0 || assetIndex < 0 || updateIndex > assetIndex {
+		t.Fatalf("legacy worker update trigger must precede versioned assets: %s", body)
+	}
+}
+
+func TestLegacyServiceWorkerRetirementHandler(t *testing.T) {
+	root := t.TempDir()
+	retirementPath := filepath.Join(root, legacyServiceWorkerRetirementPath)
+	if err := os.MkdirAll(filepath.Dir(retirementPath), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	const script = `self.addEventListener("install", () => {});`
+	if err := os.WriteFile(retirementPath, []byte(script), 0o600); err != nil {
+		t.Fatalf("WriteFile(retirement worker) error = %v", err)
+	}
+	server := &pluginServer{rootDir: root}
+
+	t.Run("get", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		server.handleLegacyServiceWorkerRetirement(recorder, httptest.NewRequest(http.MethodGet, "/service-worker.js", nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", recorder.Code)
+		}
+		if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("Cache-Control = %q, want no-store", got)
+		}
+		if got := recorder.Header().Get("Content-Type"); got != "text/javascript; charset=utf-8" {
+			t.Fatalf("Content-Type = %q", got)
+		}
+		if got := recorder.Header().Get("Service-Worker-Allowed"); got != "/" {
+			t.Fatalf("Service-Worker-Allowed = %q, want /", got)
+		}
+		if got := recorder.Body.String(); got != script {
+			t.Fatalf("body = %q, want %q", got, script)
+		}
+	})
+
+	t.Run("head", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		server.handleLegacyServiceWorkerRetirement(recorder, httptest.NewRequest(http.MethodHead, "/service-worker.js", nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", recorder.Code)
+		}
+		if recorder.Body.Len() != 0 {
+			t.Fatalf("HEAD body length = %d, want 0", recorder.Body.Len())
+		}
+	})
+
+	t.Run("method not allowed", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		server.handleLegacyServiceWorkerRetirement(recorder, httptest.NewRequest(http.MethodPost, "/service-worker.js", nil))
+		if recorder.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("status = %d, want 405", recorder.Code)
+		}
+	})
+}
+
 func TestDynamicAssetResponsesTrackLPKVersionWithoutRestart(t *testing.T) {
 	root := t.TempDir()
 	staticDir := filepath.Join(root, "runtime", "static")
