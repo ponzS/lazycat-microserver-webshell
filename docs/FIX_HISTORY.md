@@ -1473,3 +1473,567 @@ git diff --check
 - 回归 guard：`internal/pkg/fonts/store_test.go` 固定服务端默认值为 2000 且验证已有 5000 行设置不变；`TestRuntimeTerminalScrollbackSettingPersistence` 固定前端默认值为 2000；现有 workspace/agent 参数测试继续覆盖显式设置值向 PTY 传递。
 - 验证结果：已执行 `gofmt`、`go test ./... -count=1`、`go test -race ./... -count=1`、Node 全量测试 `146/146`、`node --input-type=module --check runtime/static/main.js` 和 `git diff --check`，均通过；已重新构建 LPK。最新 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk` SHA-256 为 `43d3cbd44fb70d2ab30716af120b9b70efc3a04d6ca2223edd522264c820e9ff`，包内 content revision 为 `f316adce4cec5abb0af35c07a2047b850831374c9ecde8b746b91c82c63b3359`，包内 `runtime/static/main.js` 与工作区哈希一致。
 - 禁止复现：不得通过升级直接覆盖已有用户的滚动历史设置；不得只修改前端或只修改服务端默认；不得修改 Ghostty 上游测试中的固定容量样例来代替 WebShell 默认配置。
+
+### LCMD-20260830-01：诊断状态与资源生命周期从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理；`main.js` 长期同时持有调试开关、日志、FPS、性能任务、网络监视器和终端诊断时间线，状态归属与清理边界难以审核。
+- 影响模块：`runtime/static/main.js`、新增 `runtime/static/diagnostics/`、Service Worker、诊断 Node 测试和 runtime 静态契约测试。
+- 架构问题：原实现把诊断 DOM、localStorage、console/window 捕获、RAF、interval、动态模块加载、socket instrumentation 和终端事件时间线都编排在入口文件中。关闭调试总控或销毁页面时依赖多处分散调用；动态 import、timer 和 socket 回调没有统一 generation owner；终端时间线还写入业务 session，诊断状态可能继续扩大 session 的可变表面。
+- 实施方案：建立带 README 和单一公开入口的 `diagnostics/` 模块。`diagnostics_controller.js` 成为调试开关、持久化、日志、性能采样、网络监视和诊断时间线的唯一 owner；`diagnostics_lifecycle.js` 统一管理设置 listener、网络动态加载 generation、采样 timer 和 socket instrumentation；DOM、日志、FPS、启动追踪和终端时间线分别下沉到专用文件。终端时间线改用模块内部 `WeakMap`，不再修改业务 session。`main.js` 只提供只读网络上下文、调用公开 API，并保留设备心跳和强制 PC 模式各自的业务状态。
+- 资源边界：关闭调试总控会停止 console/window 捕获、FPS RAF、性能采样、网络采样 timer 和 WebSocket 包装，但保留各子开关的持久化值；`dispose()` 幂等清理全部资源并使迟到动态加载结果失效。网络监视器继续按需动态加载，不进入 Service Worker app-shell 预缓存；其余 diagnostics 静态依赖使用版本化相对 import 并进入 app shell。
+- 回归 guard：`diagnostics_controller_test.mjs` 覆盖幂等启动/销毁、开关持久化、资源清理、调试总控关闭、迟到网络模块拒绝和时间线所有权；`terminal_network_monitor_test.mjs` 继续覆盖 WebSocket 包装、流量、状态和 dispose；`TestRuntimeDiagnosticsModuleBoundary`、`TestRuntimeDebugModeControlsDebugTools`、`TestRuntimeTerminalDiagnosticTimelineGuard` 和 Service Worker guard 固定公开入口、README、状态边界、旧路径删除及按需加载策略。
+- 验证结果：diagnostics 与 `main.js` JavaScript 语法检查通过；Node 全量 `148/148`、`go test ./... -count=1`、`go test -race ./... -count=1` 和版本化 diagnostics 资源请求均通过。`lzc-cli project release` 成功生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，包内包含完整 `runtime/static/diagnostics/`、不包含旧根目录模块，包内 `main.js` 与工作区 SHA-256 均为 `5397516b9d9852b486c611759d651652fc49b5571df75ceedb4c2c076345c812`；LPK SHA-256 为 `e6cd72f2deb6a4abac75eee713e156e36a3f2860e92b3b52f40d7367d9a0406e`。
+- 禁止复现：不得把诊断状态、DOM 查询、listener、timer、RAF、动态加载或 socket 包装重新放回 `main.js`；不得让诊断模块修改终端连接、历史、渲染、resize、输入或工作区权威状态；不得把网络监视器改为无条件预取；不得把诊断时间线重新写入业务 session。
+
+### LCMD-20260830-02：启动失败早于 Ghostty 初始化时创建错误终端导致二次异常
+
+- 日期：2026-08-30
+- 来源：diagnostics 模块浏览器回归验证；本地无账号上下文时实例请求快速返回 HTTP 401。
+- 影响模块：`runtime/static/main.js` 的 bootstrap 失败路径和 Ghostty Web 初始化顺序。
+- 错误现象：实例请求在 Ghostty WASM 初始化完成前失败时，`bootstrap().catch()` 立即调用 `createTab()` 创建错误终端，浏览器抛出 `ghostty-web not initialized. Call init() before creating Terminal instances.`。原始 401 已被错误面板展示，但错误处理本身又产生未处理异常，导致错误终端无法可靠建立。
+- 根因：正常 bootstrap 同时等待 Ghostty、主题、设置、实例和工作区任务，而失败 handler 没有继承 Ghostty ready barrier。快速失败的网络请求可以抢在 `ghosttyInitPromise` 之前进入 catch，错误展示路径因此违反 Terminal 构造前必须完成初始化的前置条件。
+- 实施方案：bootstrap catch 先记录诊断日志、toast 和错误面板，再 `await ghosttyInitPromise`；确认页面未 dispose 后才创建错误 tab 并写入错误文本。Ghostty 初始化本身失败时只追加“错误终端创建失败”诊断，不覆盖原始启动错误，也不再次抛出未处理异常。
+- 回归 guard：新增 `TestRuntimeBootstrapFailureWaitsForGhostty`，固定错误面板先展示、错误终端必须位于 `await ghosttyInitPromise` 之后、dispose gate 和 Ghostty 失败诊断均保留。浏览器验证使用无账号 401 路径，覆盖快速失败早于终端初始化的实际时序。
+- 验证结果：JavaScript 模块语法检查、Node 全量 `148/148`、`go test ./... -count=1`、`go test -race ./... -count=1` 均通过。Chrome CDP 在禁用缓存并重新导航后确认错误面板显示 `Failed to load instances (401): account id is required`，页面建立 1 个终端 pane 和 1 个 Canvas，导航后的 `Runtime.exceptionThrown` 为 0。
+- 禁止复现：任何启动失败、恢复失败或兜底 UI 都不得在 Ghostty ready barrier 前创建 Terminal；错误处理不得用二次异常覆盖原始错误；等待期间页面 dispose 后不得继续创建 tab、Canvas 或注册资源。
+
+### LCMD-20260830-03：diagnostics 迁移后旧变量 guard 导致实例切换运行时异常
+
+- 日期：2026-08-30
+- 来源：继续整理服务转发模块前检查 `main.js` 调用链时发现；续接 `LCMD-20260830-01`。
+- 影响模块：`runtime/static/main.js` 的实例目标切换、Unified 物理连接状态和直连 socket 挂载路径。
+- 错误现象：diagnostics 模块已经删除 `main.js` 内的 `terminalNetworkMonitor` 局部状态，但 6 个调用点仍保留 `if (terminalNetworkMonitor)`。正常实例切换、Unified 建连/关闭或 session socket 建立时会读取未声明标识符并抛出 `ReferenceError`，使后续连接或实例切换逻辑中断。上一轮无账号浏览器验证中 `activeName` 初始为空，未进入目标变化分支，因此没有覆盖该路径。
+- 根因：迁移时只替换了网络监视器的状态 owner 和主要公开 API，遗漏了旧的“实例存在时才同步”条件 guard。JavaScript 语法检查不会识别运行期未声明变量，原静态测试也只禁止旧 import、timer 和 DOM 状态，没有禁止该旧条件表达式。
+- 实施方案：删除全部旧变量条件，统一直接调用 diagnostics 的 `syncNetworkSockets()` 公开入口。该入口在监视器未加载或未启用时是可重复调用的受控空操作，在启用时负责同步当前只读 socket 快照。实例变化继续使用 `{ reset: true }` 清除旧 socket instrumentation。
+- 回归 guard：`TestRuntimeDiagnosticsModuleBoundary` 新增禁止 `if (terminalNetworkMonitor)` 的契约；浏览器使用 `?name=alpha@deploy-a` 进入无账号 401 路径，强制执行 `alpha@deploy-a -> ""` 的实例目标变化，确认 diagnostics 同步和服务转发目标清理均不抛异常。
+- 验证结果：diagnostics/service forwarding JavaScript 语法检查、Node 全量 `153/153`、`go test ./... -count=1`、`go test -race ./... -count=1` 和 Chrome CDP 验证通过；目标变化后的 `Runtime.exceptionThrown` 为 0。
+- 禁止复现：模块状态迁出后不得保留对旧 owner 标识符的存在性判断；可选模块的调用方必须使用其公开幂等入口，不能通过读取模块内部变量猜测是否已启动；静态 guard 必须覆盖被删除状态名的残留条件。
+
+### LCMD-20260830-04：服务转发状态与异步事务从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理；服务转发的 DOM、HTTP、表单、列表、实例过滤、部署补偿和事件监听长期集中在 `main.js`。
+- 影响模块：`runtime/static/main.js`、新增 `runtime/static/service_forwarding/`、Service Worker、服务转发 Node 测试和 runtime 静态契约测试。
+- 架构问题：原实现由 `main.js` 共同持有发布列表、编辑 ID、busy 和刷新序号，同时直接调用六条 `/api/publish/*` 路由、操作表单 DOM 并注册所有事件。刷新只保护 list request，部署、安装、删除、延迟 focus 和实例切换之间没有统一 generation；旧目标 Promise 可能在切换实例或关闭页面后继续修改新目标 UI。状态、视图、HTTP 和事务补偿混在同一文件，难以审核账号/实例边界。
+- 实施方案：建立带 README 和单一公开入口的 `service_forwarding/` 模块。Controller 成为列表、编辑态、busy、refresh/operation/focus generation 的唯一 owner；API 层只调用 Provider 白名单路由并维护 JSON/multipart 契约；model 负责纯记录、目标、子域名和上游 URL 校验；view 负责 DOM；lifecycle 负责 listener 注册清理。实例切换统一调用 `handleTargetChange()` 清空旧目标状态并拒绝迟到回调；新建记录在安装失败或安装前事务失效时尽力补偿删除。
+- 集成边界：`main.js` 仅在设置 tab 选择、实例目标变化、全局 Escape 弹层顺序、启动和销毁时调用公开 API。服务模块通过只读 `getTarget()` 获取 selector/display name，通过回调使用设置反馈、确认对话框、URL 打开和移动 select 关闭能力；浏览器仍不能直接访问 LightOS Admin，也不保存服务凭据。
+- 回归 guard：`service_forwarding_controller_test.mjs` 覆盖当前目标过滤、旧目标迟到刷新、完整 create/update/install/list/delete Provider 请求、IPv6 上游 URL、安装失败回滚、删除确认、真实 DOM listener 移除、focus timer 清理和 dispose；`TestRuntimeServiceForwardingModuleBoundary` 固定公开入口、README、controller generation、API 白名单、lifecycle 清理、Service Worker 资源和 `main.js` 禁止旧状态/API/DOM 实现；现有 `workspace_test.go` 继续覆盖账号、实例所有权、multipart 和代理白名单。
+- 验证结果：service forwarding 与 `main.js` JavaScript 语法检查通过；Node 全量 `153/153`、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 通过。Chrome CDP 确认六个版本化模块均返回 200，添加编辑器、端口步进、Escape 关闭和无目标提交错误态正常，`Runtime.exceptionThrown` 为 0。`lzc-cli project release` 成功生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，包内包含完整 diagnostics 与 service_forwarding 目录；包内和工作区 `main.js` SHA-256 均为 `a708e269a3add6caa0661285eeb5541cdf29da0b79eb78897e612d15f7aae1b9`，LPK SHA-256 为 `4589cdff88ea7c53b0f72120d22447b3a305d6518949203125fbb0e62f74e693`。
+- 禁止复现：不得把服务转发 DOM、entries、editing ID、busy、fetch、FormData 或事件监听重新放回 `main.js`；不得允许旧实例或 dispose 后的 Promise 覆盖当前 UI；不得绕过 Provider 白名单直接请求 Admin；新建记录安装失败时不得静默遗留未完成发布；服务转发模块不得修改终端、工作区或历史权威状态。
+
+### LCMD-20260830-05：附件浏览、上传与资源生命周期从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理；附件弹层、远端文件浏览、上传进度、剪贴板 reservation、触摸返回和动态 DOM 长期集中在 `main.js`。
+- 影响模块：`runtime/static/main.js`、新增 `runtime/static/attachments/`、Service Worker、附件 Node 测试和 runtime 静态契约测试。
+- 架构问题：原实现由 `main.js` 共同持有浏览器路径、父路径、entries、排序、选择集合、request sequence、上传 map、XHR、自动关闭 timer、ClipboardItem reservation 和边缘滑动状态，同时直接访问三条 `/api/attachments*` 路由并注册全部 DOM listener。列表请求只按序号拒绝迟到结果，没有绑定实例目标或弹层生命周期；剪贴板读取、延迟 focus、上传完成回调和 tab/实例切换之间缺少统一 dispose/generation owner。动态上传面板还把 DOM 节点和 listener 写回业务上传对象，资源清理边界难以审核。
+- 实施方案：建立带 README 和单一公开入口的 `attachments/` 模块。`attachments_controller.js` 成为弹层、浏览路径、排序、选择、browser/clipboard generation、上传记录、XHR、timer、reservation 和触摸状态的唯一 owner；API 层只维护 Provider 列表、上传和下载白名单；clipboard 层负责文件读取、文本降级和延迟 ClipboardItem；model 负责路径、entry、排序、大小、文件名和 32 文件/2GB/64 下载限制；view 负责文件列表、面包屑、下载触发和动态上传面板 DOM；lifecycle 统一注册和移除静态 listener。
+- 异步与资源边界：浏览请求必须同时匹配当前目标、browser target、request generation、打开状态和 dispose 状态。客户端实例仍从 `/` 开始，普通容器仍从活动 pane 的 cwd 开始。每个上传绑定创建时的实例和 tab；关闭 tab、切换实例或 dispose 时先从 owner map 删除，再 reject reservation、清 timer、移除面板并 abort XHR，使迟到 progress/load/error/abort 回调成为空操作。剪贴板读取使用独立 generation，目标切换后不得继续发起上传；关闭弹层时无条件取消迟到 focus timer。
+- 集成边界：`main.js` 只创建 controller，并在附件动作、tab 激活、搜索开关、实例切换、tab 删除、全局 Escape、启动和销毁时调用公开 API；不再查询附件 DOM、保存附件状态、创建 XHR/FormData、访问附件路由或注册附件 listener。模块通过只读 `getContext()` 获取目标、cwd、tab 和搜索状态，通过 `getTabHost(tabId)` 获取上传面板挂载点，不修改 workspace、terminal session、连接、历史或渲染权威状态。
+- 回归 guard：新增 `attachments_controller_test.mjs` 5 项，覆盖旧目标迟到列表、客户端根路径、三条 Provider 路由、排序/选择/下载、上传进度、路径复制、32 文件和 2GB 限制、5 秒自动关闭、tab/target/dispose 清理、迟到剪贴板读取以及真实 listener 注销。`TestRuntimeAttachmentsModuleBoundary` 固定公开入口、README、状态 generation、API 白名单、lifecycle 清理、Service Worker 资源、`main.js` 公开集成和旧实现删除；现有 `attachments_test.go` 继续保护账号/实例授权、客户端代理、路径、符号链接、归档与服务端容量限制。
+- 验证结果：附件模块和 `main.js` JavaScript 语法检查通过；Node 全量 `158/158`、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 通过。Chromium CDP 确认 7 个版本化附件模块均返回 200，附件弹层、Escape、浏览器 body class、路径、排序、选择计数、真实 DOM 上传成功面板和 dispose 清理正常，`Runtime.exceptionThrown` 为 0。`main.js` 从 23703 行降至 22651 行。`lzc-cli project release` 成功生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，包内完整包含 `runtime/static/attachments/` 且与工作区逐文件一致；包内和工作区 `main.js` SHA-256 均为 `1fb4da81eddbd3aeba84579e77a39461e0208f31bf6b3917fe4ef9b9efb7574f`，LPK SHA-256 为 `2f9fd722497c2aabeffe2889bfa93c59f6550911f0c84fc6c0017d86561dba63`。
+- 禁止复现：不得把附件 DOM、浏览状态、entries、selection、XHR、FormData、timer、ClipboardItem reservation、touch state 或 `/api/attachments*` 请求重新放回 `main.js`；不得让关闭弹层、旧实例、已删除 tab 或 dispose 后的异步回调继续修改 UI；不得绕过 Provider 直接访问目标实例；不得放宽 32 文件、单文件 2GB、64 下载条目和服务端路径/符号链接授权边界；附件模块不得触碰终端历史回放、连接、resize、输入或 Canvas presentation。
+
+### LCMD-20260830-06：设备在线状态与请求生命周期从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理；设备心跳、在线列表、调试总控联动、面板 DOM 和页面显隐处理长期分散在 `main.js`。
+- 影响模块：`runtime/static/main.js`、新增 `runtime/static/devices/`、Service Worker、设备 Node 测试和 runtime 静态契约测试。
+- 架构问题：原实现由 `main.js` 持有心跳开关、active/in-flight/error、heartbeat/list interval、timeout、列表 loading/signature/request sequence 和面板状态，同时直接访问三条 `/api/devices*` 路由并注册设备 DOM listener。关闭调试总控、关闭面板、页面 resume/pagehide 和 dispose 依赖多处分散调用；列表 sequence 没有同时绑定面板打开状态和 dispose generation，在途 fetch 也没有统一 abort owner。设备 DOM、持久化、平台识别、HTTP、beacon、渲染和生命周期混在入口中，难以审核短 TTL、账号隔离和资源清理边界。
+- 实施方案：建立带 README 和单一公开入口的 `devices/` 模块。`devices_controller.js` 成为心跳开关、heartbeat/list 请求、timer、AbortController、request/focus generation、列表 snapshot 和面板状态的唯一 owner；API 层只维护 `/api/devices`、`/api/devices/heartbeat` 和 `/api/devices/offline` Provider 路由；model 负责平台/浏览器识别、记录归一化和 signature；view 负责 DOM；lifecycle 统一注册和移除模块 listener。
+- 异步与资源边界：心跳始终保持单 in-flight，请求超时与生命周期主动 abort 分开处理；真实超时写入诊断，关闭调试总控或 dispose 的 abort 不制造错误噪声。关闭、重开或销毁面板会递增列表 generation、abort 当前请求并停止刷新 interval，迟到响应不能更新新面板。离线 beacon 只在心跳 active、浏览器在线且支持 `sendBeacon` 时发送。账号隔离、`client_id` 与 account ID 的联合身份和短 TTL 淘汰继续由服务端权威决定。
+- 集成边界：diagnostics 只通过 `setDebugMode()` 传入调试总控状态，不保存设备数据；`main.js` 仅创建 controller，并转发设置同步、弹层关闭、Escape、resize、resume、pagehide、启动和销毁命令。设备模块不得读取或修改 workspace、terminal session、WebSocket、历史、resize、输入或 Canvas presentation 状态。
+- 回归 guard：新增 `devices_controller_test.mjs` 5 项，覆盖心跳单 in-flight、真实 timeout、生命周期 abort、调试总控关闭、迟到列表拒绝、Provider 路由、设备身份 payload、beacon 和真实 listener 清理；`TestRuntimeDeviceManagementStaticGuards` 固定公开入口、README、controller owner、API 白名单、model/view/lifecycle 边界、Service Worker 资源、`main.js` 公开集成和旧实现删除；`devices_test.go` 继续覆盖服务端账号隔离、TTL、heartbeat 和 offline 行为。
+- 验证结果：设备模块和 `main.js` JavaScript 语法检查通过；Node 全量 `163/163`、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 通过。Chromium CDP 确认 6 个版本化设备模块均返回 200，设置控件、在线设备面板、错误反馈、Escape 和调试总控关闭联动正常，`Runtime.exceptionThrown` 为 0。`main.js` 从 22651 行降至 22306 行。`lzc-cli project release` 成功生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，包内完整包含 `runtime/static/devices/` 且与工作区逐文件一致；包内和工作区 `main.js` SHA-256 均为 `5f3210fb7c146b5ff286296c3619a66e4cce436b11c08dbc0331f910500778a2`，LPK SHA-256 为 `f7aa7ad4866eb90e22af9c43ecf1df354c065c7021a887d2b39745f387c240b1`。
+- 禁止复现：不得把设备 DOM、心跳开关、timer、AbortController、列表状态、request generation、平台识别、beacon 或 `/api/devices*` 请求重新放回 `main.js`；不得让关闭面板、关闭调试总控或 dispose 后的请求继续修改 UI；不得把 `client_id` 当作脱离 account ID 的全局身份；不得让设备模块触碰终端历史回放、连接、resize、输入或 Canvas presentation，也不得以任何方式显示历史回放过程。
+
+### LCMD-20260830-07：实例发现、切换器与首页导航从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理；实例列表、切换器 DOM、首页 URL cache、请求重试、`popstate` 和实例选择 listener 长期分散在 `main.js`，已有根目录 `instances_loader.js` 也没有完整模块边界。
+- 影响模块：`runtime/static/main.js`、新增 `runtime/static/instances/`、Service Worker、实例 Node 测试、runtime/workspace 静态契约测试和前端模块地图。
+- 架构问题：原实现由 `main.js` 持有 `currentInstances`、切换器 DOM、反馈、LightOS 首页 URL/in-flight Promise，并直接注册按钮、列表、外部点击、Escape、首页和 `popstate` listener。实例 selector/model、列表加载、工作区切换、tab history 和首页恢复提交混在同一文件；页面销毁只取消列表 loader，首页请求没有 generation/AbortController，迟到响应仍可能缓存 URL 或修改按钮。直接迁移 `activeName` 又会同时波及 workspace、terminal transport、history、cache、resize 和 presentation 数百个调用点，超出本批可验证边界。
+- 实施方案：建立带 README 和单一公开入口的 `instances/` 模块。`instances_controller.js` 成为实例列表 snapshot、公开 load generation、切换器打开/反馈状态和子资源生命周期的唯一 owner；`instances_loader.js` 移入模块并继续保持网络错误及 502/503/504 的 250/750/1500/3000ms 有限退避、401/403 与 JSON 错误不重试、并发单飞和 Provider 阶段详情；model 负责 selector、显示名、运行状态和 URL 参数纯函数；view 负责切换器/首页 DOM；lifecycle 统一注册和移除按钮、列表、首页、外部点击、Escape 与 `popstate` listener；navigation 独占 LightOS 首页 URL cache、in-flight Promise、generation 和 AbortController。
+- 状态与集成边界：`activeName` 和 `activeInstanceGeneration` 暂时继续由工作区核心持有。实例模块只通过 `getActiveName()` 观察 selector，通过 `onSwitchTarget()` 发出用户选择命令；`main.js` 保留 tab reset、workspace refresh、URL 提交和目标 generation 更新。首页导航通过显式 prepare/commit/rollback 回调使用工作区恢复边界。模块不得直接修改 tab/pane、terminal session、WebSocket、历史、缓存、resize、输入或 Canvas presentation，也不得直接访问 LightOS Admin 或客户端服务凭据。
+- 异步与资源边界：controller 和 loader 双层共享当前 load Promise，关闭或销毁会递增 generation 并 abort 请求，迟到列表不能覆盖 snapshot 或反馈。切换器 close generation 拒绝关闭后的错误反馈。首页 URL 请求并发共享、成功缓存，失败允许重试；dispose 会 abort 并拒绝迟到 cache。模块 `dispose()` 幂等移除全部 listener、关闭切换器并清空 DOM 状态。
+- 回归 guard：新增 `instances_controller_test.mjs` 6 项，覆盖 selector/model、不可变列表 snapshot、工作区切换回调、默认运行目标、切换器单飞与关闭/dispose、首页 Provider URL/cache/偏好/失败回滚以及真实 listener 清理；`instances_loader_test.mjs` 改为只经公开入口导入并继续覆盖 502/503/504、网络错误、4xx、单飞、Provider 详情、无效 JSON 和 dispose。新增 `TestInstancesControllerBehavior` 与 `TestRuntimeInstancesModuleBoundary`，固定公开入口、controller/model/view/lifecycle/navigation 边界、Service Worker 七个资源、旧根目录 loader 删除和 `main.js` 禁止旧 DOM/请求/状态/listener；首页、移动总览 `popstate` 和客户端 selector 旧 guard 已迁移到新 owner。
+- 验证结果：实例定向 Node 测试 11/11、Node 全量 169/169、`go test ./... -count=1`、`go test -race ./... -count=1`、运行时 JavaScript 语法检查和 `git diff --check` 均通过。Headless Chromium 通过版本化 `/assets/1.0.39-cba4156e3456fef373b328bc/instances/` 加载全部 7 个模块且均返回 200；无账号 401 路径正确显示启动错误，切换器打开后显示授权反馈，Escape 关闭，首页 502 后按钮恢复，`Runtime.exceptionThrown` 为 0。`main.js` 从 22306 行降至 22082 行，SHA-256 为 `f104aef17b11b7f39db485c85eda30ecff033397306fc932575c44531fd62d3e`。`lzc-cli project release` 生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，包内七个实例模块与工作区逐文件一致、不含旧根目录 loader，LPK SHA-256 为 `952b4bd4ab032594e5f7f2d3eef71322ef6500255a7e3b2a8db8bc727c21327d`。
+- 禁止复现：不得把实例列表、切换器 DOM/反馈、loader、首页 URL cache、实例 listener 或 `/api/instances`、`/api/lightos-admin-info` 请求重新放回 `main.js`；不得从公开入口之外深度导入模块；不得让关闭切换器、旧请求或 dispose 后的回调继续修改 UI；不得绕过 Provider/Admin 账号可见性边界；在工作区模块完成前不得把 `activeName` 强行迁入实例模块形成跨终端状态的双 owner；实例模块不得触碰或展示终端历史回放过程。
+
+### LCMD-20260830-08：主题目录、选择器与生命周期从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理；主题 catalog、当前主题、主题选择器、设置页主题列表、Canvas 预览和滚动/触摸交互长期集中在 `main.js`。
+- 影响模块：`runtime/static/main.js`、新增 `runtime/static/appearance/`、`runtime/static/themes.json`、Service Worker、主题 Node 测试、runtime 静态契约测试和前端模块地图。
+- 架构问题：原实现由 `main.js` 同时持有主题 catalog、active theme、localStorage、主题资源请求、页面 CSS variables、浏览器 `theme-color`、两套主题列表 DOM、Canvas 预览、滚动条 RAF/drag、边缘滑动、focus/scroll timer 和全部 listener。主题选择的浏览器资源生命周期与终端 session 遍历、Ghostty theme 更新及 Canvas presentation 混在同一入口文件，难以审核状态唯一 owner、迟到请求和清理边界，也容易在后续整理中误把主题变化接入历史 replay/reset 路径。
+- 实施方案：建立带 README 和单一公开入口的 `appearance/` 模块。`appearance_controller.js` 成为 catalog、active theme、持久化、catalog generation/AbortController、picker/settings 状态、timer、RAF、drag 和 touch state 的唯一 owner；`theme_catalog.js` 通过相对 `import.meta.url` 加载版本化 `themes.json`，并发调用共享同一请求，失败保留内置 fallback，dispose 后拒绝迟到结果；`theme_model.js` 只负责归一化、不可变副本和终端颜色转换；`appearance_view.js`、`theme_preview.js` 与 `appearance_lifecycle.js` 分别负责 DOM/CSS、Canvas 绘制和 listener 注册清理。外部只能从 `appearance/index.js` 导入 controller。
+- 状态与资源边界：`start()` 幂等注册主题选择器、设置列表、scroll、touch、pointer 和 window listener；`dispose()` 递增 generation、abort catalog 请求、取消 timer/RAF、移除 listener 并释放 view 资源。主题 snapshot、terminal theme 和 OSC 颜色 payload 均返回副本，调用方不能修改 controller 内部状态。`main.js` 不再查询主题 DOM、请求 `themes.json`、保存主题状态或实现主题手势。
+- 终端呈现边界：`onThemeChange(theme, previousTheme)` 是 appearance 唯一终端集成出口。现有 rendering 适配先对每个 pane 调用 `beginTerminalPresentationHold(session)`，再更新 Ghostty theme、颜色映射和终端颜色协议；随后按当前内存终端状态请求 full render。主题变化不清空终端、不调用 `writeReplay()`、不重置 history/cursor、不重新读取缓存，也不得显示任何历史回放中间过程。
+- 回归 guard：新增 `appearance_controller_test.mjs` 3 项，覆盖 stored theme、不可变 catalog/snapshot、terminal theme/payload、catalog 单飞、Abort/generation、dispose、picker/list/scroll/touch/pointer/timer/RAF 和真实 listener 清理；新增 `TestAppearanceControllerBehavior` 与 `TestRuntimeAppearanceModuleBoundary`，固定公开入口、README、controller/model/view/lifecycle/preview 边界、版本化 catalog URL、Service Worker 七个模块与 `themes.json`、`main.js` 旧实现删除，以及 presentation hold 必须早于 Ghostty theme 更新且适配块禁止出现 replay/history/reset。
+- 验证结果：appearance 与 `main.js` JavaScript 模块语法检查通过；Node 全量 `172/172`、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 均通过。Playwright/Chromium 通过版本化 URL 加载全部 7 个 appearance 模块和 `themes.json`，资源均返回 200；48 个主题选项正常渲染，预览 Canvas 为 `308x60` 且包含非透明像素，`default -> freya` 切换后 body theme、CSS variables、localStorage 和唯一选中态一致，Escape 可关闭设置页，页面异常和失败资源均为 0。`main.js` 从 22082 行降至 21372 行，工作区与包内 SHA-256 均为 `5ea707fffff9a600052d2cf4931e040c33a7d4bf95f3063645e8f9ab9168fe70`。`lzc-cli project release` 生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，包内 `.lpk-content-revision` 为 `cc86f5e9f532d0121319313034d297237fc4f726a0d25d08cbd1f0181a10596f`，七个 appearance 模块、README、`themes.json` 和 Service Worker 与工作区逐文件一致；LPK SHA-256 为 `9f76c6faf519dde8520f403f388d61873a7bc844b71250446cda99de1ba82252`。
+- 禁止复现：不得把主题 catalog、active theme、localStorage、主题 DOM、Canvas 预览、timer、RAF、drag/touch state、listener 或 `themes.json` 请求重新放回 `main.js`；不得从公开入口之外深度导入 appearance 内部文件；不得让迟到 catalog、已关闭 picker 或 dispose 后回调修改当前 UI；appearance 不得读取或修改 tab/pane/session、WebSocket、history、cache、resize、input 或 Canvas presentation 权威状态；主题、字体和字号变化只能复用当前 presentation hold，任何情况下都不得进入或展示历史回放过程。
+
+### LCMD-20260830-09：设置状态、持久化、编辑器与生命周期从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理；服务端设置 snapshot、字体、字号、行高、scrollback、手机/PC 快捷键编辑器、设置导航和全部 listener/timer 长期集中在 `main.js`。迁移收尾的 Go 静态 guard 还发现 `applyTerminalScrollback()` 与 `invalidateSessionsForTerminalScrollbackChange()` 已被删除但回调调用仍保留，设置模块启动或修改 scrollback 时会抛出 `ReferenceError`。
+- 影响模块：`runtime/static/main.js`、新增 `runtime/static/settings/`、Service Worker、settings Node 测试、runtime 静态契约测试、`AGENTS.md` 和前端模块地图。
+- 架构问题：原实现由 `main.js` 同时持有服务端设置、本地字号/强制 PC/移动远程桌面偏好、完整快照 PUT、字体 FontFace、两套快捷键配置/编辑器/拖拽、面板 DOM、request sequence、debounce/focus/scroll timer 和永久 listener。多个设置并发保存时完整快照可能覆盖其他字段；空数组、`null` 和手机快捷键文本空白的语义难以审核；迟到 load/PATCH、dispose、FontFace 和拖拽临时 listener 缺少统一 owner。迁移过程中又因删除旧辅助函数而保留调用点，暴露出仅靠语法检查无法发现的运行时缺口。
+- 实施方案：建立带 README 和单一公开入口的 `settings/` 模块。`settings_controller.js` 成为 snapshot、本地偏好、字段级 PATCH 串行队列、pending overlay、controller/load generation、AbortController、字体/快捷键编辑状态、拖拽和 timer 的唯一 owner；API 层只访问 Provider 相对 settings/font 路由；model 负责默认值、归一化、序列化、快捷键解析和不可变副本；view 负责全部设置 DOM；lifecycle 统一注册和移除永久/临时 listener；font registry 独占 FontFace generation 与销毁；shortcut editor 只做纯校验和列表变换。恢复 scrollback 的终端适配与历史窗口失效函数，避免启动和保存路径读取未声明标识符。
+- PATCH 与异步边界：每次保存只发送一个显式字段，`terminal_font_id: ""` 表示系统默认字体，`mobile_shortcuts: null`/`desktop_shortcuts: null` 表示恢复默认，`[[], []]`/`[]` 保持显式空配置，手机快捷键 `text` 不执行 `trim()`。pending overlay 防止较早响应覆盖尚未完成的新字段；load、PATCH、字体注册、独立客户端检测和 focus timer 都绑定 controller generation/dispose，关闭或销毁后不得继续提交 UI。
+- 集成与历史边界：`main.js` 只从 `settings/index.js` 导入，通过 getter、命令和显式回调消费状态，不再查询设置 DOM、请求 settings API、持有编辑器/timer 或创建 FontFace。字体与字号变化先调用 presentation hold，再更新 Ghostty options 并刷新当前内存 metrics；行高和快捷键栏只进入现有 resize；这些呈现适配不得调用 replay/history reset，也不得展示历史回放过程。scrollback 变化继续通过既有缓存失效和受抑制的权威历史恢复路径处理，任何中间帧仍不可见。
+- 回归 guard：新增 `settings_controller_test.mjs` 4 项，覆盖不可变快照、显式空配置、字段级 PATCH、pending overlay、手机快捷键文字保真、reset `null`、dispose 和迟到 load；新增 `TestRuntimeSettingsModuleBoundary` 固定公开入口、controller/API/model/view/lifecycle/font registry/shortcut editor/README 边界、Service Worker 八个资源、`main.js` 禁止旧实现和字体/字号/行高适配不得进入 replay。原字体、scrollback、line-height、移动/PC 快捷键、force-PC、原生粘贴和设置导航 guard 已迁到实际 owner；scrollback guard同时固定入口适配函数存在，防止再次留下未声明调用。
+- 验证结果：settings 各模块和 `main.js` JavaScript 语法检查通过；Node 全量 `176/176`、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 均通过。Headless Chrome 通过版本化 URL 加载全部 8 个 settings 模块且均返回 200；设置面板、5 个字体卡、字体加载、29 个手机快捷键、35 个 PC 快捷键、两套新增编辑器、字号 `16 -> 17 -> 16`、行高 `100 -> 101 -> 100`、scrollback `2000 -> 2001 -> 2000`、Escape、移动端 5 项列表导航/详情/返回均正常，`Runtime.exceptionThrown` 和 console error 为 0。`main.js` 从 21372 行降至 18482 行，工作区与包内 SHA-256 均为 `8aebfc5bbd0cfde01f36585e0d1ed950614f91a7dc672bdfd5b4a46315c4ea55`。`lzc-cli project release` 生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，包内 `.lpk-content-revision` 为 `52fb45d3e272c49148b5ade3cc6caa31fd2569e5add578a009e30805e8e21f72`，settings 目录、README、Service Worker 和入口文件与工作区逐文件一致；LPK SHA-256 为 `837c8b671963111f9bf4c1435c82144383fb8597b57b4697befe8b50f4e4dedf`。
+- 禁止复现：不得把设置 DOM、snapshot、完整快照保存、FontFace、编辑器/拖拽状态、timer、listener 或 `api/settings*` 请求重新放回 `main.js`；不得从公开入口之外深度导入 settings 内部文件；不得让较早 PATCH、旧 load、迟到字体注册或 dispose 后回调覆盖当前状态；不得把 `null`、显式空配置或快捷键文本空白归一成同一含义；不得删除终端适配函数后保留调用点；字体、字号、行高和主题变化不得进入或展示历史回放过程。
+
+### LCMD-20260830-10：终端 session 初始状态与销毁生命周期从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理；`createPaneSession()` 长期同时分配 pane ID、创建 Ghostty/DOM、构造包含连接、replay、cache、input、output、resize、presentation 和 activity 的两百余个扁平字段，并安装全部事件 adapter；`disposePane()` 又直接编排跨 transport、history、input、output、resize、presentation、cache、Ghostty 和 DOM 的清理顺序。
+- 影响模块：`runtime/static/main.js`、新增 `runtime/static/terminal/` 与 `runtime/static/terminal/session/`、Service Worker、session Node 行为测试、runtime 静态契约测试和前端模块地图。
+- 架构问题：pane ID 序列、初始尺寸、子控制器实例、cleanup 数组和销毁状态没有独立 owner，任何新增字段都只能继续堆入 `main.js`。尤其 Unified logical close 会同步触发 close callback，销毁路径必须在 detach 前设置 `closed`，否则可能为主动关闭的 pane 重新调度 retry；这个关键顺序与历史 flush、`client:` scheduler 注销、preview/frame 释放和 Ghostty dispose 混在入口文件中，难以证明单 pane 销毁不会关闭 Unified 物理连接或影响兄弟 stream。迟到异步 callback 在 session 已关闭后继续注册 cleanup 时，旧数组也不会再次执行。
+- 实施方案：建立 `terminal/README.md` 和带 README、单一公开入口的 `terminal/session/` 模块。`session_controller.js` 成为 pane ID 序列和初始 cols/rows 归一化的唯一 owner，通过显式 resource factory 组合 DOM/Ghostty 资源、state 和 lifecycle；`session_state.js` 创建完整且相互隔离的扁平状态，并实例化 replay、resize 和 render snapshot 子控制器。字段本批保持扁平，以避免同时改写 transport、history、cache、input、output、resize 和 presentation 算法。
+- 生命周期与连接边界：`session_lifecycle.js` 使用私有 `WeakMap`/`WeakSet` 保存 cleanup 与 disposed 状态，不再把 cleanup 数组暴露在 session 上。销毁严格执行“flush 历史写入 -> 设置 `closed` -> reset replay -> detach 当前 Unified logical stream -> 注销 `client:` scheduler -> 清输入/连接/retry/resize/输出/presentation/cache 资源 -> 取消 preview/frame -> 运行 cleanup -> 清 Canvas -> dispose Ghostty -> 移除 DOM”；重复 dispose 无副作用，关闭后的迟到 cleanup 立即执行。lifecycle 没有物理 socket close、历史 replay/reset 或 Canvas presentation 算法，单 pane 销毁不能触碰 Unified 物理连接和兄弟 session。
+- 集成边界：`main.js` 只从 `terminal/session/index.js` 导入 controller，保留尚未迁移的 Ghostty/DOM resource factory 和事件 adapter 安装，通过 `create()`、`addCleanup()`、`dispose()` 使用模块公开 API；`nextPaneSeq`、初始状态字面量、cleanup helper 和销毁编排已删除。现有七组 resize、cache-v2、output、history、diagnostics、input 和 cursor 静态 guard 改为从真实的 `session_state.js` owner 读取初始字段，不再要求字段继续存在于入口文件。
+- 回归 guard：新增 `terminal_session_controller_test.mjs` 3 项，覆盖显式 pane ID 推进、初始尺寸、cache identity 副本、数组/子控制器隔离、flush/closed/detach/unregister 顺序、cleanup 异常隔离、幂等销毁、迟到 cleanup 和兄弟 session/socket 不受影响；`TestTerminalSessionControllerBehavior` 将其纳入 Go 全量测试入口。新增 `TestRuntimeTerminalSessionModuleBoundary`，固定公开入口、controller/state/lifecycle/README 职责、Service Worker 四个资源、`main.js` 禁止深度导入或恢复巨大状态，并禁止 lifecycle 调用物理连接 close、`writeReplay` 或历史 reset。
+- 验证结果：session 模块、Service Worker 和 `main.js` JavaScript 模块语法检查通过；Node 全量 `179/179`、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 通过。Headless Chrome CDP 拦截 Provider `/api/*` 注入最小合法 workspace，真实创建 `pane-1`、terminal host 和 Ghostty Canvas；四个版本化 session 模块均返回 200，`Runtime.exceptionThrown`、console error 和非 WebSocket失败请求均为 0。`main.js` 从 18482 行降至 18192 行，工作区与包内 SHA-256 均为 `2fc7ee6e9c1f995061150af34bf0673fc07ea078c6fe75300ee449fe5adaca9f`。`lzc-cli project release` 成功生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，Ghostty WASM 重建后与固定源码一致；包内 `.lpk-content-revision` 为 `7eb589b86274643b69bbb69f1ff3bee32e2798f97b3ff2b453aad6301637c4cf`，terminal README、四个 session 模块、Service Worker 和入口文件与工作区逐文件一致，LPK SHA-256 为 `5ff5fa8cfd9249b04931cbe641e54ab61903f2271e463c0fbc6eaf9f25354a6a`。
+- 禁止复现：不得把 pane ID、session 初始字段、cleanup 数组或销毁顺序重新放回 `main.js`；不得从公开入口之外深度导入 session 内部文件；不得让 dispose 在设置 `closed` 前 detach logical stream；不得让单 pane 销毁关闭 Unified 物理 socket、修改兄弟 logical stream，或进入 history replay/reset；不得让已关闭 session 的迟到 cleanup、timer 或 callback继续保留资源；任何迁移都不得显示历史回放、snapshot、resize 或重连的中间画面。
+
+### LCMD-20260830-11：静态根目录独立模块按职责归档
+
+- 日期：2026-08-30
+- 来源：前端模块化整理；用户要求先整理 `runtime/static/` 下已经独立成文件的模块，只创建职责目录并更新引用，不在本批继续拆分 `main.js` 逻辑。
+- 影响模块：`runtime/static/main.js`、`runtime/static/service-worker.js`、`runtime/static/index.html`、`runtime/static/appearance/`、新增 `runtime/static/workspace/` 与多个 `runtime/static/terminal/*/` 子目录、Node/Go 路径 guard、前端模块地图和 LPK 静态内容。
+- 架构问题：连接、历史、缓存、渲染、resize、总览、截图、iOS 宿主、tab 激活和 fullscreen TUI 等实现虽然已经是独立文件，仍全部平铺在静态根目录。文件名只能靠前缀表达归属，`main.js` 深度导入每个实现，Service Worker 和测试也散落维护旧根路径；后续建立 controller/lifecycle 时容易把“已有算法文件”和“真正完成状态迁移”混为一谈，也难以审核模块公开 API、目录文档和依赖方向。
+- 实施方案：只做路径归档，不重写算法。`tab_activation_scheduler.js` 归入 `workspace/`；replay/checkpoint/cache 归入 `terminal/history/`；连接与 Unified/Queue/Fast 文件归入 `terminal/transport/`；Kitty graphics、RenderSnapshot 和 frame release 归入 `terminal/rendering/`；resize 三个文件归入 `terminal/resize/`；preview 与长截图分别归入 `terminal/overview/`、`terminal/screenshot/`；iOS 经典宿主脚本归入 `terminal/input/ime/`；fullscreen TUI 按 `common/claude/opencode/herdr/pi` 分目录；`themes.json` 归入 `appearance/`。每个责任目录补 README，ES module 目录补单一 `index.js`，`main.js`、session state 和行为测试统一通过公开入口导入。仅因目录层级变化而调整必要的相对 import、HTML script URL、Service Worker app-shell 路径和白盒测试源码路径。
+- 边界：本批没有迁移 transport、history、rendering、resize、overview、input、TUI 或 workspace 的状态 owner、DOM 编排和生命周期；这些逻辑仍按模块地图留在 `main.js`，不能把文件归档误记为 controller 迁移完成。普通容器单 Unified 物理连接、`client:` 三直连、单 pane logical 隔离、last-known-good frame、resize 三阶段、Cache API v2 身份和“任何情况下不得显示历史回放中间过程”等现有行为全部保持不变。
+- 回归 guard：新增 `TestRuntimeStaticModulesAreGroupedByResponsibility`，固定所有目录 README、公开入口、旧根目录文件删除、`main.js` 只从模块入口导入、Service Worker 新路径和 iOS HTML 入口；现有 Node 行为测试改从各模块公开入口导入，必须继续覆盖 179 项连接、历史、缓存、渲染、resize、总览、截图、TUI 和 tab 激活行为。需要读取实现源码的白盒 Go guard 指向模块内部真实文件，但运行时不得深度导入。
+- 验证结果：全部新模块与 `main.js`、Service Worker 语法检查、Node 全量 `179/179`、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 通过。Headless Chrome 从版本化 `/assets/1.0.39-b430df144ab347eee2192612/` 成功加载 workspace、history、transport、rendering、resize、overview、screenshot、input/ime、TUI 各级入口与内部文件以及 `appearance/themes.json`，相关资源均为 200，`pageerror` 为 0；本地无账号上下文仅保留预期的 `/api/instances` 401 失败路径。`main.js` 为 18199 行，SHA-256 为 `12fac538b345164f90ddcfc4271f5113b40ce871e9c8555bb718e366f3d764c5`。`lzc-cli project release` 生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，LPK SHA-256 为 `4577931b48b7002c61f3a04a5c60b15f2a6dfbfb9006111e5d9cc372c9d8ead3`，包内 content revision 为 `6aa3e6def5b28c8b5d9a4866a4b0ed29b2c30481a8128f8bbee4dc8321f75716`；包内新目录完整、不含旧根模块路径，包内 `main.js` 与 Service Worker 哈希和工作区一致。
+- 禁止复现：不得把已经归档的业务模块重新平铺到 `runtime/static/` 根目录；不得让 `main.js` 绕过公开入口深度导入内部文件；移动模块时不得漏改相对 import、HTML、Service Worker、测试或 LPK 内容；不得以“整理目录”为名同时改写连接、历史、渲染、resize、输入或 TUI 算法；任何后续迁移仍必须先确定唯一 owner、controller 和 lifecycle，并继续禁止展示历史回放过程。
+
+### LCMD-20260830-12：标签总览状态、DOM 与生命周期从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理；静态根目录归档后，标签总览的打开状态、DOM、preview Canvas、cache-v2 预热、拖拽排序、移动端边缘手势和浏览器历史 guard 仍集中在 `main.js`，入口文件仍有 18199 行。
+- 影响模块：`runtime/static/main.js`、`runtime/static/terminal/overview/`、`runtime/static/service-worker.js`、总览 Node/Go guard、前端模块地图和 LPK 静态内容。
+- 架构问题：原实现由 `main.js` 同时查询 5 个总览 DOM、持有 render/drag/swipe/idle 状态、绘制分屏缩略图、读取 cache manifest、注册永久与拖拽临时 listener、编排标签移动请求并修改移动端 history state。总览专用 RAF、idle callback、长按/重排 timer 和迟到 preview 缺少统一模块销毁入口；白盒 guard 又绑定入口文件文本位置，使后续继续缩减 `main.js` 时容易把“缩略图只用于总览”与终端历史恢复混为一体。
+- 实施方案：在既有 `terminal/overview/` 中新增 `overview_controller.js`、`overview_view.js` 和 `overview_lifecycle.js`，并由 `index.js` 作为单一公开入口。controller 成为打开状态、render/focus RAF、preview idle 预热、拖拽/长按/placeholder/自动滚动、重排 timer、移动端双侧边缘手势和 `webshellMobileOverviewGuard` 的唯一 owner；view 独占总览 DOM 查询、响应式网格、卡片构建和分屏 Canvas 绘制；lifecycle 统一注册永久与临时 listener。既有 preview controller 继续按 sequence、closed、history generation 和完整 cache identity 拒绝迟到图片，并补充 `get()` 作为身份校验后的读取入口。
+- 集成与资源边界：`main.js` 只注入 tab/pane 只读视图、活动 selector/tab getter、cache-v2 identity、last-known-good frame 判断，以及新建、激活、关闭、移动标签的显式命令；所有调用改为 `open/close/isOpen/scheduleRender/clearSessionPreview/consumeHistoryBack/updateWorkspaceLocation/start/dispose`。dispose 会取消 RAF、idle、长按、自动滚动和重排 timer，结束拖拽，移除 listener，并释放所有已解码 preview。总览不建立或关闭 WebSocket，不修改 history cursor、Ghostty、resize、replay 或输入状态；缓存图片只用于总览，任何情况下不得参与终端恢复、input ready 或显示历史回放过程。
+- 回归 guard：新增 `terminal_overview_controller_test.mjs` 3 项，覆盖幂等 start/dispose、后台 pane preview 预热、打开后的即时与下一帧渲染、选择/关闭/新建命令、移动端 history back guard、阻塞弹层和左右边缘手势；既有 `terminal_overview_preview_test.mjs` 继续覆盖冷隐藏 pane、generation 变化和清理。新增 `TestTerminalOverviewControllerBehavior` 与 `TestRuntimeTerminalOverviewModuleBoundary`，固定公开入口、controller/view/lifecycle/preview 职责、Service Worker 五个资源、`main.js` 禁止恢复总览 DOM/状态/listener/算法，并把原 cache-v2、Canvas、移动端手势和拖拽 guard 迁到真实 owner 文件。
+- 验证结果：总览各模块、Service Worker 和 `main.js` JavaScript 模块语法检查通过；Node 全量 `182/182`、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 均通过。Headless Chrome 在 1280x800 桌面与 390x844 触摸视口通过版本化 `/assets/1.0.39-cd5a464a1c122bf4ed095e24/` 加载 `index/controller/lifecycle/view/preview` 五个模块且均返回 200；两种布局均渲染 3 个有效 Canvas 卡片，打开/关闭正常，移动端左侧边缘手势可重新打开，`pageerror` 和非 WebSocket失败请求为 0。`main.js` 从 18199 行降至 17162 行，SHA-256 为 `e43a5b5c3307c50ea5fbc728272fdf89c6906192f5bde8a5baa07eb52de15503`。`lzc-cli project release` 生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，包内总览模块、入口和 Service Worker 与工作区逐文件一致，content revision 为 `51e7304f42b59dd11363dd55af70f56092c7e4acafb50499db42b54f6e450370`，LPK SHA-256 为 `cb44007d6413221f06be950ddee55699baa5e9f62e096bfc2751e1ae585c6dd7`。
+- 禁止复现：不得把总览 DOM 查询、打开/拖拽/手势/history 状态、RAF/idle/timer、preview manifest 协调或 listener 重新放回 `main.js`；不得从公开入口之外深度导入 overview 内部文件；不得让 dispose 后的 pointer、timer、RAF、idle 或 preview 回调继续修改 UI；不得让总览直接修改 tab registry、布局、连接、history cursor、Ghostty、resize、replay 或输入状态；未激活 pane 必须继续优先使用完整身份校验的缓存缩略图，且总览缩略图永远不能成为终端启动显示、历史权威、恢复状态或输入就绪条件。
+
+### LCMD-20260830-13：终端上下文菜单状态、DOM 与 listener 生命周期从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理；标签总览迁出后，桌面右键菜单、移动操作菜单、触摸合成菜单抑制和 pane/tab `contextmenu` listener 仍由 `main.js` 维护，入口文件仍超过 1.7 万行。
+- 影响模块：`runtime/static/main.js`、新增 `runtime/static/terminal/interaction/`、`runtime/static/service-worker.js`、交互 Node/Go guard、前端模块地图和 LPK 静态内容。
+- 架构问题：原实现由 `main.js` 查询 5 个菜单 DOM、持有 desktop/mobile context target、动作集合、350ms 移动菜单误点击门禁和 1400ms 触摸合成菜单抑制窗口，同时构建移动菜单、计算桌面菜单分组/定位、执行 19 类动作并直接注册 document/window/pane/tab listener。pane 销毁和 tab 按钮重建没有统一动态 listener owner；菜单目标又与工作区可变对象混在入口文件中，难以审核 pane 跨 tab、触摸选择、Claude fullscreen 右键和全局销毁边界。
+- 实施方案：建立 `terminal/interaction/`，由 `context_menu_controller.js` 独占菜单目标、动作可用性/分派、触摸抑制和点击门禁；`context_menu_view.js` 独占 DOM 查询、桌面分组/定位、移动菜单构建、图标映射与 ARIA/body 状态；`interaction_lifecycle.js` 独占永久和动态 listener；`index.js` 是唯一公开入口。`main.js` 只注入 tab/pane 只读查询、选择/链接读取和复制、粘贴、搜索、截图、分屏、移动、关闭、主题等显式命令。
+- 生命周期与事件边界：controller 的 `start()`/`dispose()` 幂等管理 document/window 和菜单 listener；`bindPane()` 返回 cleanup 并注册到 terminal session lifecycle，`bindTab()` 的 cleanup 在按钮重建和 tab 删除时立即执行。pane context target 在事件发生时通过 getter 读取当前 `session.tabId`，避免 pane 跨 tab 后操作旧目标。触摸选择与 fullscreen TUI 只通过公开 `markTouchCandidate()`、`shouldSuppressContextMenu()` 和 `isMobileOpen()` 协作；Claude fullscreen 专用右键适配器继续先于通用 mouse tracking 安装。
+- 历史与终端边界：本批没有修改 Ghostty、WebSocket、Unified membership、history cursor、Cache API v2、resize epoch、输出队列或输入 readiness。菜单动作不得清空终端、触发 replay/reset、改变 resize owner，或展示历史回放、snapshot、resize、重连的中间过程；已有 last-known-good frame 继续由 rendering/presentation 责任域维护。
+- 回归 guard：新增 `terminal_context_menu_controller_test.mjs` 3 项，覆盖动态 pane target、desktop/tab 动作分派、移动菜单动作禁用、350ms 点击门禁、1400ms 触摸抑制和永久/动态 listener 清理；新增 `TestTerminalContextMenuControllerBehavior` 与 `TestRuntimeTerminalInteractionModuleBoundary`，固定公开入口、controller/view/lifecycle/README、Service Worker 资源、pane/tab cleanup 和禁止旧状态/DOM/listener 回流 `main.js`。原触摸布局、移动快捷键、Claude fullscreen 右键隔离和长截图 guard 已迁到真实 owner 文件。
+- 验证结果：interaction 各模块、Service Worker 和 `main.js` JavaScript 语法检查通过；Node 全量 `185/185`、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 均通过。Playwright/Chromium 在 1280x800 桌面和 390x844 触摸视口通过版本化 URL 实际加载 interaction 四个 JS，桌面 pane/tab 右键、外部点击、Escape、长截图项显隐、移动端合成菜单抑制、19 项操作菜单、动作禁用、ARIA/body 状态和 scrim 关闭均正常，`pageerror` 为 0。`main.js` 从上一完整批次的 17162 行降至 16857 行，SHA-256 为 `d64ae8372d6eafaa7ca3b91d72fa8e24e7d926789cc6ba2cc433c107b4ffcece`。`lzc-cli project release` 生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，包内 `.lpk-content-revision` 为 `3cb693be2102f3855273764d40d4f42048c8b6ca643c8828763f13cc806eca65`，interaction 目录、README、入口和 Service Worker 与工作区逐文件一致；LPK SHA-256 为 `a8ea3691b9f614017bcc01ca1b1d124c2ec2ba65795a3c913c12921f170b4f7d`。
+- 禁止复现：不得把 context target、动作集合/分派、菜单 DOM 查询/构建/定位、触摸抑制状态、点击门禁或菜单 listener 重新放回 `main.js`；不得从公开入口之外深度导入 interaction 内部文件；不得让 tab 按钮重建、pane/tab 删除或 dispose 后保留旧 listener；不得把选择、搜索、剪贴板或 mouse protocol 状态塞入 context menu controller；不得破坏 Claude fullscreen 与通用 mouse tracking 的事件所有权顺序；任何后续交互迁移仍不得显示历史回放、snapshot、resize 或重连的中间过程。
+
+### LCMD-20260830-14：终端搜索状态、DOM、匹配模型与生命周期从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理；上下文菜单迁出后，搜索 query、match 列表、当前 index、搜索 DOM、逻辑行构建、绝对行滚动和全部搜索 listener 仍由 `main.js` 维护。
+- 影响模块：`runtime/static/main.js`、`runtime/static/terminal/interaction/`、`runtime/static/service-worker.js`、搜索 Node/Go guard、前端模块地图和 LPK 静态内容。
+- 架构问题：原实现由入口文件查询 6 个搜索 DOM，持有可变搜索状态，直接遍历 Ghostty buffer、拼接物理换行、计算字符到 cell 坐标、滚动并选中结果，同时注册 input/Enter/Shift+Enter/Escape/按钮 listener 和零延迟 focus timer。搜索状态没有独立 owner，timer 与 listener 也没有 dispose 边界；完整缓冲区文本和逻辑行算法又被选择、链接代码隐式共享，继续阻碍交互责任域拆分。
+- 实施方案：在 `terminal/interaction/` 新增 `search_controller.js`、`search_view.js`、`search_lifecycle.js`、`search_model.js` 和 `terminal_text_model.js`。controller 独占 open/query/matches/index/session ID 并编排打开、关闭、选区搜索和结果循环；view 独占搜索 DOM；lifecycle 独占 listener 与延迟聚焦 timer；model 只执行无状态匹配和绝对行滚动；文本模型只读取 Ghostty buffer 并输出逻辑行、cell 坐标和完整缓冲区文本。`main.js` 仅创建 controller、注入活动 session/选区/焦点/反馈/布局命令，并调用公开 `start/open/openFromSelection/isOpen/dispose`。
+- 终端边界：搜索只读取当前 Ghostty 内存状态并调用现有 `scrollToLine/select/focus`，不读取或修改 WebSocket、Unified membership、history generation/cursor、Cache API v2、replay authorization、resize epoch、输出队列或 presentation gate。搜索不得触发 replay/reset，也不得让历史、snapshot、resize 或重连中间过程可见。
+- 回归 guard：新增 `terminal_search_controller_test.mjs` 3 项，覆盖真实 Ghostty 兼容形态的物理行到逻辑行映射、跨换行和大小写不敏感匹配、结果循环、选区 query 归一化、空选区反馈、幂等 start/dispose、listener 移除和延迟 focus 取消；新增 `TestTerminalSearchControllerBehavior` 并扩展 `TestRuntimeTerminalInteractionModuleBoundary`，固定公开入口、owner 文件、Service Worker 资源和旧 DOM/状态/函数/listener 禁止回流 `main.js`。原移动选择工具栏 guard 改为检查搜索 controller 的真实 owner。
+- 验证结果：JavaScript 语法检查、Node 全量 `188/188`、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 均通过。本地 Chromium 在 1280x800 与 390x844 触摸布局验证菜单打开、输入、Enter/Shift+Enter、Escape/关闭按钮、空结果和 6 个版本化模块加载，`pageerror` 为 0；`debug123` 真实账号/API/PTY 环境通过浏览器资源映射加载当前工作区前端，对真实 PTY 输出搜索 `debug123` 得到 `1/1`，结果跳转与关闭正常，6 个模块均为 200，`pageerror` 为 0。`main.js` 从 16857 行降至 16678 行。
+- 打包验证：`lzc-cli project release` 成功生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，LPK SHA-256 为 `842b97ece58d25762b2b2cf87d60d5a3aaca290f1a8929ce092ba8439f5c33f5`，包内 content revision 为 `227c26bbde4af7bb50f42a6a234c4026c3005e77eddf79e2e1a2919a5e3ec1ed`；包内 `main.js`、Service Worker、interaction README/入口和 5 个搜索实现文件与工作区逐文件一致。直接安装被当前 `lzc-cli` 所连接设备的开发盒子公钥信任配置拦截，因此采用已有登录态的 `debug123` 真实后端加当前静态资源映射完成等价前端回归。
+- 禁止复现：不得把搜索 DOM、query/matches/index/session 状态、逻辑行遍历、结果滚动选择、搜索 listener 或 focus timer 放回 `main.js`；不得从公开入口之外深度导入搜索实现；不得让 dispose 后 timer/listener 继续修改 UI；不得让搜索 controller 接管选择范围、剪贴板、链接、mouse protocol、transport、history、resize 或 presentation 状态；任何后续交互迁移仍不得显示历史回放、snapshot、resize 或重连中间过程。
+
+### LCMD-20260830-15：终端剪贴板命令、浏览器适配与桌面 listener 生命周期从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理；搜索迁出后，复制/粘贴、Clipboard API、textarea fallback、完整缓冲区复制、bracketed paste、桌面拖选自动复制和中键粘贴仍由 `main.js` 实现。
+- 影响模块：`runtime/static/main.js`、`runtime/static/terminal/interaction/`、`runtime/static/service-worker.js`、剪贴板 Node/Go guard、前端模块地图和 LPK 静态内容。
+- 架构问题：入口文件同时持有浏览器权限错误归一化、隐藏 textarea DOM、选择文本解释、toast/selection UI、输入发送、桌面 drag 状态和 shell/document listener。中键粘贴的 Clipboard Promise 完成后只检查 pane，缺少模块 dispose guard；pane cleanup、应用 dispose 和异步权限请求之间的边界难以审核。复制 API 又被 diagnostics、attachments、链接、上下文菜单、快捷键和 IME 共同调用，继续扩大入口文件的隐式依赖。
+- 实施方案：新增 `clipboard_controller.js`、`clipboard_adapter.js` 和 `clipboard_lifecycle.js`。controller 成为复制/粘贴命令、完整缓冲区解释、bracketed paste、桌面 drag 状态和异步 generation/dispose 检查的唯一 owner；adapter 独占安全上下文 Clipboard API、权限错误消息和 textarea fallback；lifecycle 独占 shell mousedown/auxclick 与 document mousemove/mouseup listener。`bindDesktopSession()` 返回幂等 cleanup 并进入 terminal session lifecycle；`main.js` 只注入活动 session、输入命令、选择 UI、设置 getter、pane 激活、尺寸重申和 selection manager 准备命令。
+- 生命周期与输入边界：pane 已关闭或 controller 已 dispose 时，迟到 clipboard read 不得发送输入；copy 完成后也不得再清除已销毁 pane 的选择或刷新 UI。普通和 bracketed paste 仍统一进入现有 `sendOrQueueInput()`，继续遵守输入分块、backpressure、连接 readiness 和用户/generated 分类；剪贴板模块不拥有 socket、输入队列或 replay 状态。
+- 回归 guard：新增 `terminal_clipboard_controller_test.mjs` 3 项，覆盖安全 Clipboard API、write 失败 fallback、权限拒绝消息、完整缓冲区复制、普通/bracketed paste、pane 关闭后的迟到 read、幂等 dispose、拖选阈值、中键激活/尺寸重申/粘贴和 listener cleanup；新增 `TestTerminalClipboardControllerBehavior` 并扩展 `TestRuntimeTerminalInteractionModuleBoundary`。原 native paste、Shift+Insert、IME beforeinput、大文本分块和 Claude fullscreen 桌面选择安装顺序 guard 已改为检查 clipboard controller 的真实 owner。
+- 验证结果：JavaScript 语法检查、Node 全量 `191/191`、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 均通过。`debug123` 真实账号/API/PTY 环境通过当前静态资源映射加载剪贴板模块，在隔离 tab 退出全屏程序后，从浏览器剪贴板经右键菜单粘贴唯一命令，PTY 成功输出 marker；随后搜索选中 marker、右键复制并从浏览器 Clipboard API 读回完全一致的文本。3 个模块均返回 200，`pageerror` 为 0，测试 tab 已关闭。`main.js` 从 16678 行降至 16506 行。
+- 打包验证：`lzc-cli project release` 成功生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，LPK SHA-256 为 `c978f4aac7959935faecae9ab52adf8212d46608fcac568eae6572fec5b52064`，包内 content revision 为 `a562d8b55f8a3ab366d35cdcca8c9aba032f8d9d4ad468b0f7faefbb8553820a`；包内 `main.js`、Service Worker 和 3 个剪贴板实现文件与工作区逐文件一致。
+- 禁止复现：不得把 Clipboard API/fallback DOM、复制/粘贴、完整缓冲区解释、bracketed paste、桌面 drag 状态、中键 listener 或迟到异步处理放回 `main.js`；不得从公开入口之外深度导入剪贴板实现；不得让 pane close/dispose 后的 clipboard callback 发送输入或修改 UI；不得让 clipboard controller 接管 selection range、mouse protocol、transport、history、resize、output 或 presentation 权威状态；任何后续迁移仍不得显示历史回放、snapshot、resize 或重连中间过程。
+
+### LCMD-20260830-16：终端 URL 识别、cell 命中和链接命令从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理；剪贴板迁出后，URL scheme 正则、尾部标点剥离、逻辑行/cell 命中、浏览器打开和链接复制反馈仍由 `main.js` 实现，并被服务转发、桌面右键和移动操作菜单共同调用。
+- 影响模块：`runtime/static/main.js`、`runtime/static/terminal/interaction/`、`runtime/static/service-worker.js`、链接 Node/Go guard、前端模块地图和 LPK 静态内容。
+- 架构问题：入口文件同时维护 URL 算法、终端坐标解释和浏览器命令；链接复制直接串接 Clipboard Promise 与 toast，应用 dispose 后的迟到结果仍缺少链接责任域自己的 generation guard。服务转发和终端菜单又依赖同一隐式 `openURL()`，状态/命令归属难以审核。
+- 实施方案：新增 `link_model.js` 和 `link_controller.js`。model 复用 `terminal_text_model.js` 的无状态逻辑行/字符到 cell 映射，独占 URL scheme 匹配、尾部标点剥离和指针 cell 命中；controller 独占安全浏览器打开参数、链接复制反馈、幂等 start/dispose 和异步 operation generation。服务转发、选区链接和 pane 右键目标统一调用 controller 公开 API；`main.js` 删除 URL 正则、`findURLAtPosition()`、`findFirstURLInText()` 和 `openURL()`，只保留依赖注入与生命周期接线。
+- 生命周期与边界：链接模块不注册 DOM listener，不拥有 selection range、Ghostty、mouse protocol、transport、history、resize、output 或 presentation 状态。dispose 会使后续查询/打开/复制失效，并拒绝已经发起但尚未完成的复制结果和反馈；链接动作不得清空终端、触发 replay/reset 或改变 Unified logical stream。
+- 回归 guard：新增 `terminal_link_controller_test.mjs` 2 项，覆盖普通 scheme、跨物理换行 URL、尾部标点、指针 cell 命中、`_blank/noopener/noreferrer`、复制反馈和 dispose 后迟到 Promise；新增 `TestTerminalLinkControllerBehavior` 并扩展 `TestRuntimeTerminalInteractionModuleBoundary`，固定公开入口、Service Worker 资源、main 接线和禁止实现回流。
+- 验证结果：JavaScript 语法检查、Node 全量 `193/193`、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 均通过。`debug123` 真实账号/API/PTY 环境通过版本化静态资源映射加载当前工作区前端，在隔离 bash tab 清屏后输出唯一 URL；桌面右键按真实 cols/rows 命中 URL cell，打开/复制链接两项均可见，复制后 Clipboard API 读回完全一致文本，打开调用为 `_blank` 与 `noopener,noreferrer`。interaction 入口和两个链接模块均返回 200，API 错误与 `pageerror` 为 0，测试 tab 已关闭。`main.js` 从 16506 行降至 16458 行。
+- 打包验证：`lzc-cli project release` 成功生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，LPK SHA-256 为 `20184cbe24dabad14dbffccaf0c7f24233573a84fa6a53c32dc679226d458b2a`，包内 content revision 为 `d0718d157ef0c000895e663aea7e007517d3b14b20b4598e2587c2b3ccf6a6a6`；包内 `main.js`、Service Worker、interaction README/入口和两个链接实现文件与工作区逐文件一致。
+- 禁止复现：不得把 URL 正则、尾部标点处理、终端 cell 命中、`window.open` 参数或链接复制反馈放回 `main.js`；不得从公开入口之外深度导入链接实现；不得让 dispose 后的复制回调继续反馈；不得让链接 controller 接管 selection、mouse protocol、transport、history、resize、output 或 presentation 状态；任何后续迁移仍不得显示历史回放、snapshot、resize 或重连中间过程。
+
+### LCMD-20260830-17：终端选择责任域迁出及遗留 helper 导致启动与触摸异常
+
+- 日期：2026-08-30
+- 来源：前端模块化整理及 `debug123` 真实浏览器回归；链接模块迁出后，Ghostty selection manager 补丁、选区算法、完整缓冲区状态、移动端选择 UI 和触摸生命周期仍集中在 `main.js`。首次真机加载又发现迁移后遗留的两个裸 helper 调用。
+- 影响模块：`runtime/static/main.js`、新增 `runtime/static/terminal/selection/`、`runtime/static/terminal/interaction/`、`runtime/static/service-worker.js`、选择/触摸 Node 与 Go guard、前端模块地图和 LPK 静态内容。
+- 错误现象：selection 初次迁出后，桌面页面启动时在移动快捷键初始渲染中抛出 `ReferenceError: syncMobileMenuSelectionState is not defined`，导致页面在创建活动 terminal pane 前停止；修复启动后，移动端长按结束又在输入焦点 capture 链抛出 `ReferenceError: primaryTouch is not defined`。单纯 `node --check` 和模块单元测试均无法识别这两个只在浏览器调用路径触发的未声明标识符。
+- 根因：原 selection 实现中的 `syncMobileMenuSelectionState()` 与 `primaryTouch()` 曾位于 `main.js` 共享词法作用域。迁移时实现和定义已进入 selection controller/view，但移动快捷键刷新与输入焦点双击链仍保留旧裸调用；静态 guard 只禁止大块实现回流，没有禁止已删除 helper 名称，真实启动和合成 `touchend` 才覆盖到遗漏路径。
+- 实施方案：建立 `terminal/selection/` 单一公开入口，由 `selection_controller.js` 独占完整缓冲区私有 `WeakSet`、manager 复制/双击补丁、选择命令、长按/拖动/自动滚动编排；`selection_model.js` 独占 cell/range/text 纯算法；`selection_view.js` 独占工具栏、overlay、handle 和 point-to-cell DOM；`selection_lifecycle.js` 独占永久与 session listener、timeout、interval 和 disposable。剪贴板、上下文菜单、TUI adapter 和通用 mouse protocol 只调用公开 API。移动快捷键刷新改为调用 `terminalSelection.update()`；输入焦点的同步 `touchend` 路径在函数内直接读取 `event.changedTouches?.[0] || event.touches?.[0]`，不再依赖 selection 私有 helper。
+- 生命周期与事件边界：完整缓冲区选择不再写入共享 session；pane 关闭会恢复 manager 补丁并移除 overlay、listener 和 timer。安装顺序继续固定为 input focus、默认 selection、Claude/opencode/herdr/pi adapter、通用 mouse tracking、桌面 clipboard；iOS/宽触摸屏双击 focus 仍在 capture `touchend` 内同步完成，不能改为 RAF、timeout 或 Promise。selection 不拥有 WebSocket、history cursor、Cache API、resize epoch、输入队列或 Canvas presentation，也不得触发或显示 replay、snapshot、resize 或重连中间过程。
+- 回归 guard：新增 `terminal_selection_controller_test.mjs` 4 项，覆盖范围归一化、Ghostty grapheme 文本、完整缓冲区私有状态、manager patch、工具栏命令、移动 overlay/handle、长按/自动滚动和幂等清理；`TestRuntimeTerminalSelectionModuleBoundary` 固定公开入口、owner 文件、Service Worker 五个资源、调用顺序和禁止旧实现/`syncMobileMenuSelectionState(` 回流。`TestRuntimeTouchKeyboardFocusPrecedesTouchConsumers` 固定 `finishMobileTap` 直接读取 `changedTouches`，并禁止 `installTerminalInputFocus` 再依赖 `primaryTouch(`。
+- 验证结果：selection/clipboard/context 定向 Node 测试 10/10、Node 全量 197/197、全部 `runtime/static/**/*.js` 语法检查、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 均通过。`debug123` 真实账号/API/PTY 环境通过当前静态资源映射加载五个 selection 模块且均返回 200；隔离 tab 中桌面双击 marker 后复制文本精确一致，完整缓冲区复制同时包含首尾 marker，390x844 触摸视口合成长按后选择工具栏和两个 handle 可见且移动复制成功，API error、console error 和 `pageerror` 均为 0，测试 tab 已关闭。`main.js` 从 16458 行降至 15611 行。
+- 打包验证：`lzc-cli project release` 成功生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，LPK SHA-256 为 `2d18c49c783e0140f47a86dc5d758b65978a82314cec7dafdfb1d76988c414d0`，包内 content revision 为 `74eea3146ce522f9d81a279d793c96c805886f54c838d7ec5aeef0d43d33c990`；包内 `main.js` SHA-256 与工作区一致为 `309a40473c910dfe74a6d99decb8965984b22006e6fd3e5fbea3d67116e146d6`，selection 五个实现文件和 README 逐文件一致。直接安装到 `debug123` 仍受该设备缺少或无法访问懒猫开发者工具限制，真实浏览器验证使用同源已登录后端与当前工作区静态资源映射完成。
+- 禁止复现：不得把 selection manager 补丁、范围/文本算法、完整缓冲区状态、选择 DOM、长按/手柄/自动滚动或生命周期资源放回 `main.js`；不得从公开入口之外深度导入 selection 内部文件；不得保留已迁出 helper 的裸调用或只依赖语法检查判断浏览器调用链完整；不得让 selection 接管 transport、history、resize、output、input readiness 或 presentation；任何路径都不得显示历史回放过程。
+
+### LCMD-20260830-18：终端鼠标协议、触摸兼容状态与 listener 生命周期从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理；selection 迁出后，Ghostty mouse mode 读取、Legacy/SGR 编码、桌面按下/拖动/释放/滚轮、触摸鼠标序列、事件所有权和 Grok 双击键盘兼容状态仍集中在 `main.js`。
+- 影响模块：`runtime/static/main.js`、新增 `runtime/static/terminal/mouse/`、`runtime/static/terminal/tui_adapters/`、`runtime/static/service-worker.js`、mouse Node/Go guard、前端模块地图和 LPK 静态内容。
+- 架构问题：入口文件同时维护终端协议编码、桌面 document 级拖动、session button/move/touch 状态、本地 TUI 事件认领 `WeakSet`、Grok 延迟点击/滚轮/双击状态和全部 shell/document listener。Claude/opencode/herdr/pi adapter 又直接依赖入口中的私有 mouse helper，工具身份、协议机械逻辑与生命周期互相穿透；pane 销毁或应用 dispose 时缺少独立责任域可审核的清理边界。
+- 实施方案：建立 `terminal/mouse/` 单一公开入口。`mouse_model.js` 独占 Ghostty mode、button/modifier、touch event 转换及 Legacy/SGR 编码；`mouse_controller.js` 独占事件认领 `WeakSet`、桌面/触摸状态机、移动去重、TUI `sendWheel()`/`sendClick()` 命令和延迟双击键盘兼容；`mouse_lifecycle.js` 独占 session shell/document listener 与幂等清理。`main.js` 只注入 pane 激活、selection、输入、尺寸重申和焦点命令；Grok 精确身份仍留在入口，并仅通过 `isDeferredTouchClickSession: (session) => isGrokTerminalSession(session)` 注入，通用模块不得出现任何工具名。TUI adapter 只通过 `hasTracking()`、`claimEvent()`、`sendWheel()` 和 `sendClick()` 协作。
+- 生命周期与事件边界：安装顺序继续固定为 input focus、默认 selection、Claude/opencode/herdr/pi adapter、通用 mouse、桌面 clipboard。controller dispose 后不得编码、发送或认领事件；session dispose 必须移除 shell 与 document listener 并清空 active button、move 和 touch 状态。同步双击键盘请求仍发生在 `touchend` 调用栈内，不得改为 RAF、timeout 或 Promise。mouse 模块不建立或关闭 WebSocket，不拥有输入队列、history cursor、Cache API、resize epoch 或 Canvas presentation，也不得清空终端、触发或显示 history replay、snapshot、resize 或重连中间过程。
+- 回归 guard：新增 `terminal_mouse_controller_test.mjs` 4 项，覆盖 mode/Legacy/SGR 纯模型、桌面跨 document press/move/release/wheel、重复 move、TUI event claim、命令适配、Grok 延迟 tap/wheel/同步双击焦点和生命周期清理；新增 `TestTerminalMouseControllerBehavior` 与重写后的 `TestRuntimeTerminalMouseTrackingSequences`、Grok/Claude/opencode/herdr/pi 隔离 guard，固定公开入口、README、Service Worker 资源、工具无关边界和调用顺序，并禁止旧 mouse 实现回流 `main.js`。
+- 验证结果：mouse 定向 Go/Node 测试、Node 全量 `201/201`、全部 `runtime/static/**/*.js` 语法检查、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 均通过。`debug123` 真实账号/API/PTY 环境通过当前工作区静态资源映射加载桌面和 390x844 触摸页面：桌面 SGR press、两次 drag move、release、wheel 字节完整；移动 Grok 单击发送一组 press/release，滑动只发送 4 组 wheel 且不误发 click，双击发送两组 click 并在第二个同步 `touchend` 后聚焦 textarea。两页 Canvas 均非空、每页各只有 1 条 Unified 物理 WebSocket，mouse 四个资源在两页共 8 次请求全部为 200，API error、console error 和 `pageerror` 均为 0，隔离 tab 与临时 `grok` 可执行链接已清理。`main.js` 从 15611 行降至 15038 行。
+- 打包验证：`lzc-cli project release` 成功生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，LPK SHA-256 为 `8dc9f247f97b1e5d22b3149d846658dfa99120cdc8e5dd678e4d58c0d3075e10`，包内 content revision 为 `49239471f131781eb7c94b6071403d216227fd01603be0d27e2403ab3ff0e79e`；包内 `main.js` SHA-256 与工作区一致为 `c0b6a6442ec289c6da82292c4517ca819b1c8c84ad959b9e55f6e33a1bce8fab`，mouse 四个实现文件和 README 与工作区逐文件一致。
+- 禁止复现：不得把 mouse mode、协议编码、桌面/触摸状态、事件认领或 listener 放回 `main.js`；不得从公开入口之外深度导入 mouse 内部文件；不得把 Claude、opencode、herdr、pi、Grok 或其他工具身份分支写入通用 mouse controller；不得让 adapter 读取私有状态或复制协议编码；不得破坏 input focus、selection、TUI adapter、mouse、clipboard 的事件顺序；任何 mouse 路径都不得显示历史回放过程。
+
+### LCMD-20260830-19：Ghostty renderer adapter 迁出及遗留 viewport helper 导致真机启动异常
+
+- 日期：2026-08-30
+- 来源：前端模块化整理及 `debug123` 真实浏览器回归；mouse 迁出后，字体基线、行高度量、主题 RGB 映射、底部 viewport 归一化、cell seam、Powerline、块光标和 pixel-scroll fallback 仍由 `main.js` 直接 patch Ghostty renderer。首次真机加载又发现迁移后遗留的裸 viewport helper 调用。
+- 影响模块：`runtime/static/main.js`、`runtime/static/terminal/rendering/`、`runtime/static/service-worker.js`、renderer Node/Go guard、前端模块地图和 LPK 静态内容。
+- 错误现象：renderer adapter 初次迁出后，`debug123` 页面创建真实终端 session 时抛出 `ReferenceError: isTerminalViewportAtBottom is not defined`。原 helper 定义已迁入 adapter，但 `main.js` 的 presentation/viewport 调用路径仍直接引用旧词法作用域名称；JavaScript 语法检查和 adapter 单元测试无法识别该浏览器运行时调用链遗漏。
+- 根因：原 renderer patch 和 presentation 代码共享 `main.js` 词法作用域。迁移时只替换了 patch 安装、字体度量和主题映射入口，没有把剩余 viewport 查询统一收敛到公开 API，也没有在第一版静态 guard 中禁止已删除 helper 名称回流或保留裸调用。
+- 实施方案：新增 `renderer_adapter.js`，成为字体基线与行高度量、estimated metrics、主题 RGB mapper、bottom viewport/scrollbar patch、cell seam、Powerline、块光标和 pixel-scroll fallback 的唯一 owner；公开 `captureViewport(term)` 与 `normalizeBottomViewport(term)`，由 adapter 内部封装底部判断和归一化。`main.js` 只创建 adapter、注入字体/字号/行高 getter，并在 session/runtime 生命周期调用 `installSession()`、`syncRuntime()` 和 `dispose()`。adapter 不读取或修改 tab/pane registry、history cursor、replay authorization、resize epoch、presentation generation、输入队列或 WebSocket。
+- 呈现边界：viewport API 只返回 renderer 机械快照和执行底部归一化，不决定画面是否可以提交。presentation gate 仍必须验证当前 identity、fit/replay generation、Canvas 尺寸和 full render 成功；网络错误、snapshot、resize、重连和历史恢复期间继续保留 last-known-good frame，任何路径都不得显示历史回放或中间帧。
+- 回归 guard：新增 `terminal_renderer_adapter_test.mjs` 3 项，覆盖 estimated/adjusted metrics、baseline、主题映射、bottom viewport、cell seam、Powerline、块光标、pixel-scroll fallback、幂等安装和 dispose；新增 `TestTerminalRendererAdapterBehavior` 与 `TestRuntimeTerminalRendererAdapterBoundary`，固定 rendering 单一公开入口、README、Service Worker 资源、`main.js` 接线，并禁止 `isTerminalViewportAtBottom`、`normalizeTerminalBottomViewport`、`terminalViewportValue` 及 renderer patch 实现回流入口文件。
+- 验证结果：renderer 定向 Node/Go guard、Node 全量 `204/204`、全部 `runtime/static/**/*.js` 语法检查、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 均通过。`debug123` 真实账号/API/PTY 环境通过当前工作区静态资源映射加载 5 个 rendering 资源且全部返回 200；连续背景色带实际绘制 100px 无缝连续，Powerline 三角形记录 9 种逐行宽度，Canvas 非空且命令前后像素摘要变化，单页仅 1 条 Unified WebSocket，API error、console error 和 `pageerror` 均为 0，隔离测试 tab 已关闭。`main.js` 从 15038 行降至 14525 行。
+- 打包验证：`lzc-cli project release` 成功生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，LPK SHA-256 为 `a3b6087c12c6f8f7e77817a98ff8083835421ae0476317650e10a2d70fa7a096`，包内 content revision 为 `b834982661b47805b9c29fcd64735a50ffe713f15110884b46093588dd72e197`；包内 `main.js`、Service Worker、renderer adapter、rendering 入口和 README 与工作区逐文件一致。
+- 禁止复现：不得把字体基线/行高度量、主题 mapper、底部 viewport helper、cell seam、Powerline、块光标或 pixel-scroll patch 放回 `main.js`；不得从公开入口之外深度导入 renderer adapter；不得保留已迁出 helper 的裸调用或只依赖语法检查判断浏览器调用链完整；不得让 renderer adapter 接管 history、replay、resize、presentation、transport、input 或工作区权威状态；任何 renderer 路径都不得清空 last-known-good frame或显示历史回放过程。
+
+### LCMD-20260830-20：终端 host 清理误删 presentation hold 并暴露 resize 中间帧
+
+- 日期：2026-08-30
+- 来源：presentation 模块迁移后的 `debug123` 真实浏览器 resize/tab/theme 原子呈现回归；静态和 Node 测试均通过，但 RAF 采样发现 resize pending 期间 hold 仍不可见。
+- 影响模块：`runtime/static/main.js` 的 terminal host viewport 清理、`runtime/static/terminal/rendering/presentation_view.js`、Cache API v2 preview、presentation Node/Go guard 和前端模块地图。
+- 错误现象：窗口从 `1280x800` 调整到 `1080x700` 时，活动 pane 的 live Canvas backing store 从 `1280x756` 变为 `1080x651`，但 `.terminal-frame-hold` 不在 DOM；连续实测出现 8 至 9 个 `renderReady=false && hasPresentedFrame=true` 且无 hold 覆盖的 RAF 采样。controller 实际执行了 `drawImage`，却只画到已经脱离 DOM 的 Canvas，因此 resize 重排中间帧仍会直接显示。Cache preview 同样在 session 创建后失去 DOM 挂载。
+- 根因：`installTerminalHostViewportGuard()` 在 session 创建阶段立即调用 `resetTerminalHostViewport(session, { clean: true })`。该清理白名单只保留 Ghostty live Canvas、textarea 和 IME composition preview，把 session 自有的 `terminalPreview` 与 `terminalFrameHold` 当成浏览器 contenteditable 残留节点删除。presentation controller 继续持有被删除元素的对象引用，所以单元测试中的复制/状态推进均成功，只有真实 DOM 合成验证才能暴露问题。
+- 实施方案：terminal host clean 白名单显式保留 Cache preview、presentation hold 和 IME preview；`presentation_view.holdFrame()` 在复制前再次校验 hold 的 `parentElement`，若已脱离则挂回当前 `terminalHost`，防止后续清理路径或 DOM 重排再次把有效引用变成不可见离线 Canvas。该修复不重放历史、不清空 Ghostty、不改变 resize epoch/owner，也不建立额外 WebSocket。
+- 回归 guard：`terminal_presentation_controller_test.mjs` 在 hold 被人为脱离后验证 controller 会恢复挂载并完成旧帧提交；`TestRuntimeTerminalCanvasResidueGuard` 固定 host clean 必须保留两个 presentation overlay，并固定 presentation view 的重新挂载防线；`TestRuntimeMobileIMECompositionPreviewVisible` 共享同一完整白名单，防止 IME guard 把 Cache preview 或 presentation hold 重新删掉。真实浏览器脚本同时记录 hold `drawImage`、hidden 切换和 live Canvas width/height setter，要求 backing store 变化前 hold 已可见，且所有 pending 采样的 `unsafeSamples` 为零。
+- 验证结果：presentation Node 定向测试 4/4、Node 全量 208/208、全部 `runtime/static/**/*.js` 语法检查、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 通过。`debug123` 已登录真实账号/API/PTY 环境通过当前工作区静态资源映射复验：resize 26 个 RAF 采样中 8 个 pending、10 个 hold、0 个 unsafe；tab 切换和主题变化也分别采到 4 个和 2 个 hold 帧。9 个 rendering 资源均为 200，Canvas 非空且命令前后像素摘要变化，API error、console error、`pageerror` 均为 0，单页只有 1 条 Unified 物理 WebSocket，隔离测试 tab 已关闭。`lzc-cli project release` 成功生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，LPK SHA-256 为 `81bacb2422c78b59c52b5782f38fef9046efba27af09d81a64d82ac4ebc44010`，content revision 为 `c50dd6d04963b752939ea07171200e4e7614a0b5941f1cbbbdeba9ac4245e2fe`；包内 `main.js`、Service Worker、presentation controller 和 rendering README 与工作区哈希一致。
+- 禁止复现：任何 terminal host 清理不得删除 session/module 自有 preview、hold 或 IME overlay；不得只验证离线 Canvas 对象上的 `drawImage` 而忽略其 DOM 挂载和合成可见性；live Canvas backing store、cols/rows 或主题状态变化前必须先覆盖 last-known-good frame；任何修复不得通过历史重放、额外连接或隐藏错误日志绕过原子呈现门禁。
+
+### LCMD-20260830-21：终端 resize 状态、协议编排与生命周期从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理；renderer 与 presentation 迁出后，resize requested/applied epoch、跨设备 owner observation、ACK fence、输出 settle、DOM fit、ResizeObserver、Ghostty `onResize` 和 tab/session RAF/timer 仍集中在 `main.js`，入口文件仍超过 1.4 万行。
+- 影响模块：`runtime/static/main.js`、`runtime/static/terminal/resize/`、`runtime/static/service-worker.js`、resize Node/Go guard、前端模块地图和 LPK 静态内容。
+- 架构问题：入口文件同时持有 resize 协议状态、DOM 可测量性、viewport 快照、ACK 前输出前缀排空、ACK 后 settle、跨设备 claim/reassert、observer 和调度资源。协议消息、输出、presentation、输入焦点、tab 激活和 session 销毁都能直接修改同一组字段；白盒 guard 也绑定 `main.js` 中的实现文本，难以证明 ACK 前不切本地网格、远端 observation 不自动反抢、迟到 timer/observer 不修改已关闭 pane，以及单 pane resize 故障不扩大为 Unified 物理连接故障。
+- 实施方案：在既有 `terminal/resize/` 中新增 `resize_controller.js`、`resize_lifecycle.js`、`geometry_state.js` 和 `viewport_controller.js`，并由 `index.js` 作为单一公开入口。高层 controller 成为 requested/applied resize epoch、requested/server geometry、ACK pending、fence、output settle、测量 generation、owner observation 和 claim 状态的唯一修改者；lifecycle 独占 scheduler timer、RAF、ResizeObserver、Ghostty `onResize` disposable 和 tab/session 调度资源；geometry/viewport 文件只提供无状态机械查询与恢复。既有单事务 controller、latest-only scheduler 和 size-sync 纯判断继续保留在模块内。
+- 集成与呈现边界：`main.js` 只创建一个 `terminalResize` controller，注入 transport resize 发送、output 有界 flush、rendering hold/full-render、selection/input 更新和工作区只读 getter，并在协议、tab/session 及页面事件边界调用公开方法。ACK 前继续冻结本地 Ghostty 网格并按 64 KiB 预算排空旧 geometry 输出前缀；ACK 后输出在独立 settle transaction 中处理。远端新 epoch 只更新 observation，只有明确 pointer、focus、viewport 或 owner release 边界才能重新 claim。resize 不建立或关闭 WebSocket，不触发 replay/reset，也不得显示历史、snapshot、resize 或重连中间帧。
+- 回归 guard：`terminal_resize_controller_test.mjs` 现有 11 项覆盖请求/ACK/fence/settle、远端 observation、owner release、observer、Ghostty resize disposable、tab/session RAF/timer 和幂等 dispose；`terminal_resize_scheduler_test.mjs` 与 `terminal_size_sync_test.go` 继续覆盖 latest-only 调度及发送去重。`runtime_shortcuts_test.go` 的 resize 白盒 guard 已迁到真实 owner 文件，并新增负向边界，禁止 resize 实现、关键状态写入和资源生命周期回流 `main.js`。
+- 验证结果：resize Node 测试 `11/11`、Node 全量 `211/211`、全部 `runtime/static/**/*.js` 语法检查、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 均通过。`debug123` 已登录真实账号/API/PTY 环境通过当前工作区静态资源映射复验：resize 29 个 RAF 采样中 12 个 hold、10 个 pending、0 个 unsafe；tab 29 个采样中 4 个 hold、0 个 unsafe；主题 31 个采样中 2 个 hold、0 个 unsafe。Canvas 非空且命令前后像素变化正常，API error、console error 和 `pageerror` 均为 0，单页只有 1 条 Unified 物理 WebSocket，隔离测试 tab 已清理。`main.js` 从 14525 行降至 12636 行。
+- 打包验证：`lzc-cli project release` 成功生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，LPK SHA-256 为 `647097f8c47d677166d643291bd59e58421c7372a31e2c1786f277c80ac25835`，包内 content revision 为 `132b0965b0e56ae003e521446d3348746b8dec708d254bd032bb782a64cb5907`；工作区 `main.js`、`resize_controller.js` 和 Service Worker SHA-256 分别为 `6432cae95f1f93863225e50d90fbde654edab9358967d7678b6b49ee67c23957`、`61376a57b42236d37281b431641a37d5c19f616b602be2d62e59e0e3b79b0a29` 和 `16daa9aa2e54dba2541b48eae7fdd1226bf74c9237ebc9586412831d40eb53f3`，包内对应文件与工作区逐文件一致。直接安装被当前 `lzc-cli` 所连接的未授权 `ponzs` 设备拦截，开发盒子公钥不在信任列表；未修改测试机，真实功能验证使用 `debug123` 同源已登录后端完成。
+- 禁止复现：不得把 resize epoch、尺寸状态、ACK/fence/settle、DOM fit、observer、RAF、timer 或 Ghostty resize listener 放回 `main.js`；不得从公开入口之外深度导入 resize 实现；不得在 ACK 前切换本地网格，或让远端 observation 自动 reclaim；不得让迟到 callback 修改已关闭 session；不得让单 pane resize 失败关闭 Unified 物理连接；不得通过 replay/reset、清空终端或暴露任何中间帧掩盖 resize 问题。
+
+### LCMD-20260830-22：终端输入队列、generated response 与生命周期从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理；resize 迁出后，pending/input queue、WebSocket 背压、large paste 分块、lease/generation 过期、generated response 抑制、server revision 输入锁、timer 和 `term.onData` 仍集中在 `main.js`。
+- 影响模块：`runtime/static/main.js`、新增 `runtime/static/terminal/input/` controller/model/lifecycle、session 初始状态、Service Worker、Node/Go guard、`tests-auto/` 真实环境输入用例和前端模块地图。
+- 架构问题：入口文件同时修改输入队列、连接 lease、resize epoch 和 replay 门禁，并直接维护三个 timer 与 Ghostty data disposable，难以审核普通输入与自动响应是否被正确分类，也无法证明 pane 解绑后迟到 callback 不再发送。迁移过程中真实发现 lifecycle 先移除 disposable 但排队中的旧 `onData` callback 仍可能在 session 已解绑后进入 controller。
+- 实施方案：建立 `input_controller.js`、`input_lifecycle.js` 和 `input_model.js`，由 `index.js` 单一公开。controller 唯一维护 pending/input queue、背压、lease/generation 过期、generated suppression、输入锁和 payload；model 提供 DSR/Kitty response 识别、Unicode surrogate 安全分块和字节预算；lifecycle 独占 flush/pump/pending-expiry timer 与 `term.onData` disposable。data callback 除检查 disposed/closed 外还必须检查私有 `boundSessions`，session 解绑即使 callback 已排队也不能继续发送。
+- 输入与协议边界：普通输入只在 replay commit、合法 logical channel/lease、OPEN socket 且 resize ACK 已完成后发送，并携带已应用 cols/rows/pixel/epoch；generated payload 明确带 `generated: true` 且不携带网格。Canvas `renderReady` 不参与输入门禁；回放期间 generated response 继续受显式授权与 suppression 控制；单 pane 失败只回收该 logical stream，不关闭 Unified 物理连接。
+- 回归 guard：新增 `terminal_input_controller_test.mjs` 4 项，覆盖 DSR/Kitty 分类、Unicode 分块、有界背压、20 KiB 以上输入、replay pending、lease/generation 过期、输入锁、timer/listener 清理和迟到 callback；新增 `TestTerminalInputControllerBehavior`、`TestRuntimeTerminalInputModuleBoundary`，固定公开入口、README、Service Worker、状态 owner 和禁止实现回流 `main.js`。`tests-auto/02-terminal-input` 使用真实 Provider/agent/PTY 并可把版本化资源映射到当前工作区。
+- 验证结果：输入 Node 测试 `4/4`、Node 全量 `215/215`、全部 `runtime/static/**/*.js` 语法检查、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 通过。`debug123` 真实环境完成普通输入、Enter、Ctrl-C、20 KiB 粘贴和 DSR：捕获 1 条不含网格字段的 generated payload，Canvas 从哈希 `1621321757` 变化为 `2033471005`，四个输入资源均从当前工作区版本化路径加载，桌面/移动页各只有 1 条活动 Unified WebSocket，API error 与 `pageerror` 为 0，隔离 tab 已关闭。`main.js` 从 12636 行降至 12033 行。
+- 禁止复现：不得把输入队列、字节预算、generated 分类/抑制、lease expiry、输入锁、timer 或 `onData` listener 放回 `main.js`；不得从公开入口之外深度导入 input 内部文件；不得让 Canvas 可见性阻塞合法输入或让 resize ACK 前的普通输入携带新网格；不得在 replay 未授权时发送 generated response；不得让 session 解绑后的迟到 callback、timer 或 queued input 继续写入；任何输入路径都不得触发或显示历史回放过程。
+
+### LCMD-20260830-23：终端 IME、textarea、焦点与触摸键盘生命周期从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理及 `debug123` 真实浏览器回归；输入队列迁出后，textarea 定位、composition/native delete/paste、移动端同步双击 focus、单击 blur、Android VirtualKeyboard、输入焦点 allowance 和 host viewport 清理仍集中在 `main.js`。迁移过程中同时发现半迁移裸引用、重复安装 listener 和移动端尺寸 claim 语义退化三个问题。
+- 影响模块：`runtime/static/main.js`、`runtime/static/terminal/input/ime/`、`runtime/static/terminal/input/index.js`、terminal session 初始状态、Service Worker、IME Node/Go guard、`tests-auto/03-terminal-ime`、前端模块地图和版本化静态资源。
+- 错误现象：第一版移动后，调用方仍可能引用已经迁出的旧常量或 helper，只有进入真实 composition、paste 或 touch 路径才触发 `ReferenceError`；同一 session 再次执行安装会重复绑定 textarea/touch listener，使一次 composition 或 paste 可能发送两次；移动端双击 focus 后若只调用通用 `claimSize()`，无法保持当前设备 owner 的完整 claim 语义，可能在跨设备尺寸同步中沿用旧 owner 状态。
+- 根因：原 IME 实现和调用方共享 `main.js` 词法作用域，迁移时单靠语法检查无法发现迟到调用路径；lifecycle 虽能集中清理资源，但没有单独记录 session 是否已经完成安装；尺寸适配又把“重申现有尺寸”和“由当前设备明确取得 owner”误当成同一个命令。
+- 实施方案：建立 `ime_controller.js`、`ime_lifecycle.js`、`ime_model.js` 和目录公开 `index.js`，再由 `terminal/input/index.js` 统一导出，外部不得深度导入。controller 独占 textarea sentinel、composition 候选/去重、native delete、paste、focus/blur、同步触摸双击和 host viewport 清理；model 只提供平台、input type、sentinel 和 composition 纯算法；lifecycle 独占 session listener、timer 和 RAF。controller 使用私有 `installedSessions` 保证 `installSession()` 幂等；移动端明确 focus/touch 恢复通过注入的 `claimForCurrentDevice()` 命令取得尺寸 owner，普通输入只做 `reassertSize()`。session state 补齐 composition、paste、focus allowance、input anchor 和 viewport lock 字段。
+- 输入与呈现边界：composition/paste 仍统一进入 input controller，继续遵守用户输入锁、分块、背压、lease/generation 和 resize ACK 门禁；generated response 不经过 IME 用户输入路径。host 清理只保留并维护 live Canvas、textarea、Cache preview、presentation hold 与 composition preview，不得删除模块自有 overlay。双击 focus 必须继续在 capture `touchend` 的同步用户手势内完成；IME、focus、viewport reset 和移动端尺寸 claim 均不得触发 replay/reset 或显示历史、snapshot、resize、重连中间帧。
+- 回归 guard：新增 `terminal_ime_controller_test.mjs` 7 项，覆盖 composition 单次提交、ASCII separator 抑制、native Backspace 浏览器 mutation、paste 去重、单击 blur/双击同步 focus、host 白名单、幂等安装、session cleanup 和 dispose 后迟到回调；扩展 `TestRuntimeTerminalInputModuleBoundary` 与触摸/IME 静态 guard，固定统一公开入口、Service Worker 资源、已迁出常量/helper 不得回流、`installSession()` 幂等和移动端必须调用 current-device claim。`tests-auto/03-terminal-ime` 使用真实 Provider/agent/PTY，并支持把版本化静态资源映射到当前工作区。
+- 验证结果：IME 定向测试 `7/7`，IME/input/mouse/selection 联合定向测试 `19/19`，全部 `runtime/static/**/*.js` 语法检查和 `go test ./... -count=1` 通过。`debug123` 真实环境产物 `tests-auto/03-terminal-ime/artifacts/2026-08-30T05-29-51-017Z` 确认 composition 与 paste 各只发送一次，连续两次 Backspace 均未阻止浏览器原生 mutation，单击 blur、双击 focus 正常；五个 IME 资源均从当前工作区版本化路径加载，桌面 Canvas `1440x714`、移动 Canvas `390x714` 且非空，两页各只有 1 条 Unified 物理 WebSocket，fatal error 为 0。仅观察到一条既有 stale resize ACK warning，不属于 console error。`main.js` 降至 10940 行。
+- 禁止复现：不得把 textarea/composition/native delete/paste/focus/touch 状态、listener、timer 或 host 清理重新放回 `main.js`；不得从 `terminal/input/index.js` 之外深度导入 IME 实现；不得让重复安装产生重复事件发送；不得把 current-device claim 退化为通用 size reassert；不得把同步双击 focus 改成 RAF、timeout 或 Promise；不得让 IME 路径绕过 input controller、删除 presentation overlay，或触发和显示任何历史回放过程。
+
+### LCMD-20260830-24：移动 visualViewport、软键盘 inset 与方向恢复从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理；IME 迁出后，visualViewport/reference height、iOS keyboard inset、Android/客户端底部安全偏移、resize suppression、cursor pan、input viewport lock、方向恢复 generation、缩放拦截及其全局 listener/timer/RAF 仍由 `main.js` 直接维护。
+- 影响模块：`runtime/static/main.js`、新增 `runtime/static/terminal/viewport/`、terminal resize/rendering/IME 接线、Service Worker、viewport Node/Go guard、`tests-auto/04-terminal-viewport`、终端聚合文档和前端模块地图。
+- 架构问题：入口文件同时修改 viewport 与 session lock 状态，并从 presentation render、resize scheduler、IME focus/blur、window/visualViewport/orientation 事件和移动菜单回调进入同一组变量。旧白盒 guard 继续要求实现文本存在于 `main.js`，既阻碍 owner 迁移，也无法单独证明重复 start 不会重复注册全局 listener、方向/键盘旧 timer 不会迟到修改状态，以及 viewport 变化不会绕过 resize/presentation 门禁触发历史重放。
+- 实施方案：建立 `viewport_controller.js`、`viewport_lifecycle.js` 和 `viewport_model.js`，统一从 `terminal/viewport/index.js` 公开。controller 成为 visual viewport/reference height、keyboard inset、安全偏移、keyboard active、resize suppression、方向 generation 和 `session.inputViewportLock` 的唯一修改者；model 独占方向识别、bottom inset、键盘型高度变化和 cursor pan 纯计算；lifecycle 独占 window/document touch/gesture、window/visualViewport resize/scroll、orientation listener、全部 timer 和 RAF。`main.js` 只创建 controller 并向 resize、rendering 与 IME 注入 `isResizeSuppressed()`、`syncPan()`、`captureInputLock()`、`releaseInputLock()` 和 dismiss recovery 等公开命令。
+- resize、输入与呈现边界：软键盘 visualViewport 变化不提交新的 PTY cols/rows；同尺寸 owner reassert 可以存在，但不得把键盘高度当成终端几何。方向变化只调用当前 resize/presentation 事务并复用 Ghostty 内存状态，不建立或关闭 WebSocket，不访问 history/cache，不触发 replay/reset。live Canvas backing store 或网格变化前仍必须由 last-known-good hold/preview 覆盖，任何 viewport 路径都不得显示历史、snapshot、resize 或重连中间帧。
+- 回归 guard：新增 `terminal_viewport_controller_test.mjs` 5 项，覆盖方向/inset/pan 模型、lifecycle 幂等与清理、iOS 键盘 input lock 重基准、Android safe offset、键盘恢复和方向迟到 callback；新增 `TestTerminalViewportControllerBehavior` 与 `TestRuntimeTerminalViewportModuleBoundary`，固定公开入口、README、Service Worker 资源、main 接线和旧状态/算法/listener 不得回流。原 force-PC、mobile zoom、safe-area、keyboard pan、Canvas residue、tab resize 和 orientation 白盒 guard 改为检查 viewport 真实 owner。
+- 验证结果：viewport Node 测试 `5/5`、Node 全量 `227/227`、全部 `runtime/static/**/*.js` 语法检查、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 通过。`debug123` 真实环境产物 `tests-auto/04-terminal-viewport/artifacts/2026-08-30T06-01-38-575Z` 使用当前工作区版本化资源与 iPhone UA：synthetic keyboard 把 visual viewport 从 `844px` 收缩到 `544px`，应用 `300px` inset，快捷键栏同步上移，blur 后完整恢复；键盘阶段新增的控制帧保持原 `39x34` 几何。横竖屏回归采样 167 帧，其中 62 个 pending、72 个 hold、0 个 unsafe；方向变化产生 10 个合法 resize 帧，桌面 Canvas `1440x714`、移动 Canvas `390x714` 且非空，四个 viewport 资源均为版本化 200，前后只有 1 条 Unified 物理 WebSocket，API error、console error 和 `pageerror` 为 0，隔离 tab 已关闭。`main.js` 从 10940 行降至 10409 行。`lzc-cli project release` 成功生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，LPK SHA-256 为 `3db26803e3ccdf7e617e6f48c0a19609093c73b8b08aa82454b0bf58fddd0ff0`，包内 content revision 为 `ab7cc0a26904152e74f69fb293cbccbc3236659056b76554996007003f81c03e`；包内 `main.js`、Service Worker 和四个 viewport JavaScript 文件与工作区逐文件一致。
+- 禁止复现：不得把 visualViewport、keyboard inset、安全偏移、resize suppression、input viewport lock、cursor pan、方向 generation、全局 touch/gesture/resize/orientation listener、timer 或 RAF 放回 `main.js`；不得从公开入口之外深度导入 viewport 实现；不得让 resize 或 IME 直接修改 viewport owner 状态；不得把软键盘高度提交为 PTY 几何；不得通过 replay/reset、额外连接、清空终端或暴露中间帧处理 viewport 变化。
+
+### LCMD-20260830-25：终端输出队列、Queue ACK 与呈现保帧边界从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：前端模块化整理及 `debug123` 真实大输出回归；viewport 迁出后，output queue、UTF-8 分片、replay/live/suppressed 分类、flush RAF/timeout、过载重同步、history cursor 推进和 Queue turn ACK 仍集中在 `main.js`。
+- 影响模块：`runtime/static/main.js`、新增 `runtime/static/terminal/output/`、terminal resize/session/rendering 接线、Service Worker、output/presentation Node 与 Go guard、`tests-auto/05-terminal-output`、前端模块地图和版本化静态资源。
+- 架构问题：入口文件同时维护 output queue 数组、queued bytes、queue generation、flush budget、连接/history 身份、ACK pending 和 Ghostty 写入；resize 又直接读取队列私有字段。这样的边界无法独立证明旧 connection/channel/history generation 的迟到字节不会写入当前终端，也难以保证 Queue ACK 一定晚于字节解析和 cursor 推进。
+- 错误现象：首轮真实回归在普通输出和 resize 持续输出中捕获到可见活动 pane 的瞬时状态：`hasPresentedFrame=true`、`renderReady=false`，但 hold 与 preview 均不可见。采样分别出现 1 至 2 帧 unsafe；最终截图正常，因此仅靠终态检查无法发现。进一步采样确认 hold Canvas 尺寸有效但仍为 `hidden=true`，下一帧才被捕获。
+- 根因：output 更新 content generation 后会触发 presentation 验证；除 `beginHold()` 外，resize 和其他调用方还可直接调用公开 `setReady(false)`。旧 `setReady()` 只取消 frame release 并隐藏 live Canvas，不负责保存 last-known-good frame，导致直接 not-ready 路径先隐藏当前画面、后续 `ensure()` 才补 hold。
+- 实施方案：建立 `output_controller.js`、`output_lifecycle.js` 和 `output_model.js`，统一从 `terminal/output/index.js` 公开。controller 独占 queue/generation/queued bytes、分类、byte/entry/time bounded drain、4 MiB overload resync、cursor/cache commit 和 Queue turn ACK；lifecycle 独占 RAF/timeout；model 负责 Unicode/UTF-8 测量、分片、cursor 解析与批次合并。resize 只使用公开的 queue count/bytes/flush API，session lifecycle 只调用 `disposeOutput()`。presentation 同时把保帧下沉为 `setReady(false)` 的默认不变量：已有稳定帧且未持有 hold 时，必须先 `holdFrame()`，显式 `preserveFrame:false` 才可跳过。
+- 输出与协议边界：实时、历史 replay 和 resize settle 输出继续按连接 epoch、channel generation、selector、pane 和 history generation 校验；过载只请求权威 history resync，不接受损坏或跨代字节。Queue turn completion 使用有界 drain，只有 output queue 已解析、`appliedHistoryCursor` 到达 turn cursor 且 socket/epoch/channel 仍匹配时才发送 ACK。任何 output、resize 或 validation 路径都不得显示 replay、snapshot、resize 或重连中间帧。
+- 回归 guard：新增 `terminal_output_controller_test.mjs` 4 项，覆盖 Unicode 分片、顺序/cursor/cache commit、stale generation、有界 drain、Queue ACK、overload 和 dispose；presentation 新增“validation 先 hold”和“direct not-ready 自动保帧”行为测试。`TestRuntimeTerminalOutputModuleBoundary`、`TestRuntimeTerminalOutputBatchingGuard` 与 Canvas residue guard 固定公开入口、状态 owner、Service Worker、resize 私有状态隔离、ACK 顺序和 `setReady()` 保帧不变量。`tests-auto/05-terminal-output` 使用真实 Provider/agent/PTY，并映射当前工作区版本化静态资源。
+- 验证结果：output/presentation/resize 定向 Node 测试通过，Node 全量 `233/233`、全部 `runtime/static/**/*.js` 语法检查、`go test ./... -count=1`、`go test -race ./... -count=1` 和 `git diff --check` 通过。`debug123` 真实环境产物 `tests-auto/05-terminal-output/artifacts/2026-08-30T06-43-02-201Z` 完成普通输出、1.5 MiB 大块输出、隐藏 tab 和 resize 持续输出；共处理 `1585237` 字节、`183` 个 output batch，队列峰值 `429056` 字节，overload 与 stale drop 均为 0。185 个 presentation 采样中 69 个 pending、153 个 hold、0 个 unsafe；Canvas 前后哈希变化且非空，四个 output 资源均从当前工作区版本化路径加载，桌面/移动页前后各只有 1 条 Unified 物理 WebSocket，API error、console error 和 `pageerror` 为 0，临时 tab 与隔离 tab 均已清理。`main.js` 从 10409 行降至 9882 行。
+- 打包验证：`lzc-cli project release` 成功生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，LPK SHA-256 为 `1e21cd50d8976f384d38f11d00ad807723d34d59d668cecd3f8b7900fa2bd38e`，包内 content revision 为 `e66e5954a4cafd150100a75e8053aafb49f463e31c725d862bf563461832296d`。工作区 `main.js`、Service Worker、output controller 和 presentation controller SHA-256 分别为 `1174e7a4679c52d6e44f3cb5343088dc1bc8d6a60b3436474996bffab1549e87`、`080991c8dc7f2ace8f6a8df2886e46e656ab250f4ab4ed2248d6d5767fb93c4a`、`e28a2090bcf5ea4eb0534b0962d389547fedb581916ffddf8e8dc32fe3e25cd3` 和 `40178fd9b5ee4246b91966ed9110eb87b4fc31a09fa9f84bc81c537d9c8a76cb`；包内上述文件及 output 公开入口/lifecycle/model 与工作区逐文件一致。
+- 禁止复现：不得把 output queue、queued bytes、flush/ACK/overload、RAF、timer 或字节分片实现放回 `main.js`；不得从公开入口之外深度导入 output 实现；resize 不得直接读取或修改 output 私有状态；不得发送早于 cursor commit 的 Queue ACK；不得让迟到连接或 history generation 的字节进入 Ghostty；任何已有稳定帧的 not-ready 转换都必须先建立 hold，不能通过终态截图掩盖瞬时空白，也不得以 replay/reset 或额外 WebSocket 修复输出问题。
+
+### LCMD-20260830-26：Unified 异常断线恢复提前清除物理 close fence
+
+- 日期：2026-08-30
+- 来源：Unified 物理连接 owner 从 `main.js` 迁入 `terminal/transport/unified_transport_controller.js` 后新增行为测试；测试异常 WebSocket error 与恢复 microtask 的真实顺序时复现。
+- 影响模块：`runtime/static/terminal/transport/unified_transport_controller.js`、`runtime/static/main.js` 的 transport 接线、transport README、Service Worker、`terminal_unified_transport_controller_test.mjs`、`runtime_shortcuts_test.go` 和前端模块地图。
+- 错误现象：物理 WebSocket error/health failure 已经把当前 connection 从 owner 中移除并建立 `connection.closed` close fence 后，恢复 microtask 会再次调用统一关闭命令。此时当前 connection 已为空，旧关闭命令仍把 `closingPromise` 清成 `null`；如果旧 socket 的 close 事件尚未到达，logical membership 刷新便可能创建替代 Unified connection，短时间出现两条普通容器物理 WebSocket。
+- 根因：关闭命令把“没有当前 connection”误解释成“没有待完成的物理关闭”，没有区分 active connection 引用与已经捕获的 close fence。异常回调同步移除 active 引用，而物理 close 是异步完成，两者并非同一状态。
+- 实施方案：`close()` 先读取当前 active connection；没有 active connection 时只返回 `false`，不得修改既有 `closingPromise` 或写入陈旧的 expected close reason。只有确实取得 active connection 后才设置 intentional close reason、停止 watchdog、清 target 并创建新的 fence。异常断线已有 fence 因而会一直阻止 `ensure()`，直到旧 `connection.closed` 完成或既定 fence 超时，随后才刷新 membership 和重连 workspace session。
+- 回归 guard：新增 `terminal_unified_transport_controller_test.mjs` 5 项，覆盖单 target 物理复用、target 替换 fence、异常 error 恢复期间禁止替代连接、物理断线去重、离线与 `client:` target 不恢复，并由 `TestTerminalUnifiedTransportControllerBehavior` 纳入 Go 全量入口。`TestRuntimeTerminalConnectionSchedulerGuard` 固定 controller 公开入口、Service Worker、README、状态 owner、close fence 顺序和旧实现不得回流 `main.js`。
+- 验证结果：transport/session/queue/membership/health/scheduler 定向 Node 测试 `65/65`、`go test ./... -run 'TestTerminalUnifiedTransportControllerBehavior|TestRuntimeTerminalConnectionSchedulerGuard' -count=1`、相关 JavaScript 语法检查和 `git diff --check` 通过；完整 Go、Node 和真实 `debug123` 单物理连接回归在后续迁移批次继续执行。
+- 禁止复现：不得在 active connection 已为空时清除既有 close fence；不得把 connection 引用为空等同于物理 socket 已关闭；旧 Unified socket 真正关闭或 fence 到期前不得创建替代 connection；单 pane logical 错误仍不得关闭兄弟 stream，任何恢复路径不得触发 replay/reset 或显示历史、resize、重连中间帧。
+
+### LCMD-20260830-27：logical membership、pane retry 与 direct scheduler 编排从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：继续执行前端模块化整理；Unified 物理 connection owner 迁出后，logical membership、可视优先级排序、pane retry timer、测量 RAF、`client:` direct demand generation 和三条直连 scheduler lease 回调仍集中在 `main.js`。
+- 影响模块：`runtime/static/main.js`、新增 `runtime/static/terminal/transport/transport_runtime_controller.js`、`transport_runtime_lifecycle.js`、transport 公开入口与 Service Worker、`terminal_transport_runtime_controller_test.mjs`、`runtime_shortcuts_test.go` 和前端模块地图。
+- 架构问题：入口文件同时遍历 workspace tabs/panes、计算 layout/DOM 顺序、修改 membership revision、关闭/建立 logical stream、管理 exponential retry 和 connection priority decay，并实现 direct scheduler 的 connect/disconnect/retry callback。membership 变化、pane 关闭、隐藏 tab、目标切换和应用 dispose 之间没有单一生命周期 owner，迟到 RAF/timer 容易继续触碰旧 pane；静态 guard 也无法单独证明容器 Unified 与 `client:` 三直连分流。
+- 实施方案：建立 `transport_runtime_controller.js` 作为 logical membership、stream generation、pane retry、可视 priority、direct demand generation 和 scheduler lease 编排的唯一 owner；建立 `transport_runtime_lifecycle.js` 作为 priority/retry timer、measurement RAF 和 sync microtask 的唯一 owner。`main.js` 仅注入 tab/session 只读视图、resize 测量、`connectSession()`、输入 expiry、诊断和 Unified 物理 transport 命令，并通过 transport 公开入口调用 `refreshMembership`、`syncConnectionDemands`、`connectPendingSession`、`recycleUnifiedSession` 等操作。
+- 连接与呈现边界：普通容器仍由 membership 复用一条 Unified 物理 WebSocket，tab/focus 只改变 logical priority；单 pane retry 只关闭该 logical stream，不关闭兄弟 stream 或物理 connection。`client:` 目标仍由 scheduler 最多授予 3 条独立直连，后台 tab 停放，CONNECTING/CLOSING lease 持续占槽。测量和 retry 回调不得进入 history replay、清空 Canvas 或显示任何中间帧。
+- 回归 guard：新增 `terminal_transport_runtime_controller_test.mjs` 4 项，覆盖三 pane 单物理 transport、单 pane recycle、workspace applying 延迟 membership、未测量 pane RAF、四 pane 直连三槽限制、后台停放和 dispose 资源清理；新增 `TestTerminalTransportRuntimeControllerBehavior`，并扩展 `TestRuntimeTerminalConnectionSchedulerGuard`，固定 runtime controller/lifecycle 公开入口、README、Service Worker、状态 owner、direct/Unified 分支顺序和禁止实现回流 `main.js`。
+- 验证结果：transport runtime 与 Unified/session/queue/membership/health/scheduler 定向 Node 测试 `69/69`、相关 Go guard、全部新增 JavaScript 语法检查和 `git diff --check` 通过；真实 `debug123` 连接池回归将在 `connectSession()` 协议事件迁移完成后统一执行。
+- 禁止复现：不得把 membership map、DOM 排序、pane retry/priority timer、measurement RAF、direct demand generation 或 scheduler lease callback 放回 `main.js`；不得让 `client:` 直连进入 Unified 物理 socket；不得让后台/被抢占 pane 误关闭兄弟 stream；不得让迟到 timer/RAF/microtask 修改已切换目标或已关闭 session；任何路径不得显示历史、snapshot、resize 或重连中间过程。
+
+### LCMD-20260830-28：页面级生命周期 listener 从 `main.js` 迁出
+
+- 日期：2026-08-30
+- 来源：继续执行前端模块化整理；终端责任域迁移后，`online/offline`、显隐/焦点恢复、全局 resize/键盘/触摸恢复、字体 ready 和 workspace restore heartbeat 仍由入口直接注册。
+- 影响模块：`runtime/static/main.js`、新增 `runtime/static/app/`、Service Worker、`app_lifecycle_controller_test.mjs` 和 `runtime_shortcuts_test.go`。
+- 架构问题：页面 listener、heartbeat timer 与各功能 controller 的销毁顺序散落在入口，无法独立证明重复启动、页面切换或迟到字体 Promise 不会继续修改已销毁会话。
+- 实施方案：新增 `app/app_lifecycle.js` 与公开 `app/index.js`。生命周期 controller 统一注册/移除页面级 listener，维护 heartbeat timer 和 generation；具体网络、工作区、终端恢复行为通过显式 handler 注入。beforeunload 仍保持先 flush 设置/cache、再 busy-pane 门禁和既有资源销毁顺序；生命周期模块本身不建立 WebSocket、不执行 replay、不清理或显示 Canvas。
+- 回归 guard：`app_lifecycle_controller_test.mjs` 覆盖幂等 start、listener/timer 清理、字体 ready 迟到回调和 beforeunload 返回值；`TestRuntimeAppLifecycleModuleBoundary` 固定公开入口、Service Worker 预缓存、main 接线及禁止终端实现侵入。既有滚动历史、网络恢复、resize 和输入 guard 改为读取新的 lifecycle owner。
+- 验证结果：app lifecycle Node 测试 `2/2`、相关 runtime Go guard 和 `go test ./... -run '^TestRuntime' -count=1` 通过；完整 Go 测试与真实 `debug123` 回归在后续 workspace/tab 迁移批次继续执行。
+- 禁止复现：不得把页面级 listener、heartbeat timer 或全局 dispose 顺序重新堆回 `main.js`；不得让 lifecycle handler 在 dispose 后处理迟到 Promise/事件；网络恢复、尺寸变化和页面显隐期间仍不得渲染 history replay、snapshot、resize 或重连中间帧。
+
+### LCMD-20260830-29：应用入口与 workspace 基础控制器继续解耦
+
+- 日期：2026-08-30
+- 来源：继续执行前端模块化整理；`main.js` 在业务迁移后仍承担应用实现，workspace 布局和 activity 状态也缺少独立 owner。
+- 架构问题：入口文件包含启动、模块接线、布局 DOM、分割线拖拽、activity 轮询和 busy-pane 关闭确认，难以单独审核资源生命周期与历史呈现边界。
+- 实施方案：新增 `app/app_controller.js` 作为过渡应用 orchestrator，`main.js` 仅导入并调用 `startWebShellApp()`；新增 `workspace/layout_view_controller.js`、`tab_registry.js` 和 `activity_controller.js`，分别拥有布局 DOM、tab registry 基础状态和 activity 请求/timer。所有跨域行为通过显式回调接入，模块不建立额外 WebSocket、不执行 history replay，也不显示中间帧。
+- 回归 guard：新增 workspace 布局、registry、activity Node 行为测试与 `TestRuntimeMainIsOnlyBootstrapEntry`、`TestRuntimeWorkspaceModuleBoundary`；Service Worker、workspace/app README 和前端模块地图同步更新。
+- 验证结果：workspace Node 测试 `4/4`、app lifecycle 测试 `2/2`、`node --check`、`go test ./... -run '^TestRuntime' -count=1` 和 `git diff --check` 通过；`tests-auto/03-terminal-ime` 使用当前工作区静态资源完成真实 Provider/agent 回归，API error、console error 和 pageerror 均为 0。
+- 禁止复现：不得把实现代码、workspace Map、布局 listener、activity timer 或终端协议重新放回 `main.js`；`app_controller.js` 只作为迁移中的编排层，新功能必须进入对应责任域；任何布局、activity 或启动失败路径都不得清空或显示 history replay、snapshot、resize 或重连中间过程。
+
+### LCMD-20260830-30：对话框与移动关闭确认从应用控制器迁出
+
+- 日期：2026-08-30
+- 来源：继续执行前端模块化整理；桌面 confirm/prompt、移动关闭确认 sheet 的 resolver、DOM 更新、焦点和按钮 listener 仍与应用启动及 workspace 编排混在 `app_controller.js`，页面还同时注册了重复的 Escape 处理路径。
+- 影响模块：`runtime/static/app/app_controller.js`、新增 `runtime/static/app/dialog_controller.js`、`runtime/static/app/index.js`、`runtime/static/app/README.md`、Service Worker、`app_dialog_controller_test.mjs`、`runtime_shortcuts_test.go` 和前端模块地图。
+- 架构问题：多个业务模块直接依赖入口中的 `dialogResolve`/`mobileCloseConfirmResolve`，重复打开、页面销毁和移动布局切换时缺少独立的 resolver 生命周期；按钮 listener 与页面级 keydown listener 分散注册，容易造成重复响应或 dispose 后迟到 focus。
+- 实施方案：建立 `createDialogController()`，独占 confirm/prompt 和移动 sheet 的 DOM、resolver、初始焦点、Escape、重复请求和 `dispose()`；应用控制器只注入 DOM 与显式回调，并通过公开 `confirmDialog()`、`promptDialog()`、`confirmMobileSheet()`、`confirmMobileClose()` 和 `confirmCloseRunningCommand()` 使用结果。页面级 Escape listener 继续由 `app_lifecycle.js` 注册，移除入口中的旧按钮/移动 sheet listener 和 resolver 状态。
+- 回归 guard：`app_dialog_controller_test.mjs` 3 项覆盖 confirm/prompt、重复请求、Escape、移动布局、焦点、重复 dispose 和迟到结果；`TestRuntimeDialogModuleBoundary` 固定公开入口、Service Worker 资源、`app_controller.js` 不得保留旧 resolver 或具体 dialog listener，并禁止 dialog 模块依赖 WebSocket、history、terminal presentation 或 workspace 状态。
+- 验证结果：dialog 定向 Node 测试 `3/3`、app lifecycle/mobile select 定向测试、相关 Go 静态 guard、JavaScript 语法检查和 `git diff --check` 已通过；完整 Node/Go 及 `debug123` 页面回归将在本批后续 workspace/tab 迁移前执行。
+- 禁止复现：不得把 resolver、对话框 DOM listener、移动关闭 sheet 状态或焦点 timer 放回 `app_controller.js`；不得让 Escape 处理绕过既有 modal 优先级；对话框确认不得直接修改 workspace、transport、history、rendering 或显示任何历史回放、snapshot、resize、重连中间过程。
+
+### LCMD-20260830-31：移动终端快捷键栏从应用控制器迁出
+
+- 日期：2026-08-30
+- 来源：继续执行前端模块化整理；移动快捷键的 sticky modifier、按钮 DOM、触摸/指针事件、长按重复、触感反馈和键盘保活仍混在 `app_controller.js`，并被旧静态 guard 误认为入口实现。
+- 影响模块：`runtime/static/app/app_controller.js`、新增 `runtime/static/terminal/input/mobile_shortcuts/`、`terminal_mobile_shortcuts_controller_test.mjs`、`runtime_shortcuts_test.go`、Service Worker、输入目录 README、前端模块地图。
+- 架构问题：快捷键按钮重渲染时 listener 和 repeat timer 的所有权不清晰；sticky 输入状态与 IME 通过隐式共享逻辑耦合；页面销毁或 pane 切换后，迟到 pointer/timer 可能继续发送输入或执行 workspace 动作。
+- 实施方案：建立 `mobile_shortcuts_controller.js` 与 `mobile_shortcuts_lifecycle.js`，由 controller 独占 sticky modifier、触感反馈偏好、按钮渲染和动作分派，由 lifecycle 独占动态 listener、长按 timeout/interval 和重渲染清理。应用控制器只注入 `getActiveSession`、`sendInput`、IME focus allowance、设置行数据和显式 `onAction`；统一从 `terminal/input/index.js` 公开。
+- 输入与呈现边界：普通/文本快捷键继续进入现有 input controller；sticky modifier 只转换明确的单字符输入，paste/composition 不误套用；重复输入只允许 Enter/方向键。快捷键模块不建立 WebSocket、不修改 history/resize/presentation，不显示 replay、snapshot、resize 或重连中间过程。
+- 回归 guard：新增 `terminal_mobile_shortcuts_controller_test.mjs` 3 项，覆盖渲染与动作、pointer 长按重复、dispose 清理和 sticky 文本/composition/paste 区分；新增 `TestTerminalMobileShortcutsControllerBehavior` 与 `TestRuntimeTerminalMobileShortcutsModuleBoundary`，并把旧 desktop focus、文本按钮、重复、sticky 和键盘保活 guard 指向新模块源码。Service Worker 预缓存三个版本化快捷键资源。
+- 验证结果：移动快捷键定向 Node 测试 `3/3`、对应 Go guard、`node --check` 和 `git diff --check` 通过；后续完整 Node/Go 与 `debug123` 移动输入回归继续覆盖该模块。
+- 禁止复现：不得把 `bindButton`、sticky modifier、repeat timer、触感反馈或快捷键 DOM listener 放回 `app_controller.js`；不得让模块直接读取/修改 tab、pane、transport、history、resize 或 Canvas 状态；dispose 后迟到事件和 timer 不得发送输入或执行动作。
+
+### LCMD-20260830-32：tab label 与 desktop inline rename 从应用控制器迁出
+
+- 日期：2026-08-30
+- 来源：继续执行前端模块化整理；tab label 更新、desktop 双击重命名输入框、optimistic 提交与失败回滚仍和 pane/session 创建、workspace apply 及应用启动混在 `app_controller.js`。
+- 影响模块：`runtime/static/app/app_controller.js`、新增 `runtime/static/workspace/tab_label_controller.js` 与 `tab_label_lifecycle.js`、workspace 公开入口/README、Service Worker、`workspace_tab_label_controller_test.mjs`、`runtime_shortcuts_test.go` 和前端模块地图。
+- 架构问题：inline rename 的可变状态、AbortController、scroll/resize listener 和 focus RAF 没有独立 owner；tab button 重建、tab 删除、workspace state 应用和页面销毁时，迟到 blur/RAF 可能提交到旧 tab 或重新聚焦已销毁输入框。
+- 实施方案：`tab_label_controller.js` 独占 tab label presentation、inline rename state、输入几何、optimistic `rename_tab` transaction 和失败回滚；`tab_label_lifecycle.js` 独占 AbortController 与 RAF。应用控制器只注入 tab registry/active/applying 只读视图、激活命令、workspace action、标题/总览刷新和 toast，并在 tab button、自动标题、prompt rename、tab 删除与 dispose 边界调用公开 API。
+- 生命周期与呈现边界：输入框关闭或模块 dispose 会先 abort 全部 listener、移除 DOM 并取消 focus RAF；optimistic 失败仅回滚同一 tab 的同一 label，不覆盖后续成功状态。标签重命名不触碰 Ghostty、transport、history、resize 或 presentation，不能清空终端或显示 replay、snapshot、resize、重连中间过程。
+- 回归 guard：新增 `workspace_tab_label_controller_test.mjs` 2 项，覆盖活动标题更新、inline Enter 提交、optimistic 参数、失败回滚、dispose 取消迟到 focus 和幂等销毁；workspace Node 聚合与 `TestRuntimeDesktopDoubleClickInlineRenamesTab`、`TestRuntimeWorkspaceModuleBoundary` 固定新 owner、公开入口、Service Worker 资源和旧状态/listener 不得回流 `app_controller.js`。
+- 验证结果：workspace 定向 Node 测试 `12/12`、相关 Go guard和新模块 JavaScript 语法检查通过；完整 Node/Go 与 `debug123` workspace 真机回归将在本批收口时继续执行。
+- 禁止复现：不得把 inline rename state、输入 DOM listener、AbortController、position 算法、optimistic rename 或 focus RAF 放回 `app_controller.js`；不得让 tab label 模块深度导入 terminal/transport/history/rendering；dispose 后迟到事件不得提交 workspace action 或恢复焦点。
+
+### LCMD-20260830-33：tab navigation 与最近 tab 状态从应用控制器迁出
+
+- 日期：2026-08-30
+- 来源：继续执行前端模块化整理；DOM tab 顺序、前后/索引切换、最近两个 tab、按实例 localStorage 持久化和 tab 滚动仍由 `app_controller.js` 直接实现。迁移中同时发现 `tab_registry` 和 navigation controller 都声明最近 tab 状态，形成双 owner。
+- 影响模块：`runtime/static/app/app_controller.js`、`runtime/static/workspace/tab_navigation_controller.js`、`tab_registry.js`、workspace 公开入口/README、Service Worker、`workspace_tab_navigation_controller_test.mjs`、`runtime_shortcuts_test.go` 和前端模块地图。
+- 架构问题：最近 tab 状态与 tab registry、workspace apply、快捷键和 DOM 顺序读取混在应用编排层，无法独立证明跨实例持久化、删除后裁剪和页面销毁行为；双 owner 还可能让两个快照静默分叉。
+- 实施方案：`tab_navigation_controller.js` 唯一持有最近两个 tab ID，负责按实例读写、去重裁剪、交换最近 tab、DOM 顺序、offset/index 激活和 tab button 滚动；`tab_registry.js` 移除未使用的最近 tab 副本，只保留 registry/ID/active snapshot。应用控制器只创建 controller 并调用公开 API，页面销毁时幂等 dispose。
+- 生命周期与呈现边界：navigation controller 不持有 listener、timer、terminal session 或 Canvas，只调用注入的 tab 激活命令；dispose 后所有读写与切换命令失效。tab 激活原有 presentation hold、resize、membership 和 workspace persistence 分阶段顺序未改变，任何路径都不得显示 history replay、snapshot、resize 或重连中间过程。
+- 回归 guard：新增 `workspace_tab_navigation_controller_test.mjs` 2 项，覆盖 DOM 顺序补全、循环/索引切换、滚动、按实例 recent persistence、去重/裁剪、最近 tab 交换、空状态反馈和幂等 dispose；workspace Node 聚合与 `TestRuntimeWorkspaceModuleBoundary` 固定公开入口、Service Worker、单一状态 owner、页面 dispose 和旧实现不得回流 `app_controller.js`。
+- 验证结果：workspace 定向 Node 测试 `14/14`、相关 Go guard、JavaScript 语法检查和 `git diff --check` 通过；完整 Node/Go 与 `debug123` workspace 真机回归将在继续迁移前执行。
+- 禁止复现：不得在 `app_controller.js` 或 `tab_registry.js` 重新声明 `recentTabIds`/recent storage key；不得让 navigation 模块导入或修改 transport、history、resize、presentation；最近 tab 切换必须继续通过既有 `setActiveTab()` 编排，不得复制激活流程。
+
+### LCMD-20260830-34：workspace API、恢复与活动 tab 持久化从应用控制器迁出
+
+- 日期：2026-08-30
+- 来源：继续执行前端模块化整理；workspace GET/POST、尺寸 query、selector 校验、启动恢复、首页导航 suppression、last/restart tab 和异步 `activate_tab` Promise chain 仍散落在 `app_controller.js`。
+- 影响模块：`runtime/static/app/app_controller.js`、新增 `runtime/static/workspace/workspace_api.js` 与 `persistence_controller.js`、workspace 公开入口/README、Service Worker、`workspace_api_controller_test.mjs`、`workspace_persistence_controller_test.mjs`、`runtime_shortcuts_test.go` 和前端模块地图。
+- 架构问题：Provider 请求和浏览器持久化共享应用层可变状态，selector/generation 响应边界、首页导航提交/回滚、快速 tab 切换的串行提交和页面 dispose 无法独立审核；storage key 与 suppression flag 也容易被其他功能直接修改。
+- 实施方案：`workspace_api.js` 统一生成 workspace/activity URL，使用同一尺寸写入 query/body，解析 Provider 错误，并只对仍匹配的 selector/generation 执行 revision 观察和 workspace apply；`persistence_controller.js` 唯一持有 restore/location suppression、local/session storage key、last/restart tab 和按 selector generation 隔离的 active-tab Promise chain。应用层只注入 getter、命令和 apply 回调。
+- 生命周期与呈现边界：API 和 persistence 都提供幂等 dispose；迟到 API 响应不应用到新目标，尚未发送且已失活的 tab 持久化会跳过，在途旧请求之后仍串行发送最终活动 tab。模块不接触 terminal session、WebSocket、history、resize 或 presentation，tab 激活原有 hold/resize/membership 阶段未改变，任何路径不得显示 replay、snapshot、resize 或重连中间过程。
+- 回归 guard：新增 workspace API 3 项与 persistence 3 项 Node 测试，覆盖请求 URL/body、Provider 错误、selector mismatch、stale generation、无 TTL 启动恢复、`last=false` 清理、URL suppression、last/restart tab、首页提交/回滚、串行 active-tab persistence、失活跳过和 dispose；LightOS 首页恢复、异步 tab activation 与 workspace 模块边界 Go guard 改为读取新 owner，并固定旧状态不得回流应用控制器。
+- 验证结果：新增 Node 测试 `6/6`、workspace 聚合、相关 Go guard、JavaScript 语法检查和 `git diff --check` 通过；`app_controller.js` 由约 4652 行降至 4306 行，`main.js` 保持 3 行。`debug123` workspace 真机回归将在进入 refresh/retry 迁移前执行。
+- 禁止复现：不得在 `app_controller.js` 重新实现 workspace fetch/POST、selector guard、restore storage、last/restart tab 或 active persistence chain；不得让 API/persistence 模块导入 terminal transport/history/rendering；stale selector/generation 响应不得应用，活动 tab 持久化不得恢复为无序并发提交。
+
+### LCMD-20260830-35：终端 custom key handler 从应用控制器迁出
+
+- 日期：2026-08-30
+- 来源：继续执行前端模块化整理；`Alt` ESC 前缀、`Shift+Tab` backtab、字体快捷键拦截和移动 sticky modifier 仍直接实现于 `app_controller.js`，与 session/IME/input 编排混在一起。
+- 影响模块：`runtime/static/app/app_controller.js`、新增 `runtime/static/terminal/input/key_overrides/`、terminal input 公开入口、Service Worker、`terminal_key_overrides_controller_test.mjs`、`runtime_shortcuts_test.go` 和前端模块地图。
+- 架构问题：Ghostty custom key handler 的安装和键值转换没有独立 owner，session cleanup/dispose 时也无法单独证明迟到键盘事件不会再次写入已关闭 pane；静态 guard 只能从入口文本推断实现边界。
+- 实施方案：建立 `key_overrides_controller.js`、`index.js` 和目录 README。controller 独占 session handler 绑定及 dispose fence；纯函数负责 ASCII/AltGraph/键码转换。应用控制器仅注入 settings 字体快捷键、mobile shortcut sticky 状态、input send 和 session cleanup 回调，IME 继续通过公开 `installKeyOverrides` 命令接入。
+- 输入与呈现边界：只转换明确的用户键盘事件，不创建连接、不修改 input queue 私有状态、不触碰 history/replay/resize/presentation；`AltGraph` 和带 Ctrl/Meta 的组合保持原生路径。session cleanup 后 handler 返回 false 且不得发送任何字节。
+- 回归 guard：新增 `terminal_key_overrides_controller_test.mjs` 3 项，覆盖 Alt/AltGraph、字体/ sticky/backtab 分支、重复安装、session cleanup 和 dispose；新增 `TestTerminalKeyOverridesControllerBehavior`，并扩展 `TestRuntimeTerminalInputModuleBoundary`、`TestRuntimeDesktopAltPrintableKeysSendMetaEscapePrefix` 与 Service Worker 资源 guard。
+- 验证结果：键盘覆盖层 Node `3/3`、输入模块及 Alt 映射定向 Go 测试、JavaScript 语法检查和 `git diff --check` 通过；真实 `debug123` 键盘/IME 回归继续在本批终端迁移收口时执行。
+- 禁止复现：不得把 custom key handler、Alt/Tab 字节转换或 sticky modifier 实现放回 `app_controller.js`；不得让模块深度导入 session/transport/history；dispose 或 pane close 后迟到事件不得写入 Ghostty，也不得借键盘路径显示任何历史、snapshot、resize 或重连中间帧。
+
+### LCMD-20260830-36：终端身份与交互策略从应用控制器迁出
+
+- 日期：2026-08-30
+- 来源：继续执行前端模块化整理；Grok 精确会话识别、Claude fullscreen 事件候选、终端位置描述和用户输入前滚动仍散落在 `app_controller.js`，且与 transport/session 生命周期交叉引用。
+- 影响模块：`runtime/static/app/app_controller.js`、新增 `runtime/static/terminal/policy/`、Service Worker、`terminal_policy_controller_test.mjs`、`runtime_shortcuts_test.go` 和前端模块地图。
+- 架构问题：命令 token 解析和工具身份判断没有独立 owner；滚动策略直接修改 renderer/动画字段，session 关闭、对话框和页面销毁边界难以独立验证；旧静态 guard 继续要求已迁出的实现存在于应用控制器。
+- 实施方案：建立 policy controller 与公开入口。纯函数集中维护引号 token、可执行文件、官方 Grok 入口和位置描述；controller 通过显式注入读取 mouse/dialog/layout 状态并执行当前 session 的滚动命令，提供 dispose fence。应用控制器只保留公开 API 适配，销毁时调用 policy dispose。
+- 回归 guard：新增 Node 行为测试 3 项，覆盖精确 Grok 匹配、Claude 参数路由、底部视口归一化、关闭/对话框/dispose 门禁；更新 Grok/Claude/renderer Go 静态 guard 与 Service Worker 资源契约。
+- 验证结果：`terminal_policy_controller_test.mjs` 3/3、相关 Claude/Grok/renderer runtime guard 通过；`node --check` 和 `git diff --check` 随后执行完整迁移测试。
+- 禁止复现：不得把 Grok/Claude 检测、命令 token 解析或滚动动画清理重新放回 `app_controller.js`；策略不得创建连接、修改 history/replay/resize/presentation 或显示任何中间帧。
+
+### LCMD-20260830-37：终端 metrics 与 WebSocket URL 工具从应用控制器迁出
+
+- 日期：2026-08-30
+- 来源：继续执行前端模块化整理；字体 metrics 稳定化、scrollback 遍历、终端尺寸估算和 `http(s)` 到 `ws(s)` 的 URL 转换仍散落在 `app_controller.js`，导致设置、workspace API 和连接协议共享未声明的实现细节。
+- 影响模块：`runtime/static/app/app_controller.js`、新增 `runtime/static/terminal/metrics/`、`runtime/static/terminal/transport/websocket_url.js`、Service Worker、对应 Node/Go 测试和前端模块地图。
+- 架构问题：metrics retry 的 RAF/timer 没有独立资源 owner，session 关闭或页面销毁时可能触碰旧 pane；尺寸 query 与 URL 协议校验也无法单独验证，静态 guard 依赖入口实现文本。
+- 实施方案：建立 `terminal/metrics/` controller，独占字体 generation、retry 资源、scrollback 同步和尺寸 query，并通过 session cleanup/dispose 拒绝迟到回调；建立 transport `websocket_url.js` 纯函数，统一页面 URL 解析和 `ws:`/`wss:` 校验。应用控制器只注入 renderer/presentation/resize 和页面 URL，不保留测量、padding 或协议转换实现。
+- 回归 guard：`terminal_metrics_controller_test.mjs` 2 项覆盖 hold/metrics retry、scrollback、padding/fallback、cleanup/dispose；`terminal_websocket_url_test.mjs` 2 项覆盖 HTTP/HTTPS 转换和非法 base；新增 metrics/URL Go 行为与模块边界 guard，并更新 transport/terminal Service Worker 资源契约。
+- 验证结果：metrics Node 2/2、URL Node 2/2、`TestRuntime` 全部通过；随后继续执行完整 Node/Go、LPK 和 debug123/tests-auto 回归。
+- 禁止复现：不得把 metrics generation、字体 retry timer、scrollback 遍历、尺寸估算或 WebSocket 协议转换重新放回 `app_controller.js`；metrics/URL 工具不得建立连接、执行 history replay 或显示 resize/重连中间帧。
+
+### LCMD-20260830-38：应用反馈 DOM 与 toast 生命周期从应用控制器迁出
+
+- 日期：2026-08-30
+- 来源：继续执行前端模块化整理；toast timer、启动错误面板文本和 hidden 状态仍直接写在 `app_controller.js`，与 bootstrap、session startup error 和网络恢复回调混杂。
+- 影响模块：`runtime/static/app/app_controller.js`、新增 `runtime/static/app/feedback/`、Service Worker、`app_feedback_controller_test.mjs`、`runtime_shortcuts_test.go`、app README 和前端模块地图。
+- 架构问题：反馈 DOM 没有独立状态 owner，重复 toast、页面销毁和迟到 timer 的清理边界无法单独验证；不同错误源可能绕过统一面板生命周期。
+- 实施方案：建立 `feedback_controller.js` 与公开入口，独占 toast timer、startup error DOM 和 dispose fence；应用控制器仅注入 DOM 并转发公开反馈命令。
+- 回归 guard：Node 行为测试 2 项覆盖 toast 显示/自动隐藏、启动错误清理、重复 dispose 和迟到回调；新增 app feedback Go 模块边界及 Service Worker 资源 guard。
+- 验证结果：`app_feedback_controller_test.mjs` 2/2、相关 `TestRuntime` guard、语法检查和 `git diff --check` 通过。
+- 禁止复现：不得把 toast timer、启动错误面板写入或 resolver 状态重新放回 `app_controller.js`；反馈路径不得触发或显示 history replay、snapshot、resize 或重连中间帧。
+
+### LCMD-20260831-39：应用命令路由与 shell 控件从应用控制器迁出
+
+- 日期：2026-08-31
+- 来源：继续整理 `app/app_controller.js`；移动快捷键 action 的 tab/overview/search/attachment/clipboard/paging/zoom 路由、新建 tab 检查以及新建 tab、空状态和 tab 栏滚轮 listener 仍直接写在应用控制器中。
+- 影响模块：`runtime/static/app/app_controller.js`、新增 `runtime/static/app/commands/`、Service Worker、`app_command_controller_test.mjs`、`runtime_shortcuts_test.go` 和前端模块地图。
+- 架构问题：页面命令和 DOM listener 没有独立 owner，移动快捷键与 shell 按钮共享的 `create_tab` 行为存在重复实现；销毁后迟到 click/wheel 或异步 action 的边界只能依赖应用控制器顺序，难以单独审查。
+- 实施方案：建立 `command_controller.js` 与 `command_lifecycle.js`，由 `app/commands/index.js` 公开。controller 唯一路由移动 action、执行活动目标检查和 `create_tab` workspace action；lifecycle 独占 shell listener、幂等安装、dispose generation。应用控制器只创建命令 controller、把 `runAction()` 注入移动快捷键，并传入三个 shell 控件引用。
+- 回归 guard：`app_command_controller_test.mjs` 3 项覆盖命令分派、无目标反馈、滚轮/按钮 listener、重复安装和销毁；新增 `TestRuntimeAppCommandModuleBoundary`，并更新 overview/移动选择的旧 guard 指向实际 command owner。命令模块明确禁止 WebSocket、history/replay、snapshot 和 Canvas 依赖。
+- 验证结果：命令模块 Node 测试 `3/3`，快捷键/移动快捷键联合测试 `9/9`，相关 `TestRuntime` guard、全部 JavaScript 语法检查和 `git diff --check` 通过。
+- 禁止复现：不得把应用 action `switch`、`createUserTab()` 或 shell 控件 listener 重新放回 `app_controller.js`；命令路径不得建立连接、改写终端状态或触发/显示任何历史回放、snapshot、resize 或重连中间过程。
+
+### LCMD-20260831-40：终端主题发送协议适配从应用控制器迁出
+
+- 日期：2026-08-31
+- 来源：应用命令迁移后继续收口终端协议适配；`sendTerminalTheme()` 仍在 `app_controller.js` 直接检查 socket 并拼装主题 JSON，appearance 状态与 transport 发送边界混在一起。
+- 影响模块：`runtime/static/app/app_controller.js`、`runtime/static/terminal/transport/theme_controller.js`、transport 公开入口、Service Worker、`terminal_theme_controller_test.mjs`、`runtime_shortcuts_test.go` 和 transport README。
+- 架构问题：主题 payload 的发送实现没有独立生命周期 fence，socket 状态校验和 JSON 协议细节只能通过应用控制器白盒检查；销毁后迟到的主题发送无法由 transport 适配器单独拒绝。
+- 实施方案：新增 `createTerminalThemeController()`，只接收 appearance 提供的 payload getter 和 socket OPEN 常量，负责发送 `{ type: "theme", ...payload }`；controller 不拥有主题、session、连接或渲染状态。应用控制器仅创建适配器、传递 `send()` 回调并在销毁时调用 `dispose()`。
+- 回归 guard：`terminal_theme_controller_test.mjs` 2 项覆盖 OPEN/非 OPEN socket、payload 序列化和 dispose fence；扩展 transport runtime guard、Service Worker 资源和 README 文件清单。
+- 验证结果：主题适配器 Node 测试 `2/2`，相关 transport/runtime guard、JavaScript 语法检查和 `git diff --check` 通过。
+- 禁止复现：不得把主题 socket 校验或 JSON 发送实现重新放回 `app_controller.js`；主题适配器不得建立新连接、触碰 history/replay/resize/presentation 或显示任何中间帧。
+
+### LCMD-20260831-41：终端 live options 适配从全局 runtime 迁出
+
+- 日期：2026-08-31
+- 来源：继续整理 `global-runtime.js`；设置变化时遍历 pane、更新字体/字号/scrollback/mobile pixel scroll，并触发 presentation hold、metrics retry 和 resize 的适配逻辑仍直接写在全局运行时中。
+- 架构问题：全局运行时同时承担全局 options 基值和每个 live pane 的终端 options 传播，导致设置模块与 metrics/resize/presentation 的边界不清晰；迁移后的静态 guard 还继续要求旧常量和旧循环留在入口。
+- 实施方案：扩展 `terminal/metrics/metrics_controller.js`，由 metrics controller 统一负责 live pane 的字体、字号、scrollback 和 mobile pixel scroll 适配、presentation hold、history change 通知及 resize 请求。`global-runtime.js` 只保留全局 options 基值 setter、controller 创建、显式依赖注入和页面生命周期；新增 `getAllSessions()` 仅作为全局 session registry 的只读快照辅助，不承载业务算法。
+- 回归 guard：`terminal_metrics_controller_test.mjs` 新增 live options 适配、history 通知、resize 和 dispose 测试；更新 `TestRuntimeTerminalMetricsModuleBoundary`、设置/scrollback/Canvas 静态 guard，使配置 owner、metrics owner 和 global runtime 接线分别可验证。所有路径继续禁止触发或显示 history replay、snapshot、resize 或重连中间帧。
+- 验证结果：metrics Node 测试 `3/3`、相关 Runtime 定向 Go guard、JavaScript 语法检查和 `git diff --check` 通过；完整 Go/Node 及真实 `debug123` 回归在本批后续收口执行。
+- 禁止复现：不得把 live pane options 遍历、字体 hold/retry、scrollback 传播或 mobile pixel scroll 适配重新放回 `global-runtime.js`；metrics controller 不得建立 WebSocket、修改 history/replay 权威状态或提交中间 Canvas。
+
+### LCMD-20260831-42：终端协议序列化与 presentation-ready 局部编排从全局 runtime 收口
+
+- 日期：2026-08-31
+- 来源：继续整理 `global-runtime.js`；连接 ping、resize/input/Queue ACK 的 JSON 发送仍以内联依赖形式存在，presentation `onReady` 还直接跨 cache、input、diagnostics 和 transport 执行副作用。
+- 影响模块：`runtime/static/global-runtime.js`、`terminal/transport/session_connection_controller.js`、`terminal/transport/session_connection_lifecycle.js`、`terminal/resize/resize_controller.js`、`terminal/input/input_controller.js`、`terminal/output/output_controller.js`、`terminal/session/session_installation_controller.js` 及对应 README、模块地图和静态 guard。
+- 架构问题：根 runtime 同时承担协议算法和 pane ready 后的业务动作，导致 socket identity 校验、JSON 契约、preview/input/指标/retry 的生命周期无法由责任域单独审核；旧静态 guard 也继续要求已迁出的实现存在于入口。
+- 实施方案：将 ping、resize、input 和 Queue ACK 的默认 serializer 放回各自 controller/lifecycle；Queue ACK 默认实现继续校验当前 socket、Unified channel、connection epoch 和 channel generation。新增 `sessionInstallation.handlePresentationReady()`，统一接收 rendering ready 信号并执行 preview 清理/捕获、pending input flush、恢复指标/startup trace、Unified retry reset；`global-runtime.js` 只保留公开 controller 创建、依赖接线和 ready 信号转发。
+- 回归 guard：新增/扩展 `terminal_output_controller_test.mjs`、`terminal_resize_controller_test.mjs`、`terminal_session_installation_controller_test.mjs`，覆盖默认 serializer、身份失配、closed/dispose 和 ready 副作用顺序；更新 `TestRuntimeTerminalInputModuleBoundary`、`TestRuntimeTerminalOutputModuleBoundary`、`TestRuntimeResizeEpochAckGuard`、`TestRuntimeTerminalSessionModuleBoundary`、WebSocket health guard 和 overview 旧 owner guard，禁止协议 JSON 与 ready 副作用回流根 runtime。
+- 验证结果：受影响 Node 测试 15/15 通过；相关 Runtime Go guard 通过；全量 `go test ./...` 在更新前曾仅因 overview 旧文本 guard 失败，更新 guard 后需继续执行完整 Node/Go、语法和差异检查。
+- 禁止复现：不得在 `global-runtime.js` 直接调用 `socket.send(JSON.stringify(...))` 实现 feature 协议；不得把 preview/input/恢复指标/retry reset 的 ready 副作用重新写入 presentation `onReady`；任何 ready、协议或清理路径都不得显示 history replay、snapshot、resize 或重连中间过程。
+
+### LCMD-20260831-43：pane 批量销毁收口到 terminal session lifecycle
+
+- 日期：2026-08-31
+- 来源：继续整理 `global-runtime.js`；页面 `beforeunload` 在各 controller dispose 后仍直接遍历 pane，改写 `closed`、replay/Queue 状态并清理连接 timer。
+- 架构问题：同一 pane 的销毁顺序同时由 `session_lifecycle.js` 和根 runtime 维护，批量页面销毁无法复用 `closed` 先于 logical detach、历史 flush 和资源清理的既有 guard；后续新增 session 字段也容易只更新其中一条路径。
+- 实施方案：`terminal/session/session_lifecycle.js` 增加 `disposeAll()`，逐 pane 调用与单 pane 完全相同的销毁流程；`session_controller.js` 通过公开入口转出该方法。`global-runtime.js` 在 session installation controller 停止后调用 `terminalSessionController.disposeAll(getAllSessions())`，删除所有直接 pane 字段和 connection timer 操作，随后保留各模块的幂等全局 dispose。
+- 回归 guard：`terminal_session_controller_test.mjs` 新增批量销毁顺序、幂等和资源只执行一次测试；`TestRuntimeTerminalSessionModuleBoundary` 要求 controller 暴露 `disposeAll`，并禁止根 runtime 直接改写 pane closed/replay/Queue/timer 字段。
+- 验证结果：`node --test terminal_session_controller_test.mjs terminal_websocket_url_test.mjs` 共 7/7 通过；相关 Runtime 定向 Go guard、`node --test *_test.mjs`（383/383）、`go test ./... -count=1`、全量 `find runtime/static -type f -name '*.js' -print0 | xargs -0 -n1 node --check` 和 `git diff --check` 均通过。未执行真实 debug123 页面回归，本条只调整销毁接线。
+- 禁止复现：不得在 `global-runtime.js`、workspace tab controller 或其他应用层复制 pane 销毁循环；页面销毁必须通过 session controller 的单个/批量公开 API，且任何路径不得显示历史 replay、snapshot、resize 或重连中间过程。
+
+### LCMD-20260831-44：Unified WebSocket endpoint 参数构造归入 transport
+
+- 日期：2026-08-31
+- 来源：继续审计 `global-runtime.js`；Unified 物理连接虽然由 transport controller 拥有，但根 runtime 仍直接拼接 `mode`、`transport_role`、`protocol_version`、目标名和 `client_id` 查询参数。
+- 架构问题：协议字段构造和全局依赖接线混在一起，transport URL 契约只能通过根 runtime 的内联实现审查；后续协议版本或身份字段变更容易遗漏其他连接路径。
+- 实施方案：在 `terminal/transport/websocket_url.js` 增加无状态 `terminalUnifiedWebSocketURL()`，复用页面协议转换并集中设置 Unified transport 参数；公开入口导出该函数。`global-runtime.js` 只传入 target 与 server revision client ID，并把结果交给 Unified controller。
+- 回归 guard：扩展 `terminal_websocket_url_test.mjs` 覆盖 HTTPS、目标名/client ID 编码和完整参数；`TestRuntimeWebSocketURLUsesWebSocketProtocols` 与 `TestRuntimeTerminalConnectionSchedulerGuard` 要求 Unified builder 位于 transport 公开模块，并禁止根 runtime 直接调用 `searchParams.set()` 拼协议字段。
+- 验证结果：`terminal_websocket_url_test.mjs` 及相关 Node 定向测试通过；`node --test *_test.mjs`（383/383）、`go test ./... -count=1`、全量 JavaScript 语法检查和 `git diff --check` 均通过。未执行真实 debug123 页面回归，本批 URL builder 为无状态纯函数，不改变连接时序。
+- 禁止复现：不得在 `global-runtime.js` 或应用控制器重新拼接 Unified URL 协议参数；URL 工具不得创建连接、读取 session/history 或触发任何历史、snapshot、resize、重连中间过程。
+
+### LCMD-20260831-45：Cache preview fingerprint 序列化归入 history identity
+
+- 日期：2026-08-31
+- 来源：继续审计 `global-runtime.js`；Cache API preview 的主题、颜色、字号、字体和行高指纹仍以内联 `JSON.stringify()` 实现，缓存身份规则与根 runtime 的跨模块接线混在一起。
+- 架构问题：preview metadata 的稳定字段顺序没有在 history/cache identity 边界集中定义，后续字段调整容易只改一条调用路径；根 runtime 也因此保留了不属于全局生命周期的缓存序列化细节。
+- 实施方案：在 `terminal/history/cache_identity.js` 增加无状态 `terminalCachePreviewFingerprint()`，由 history 公开入口导出。根 runtime 只读取 appearance/settings 的只读值并传入快照，不再负责 fingerprint 序列化；不改变现有字段、顺序或 preview 授权门禁。
+- 回归 guard：`terminal_cache_controller_test.mjs` 固定指纹的稳定 JSON 输出；`TestRuntimeTerminalHistoryCacheModuleBoundary` 要求 identity 公开函数和根 runtime 委托调用，并禁止根 runtime 内联 preview fingerprint 序列化。历史 replay、snapshot、resize 和重连过程的可见性规则保持不变。
+- 验证结果：新增/受影响 Node 测试通过；随后执行 `node --test *_test.mjs`（384/384）、`go test ./... -count=1`、全量 JavaScript 语法检查和 `git diff --check` 均通过。未执行真实 debug123 页面回归，本批仅移动无状态序列化逻辑。
+- 禁止复现：不得把 preview fingerprint 字段拼接或 JSON 序列化重新放回 `global-runtime.js`；identity helper 不得读取 appearance/settings、创建连接、触碰 Canvas 或触发/显示任何 history replay、snapshot、resize 或重连中间过程。
+
+### LCMD-20260831-46：终端点击触发重复 resize 导致画面上下抖动
+
+- 日期：2026-08-31
+- 来源：当前终端版本现场反馈；对同一 pane 的点击、focus、IME capture 和终端 mouse 事件进行时序复现，并在 `debug123` 真实桌面/移动页面观察 resize 控制帧。
+- 错误现象：终端已经稳定呈现后，任意点击或常规操作仍会重复触发 pane 激活、尺寸确认和设备 claim。每次重复 resize 都可能捕获/恢复 viewport、重置 host scroll、重新定位 IME、更新 selection handles 或提交 full render；服务端重复 claim 还会推进 `resize_epoch` 并广播 `resize-applied`，最终表现为终端内容上下抖动或短暂隐藏。
+- 根因：同一次手势同时经过 IME capture、session installation、pane activation 和 terminal mouse 多条路径；当前 pane 重复激活默认强制 `forceFullRender`，resize controller 在 cols/rows 与 Canvas backing size 未变化时仍执行完整副作用；`claimForCurrentDevice()` 只按时间窗抑制，稳定设备重复点击仍可发送相同 claim。
+- 实施方案：pane activation 增加 `resizeIfActive`，默认只在真正切换 pane 时调度 resize，布局重建等明确场景显式要求当前 pane resize；session pointer/focus 激活关闭重复 resize，IME capture 保留唯一设备 claim 入口。resize controller 增加稳定几何快速路径，要求 fit、Canvas、presentation、fence/settle 和 pending target 均稳定后直接返回，不捕获/恢复 viewport、不重置 host、不移动 IME、不更新选区、不 full-render；同一 target 的 in-flight resize ACK 不重复发送。增加 `sizeClaimed`/`requestedResizeClaim` 状态，成功 claim 后跳过重复 claim；远端新 epoch、owner release 或 claim/error 只标记下一次明确交互重新接管，几何相同也不自动反抢。
+- 回归 guard：`terminal_resize_controller_test.mjs` 覆盖稳定几何快速路径、重复 claim 去重、ACK/远端 epoch 和 fence；`workspace_pane_activation_controller_test.mjs` 覆盖当前 pane 重复激活不 resize；`terminal_session_installation_controller_test.mjs` 固定 pointer/focus 不重复 resize；`tests-auto/08-terminal-click-jitter/test.mjs` 在真实页面连续点击 5 次，断言无新增 resize frame、Canvas 尺寸不变、已呈现画面不进入 `renderReady=false`，并检查无 fatal/page error。
+- 验证结果：受影响 Node 测试通过，Node 全量 `387/387`；`go test ./... -count=1` 通过；真实 `debug123` 点击抖动用例通过（artifact：`tests-auto/08-terminal-click-jitter/artifacts/2026-08-30T19-32-32-792Z`）。跨设备竞争产生的旧 epoch/owner ACK 被状态机拒绝，未改变同设备稳定点击断言；后续完整 race、语法和差异检查仍需在本批收口时执行。
+- 禁止复现：不得让稳定几何的点击路径重新进入 viewport/host/IME/selection/full-render 副作用；不得在当前 pane 已 active 时默认强制 resize；不得以固定时间窗代替 claim 状态；远端 observation 不得自动 reclaim；任何 resize/ACK/claim 路径都不得显示 history replay、snapshot、resize 或重连中间帧。
+
+### LCMD-20260831-47：稳定终端交互反复切换 presentation hold 导致画面上下抖动
+
+- 日期：2026-08-31
+- 来源：模块化迁移后的真实终端回归；进入 pane、点击、输入文字和拖拽选择都会出现内容上下抖动，旧的几何/resize 采样没有发现 host 或 live Canvas 外层尺寸变化。
+- 错误现象：稳定尺寸下，点击触发的同尺寸 claim ACK、普通 PTY 输出、Queue turn 完成和 presentation validation 都短暂显示 `terminal-frame-hold`，随后再隐藏。hold Canvas 使用与 live Canvas 不同的 backing store 和 `object-position: left bottom` 合成方式，切换覆盖层时产生可见的垂直位移；部分时序还会把 `renderReady` 短暂置为 false。
+- 根因：presentation controller 的 `ensure()` 在检查当前状态前无条件执行 `beginHold()` 或 `setReady(false)`。拆分过程中 `setReady(false)` 又增加了默认保留旧帧的 hold 行为，导致“内容/resize epoch 已过期”被错误等同为“终端几何即将变化”。稳定的 `fit`、网格、Canvas backing store 和 replay generation 并未变化，但每次 ACK/输出/validation 仍进入 hold/释放流程。
+- 实施方案：在 `runtime/static/terminal/rendering/presentation_controller.js` 增加稳定几何判定，分别检查 fit generation、replay generation、Canvas 尺寸、activation pending 和 resize fence/ACK/settle 目标。仅首次呈现、真实几何/backing store 变化或 replay 状态切换进入 hold；稳定几何下的内容更新、Queue ACK、同尺寸 resize epoch 和历史 validation 直接在 live Canvas 上 full render，保持 `renderReady=true`，不显示 hold。保留 `setReady(false)` 的直接调用保帧不变量，避免破坏 resize/context-loss 等明确门禁路径。
+- 回归 guard：`terminal_presentation_controller_test.mjs` 新增稳定 validation、同几何 resize ACK 不显示 hold，以及真实 fit/Canvas 变化仍进入 hold 的测试；`tests-auto/09-terminal-interaction-jitter/test.mjs` 记录活动 pane 的 presentation trace 和 hold Canvas 可见性，在点击、输入、拖选窗口内禁止 hold transition 和可见 hold，并继续检查几何、像素和 `renderReady` 安全状态。
+- 验证结果：presentation/resize/output/session 定向 Node 测试 `23/23` 通过；`go test ./... -count=1` 通过；真实 `debug123` 的 09 交互回归通过，活动 pane `holdTransitions=0`、可见 hold 样本为 0、几何变化为 0；08 点击、05 输出、03 IME 和带 iPhone User-Agent 的 04 viewport 回归均通过。未设置移动 User-Agent 的 04 首次失败仅因测试未进入 iOS 分支，使用 `WEBSHELL_MOBILE_USER_AGENT` 后复验通过。
+- 禁止复现：不得在稳定内容或仅 metadata/epoch 变化时调用 `beginHold()`、切换 `terminal-frame-hold` 或把 `renderReady` 置为 false；只有真实 geometry/backing store、resize fence、context loss、replay recovery 等明确路径可以覆盖 last-known-good frame。所有路径继续禁止显示 history replay、snapshot、resize 或重连中间帧。

@@ -7,5 +7,5 @@ cd "${repo_dir}"
 
 go test ./... -count=1 -run 'TestTerminalPaneResizeEpochIsMonotonicIdempotentAndOrdered|TestTerminalControlInputCannotPassivelyResizeOwnedPane|TestRuntimeResizeEpochAckGuard|TestRuntimeCrossClientResizeDoesNotAutoReclaim'
 node --check runtime/static/main.js
-node --test terminal_resize_scheduler_test.mjs
+node --test tests/terminal_resize_scheduler_test.mjs
 git diff --check

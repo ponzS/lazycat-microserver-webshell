@@ -149,9 +149,9 @@ func TestLightOSManifestEnablesMultiInstance(t *testing.T) {
 }
 
 func TestRuntimeInstanceSelectorSupportsClientInstances(t *testing.T) {
-	data, err := os.ReadFile("runtime/static/main.js")
+	data, err := os.ReadFile("runtime/static/instances/instances_model.js")
 	if err != nil {
-		t.Fatalf("ReadFile(runtime/static/main.js) error = %v", err)
+		t.Fatalf("ReadFile(runtime/static/instances/instances_model.js) error = %v", err)
 	}
 	if !containsAll(string(data), "item?.selector", "item?.target", "item?.client_instance_id", "client:${clientInstanceID}") {
 		t.Fatalf("expected runtime instanceSelector to support client instance selectors")

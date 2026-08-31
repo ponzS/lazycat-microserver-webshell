@@ -47,6 +47,33 @@ export const config = {
   foreground: process.env.HEADLESS === "1"
     ? false
     : envFlag(process.env.TEST_FOREGROUND, true),
+  localStaticDir: String(process.env.WEBSHELL_LOCAL_STATIC_DIR || "").trim(),
+  mobileUserAgent: String(process.env.WEBSHELL_MOBILE_USER_AGENT || "").trim(),
+};
+
+const installLocalStaticRoute = async (context) => {
+  if (!config.localStaticDir) return;
+  const staticRoot = path.resolve(config.localStaticDir);
+  await context.route(/\/assets\/[^/]+\/.+/, async (route) => {
+    const requestURL = new URL(route.request().url());
+    const match = requestURL.pathname.match(/\/assets\/[^/]+\/(.+)$/);
+    if (!match) {
+      await route.continue();
+      return;
+    }
+    const relativePath = decodeURIComponent(match[1]);
+    const localPath = path.resolve(staticRoot, relativePath);
+    if (localPath !== staticRoot && !localPath.startsWith(`${staticRoot}${path.sep}`)) {
+      await route.abort("blockedbyclient");
+      return;
+    }
+    try {
+      await fs.access(localPath);
+      await route.fulfill({ path: localPath });
+    } catch {
+      await route.continue();
+    }
+  });
 };
 
 const runID = new Date().toISOString().replaceAll(/[:.]/g, "-");
@@ -144,19 +171,30 @@ const createWindow = async (name, viewport, position) => {
     channel: process.env.PW_CHANNEL || "chrome",
     args: [`--window-size=${viewport.width},${viewport.height}`, `--window-position=${position.x},${position.y}`],
   });
-  const context = await browser.newContext({ viewport, hasTouch: name === "mobile", isMobile: name === "mobile", ignoreHTTPSErrors: true });
+  const context = await browser.newContext({
+    viewport,
+    hasTouch: name === "mobile",
+    isMobile: name === "mobile",
+    ...(name === "mobile" && config.mobileUserAgent ? { userAgent: config.mobileUserAgent } : {}),
+    ignoreHTTPSErrors: true,
+    serviceWorkers: config.localStaticDir ? "block" : "allow",
+  });
+  await installLocalStaticRoute(context);
   const page = await context.newPage();
   const state = { name, page, browser, context, framesSent: [], output: "", lastResize: null, fatalErrors: [], resizeErrors: 0 };
   await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
   await page.addInitScript(() => {
     window.__testsAutoResizeFrames = [];
     window.__testsAutoTerminalOutput = "";
+    window.__testsAutoSockets = [];
+    window.__testsAutoSentMessages = [];
     const NativeWebSocket = window.WebSocket;
     const send = NativeWebSocket.prototype.send;
     NativeWebSocket.prototype.send = function autoTestObservedSend(data) {
       if (typeof data === "string") {
         try {
           const value = JSON.parse(data);
+          window.__testsAutoSentMessages.push(value);
           const resize = value?.type === "pane-control" ? value.control : value;
           if (resize?.type === "resize") {
             window.__testsAutoResizeFrames.push({ cols: Number(resize.cols), rows: Number(resize.rows), resizeEpoch: resize.resize_epoch || "" });
@@ -189,6 +227,7 @@ const createWindow = async (name, viewport, position) => {
     window.WebSocket = new Proxy(NativeWebSocket, {
       construct(target, args) {
         const socket = Reflect.construct(target, args);
+        window.__testsAutoSockets.push(socket);
         socket.addEventListener("message", (event) => { appendMessage(event.data).catch(() => {}); });
         return socket;
       },

@@ -16,7 +16,7 @@ func TestClaudeFullscreenContextMenuBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Getwd() error = %v", err)
 	}
-	modulePath := filepath.Join(workingDirectory, "runtime", "static", "claude_fullscreen_context_menu_adapter.js")
+	modulePath := filepath.Join(workingDirectory, "runtime", "static", "terminal", "tui_adapters", "claude", "claude_fullscreen_context_menu_adapter.js")
 	runnerPath := filepath.Join(t.TempDir(), "claude_fullscreen_context_menu_test.mjs")
 	runner := `
 import assert from "node:assert/strict";

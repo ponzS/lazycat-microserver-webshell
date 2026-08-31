@@ -16,10 +16,10 @@ func TestPiFullscreenTouchAdapter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Getwd() error = %v", err)
 	}
-	gesturePath := filepath.Join(workingDirectory, "runtime", "static", "fullscreen_tui_touch.js")
-	adapterPath := filepath.Join(workingDirectory, "runtime", "static", "fullscreen_tui_touch_adapter.js")
-	piPath := filepath.Join(workingDirectory, "runtime", "static", "pi_fullscreen_touch.js")
-	piAdapterPath := filepath.Join(workingDirectory, "runtime", "static", "pi_fullscreen_touch_adapter.js")
+	gesturePath := filepath.Join(workingDirectory, "runtime", "static", "terminal", "tui_adapters", "common", "fullscreen_tui_touch.js")
+	adapterPath := filepath.Join(workingDirectory, "runtime", "static", "terminal", "tui_adapters", "common", "fullscreen_tui_touch_adapter.js")
+	piPath := filepath.Join(workingDirectory, "runtime", "static", "terminal", "tui_adapters", "pi", "pi_fullscreen_touch.js")
+	piAdapterPath := filepath.Join(workingDirectory, "runtime", "static", "terminal", "tui_adapters", "pi", "pi_fullscreen_touch_adapter.js")
 	runnerPath := filepath.Join(t.TempDir(), "pi_fullscreen_touch_test.mjs")
 	runner := `
 import assert from "node:assert/strict";

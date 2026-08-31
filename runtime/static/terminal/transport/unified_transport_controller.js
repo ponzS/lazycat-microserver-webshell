@@ -1,0 +1,381 @@
+import { createTerminalUnifiedConnection } from "./terminal_unified_connection.js";
+import { createTerminalUnifiedHealthWatchdog } from "./terminal_unified_health.js";
+
+const noop = () => {};
+
+export function createTerminalUnifiedTransportController({
+  windowObject = globalThis.window,
+  createConnection = createTerminalUnifiedConnection,
+  createHealthWatchdog = createTerminalUnifiedHealthWatchdog,
+  buildConnectionURL = () => "",
+  getDisposed = () => false,
+  isOnline = () => true,
+  isClientTarget = () => false,
+  getActiveName = () => "",
+  getSessions = () => [],
+  getMembershipPaneIDs = () => [],
+  refreshMembership = noop,
+  reconnectWorkspaceSessions = noop,
+  scheduleLogicalSync = noop,
+  invalidateStartupError = noop,
+  syncNetworkMonitor = noop,
+  appendDebugWarning = noop,
+  appendDebugError = noop,
+  queueMicrotaskImpl = (callback) => queueMicrotask(callback),
+  socketConnecting = 0,
+  socketOpen = 1,
+  socketClosing = 2,
+  socketClosed = 3,
+  healthCheckIntervalMs = 4 * 1000,
+  pongTimeoutMs = 12 * 1000,
+  transitionTimeoutMs = 12 * 1000,
+  recoveryRetryMs = 1000,
+} = {}) {
+  let connection = null;
+  let targetName = "";
+  let healthWatchdog = null;
+  const closedConnections = new WeakSet();
+  let closingPromise = null;
+  let expectedCloseReason = "";
+  let recoveryScheduled = false;
+  let recoveryRunning = false;
+  let recoveryPendingReason = "";
+  let recoveryRetryTimer = 0;
+  let disposed = false;
+
+  const waitForClosures = async () => {
+    if (closingPromise) {
+      await Promise.allSettled([closingPromise]);
+    }
+  };
+
+  const needsRecovery = () => Boolean(
+    connection
+    && connection.snapshot?.().physicalReadyState === socketClosed
+    && getMembershipPaneIDs().length > 0
+  );
+
+  const close = (reason = "context_changed") => {
+    const normalizedReason = String(reason || "context_changed");
+    const current = connection;
+    for (const pane of getSessions()) {
+      if (pane?.connectionChannel === "unified") {
+        pane.connectionCloseReason = normalizedReason;
+      }
+    }
+    if (!current) {
+      return false;
+    }
+    expectedCloseReason = normalizedReason;
+    connection = null;
+    targetName = "";
+    healthWatchdog?.stop?.();
+    healthWatchdog = null;
+    let fence;
+    fence = Promise.resolve(current.closed).finally(() => {
+      if (closingPromise === fence) {
+        closingPromise = null;
+        expectedCloseReason = "";
+      }
+      syncNetworkMonitor();
+    });
+    closingPromise = fence;
+    closedConnections.add(current);
+    current.close(4001, normalizedReason);
+    return true;
+  };
+
+  const scheduleRecovery = (reason = "transport_failure") => {
+    const normalizedReason = String(reason || "transport_failure");
+    if (
+      disposed
+      || getDisposed()
+      || !isOnline()
+      || isClientTarget(getActiveName())
+    ) {
+      return false;
+    }
+    if (recoveryScheduled || recoveryRunning) {
+      recoveryPendingReason = normalizedReason;
+      return true;
+    }
+    recoveryScheduled = true;
+    queueMicrotaskImpl(async () => {
+      recoveryScheduled = false;
+      if (
+        disposed
+        || getDisposed()
+        || !isOnline()
+        || isClientTarget(getActiveName())
+        || recoveryRunning
+      ) {
+        return;
+      }
+      recoveryRunning = true;
+      appendDebugWarning("终端物理通道异常，正在恢复", normalizedReason);
+      try {
+        close("transport_recovery");
+        await waitForClosures();
+        expectedCloseReason = "";
+        if (!disposed && !getDisposed() && isOnline()) {
+          refreshMembership({ reason: "transport_recovery" });
+          reconnectWorkspaceSessions({ allowHidden: true });
+        }
+      } catch (error) {
+        appendDebugError("终端物理通道恢复失败", error?.message || String(error));
+        if (
+          !disposed
+          && !getDisposed()
+          && isOnline()
+          && getActiveName()
+          && !isClientTarget(getActiveName())
+          && !recoveryRetryTimer
+        ) {
+          recoveryRetryTimer = windowObject?.setTimeout?.(() => {
+            recoveryRetryTimer = 0;
+            scheduleRecovery("transport_recovery_retry");
+          }, recoveryRetryMs) || 0;
+        }
+      } finally {
+        recoveryRunning = false;
+        const pendingReason = recoveryPendingReason;
+        recoveryPendingReason = "";
+        if (
+          pendingReason
+          && !disposed
+          && !getDisposed()
+          && isOnline()
+          && needsRecovery()
+        ) {
+          scheduleRecovery(pendingReason);
+        }
+      }
+    });
+    return true;
+  };
+
+  const handlePhysicalDisconnect = (observedConnection, reason = "unified_transport_closed") => {
+    if (!observedConnection || closedConnections.has(observedConnection)) {
+      return false;
+    }
+    closedConnections.add(observedConnection);
+    healthWatchdog?.setConnection(null);
+    if (!closingPromise) {
+      let closeFenceTimer = 0;
+      let closeFence;
+      closeFence = Promise.race([
+        Promise.resolve(observedConnection.closed),
+        new Promise((resolve) => {
+          closeFenceTimer = windowObject?.setTimeout?.(resolve, healthCheckIntervalMs) || 0;
+        }),
+      ]).finally(() => {
+        if (closeFenceTimer) {
+          windowObject?.clearTimeout?.(closeFenceTimer);
+        }
+        if (closingPromise === closeFence) {
+          closingPromise = null;
+        }
+      });
+      closingPromise = closeFence;
+    }
+    if (connection === observedConnection) {
+      connection = null;
+      targetName = "";
+    }
+    for (const pane of getSessions()) {
+      if (!pane?.closed && pane.name === getActiveName() && pane.connectionChannel === "unified") {
+        invalidateStartupError(pane, { hidePanel: true });
+        pane.connectionRetrying = true;
+        if (pane.shellEl?.dataset) {
+          pane.shellEl.dataset.connection = isOnline() ? "reconnecting" : "offline";
+        }
+      }
+    }
+    appendDebugWarning("统一终端物理通道已断开，立即重建", String(reason || "unified_transport_closed"));
+    scheduleRecovery(String(reason || "unified_transport_closed"));
+    return true;
+  };
+
+  const startHealthWatchdog = (current) => {
+    healthWatchdog?.stop?.();
+    healthWatchdog = createHealthWatchdog({
+      intervalMs: healthCheckIntervalMs,
+      pongTimeoutMs,
+      transitionTimeoutMs,
+      isPaused: () => disposed || getDisposed() || !isOnline(),
+      onUnhealthy: (reason, observedConnection) => {
+        appendDebugWarning("统一终端物理通道健康检查失败", reason);
+        handlePhysicalDisconnect(observedConnection, reason);
+      },
+      onDisconnected: (reason, observedConnection) => {
+        if (observedConnection && connection !== observedConnection) {
+          return;
+        }
+        scheduleRecovery(reason);
+      },
+    });
+    healthWatchdog.setConnection(current);
+    return healthWatchdog;
+  };
+
+  const probe = (reason = "lifecycle_resume") => {
+    if (!healthWatchdog || !connection) {
+      return false;
+    }
+    const result = healthWatchdog.probe(reason);
+    return result?.action !== "paused";
+  };
+
+  const retryUnavailable = (reason = "lifecycle_resume") => {
+    if (disposed || getDisposed() || !isOnline() || isClientTarget(getActiveName())) {
+      return false;
+    }
+    const state = connection?.snapshot?.().physicalReadyState ?? socketClosed;
+    if (connection && state !== socketClosed) {
+      return false;
+    }
+    if (getMembershipPaneIDs().length === 0) {
+      return false;
+    }
+    scheduleRecovery(reason);
+    return true;
+  };
+
+  const ensure = (requestedTargetName) => {
+    const normalizedTarget = String(requestedTargetName || "").trim();
+    if (disposed || !normalizedTarget || closingPromise) {
+      return null;
+    }
+    if (
+      connection
+      && targetName === normalizedTarget
+      && connection.snapshot().physicalReadyState !== socketClosing
+      && connection.snapshot().physicalReadyState !== socketClosed
+    ) {
+      return connection;
+    }
+    if (connection) {
+      close("unified_target_changed");
+      return null;
+    }
+    const url = buildConnectionURL(normalizedTarget);
+    if (!url) {
+      return null;
+    }
+    let current;
+    let observedPhysicalReadyState = socketClosed;
+    current = createConnection({
+      url,
+      onStateChange: (state) => {
+        if (connection !== current) {
+          return;
+        }
+        const previousPhysicalReadyState = observedPhysicalReadyState;
+        observedPhysicalReadyState = state.physicalReadyState;
+        const becameOpen = state.physicalReadyState === socketOpen
+          && previousPhysicalReadyState !== socketOpen;
+        syncNetworkMonitor();
+        if (state.physicalReadyState === socketConnecting || state.physicalReadyState === socketOpen) {
+          healthWatchdog?.start();
+        }
+        if (becameOpen) {
+          healthWatchdog?.probe("transport_open");
+          scheduleLogicalSync({ reason: "unified_open" });
+        }
+        if (
+          state.physicalReadyState === socketClosed
+          && !expectedCloseReason
+          && !closedConnections.has(current)
+        ) {
+          handlePhysicalDisconnect(current, "unified_transport_closed");
+        }
+      },
+      onPhysicalError: ({ message, connection: failedConnection }) => {
+        appendDebugWarning("统一终端物理通道 WebSocket 错误，立即关闭重建", message);
+        handlePhysicalDisconnect(failedConnection, "unified_websocket_error");
+        try {
+          failedConnection.close(4001, "unified_websocket_error");
+        } catch (error) {
+        }
+      },
+      onPhysicalClose: ({ connection: closedConnection, reason }) => {
+        if (!expectedCloseReason) {
+          handlePhysicalDisconnect(closedConnection, reason || "unified_websocket_closed");
+        }
+      },
+      onProtocolError: (error, identity) => {
+        appendDebugError(
+          "统一终端协议错误",
+          `${identity?.paneID || "unknown"}: ${error?.message || String(error)}`,
+        );
+      },
+    });
+    connection = current;
+    targetName = normalizedTarget;
+    startHealthWatchdog(current);
+    syncNetworkMonitor();
+    Promise.resolve(current.closed).finally(() => {
+      if (connection === current && !expectedCloseReason) {
+        handlePhysicalDisconnect(current, "unified_transport_closed_finally");
+      }
+      syncNetworkMonitor();
+    });
+    current.connect();
+    return current;
+  };
+
+  const clearExpectedCloseReason = () => {
+    expectedCloseReason = "";
+  };
+
+  const setPriority = (paneID, priority) => connection?.setPriority?.(paneID, priority) ?? false;
+
+  const matchesTarget = (value) => Boolean(
+    connection
+    && targetName === String(value || "").trim()
+  );
+
+  const snapshot = () => Object.freeze({
+    connection,
+    targetName,
+    physicalReadyState: connection?.snapshot?.().physicalReadyState ?? socketClosed,
+    closing: Boolean(closingPromise),
+    expectedCloseReason,
+    recoveryScheduled,
+    recoveryRunning,
+  });
+
+  const dispose = (reason = "page_disposed") => {
+    if (disposed) {
+      return false;
+    }
+    if (recoveryRetryTimer) {
+      windowObject?.clearTimeout?.(recoveryRetryTimer);
+      recoveryRetryTimer = 0;
+    }
+    close(reason);
+    disposed = true;
+    return true;
+  };
+
+  return Object.freeze({
+    clearExpectedCloseReason,
+    close,
+    dispose,
+    ensure,
+    getClosingPromise: () => closingPromise,
+    getConnection: () => connection,
+    getPhysicalSocket: () => connection?.getPhysicalSocket?.() || null,
+    getTargetName: () => targetName,
+    handlePhysicalDisconnect,
+    isClosedConnection: (value) => Boolean(value && closedConnections.has(value)),
+    matchesTarget,
+    needsRecovery,
+    probe,
+    retryUnavailable,
+    scheduleRecovery,
+    setPriority,
+    snapshot,
+    waitForClosures,
+  });
+}
