@@ -9,6 +9,8 @@ const socketOpen = 1;
 const socketClosing = 2;
 const socketClosed = 3;
 
+const normalizePriority = (value) => Math.max(0, Math.min(3, Math.floor(Number(value) || 0)));
+
 const normalizeIdentity = (descriptor = {}) => {
   const paneID = String(descriptor.pane_id || descriptor.paneID || "").trim();
   const streamID = String(descriptor.stream_id || descriptor.streamID || "").trim();
@@ -178,6 +180,15 @@ export const createTerminalQueueConnection = ({
     return true;
   };
 
+  const sendPriority = (entry, priority) => sendPhysical({
+    type: "set-priority",
+    protocol_version: terminalQueueProtocolVersion,
+    pane_id: entry.identity.paneID,
+    stream_id: entry.identity.streamID,
+    channel_generation: entry.identity.channelGeneration,
+    priority,
+  });
+
   const sendSubscriptions = () => {
     subscriptionUpdatePending = false;
     const entries = Array.from(logicalStreams.values());
@@ -191,7 +202,14 @@ export const createTerminalQueueConnection = ({
       return false;
     }
     for (const entry of entries) {
-      entry.lastSentPriority = Math.max(0, Math.min(3, Math.floor(Number(entry.subscription.priority) || 0)));
+      const nextPriority = normalizePriority(entry.subscription.priority);
+      if (entry.lastSentPriority === null) {
+        entry.lastSentPriority = nextPriority;
+        continue;
+      }
+      if (entry.lastSentPriority !== nextPriority && sendPriority(entry, nextPriority)) {
+        entry.lastSentPriority = nextPriority;
+      }
     }
     return true;
   };
@@ -568,19 +586,16 @@ export const createTerminalQueueConnection = ({
     if (!entry) {
       return false;
     }
-    const nextPriority = Math.max(0, Math.min(3, Math.floor(Number(priority) || 0)));
+    const nextPriority = normalizePriority(priority);
     entry.subscription.priority = nextPriority;
     if (entry.lastSentPriority === nextPriority) {
       return true;
     }
-    const sent = sendPhysical({
-      type: "set-priority",
-      protocol_version: terminalQueueProtocolVersion,
-      pane_id: entry.identity.paneID,
-      stream_id: entry.identity.streamID,
-      channel_generation: entry.identity.channelGeneration,
-      priority: nextPriority,
-    });
+    if (entry.lastSentPriority === null || subscriptionUpdatePending) {
+      scheduleSubscriptionUpdate();
+      return true;
+    }
+    const sent = sendPriority(entry, nextPriority);
     if (sent) {
       entry.lastSentPriority = nextPriority;
     }

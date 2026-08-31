@@ -37,6 +37,29 @@ const localWorkspaceResources = (state) => state.page.evaluate(() => {
   ]));
 });
 
+const createTemporaryTab = async (state) => {
+  const previousIDs = await state.page.locator("#tabs .tab").evaluateAll((buttons) => (
+    buttons.map((button) => button.dataset.tabId)
+  ));
+  await state.page.locator("#newTab").click();
+  await state.page.waitForFunction((count) => document.querySelectorAll("#tabs .tab").length > count, previousIDs.length);
+  const activeID = await state.page.locator("#tabs .tab.active").getAttribute("data-tab-id");
+  if (!activeID || previousIDs.includes(activeID)) {
+    throw new Error(`new tab did not become active: ${JSON.stringify({ previousIDs, activeID })}`);
+  }
+  return activeID;
+};
+
+const closeTabByAPI = async (state, tabID) => state.page.evaluate(async (id) => {
+  const name = new URLSearchParams(location.search).get("name");
+  const response = await fetch(`./api/workspace?name=${encodeURIComponent(name || "")}&cols=120&rows=32`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "close_tab", tab_id: id, cols: 120, rows: 32 }),
+  });
+  if (!response.ok) throw new Error(`workspace close_tab ${response.status}: ${await response.text()}`);
+}, tabID);
+
 export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   if (!config.localStaticDir) {
     throw new Error("WEBSHELL_LOCAL_STATIC_DIR is required so the real environment loads the current workspace frontend");
@@ -46,6 +69,52 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   if (!tabID) throw new Error("isolated workspace tab is unavailable");
 
   await desktop.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
+  const transportErrors = [];
+  const onConsole = (message) => {
+    const text = message.text();
+    if (text.includes("unified pane stream is not active")) {
+      transportErrors.push(text);
+    }
+  };
+  desktop.page.on("console", onConsole);
+  const socketsBeforeNewTab = await unifiedSocketSnapshot(desktop);
+  let temporaryTabID = "";
+  let newTabCanvas = null;
+  let socketsAfterNewTab = null;
+  try {
+    temporaryTabID = await createTemporaryTab(desktop);
+    await desktop.page.waitForFunction((id) => {
+      const pane = document.querySelector(`.terminal-pane.active[data-tab-id="${CSS.escape(id)}"] .pane-shell`);
+      const startupError = document.querySelector("#startupErrorPanel");
+      return pane?.dataset.connection === "open"
+        && pane.dataset.renderReady === "true"
+        && pane.dataset.hasPresentedFrame === "true"
+        && (!startupError || startupError.hidden);
+    }, temporaryTabID, { timeout: 60_000 });
+    newTabCanvas = await canvasSummary(desktop);
+    if (newTabCanvas.width <= 0 || newTabCanvas.height <= 0 || newTabCanvas.nonTransparent <= 0) {
+      throw new Error(`new terminal canvas is blank: ${JSON.stringify(newTabCanvas)}`);
+    }
+    socketsAfterNewTab = await unifiedSocketSnapshot(desktop);
+    if (
+      socketsBeforeNewTab.active !== 1
+      || socketsAfterNewTab.active !== 1
+      || socketsAfterNewTab.created !== socketsBeforeNewTab.created
+    ) {
+      throw new Error(`new terminal replaced the Unified socket: ${JSON.stringify({ before: socketsBeforeNewTab, after: socketsAfterNewTab })}`);
+    }
+    if (transportErrors.length > 0) {
+      throw new Error(`new terminal used priority before subscription:\n${transportErrors.join("\n")}`);
+    }
+  } finally {
+    desktop.page.off("console", onConsole);
+    if (temporaryTabID) {
+      await closeTabByAPI(desktop, temporaryTabID).catch(() => {});
+      await desktop.page.locator(`#tabs .tab[data-tab-id="${tabID}"]`).click();
+      await desktop.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 30_000 });
+    }
+  }
+
   const tabButton = desktop.page.locator(`.tab[data-tab-id="${tabID}"]`);
   const tabLabel = tabButton.locator(".tab-label");
   await tabButton.waitFor({ state: "visible" });
@@ -101,5 +170,11 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     canvas,
     resources,
     sockets,
+    newTerminal: {
+      tabID: temporaryTabID,
+      canvas: newTabCanvas,
+      socketsBefore: socketsBeforeNewTab,
+      socketsAfter: socketsAfterNewTab,
+    },
   });
 }
