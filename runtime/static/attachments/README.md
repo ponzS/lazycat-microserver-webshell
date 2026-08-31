@@ -51,7 +51,7 @@ View 只维护实际 DOM 节点及上传面板节点映射；API 只执行白名
 ## 测试与回归
 
 - `attachments_controller_test.mjs`：目标切换迟到响应、客户端根路径、排序/选择/下载、上传进度与路径复制、tab/dispose 清理和真实 listener 移除。
-- `runtime_shortcuts_test.go`：公开入口、README、`global-runtime.js` 边界、Service Worker 资源和旧实现移除契约。
+- `runtime_shortcuts_test.go`：公开入口、README、`global-runtime.js` 边界、版本化静态资源和旧实现移除契约。
 - `attachments_test.go`：服务端账号与实例授权、客户端代理、32 文件/2GB 上传限制、64 条下载、路径和归档安全。
 
 最小回归步骤：从剪贴板和文件选择器分别上传；确认进度、路径复制、手动关闭和 5 秒自动关闭；在上传中关闭 tab 或切换实例；打开文件浏览器验证容器 cwd 与客户端 `/` 起点、目录导航、三种排序、单文件和多选下载；在列表请求过程中关闭浏览器或切换实例，确认旧响应不再更新页面。

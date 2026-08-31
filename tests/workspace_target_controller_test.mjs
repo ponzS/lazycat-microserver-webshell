@@ -28,7 +28,7 @@ test("target controller orders target cleanup, reset, URL, and refresh", async (
     isDisposed: () => disposed,
     clearRefreshRetry: () => calls.push("clear-retry"),
     hideStartupError: () => calls.push("hide-error"),
-    invalidateWorkspaceIdentity: () => calls.push("invalidate-cache"),
+    invalidateWorkspaceGeneration: () => calls.push("invalidate-workspace"),
     syncNetworkSockets: (options) => calls.push(["network", options]),
     onTargetChange: (event) => calls.push(["target", event.previousName, event.name, event.generation]),
     resetWorkspace: () => calls.push("reset-workspace"),
@@ -41,7 +41,7 @@ test("target controller orders target cleanup, reset, URL, and refresh", async (
   assert.deepEqual(calls, [
     "clear-retry",
     "hide-error",
-    "invalidate-cache",
+    "invalidate-workspace",
     ["network", { reset: true }],
     ["target", "alpha", "beta", 1],
     ["location", "beta", { replace: false, tabId: "" }],

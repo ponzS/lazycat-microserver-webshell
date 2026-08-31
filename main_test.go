@@ -408,34 +408,6 @@ func TestHandleIndexInjectsLPKVersionedAssetBase(t *testing.T) {
 	}
 }
 
-func TestServiceWorkerIsServedAtRootScope(t *testing.T) {
-	root := t.TempDir()
-	staticDir := filepath.Join(root, "runtime", "static")
-	if err := os.MkdirAll(staticDir, 0o700); err != nil {
-		t.Fatalf("MkdirAll() error = %v", err)
-	}
-	workerSource := `const version = "__LCMD_ASSET_VERSION__"; const base = "__LCMD_ASSET_BASE__";`
-	if err := os.WriteFile(filepath.Join(staticDir, "service-worker.js"), []byte(workerSource), 0o600); err != nil {
-		t.Fatalf("WriteFile(service-worker.js) error = %v", err)
-	}
-	server := &pluginServer{rootDir: root, assetVersion: "3.4.5-abcdef0123456789abcdef01"}
-	recorder := httptest.NewRecorder()
-	server.handleServiceWorker(recorder, httptest.NewRequest(http.MethodGet, "/service-worker.js", nil))
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", recorder.Code)
-	}
-	if got := recorder.Header().Get("Service-Worker-Allowed"); got != "/" {
-		t.Fatalf("Service-Worker-Allowed = %q, want /", got)
-	}
-	if got := recorder.Header().Get("Cache-Control"); got != "no-cache" {
-		t.Fatalf("Cache-Control = %q, want no-cache", got)
-	}
-	if body := recorder.Body.String(); !strings.Contains(body, `"3.4.5-abcdef0123456789abcdef01"`) || !strings.Contains(body, `"/assets/3.4.5-abcdef0123456789abcdef01/"`) {
-		t.Fatalf("service worker version injection failed: %s", body)
-	}
-}
-
 func TestDynamicAssetResponsesTrackLPKVersionWithoutRestart(t *testing.T) {
 	root := t.TempDir()
 	staticDir := filepath.Join(root, "runtime", "static")
@@ -445,10 +417,6 @@ func TestDynamicAssetResponsesTrackLPKVersionWithoutRestart(t *testing.T) {
 	index := `<script src="__LCMD_ASSET_BASE__main.js"></script>`
 	if err := os.WriteFile(filepath.Join(staticDir, "index.html"), []byte(index), 0o600); err != nil {
 		t.Fatalf("WriteFile(index.html) error = %v", err)
-	}
-	workerSource := `const version = "__LCMD_ASSET_VERSION__"; const base = "__LCMD_ASSET_BASE__";`
-	if err := os.WriteFile(filepath.Join(staticDir, "service-worker.js"), []byte(workerSource), 0o600); err != nil {
-		t.Fatalf("WriteFile(service-worker.js) error = %v", err)
 	}
 	versionFile := filepath.Join(root, ".lpk-version")
 	revisionFile := filepath.Join(root, contentRevisionFileName)
@@ -472,12 +440,6 @@ func TestDynamicAssetResponsesTrackLPKVersionWithoutRestart(t *testing.T) {
 	updatedAssetVersion := "1.0.7-" + strings.Repeat("a", assetRevisionLength)
 	if body := indexRecorder.Body.String(); !strings.Contains(body, `./assets/`+updatedAssetVersion+`/main.js`) {
 		t.Fatalf("index did not use updated LPK version: %s", body)
-	}
-
-	workerRecorder := httptest.NewRecorder()
-	server.handleServiceWorker(workerRecorder, httptest.NewRequest(http.MethodGet, "/service-worker.js", nil))
-	if body := workerRecorder.Body.String(); !strings.Contains(body, `"`+updatedAssetVersion+`"`) || !strings.Contains(body, `"/assets/`+updatedAssetVersion+`/"`) {
-		t.Fatalf("service worker did not use updated LPK version: %s", body)
 	}
 
 	revisionRecorder := httptest.NewRecorder()

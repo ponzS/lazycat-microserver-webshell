@@ -10,7 +10,7 @@
 - 保存 session cleanup，不把 cleanup 数组暴露给业务对象。
 - 按固定顺序幂等销毁 session，并拒绝销毁后的迟到 cleanup。
 
-本模块不负责 WebSocket 协议、Unified 物理连接、历史同步、Cache API、Ghostty 渲染、resize 算法、输入分类或工作区布局。这些实现仍由对应责任域维护，并通过显式 lifecycle adapter 接入。
+本模块不负责 WebSocket 协议、Unified 物理连接、历史同步、浏览器存储、Ghostty 渲染、resize 算法、输入分类或工作区布局。这些实现由对应责任域维护，并通过显式 lifecycle adapter 接入。
 
 ## 公开入口
 
@@ -33,7 +33,7 @@ controller 公开：
 - `session_controller.js` 唯一持有 pane ID 序列，并组合 state 与 lifecycle。
 - `session_state.js` 只创建初始状态；每次调用都生成独立数组、Promise 和子控制器。
 - `session_lifecycle.js` 通过模块私有 `WeakMap`/`WeakSet` 持有 cleanup 与 disposed 状态。
-- transport、history 和 cache 字段暂时保持扁平；input、output、resize 和 presentation 字段虽然仍由 session state 提供初值，但只允许对应 controller 修改，其他模块必须使用公开 API。
+- transport、replay 和 `client:` 兼容历史字段暂时保持扁平；input、output、resize 和 presentation 字段虽然仍由 session state 提供初值，但只允许对应 controller 修改，其他模块必须使用公开 API。
 
 禁止其他模块直接修改 session lifecycle 的私有状态，也禁止重新在 `global-runtime.js` 建立 session cleanup 数组或复制局部销毁逻辑。
 
@@ -41,12 +41,12 @@ controller 公开：
 
 销毁顺序必须保持：
 
-1. 请求 flush 尚未提交的历史缓存写入。
+1. 对 `client:` 请求 flush 尚未提交的 IndexedDB 历史写入；普通容器为无副作用操作。
 2. 设置 `session.closed = true`。
 3. reset replay 状态，并只 detach 当前 Unified logical stream。
 4. 注销 `client:` scheduler lease。
-5. 通过各模块 adapter 清理输入、连接、重试、resize、输出、presentation 和 cache 资源；cache write/preview/compaction timer 只能由 history cache lifecycle 清理。
-6. 取消 preview/frame release，运行模块 cleanup。
+5. 通过各模块 adapter 清理输入、连接、重试、resize、输出、presentation 和 `client:` 历史资源。
+6. 取消 frame release，运行模块 cleanup。
 7. 清 Canvas、dispose Ghostty、移除 pane DOM。
 
 `closed` 必须早于 logical detach，因为 logical close 回调是同步的；否则会为正在主动销毁的 pane 重新安排 retry。单 pane 销毁不得关闭 Unified 物理连接或影响兄弟 logical stream。
@@ -54,16 +54,16 @@ controller 公开：
 ## 文件清单
 
 - `index.js`：唯一公开入口。
-- `resource_factory.js`：创建 pane 的 DOM、Ghostty Terminal/FitAddon 和预览、保帧、IME 节点；不拥有 session 状态或资源清理。
+- `resource_factory.js`：创建 pane DOM、Ghostty Terminal/FitAddon、保帧 Canvas 和 IME 节点；不拥有 session 状态或资源清理。
 - `session_controller.js`：ID、初始尺寸、资源 factory、state 和 lifecycle 的组合控制器，并提供单个/批量销毁入口。
-- `session_installation_controller.js`：presentation、output、IME、renderer、selection、TUI、mouse、clipboard、resize、input、context menu 和 transport 的显式安装编排；维护 presentation-ready 到 cache/input/diagnostics/transport 的局部接线。
+- `session_installation_controller.js`：presentation、output、IME、renderer、selection、TUI、mouse、clipboard、resize、input、context menu 和 transport 的显式安装编排；维护 presentation-ready 到 input/diagnostics/transport 的局部接线。
 - `session_installation_lifecycle.js`：pane 激活、focus 和原生 paste listener 的注册、迟到回调 guard 与清理。
 - `startup_error_api.js`：按 target 查询 agent startup error，固定 `no-store`。
 - `startup_error_controller.js`：启动错误分类、重连状态、错误面板/终端输出和 last-known-good frame 保护编排。
 - `startup_error_lifecycle.js`：每个 session 的异步请求 generation 与 dispose fence，拒绝迟到错误覆盖新会话。
 - `session_state.js`：完整扁平初始状态与子控制器实例。
 - `session_lifecycle.js`：cleanup 所有权、迟到回调处理和严格销毁编排。
-- `session_recovery_controller.js`：socket detach、历史回放 reset/resync 和 Unified/client 分支状态清理；通过显式回调连接 transport、cache、presentation、output 与 IME，不显示回放中间帧。
+- `session_recovery_controller.js`：socket detach、历史回放 reset/resync 和 Unified/client 分支状态清理；通过显式回调连接 transport、presentation、output 与 IME，不显示回放中间帧。
 
 ## 依赖与验证
 

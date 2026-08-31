@@ -49,7 +49,7 @@ View 只读写 DOM，API 只执行 HTTP 请求，lifecycle 只注册和移除事
 ## 测试与回归
 
 - `service_forwarding_controller_test.mjs`：目标过滤、迟到刷新、生命周期清理、表单部署、失败回滚、删除确认和 dispose guard。
-- `runtime_shortcuts_test.go`：公开入口、README、`global-runtime.js` 边界、Service Worker 资源和旧实现移除契约。
+- `runtime_shortcuts_test.go`：公开入口、README、`global-runtime.js` 边界、版本化静态资源和旧实现移除契约。
 - `workspace_test.go`：Provider 发布代理的账号、实例所有权、路由白名单、multipart 和错误响应测试。
 
 最小回归步骤：打开设置中的服务转发页；验证列表只显示当前实例；新建 HTTP 和 HTTPS 服务；编辑上游地址；带 PNG 图标部署；取消和确认删除；在列表加载或部署过程中切换实例并确认旧响应不覆盖新实例；关闭设置和离开页面后确认事件与 timer 已清理。

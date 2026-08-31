@@ -1,11 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  createAppBootstrapController,
-  createAppServiceWorkerController,
-  createBrowserStoragePersistenceController,
-} from "../runtime/static/app/bootstrap/index.js";
+import { createAppBootstrapController } from "../runtime/static/app/bootstrap/index.js";
 
 const deferred = () => {
   let resolve;
@@ -34,7 +30,6 @@ test("app bootstrap starts modules, prepares prerequisites and applies the curre
     isCurrentRequest: (name, generation) => name === "demo" && generation === 4,
     requestWorkspace: async (context) => { calls.push(["request", context]); return { tabs: [] }; },
     applyWorkspace: (state, options) => calls.push(["apply", state, options]),
-    requestStoragePersistence: async () => calls.push("storage"),
     startWorkspaceActivity: () => calls.push("activity:start"),
     refreshWorkspaceActivity: async (options) => calls.push(["activity:refresh", options]),
     getTabCount: () => 2,
@@ -53,7 +48,6 @@ test("app bootstrap starts modules, prepares prerequisites and applies the curre
   ]);
   assert.ok(calls.some((value) => Array.isArray(value) && value[0] === "apply"));
   assert.ok(calls.includes("activity:start"));
-  assert.ok(calls.includes("storage"));
 });
 
 test("app bootstrap rejects stale workspace apply and ignores prerequisites after dispose", async () => {
@@ -98,37 +92,4 @@ test("bootstrap failure waits for Ghostty before creating an error terminal", as
   assert.equal(await failure, false);
   assert.ok(calls.some((value) => Array.isArray(value) && value[0] === "create-tab"));
   assert.ok(calls.some((value) => Array.isArray(value) && value[0] === "write" && value[1] === pane));
-});
-
-test("browser storage persistence and service worker registration are single-owner operations", async () => {
-  const logs = [];
-  let persistCalls = 0;
-  const storage = createBrowserStoragePersistenceController({
-    navigatorObject: {
-      storage: {
-        persisted: async () => false,
-        persist: async () => { persistCalls += 1; return true; },
-        estimate: async () => ({ usage: 10, quota: 100 }),
-      },
-    },
-    consoleObject: { info: (...args) => logs.push(args), warn: (...args) => logs.push(args) },
-  });
-  assert.equal(await storage.request(), true);
-  assert.equal(await storage.request(), false);
-  assert.equal(persistCalls, 1);
-  assert.equal(storage.dispose(), true);
-
-  const registrations = [];
-  const serviceWorker = createAppServiceWorkerController({
-    windowObject: { isSecureContext: true },
-    navigatorObject: {
-      serviceWorker: {
-        register: async (...args) => registrations.push(args),
-      },
-    },
-  });
-  assert.equal(await serviceWorker.register(), true);
-  assert.equal(await serviceWorker.register(), true);
-  assert.deepEqual(registrations, [["./service-worker.js", { scope: "./" }]]);
-  assert.equal(serviceWorker.dispose(), true);
 });

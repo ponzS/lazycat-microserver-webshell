@@ -68,12 +68,10 @@ const startAtomicPresentationObserver = (state) => state.page.evaluate(() => {
     if (!active) return;
     const shell = document.querySelector(".terminal-pane.active .pane-shell");
     const hold = shell?.querySelector(".terminal-frame-hold");
-    const preview = shell?.querySelector(".terminal-cache-preview");
     const canvas = shell?.querySelector(".terminal-host canvas:not(.terminal-frame-hold)");
     const renderReady = shell?.dataset.renderReady === "true";
     const hasPresentedFrame = shell?.dataset.hasPresentedFrame === "true";
     const holdVisible = hold instanceof HTMLCanvasElement && hold.hidden === false && hold.isConnected;
-    const previewVisible = preview instanceof HTMLElement && preview.hidden === false && preview.isConnected;
     const bounds = shell?.getBoundingClientRect?.();
     samples.push({
       at: performance.now(),
@@ -85,11 +83,10 @@ const startAtomicPresentationObserver = (state) => state.page.evaluate(() => {
       holdHidden: hold instanceof HTMLCanvasElement ? hold.hidden : null,
       holdWidth: hold instanceof HTMLCanvasElement ? hold.width : 0,
       holdHeight: hold instanceof HTMLCanvasElement ? hold.height : 0,
-      previewVisible,
       canvasWidth: canvas instanceof HTMLCanvasElement ? canvas.width : 0,
       canvasHeight: canvas instanceof HTMLCanvasElement ? canvas.height : 0,
       visible: Boolean(bounds && bounds.width > 0 && bounds.height > 0),
-      unsafe: !renderReady && hasPresentedFrame && !holdVisible && !previewVisible,
+      unsafe: !renderReady && hasPresentedFrame && !holdVisible,
     });
     requestAnimationFrame(sample);
   };

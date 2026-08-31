@@ -20,13 +20,11 @@ const createResources = (events = []) => ({ id, ...options }) => ({
   },
   terminalFrameHold: { id: `${id}-hold` },
   terminalHost: { id: `${id}-host` },
-  terminalPreview: { id: `${id}-preview` },
   resourceOptions: options,
 });
 
 test("terminal session controller owns pane IDs and creates isolated flat state", () => {
   const resourceCalls = [];
-  const workspaceIdentity = { selector: "instance-a", workspace: "workspace-a" };
   const controller = createTerminalSessionController({
     createResources(options) {
       resourceCalls.push(options);
@@ -41,8 +39,7 @@ test("terminal session controller owns pane IDs and creates isolated flat state"
     connect: false,
     cols: 80.9,
     rows: 24.8,
-    cacheV2WorkspaceIdentity: workspaceIdentity,
-    cacheV2Epoch: 4,
+    workspaceGeneration: "workspace-a",
     baseTheme: { name: "default" },
   });
   const second = controller.create({
@@ -61,23 +58,17 @@ test("terminal session controller owns pane IDs and creates isolated flat state"
   assert.equal(first.initialRows, 24);
   assert.equal(first.pendingConnect, false);
   assert.equal(second.pendingConnect, true);
-  assert.equal(first.cacheV2Epoch, 4);
-  assert.deepEqual(first.cacheV2WorkspaceIdentity, workspaceIdentity);
-  assert.notEqual(first.cacheV2WorkspaceIdentity, workspaceIdentity);
+  assert.equal(first.workspaceGeneration, "workspace-a");
 
   first.pendingInput.push("input");
   first.inputQueue.push("queued");
   first.outputQueue.push("output");
   first.historyCacheWriteQueue.push("history");
-  first.cacheV2NetworkQueue.push("cache");
-  first.cacheV2WorkspaceIdentity.workspace = "mutated";
 
   assert.deepEqual(second.pendingInput, []);
   assert.deepEqual(second.inputQueue, []);
   assert.deepEqual(second.outputQueue, []);
   assert.deepEqual(second.historyCacheWriteQueue, []);
-  assert.deepEqual(second.cacheV2NetworkQueue, []);
-  assert.equal(workspaceIdentity.workspace, "workspace-a");
   assert.notEqual(first.replayController, second.replayController);
   assert.notEqual(first.resizeController, second.resizeController);
   assert.notEqual(first.renderSnapshot, second.renderSnapshot);
@@ -100,9 +91,7 @@ test("session disposal marks closed before logical detach and preserves sibling 
       clearHistoryCacheWriteSchedule: adapter("clear-cache-write-schedule"),
       clearInputFlushTimer: adapter("clear-input-flush"),
       clearInputPumpTimer: adapter("clear-input-pump"),
-      clearOverviewPreview: adapter("clear-overview-preview"),
       clearPendingInputExpiry: adapter("clear-pending-input"),
-      clearPreparedPreview: adapter("clear-prepared-preview"),
       clearPresentationRetry: adapter("clear-presentation-retry"),
       clearReconnectTimer: adapter("clear-reconnect"),
       clearUnifiedRetry: adapter("clear-unified-retry"),
@@ -112,7 +101,6 @@ test("session disposal marks closed before logical detach and preserves sibling 
       disposeHistoryCache: adapter("dispose-history-cache"),
       disposeOutput: adapter("dispose-output"),
       flushHistoryCacheWrites: adapter("flush-history"),
-      hideTerminalPreview: adapter("hide-preview"),
       releaseTerminalFrame: adapter("release-frame"),
       unregisterConnection(session, reason) {
         events.push(`${session.id}:unregister:${reason}`);
@@ -139,13 +127,9 @@ test("session disposal marks closed before logical detach and preserves sibling 
   first.pendingInputSize = 5;
   first.inputQueue = ["queued"];
   first.inputQueueSize = 6;
-  first.cacheV2NetworkQueue = ["network"];
-  first.cacheV2NetworkQueueBytes = 7;
   first.cursorBlinkHoldTimer = 11;
   first.connectionPriorityTimer = 12;
   first.connectionMeasurementFrame = 13;
-  first.cacheV2PreviewCaptureTimer = 14;
-  first.cacheV2PreviewCaptureIdle = 15;
   first.replayController.reset = () => events.push("pane-1:replay-reset");
 
   controller.addCleanup(first, () => events.push("pane-1:cleanup-a"));
@@ -164,8 +148,6 @@ test("session disposal marks closed before logical detach and preserves sibling 
   assert.equal(sibling.term.id, "pane-2-term");
   assert.deepEqual(first.pendingInput, []);
   assert.deepEqual(first.inputQueue, []);
-  assert.deepEqual(first.cacheV2NetworkQueue, []);
-  assert.equal(first.cacheV2NetworkQueueBytes, 0);
 
   const flushIndex = events.indexOf("pane-1:flush-history");
   const resetIndex = events.indexOf("pane-1:replay-reset");

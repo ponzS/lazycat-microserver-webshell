@@ -10,16 +10,11 @@ const makeSession = (overrides = {}) => ({
   shellEl: { dataset: {} },
   term: { viewportY: 4, targetViewportY: 5 },
   replayController: { reset: () => {} },
-  cacheV2WarmReplayActive: false,
   ...overrides,
 });
 test("session recovery detaches only the current socket and resets replay state", () => {
   const events = [];
-  const session = makeSession({
-    replayComplete: true,
-    cacheV2NetworkQueue: ["bytes"],
-    cacheV2NetworkQueueBytes: 5,
-  });
+  const session = makeSession({ replayComplete: true });
   const socket = session.socket;
   const controller = createTerminalSessionRecoveryController({
     clearOutputSettle: () => events.push("clear-resize"),
@@ -27,16 +22,13 @@ test("session recovery detaches only the current socket and resets replay state"
     setReplayAuthorization: (_session, value) => events.push(["auth", value]),
     clearConnectionTimers: () => events.push("clear-timers"),
     endRenderSuppression: (_session, options) => events.push(["end", options.reason]),
-    hidePreview: () => events.push("hide-preview"),
   });
 
   assert.equal(controller.detachSessionSocket(session, socket, { connection: "reconnecting" }), true);
   assert.equal(session.socket, null);
   assert.equal(session.replayComplete, false);
-  assert.equal(session.cacheV2NetworkQueueBytes, 0);
   assert.deepEqual(session.shellEl.dataset, { connection: "reconnecting" });
   assert.ok(events.indexOf("clear-resize") < events.indexOf("reset-replay"));
-  assert.ok(events.includes("hide-preview"));
   assert.equal(controller.detachSessionSocket(session, socket), false);
 });
 
@@ -77,7 +69,6 @@ test("history resync uses Unified recycle or direct socket reconnect and is fenc
   const controller = createTerminalSessionRecoveryController({
     getActiveName: () => "demo",
     resetReplayController: () => events.push("reset"),
-    hidePreview: () => events.push("hide"),
     discardOutput: () => events.push("discard"),
     recycleUnifiedSession: (_session, reason, options) => events.push(["recycle", reason, options]),
     closeSocketForReconnect: (_session, socket, reason) => events.push(["close", socket, reason]),

@@ -2,7 +2,7 @@
 
 本文档用于保存 `lazycat-microserver-webshell` 的架构基线、已确认的历史问题和防止问题复现的 guard。它不是发布日志，也不记录未经证实的猜测或已经否定的方案。
 
-当前行为以本文前半部分“当前架构基线”和最新修复条目为准。后半部分历史条目保留当时的实现和现场证据；其中出现的“首批字节可见”、`cacheV2WarmFrameReady` 或方向变化重新回放等描述仅表示旧版本行为，均已被 `LCMD-20260819-02` 取代，不得作为新代码的设计依据。
+当前行为以本文前半部分“当前架构基线”和最新修复条目为准。后半部分历史条目保留当时的实现和现场证据；其中出现的 PWA、Service Worker app-shell、Cache API v2、warm replay、缓存 preview、“首批字节可见”或方向变化重新回放等描述仅表示旧版本行为，均已被 `LCMD-20260831-48` 取代，不得作为新代码的设计依据。
 
 首版建立于 2026-07-27。初始历史条目根据仓库 Git 提交、当前实现和现有测试重建；后续每次 Bug 修复都应在同一次变更中更新本文档。
 
@@ -37,8 +37,8 @@
 
 - `main.go` 启动仅监听 `127.0.0.1:8080` 的 Provider 服务，注册静态资源、实例、设置、附件、工作区、设备、版本和 WebSocket 路由。
 - LPK 通过 `lzc-manifest.yml` 的 `/=exec://8080` 启动入口，并通过 `lightos.webshell` Resource Export 被 `lightos-admin` 发现。
-- 页面静态资源位于 `runtime/static/`，随二进制一起打包。HTML 禁止缓存并由 Provider 注入当前资源版本路径；独立 LPK 使用 `<lpk-version>-<content-revision>`，缺少构建元数据的内嵌/开发环境使用内容哈希。新页面通过该内容寻址的 `/assets/<asset-version>/` 读取 JS/CSS/JSON/WASM/manifest/图标并使用 immutable 缓存，旧 `/static/` 只保留兼容和可重验证策略。
-- PWA Service Worker 由 Provider 注入当前 LPK 版本与资源基路径；当前版本的 immutable 静态资源执行 cache-first，版本 URL 变化负责更新，缓存未命中或旧版本资源才访问网络，非成功响应可以回退已有静态缓存。页面导航、`/api/*`、`/ws` 和终端虚拟 Cache URL 不进入 app-shell 缓存。
+- 页面静态资源位于 `runtime/static/`，随二进制一起打包。HTML 禁止缓存并由 Provider 注入当前资源版本路径；独立 LPK 使用 `<lpk-version>-<content-revision>`，缺少构建元数据的内嵌/开发环境使用内容哈希。新页面通过该内容寻址的 `/assets/<asset-version>/` 读取 JS/CSS/JSON/WASM/字体/主题等资源并使用 HTTP immutable 缓存，旧 `/static/` 只保留兼容和可重验证策略。
+- 页面不注册 Service Worker，不提供 Web App Manifest/PWA 图标，也不申请浏览器持久存储。bootstrap 只执行一次性旧 WebShell Worker 和已知 Cache 名称清理；清理器不读取终端数据、不参与首屏、离线 fallback 或资源调度。
 
 ### 管理端、Provider 与目标端边界
 
@@ -60,15 +60,14 @@
 - LightOS 实例终端历史以 persistent agent 保存的原始 PTY 字节为可信来源；浏览器渲染状态不是历史权威。
 - 普通容器实例的单个 WebShell 页面只维持 1 条页面级 Unified 终端 WebSocket。全部 pane 通过 `terminal_unified_membership.js` 维护 target-scoped logical membership，并使用 `UnifiedTerminalConnection` 复用该物理连接。创建/关闭 pane才增删 logical stream；tab 切换、pane 聚焦、输入和 resize 只更新 priority 或 pane自身状态，不关闭 logical stream，不经过 Fast slot、promotion、Queue gate 或 topology reset。每个 pane具有独立 stream ID、channel generation、history generation、cursor、sequence、checksum、retry 和 resync；单 pane异常不得关闭其他 logical stream。`CONNECTING`、`OPEN`、`CLOSING` 都占用唯一物理槽，旧 socket 真实 close 或达到 close fence 前不得创建替代 transport。`client:` target 暂未升级 unified 协议，继续保留最多 3 条独立直连调度。
 - Unified 复用只发生在浏览器与 Provider 之间。Provider 为每个逻辑 pane 复用现有 agent attach、持续 drain 上游并按 pane 公平轮转；persistent agent 不修改，继续维护全部 PTY、任务、历史和 cursor。Unified broker 允许每个有效 logical stream 发送普通输入和 generated control，输入必须按 pane identity/generation 校验并经该 stream 的串行 agent writer。活动 pane 优先级只影响轮转顺序，不移除或暂停其他 pane；同一 pane 任意时刻仍只能由一个有效 channel generation 写入 Ghostty。
-- 历史流使用 `history_generation` 和绝对 byte cursor 表示范围。服务端根据本地范围选择 `snapshot`、`delta` 或 `current`，所有 chunk 必须连续。
-- 容器实例使用 Cache API v2 保存按账号 scope、完整 selector、workspace generation、tab、pane 和 history generation 隔离的不可变 PTY 字节块，并以 commit-last manifest 暴露已持久化 cursor。缓存无效时可以丢弃并从 agent 重建，但不能把不连续缓存拼接到新 generation。
-- 容器页面从网络 workspace 响应取得完整账号 scope、selector、workspace、tab 和 pane 身份后，以 8 块滚动预读窗口从 Cache API 读取该精确身份下的 PTY 字节。历史区间和恢复期间排队的实时字节通过 Ghostty 专用 replay 写入完整解析，但不调度中间 Canvas render；WASM 输入缓冲区按实例复用。只有服务端 replay complete、cursor 连续、实时队列追平、fit 当前且最终 full render 成功后才显示；新增缓存字节的持久化在后台完成，不阻塞最终 Canvas。第一批字节不是首帧。窗口、字体、主题变化和跨设备单击恢复尺寸仅在确认 cols/rows 或 canvas backing store 变化后使用 presentation hold 保留旧帧；这些操作复用当前内存终端状态，不进入历史 replay 写入。hold 覆盖期间 Ghostty 继续按正常节流渲染，当前状态的 full render 成功后立即替换，不等待 PTY 输出安静，也不重新回放历史。切换 tab 前保存有效帧，激活后用当前状态的 full render 替换，不能显示黑屏。
+- 历史流使用 `history_generation` 和绝对 byte cursor 保证服务端 snapshot 的连续性。普通容器 Unified open 只携带 `workspace_generation`，不得查询或发送浏览器本地 `history_generation`、`local_base_cursor`、`local_end_cursor`，每次 attach 直接接收 persistent agent 的权威 `snapshot + live`。
+- snapshot 和恢复期间排队的实时字节通过 Ghostty replay 路径完整解析，但必须处于 render suppression；只有服务端 replay complete、cursor 连续、实时队列追平、fit 当前且最终 full render 成功后才显示。第一批字节不是首帧。窗口、字体、主题变化和跨设备单击恢复尺寸仅在确认 cols/rows 或 canvas backing store 变化后使用 presentation hold 保留旧帧；这些操作复用当前内存终端状态，不重新回放历史。hold 覆盖期间 Ghostty 继续按正常节流渲染，当前状态的 full render 成功后立即替换，不等待 PTY 输出安静。切换 tab 前保存有效帧，激活后用当前状态的 full render 替换，不能显示黑屏。
 - Ghostty renderer 在修改 canvas 前必须一次性物化当前可见活动屏幕和 scrollback 行；活动 viewport 每帧只导出一次。任一可见行缺失时保留上一帧和 dirty 状态，由事件驱动 scheduler 退避重试，失败帧不得触发成功 `onRender` 或 pane presented generation 推进。
-- tab 总览不得只复制已经激活过的 live canvas。未激活 pane 可以按完整 cache-v2 身份读取已提交的图片缩略图，但缩略图只用于总览，不能参与终端启动显示、Ghostty 状态恢复或输入就绪判断。
-- 服务端接受本地 range 时，`delta/current` 必须复用已经恢复的 Ghostty 状态，不得再次清空和重复回放本地 chunk。服务端返回 `snapshot` 时，保持已显示的同身份本地 canvas，先在内存收齐服务端 snapshot，再一次性重置并回放权威字节；本地缓存字节不得参与 snapshot 状态计算。
+- tab 总览只允许复制已完成提交的 live Canvas，或 identity 仍有效的 `terminal-frame-hold`。未激活且从未呈现的 pane 使用空缩略图；总览不得读取浏览器历史、触发 replay 或参与输入就绪判断。
+- 普通容器收到 `snapshot` 时必须在 render suppression 下重置并回放权威字节；snapshot 中间状态不得进入 live Canvas。任何本地内存/浏览器存储都不得参与普通容器 snapshot 状态计算。
 - 已经呈现且身份仍有效的终端画面是网络故障期间的 last-known-good 状态。HTTP 502、Agent 不可用、WebSocket close/error、workspace refresh 重试和历史 snapshot 等待不得清空或隐藏该画面；输入继续锁定。只有成功的权威 workspace 响应确认账号/实例/workspace/tab/pane 身份变化、pane 被删除，或收到与当前会话不匹配的数据时才能销毁旧呈现。
-- `client:` PC target 保持其独立的 IndexedDB 和完整历史协议，不读取 Cache API v2，也不启用容器 warm replay；不能未经双方协议升级直接套用实例 agent 的增量假设。
-- pane 只有在尺寸可测量、fit generation 与 replay generation 都是当前值、canvas 尺寸正确，且本地 warm replay 或服务端 replay 已完成当前可展示帧后，才能标记为可展示；输入仍必须等待服务端 replay 完成。
+- `client:` PC target 保持其独立的 IndexedDB 和完整历史协议。IndexedDB load/write/flush/reset/delete 只能由 `client_history_controller.js` 执行，并以 `isClientTarget()` 硬隔离；不能未经双方协议升级直接套用实例 agent 的 Unified/snapshot 假设。
+- pane 只有在尺寸可测量、fit generation 与 replay generation 都是当前值、canvas 尺寸正确，且服务端 replay 已完成当前可展示帧后，才能标记为可展示；输入仍必须等待服务端 replay 完成。
 - 终端渲染使用随包分发的 Ghostty Web 和明确的 `ghostty-vt.wasm` 路径。本项目禁止引入或仿制 `xterm.js`。
 
 ### 输入、移动端与 iOS
@@ -88,16 +87,16 @@
 
 | 风险域 | 必须保持的不变量 | 修改时至少检查 |
 | --- | --- | --- |
-| 账号与 scope | HTTP、WebSocket、agent socket、输入锁、设备和缓存都按账号及完整 target 隔离 | 缺少账号头、跨账号、同名实例、`client:` target |
-| agent 生命周期 | 兼容 agent 和 PTY 不因 Provider 重启丢失；安装/升级失败不能伪装成 ready | ping、缓存命中校验、启动超时、协议不兼容、信号继承 |
-| 历史同步 | generation 一致、cursor 连续、trim 后绝对范围正确、snapshot/delta/current 选择正确；容器本地缓存必须绑定完整账号/workspace/tab/pane 身份 | 首次连接、刷新、断网重连、服务端 trim、本地缓存缺块、跨账号/实例/workspace/tab |
+| 账号与 scope | HTTP、WebSocket、agent socket、输入锁和设备都按账号及完整 target 隔离；`client:` IndexedDB 不能跨 target/account | 缺少账号头、跨账号、同名实例、`client:` target |
+| agent 生命周期 | 兼容 agent 和 PTY 不因 Provider 重启丢失；安装/升级失败不能伪装成 ready | ping、agent 复用校验、启动超时、协议不兼容、信号继承 |
+| 历史同步 | generation 一致、cursor 连续、trim 后绝对范围正确；普通容器只走服务端 snapshot/live 且无浏览器 range，`client:` IndexedDB 保持独立 | 首次连接、刷新、断网重连、服务端 trim、普通容器本地 range 禁止、`client:` 缓存缺块 |
 | 渲染就绪 | 隐藏 pane 不使用不可测尺寸；旧 fit/replay generation 不能让画面提前显示 | tab 切换、分屏、隐藏恢复、方向变化、Canvas context 恢复 |
 | 用户输入 | 用户输入、IME 和终端自动响应分离；输入锁不能吞掉允许的 generated response | composition、粘贴、大输入、回放期间 DSR/OSC、锁过期 |
 | 触摸与 iOS | 双击 focus 保持同步用户手势和 capture 顺序；单击、拖动和选择不误触键盘 | iOS WebView、宽触摸屏、长按、终端鼠标模式、快捷键 |
 | 工作区恢复 | 最后 selector/tab 持久恢复；用户明确返回首页时清除恢复意图 | 超过 30 秒、WebView 重载、无效 URL、浏览器前进后退 |
 | 设置 | PATCH 只更新显式字段，保留其他设置；null 与空值语义稳定 | 字体、scrollback、line height、移动/桌面快捷键 |
 | 客户端终端 | 浏览器不可见票据和服务凭据；每次连接前重新验证可见性 | 下线、过期票据、403/401、Device API 失败、附件代理 |
-| 浏览器连接池 | 普通容器只有 1 条 Unified 物理终端 WebSocket；Fast/Queue 迁移态逻辑必须共享同一 connection object；tab/pane 切换只改逻辑优先级，物理 close 确认前不得复用唯一槽；`client:` target 暂保留最多 3 条直连 | 首次进入、多 tab/32 分屏、Unified `CONNECTING/CLOSING`、逻辑成员替换、输入路由、断线/重连、折叠屏恢复 |
+| 浏览器连接池 | 普通容器只有 1 条 Unified 物理终端 WebSocket；tab/pane 切换只改 logical priority，物理 close 确认前不得创建替代 transport；`client:` target 暂保留最多 3 条直连 | 首次进入、多 tab/32 分屏、Unified `CONNECTING/CLOSING`、逻辑成员替换、输入路由、断线/重连、折叠屏恢复 |
 | 依赖边界 | 不引入 `tmux`、`xterm.js` 或其改名/复制实现 | Go/npm/构建依赖、脚本、vendor、示例代码迁入 |
 
 ## 验证基线
@@ -2037,3 +2036,16 @@ git diff --check
 - 回归 guard：`terminal_presentation_controller_test.mjs` 新增稳定 validation、同几何 resize ACK 不显示 hold，以及真实 fit/Canvas 变化仍进入 hold 的测试；`tests-auto/09-terminal-interaction-jitter/test.mjs` 记录活动 pane 的 presentation trace 和 hold Canvas 可见性，在点击、输入、拖选窗口内禁止 hold transition 和可见 hold，并继续检查几何、像素和 `renderReady` 安全状态。
 - 验证结果：presentation/resize/output/session 定向 Node 测试 `23/23` 通过；`go test ./... -count=1` 通过；真实 `debug123` 的 09 交互回归通过，活动 pane `holdTransitions=0`、可见 hold 样本为 0、几何变化为 0；08 点击、05 输出、03 IME 和带 iPhone User-Agent 的 04 viewport 回归均通过。未设置移动 User-Agent 的 04 首次失败仅因测试未进入 iOS 分支，使用 `WEBSHELL_MOBILE_USER_AGENT` 后复验通过。
 - 禁止复现：不得在稳定内容或仅 metadata/epoch 变化时调用 `beginHold()`、切换 `terminal-frame-hold` 或把 `renderReady` 置为 false；只有真实 geometry/backing store、resize fence、context loss、replay recovery 等明确路径可以覆盖 last-known-good frame。所有路径继续禁止显示 history replay、snapshot、resize 或重连中间帧。
+
+### LCMD-20260831-48：PWA/Cache API 调度竞态导致终端黑屏和红点
+
+- 日期：2026-08-31
+- 来源：当前终端现场反馈及第一阶段简化实施；进入终端、刷新、重连或切换 pane 时偶发整页黑屏，右上角出现连接红点，Cache API/PWA 引入后发生频率明显升高。
+- 错误现象：普通容器打开同一 persistent PTY 会话时，前端同时读取 Cache API manifest/chunk/preview、建立 Unified logical stream、计算本地 cursor range、处理服务端 snapshot/delta/current、等待缓存提交/compaction 和最终 presentation。任一迟到 Promise、generation、resize、preview 或连接事件都可能让输入、连接、replay 和 Canvas readiness 落入不一致状态，表现为无画面、旧预览覆盖、连接红点或必须再次点击/resize 才恢复。
+- 根因：Cache API v2 与 PWA 并非用户功能，而是可选基础实现；它们复制了 persistent agent 已经拥有的权威 PTY 历史，并额外引入浏览器存储 identity、manifest/chunk、warm replay、preview、compaction、Service Worker app-shell、持久存储申请和多阶段 cursor 衔接。实际会话字节量不足以抵消这套调度成本，反而扩大首屏关键路径、迟到回调和竞态组合。普通容器与 `client:` 兼容历史又共享部分扁平字段，缺少硬 target guard 时还可能误触浏览器存储路径。
+- 实施方案：删除 Web App Manifest、PWA 图标、Service Worker 注册/路由、存储持久化申请和普通容器 Cache API v2 全链路；删除 cache identity/manifest/chunk/warm replay/preview/compaction controller、DOM/CSS 和总览缓存缩略图。普通容器 Unified open 只发送 `workspace_generation`，不发送浏览器 `history_generation/local_base_cursor/local_end_cursor`，直接消费 persistent agent 的权威 `snapshot + live`；snapshot 始终在 render suppression 下 reset/replay，replay complete 后才请求唯一最终 full presentation。`client:` 保留隔离的 IndexedDB 历史 controller，并在 prepare/range/reset/write/flush/delete 及 replay commit 处增加 `isClientTarget()` 硬 guard。bootstrap 只保留一次性旧 WebShell Worker/已知 Cache 名称清理器，用于升级迁移，不参与终端启动。
+- 安全移除依据：普通容器的工作区、PTY、history generation、绝对 cursor 和 scrollback 原始字节一直由 persistent agent 权威保存；Provider 已能通过同一 Unified WebSocket 返回完整 snapshot 并继续推送 live 字节。PWA 不承担会话保活，浏览器离线时也无法继续操作远端 PTY；版本化静态资源已有内容寻址 URL 与 HTTP immutable cache。总览缓存 preview 不是用户数据，只是旧实现的展示加速，移除后功能仍由 live/hold Canvas 保留，只对从未呈现 pane 显示空缩略图。`client:` 后端尚未升级 Unified，因此其 IndexedDB 路径明确保留，未做无依据的协议合并。
+- 收益：普通容器首屏从“workspace + Cache manifest/chunk + WebSocket + cursor 合并 + cache commit + final render”收敛为“workspace + Unified snapshot/live + final render”；删除多组 timer/idle/Promise/generation、Service Worker 更新状态、CacheStorage 延迟和 preview 切换，减少黑屏/红点竞态、主线程与存储 I/O、调试分支和升级兼容面。功能层的快捷键、主题、附件、总览操作、TUI 适配、分屏、搜索、选择、输入和 resize 能力不减少。
+- 回归 guard：`TestRuntimeSnapshotOnlyAndPWARemovalContract` 固定 HTML 无 manifest/PWA icon、runtime 不注册 Service Worker/Cache v2、旧存储清理范围精确；`terminal_session_protocol_controller_test.mjs` 固定普通容器不调用 IndexedDB prepare/range、Unified open 仅带 `workspace_generation`、snapshot 在 suppression 下 reset 且 replay complete 前不提交；`client_terminal_history_controller_test.mjs` 固定 `client:` IndexedDB 兼容；overview/resource/session 测试固定不存在 cache preview DOM/controller；`runtime_shortcuts_test.go` 禁止恢复 Cache v2/warm replay/preview/compaction 符号。
+- 验证结果：`node --test tests/*.mjs` 全量 `363/363`、`go test ./... -count=1`、`go test -race ./... -count=1`、全部生产 JavaScript `node --check` 和 `git diff --check` 通过。`lzc-cli project release` 成功生成 `cloud.lazycat.webshell.lcmd-v1.0.39.lpk`，SHA-256 为 `3fe5702de62581ad57b7f81dd1a25b99695524dddbef0daf9a9a6b55a0743a7a`；包内包含旧存储清理器和 `client:` history controller，不包含 Service Worker、Manifest、PWA 图标、Cache v2 或缓存 preview 文件。使用当前工作区静态资源、真实 `debug123` Provider/persistent agent/PTY、headed Chrome 150 和 iPhone UA 执行 `tests-auto` 全矩阵，01-10 共 10 组全部通过。正式全量前一次 01 用例在第 5 次跨设备 resize 时遇到远端控制帧未应用且无错误回复，单独复验及随后完整矩阵均通过，未形成稳定复现；artifact 保留在 `tests-auto/01-multi-device-resize-sync/artifacts/2026-08-31T05-27-28-166Z`。
+- 禁止复现：普通容器不得重新引入 Cache API/IndexedDB 历史、浏览器本地 cursor range、warm replay、preview 持久化、compaction、Service Worker app-shell 或持久存储申请；不得用离线/PWA 名义复制服务端 PTY 权威状态。任何 snapshot、replay、resize 或重连中间过程都不得显示，单 pane 失败不得关闭 Unified 兄弟 stream。

@@ -1,8 +1,10 @@
 # WebShell 终端 resize 原子性与画面残留修复方案
 
-状态：分析完成，方案待评审，尚未开始代码改造
+状态：历史方案，已被当前 resize epoch 与服务端权威 snapshot 架构取代
 
 最后更新：2026-08-21
+
+> 2026-08-31 更正：本文描述的 Cache API v2、cache preview 和浏览器历史回放方案已经移除，不得再作为当前实现依据。当前普通容器只通过 Unified WebSocket 消费 persistent agent 的权威 `snapshot + live`；`client:` 仅保留隔离的 IndexedDB 兼容路径。本文只保留 resize 问题的历史分析证据，现行边界以 `docs/FIX_HISTORY.md` 和 `docs/FRONTEND_MODULE_MAP.md` 为准。
 
 本文是针对“调整窗口大小后字符位置错乱、出现难以解释的乱码、偶尔显示旧会话历史行”问题的修复设计与执行计划。它补充 [FIX_HISTORY.md](FIX_HISTORY.md) 和 [WEBSOCKET_CONNECTION_MULTIPLEXING_PLAN.md](WEBSOCKET_CONNECTION_MULTIPLEXING_PLAN.md)，不替代现有历史同步、Ghostty 渲染和连接调度约束。
 

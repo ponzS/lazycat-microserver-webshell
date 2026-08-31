@@ -19,4 +19,4 @@
 
 ## 依赖、边界与验证
 
-依赖方向为 app -> feedback；模块不得深度导入 terminal、workspace、history、transport 或 rendering。反馈路径不得触发或显示 history replay、snapshot、resize 或重连中间帧。行为测试为 `app_feedback_controller_test.mjs`，静态边界和 Service Worker 契约位于 `runtime_shortcuts_test.go`。
+依赖方向为 app -> feedback；模块不得深度导入 terminal、workspace、history、transport 或 rendering。反馈路径不得触发或显示 history replay、snapshot、resize 或重连中间帧。行为测试为 `app_feedback_controller_test.mjs`，静态边界和版本化静态资源契约位于 `runtime_shortcuts_test.go`。

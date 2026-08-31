@@ -172,14 +172,8 @@ export function createTerminalSessionConnectionController({
       }
       const attachStartedAt = Number(session.attachStartedAt || 0);
       const attachTimeout = Number(session.attachReadyTimeoutMs || 0) || attachReadyTimeoutMs;
-      const unifiedWarmReplayActive = Boolean(
-        session.connectionChannel === "unified"
-        && session.cacheV2WarmReplayActive
-        && !session.cacheV2WarmReplayReady
-      );
       if (
-        !unifiedWarmReplayActive
-        && !isReplayCommitted(session)
+        !isReplayCommitted(session)
         && attachStartedAt > 0
         && checkedAt - attachStartedAt > attachTimeout
       ) {

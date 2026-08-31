@@ -17,7 +17,7 @@
 - `dom_registry.js`：一次解析并校验页面外壳 DOM，按 workspace、dialog、mobile、startup 分组返回只读引用；不注册事件、不拥有业务状态。
 - `shortcuts/`：桌面快捷键动作映射、过滤和全屏命令；只通过显式回调调用业务模块，不拥有业务状态。
 - `server_revision/`：稳定 client ID、版本检查、部署重载提示、服务端输入锁及首次检查 timer；对话框、输入队列和工作区恢复均通过显式命令接入。
-- `bootstrap/`：应用启动事务、启动失败呈现、浏览器存储持久化申请和 Service Worker 注册；只接收显式依赖，不实现业务模块。
+- `bootstrap/`：应用启动事务、启动失败呈现和旧 PWA/Cache API 一次性迁移清理；不申请浏览器持久存储、不注册 Service Worker，只接收显式依赖，不实现业务模块。
 - `global-runtime.js`（目录外）：唯一的全局 runtime owner；创建本目录和其他 feature controller，编排启动、恢复、页面生命周期和统一销毁。
 
 ## 边界与生命周期

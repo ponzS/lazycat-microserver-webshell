@@ -59,7 +59,6 @@ export function createTerminalInputController({
   const isReady = (session) => Boolean(
     !disposed
     && isReplayCommitted(session)
-    && session?.shellEl?.dataset?.previewReady !== "true"
     && isSocketOpen(session)
     && !session.resizeAckPending
     && (

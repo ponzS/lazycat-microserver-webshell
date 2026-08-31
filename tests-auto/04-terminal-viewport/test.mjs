@@ -51,17 +51,14 @@ const startAtomicPresentationObserver = (state) => state.page.evaluate(() => {
     if (!active) return;
     const shell = document.querySelector(".terminal-pane.active .pane-shell");
     const hold = shell?.querySelector(".terminal-frame-hold");
-    const preview = shell?.querySelector(".terminal-cache-preview");
     const renderReady = shell?.dataset.renderReady === "true";
     const hasPresentedFrame = shell?.dataset.hasPresentedFrame === "true";
     const holdVisible = hold instanceof HTMLCanvasElement && hold.hidden === false && hold.isConnected;
-    const previewVisible = preview instanceof HTMLElement && preview.hidden === false && preview.isConnected;
     samples.push({
       renderReady,
       hasPresentedFrame,
       holdVisible,
-      previewVisible,
-      unsafe: !renderReady && hasPresentedFrame && !holdVisible && !previewVisible,
+      unsafe: !renderReady && hasPresentedFrame && !holdVisible,
     });
     requestAnimationFrame(sample);
   };

@@ -83,23 +83,22 @@ func encodeFastBinaryFrame(selector, paneID, historyGeneration string, sequence,
 }
 
 type agentRequest struct {
-	Type                 string                  `json:"type"`
-	Selector             string                  `json:"selector,omitempty"`
-	AccountID            string                  `json:"account_id,omitempty"`
-	Username             string                  `json:"username,omitempty"`
-	PaneID               string                  `json:"pane_id,omitempty"`
-	Cols                 int                     `json:"cols,omitempty"`
-	Rows                 int                     `json:"rows,omitempty"`
-	TerminalScrollback   int                     `json:"terminal_scrollback,omitempty"`
-	HistoryGeneration    string                  `json:"history_generation,omitempty"`
-	WorkspaceGeneration  string                  `json:"workspace_generation,omitempty"`
-	CacheProtocolVersion int                     `json:"cache_protocol_version,omitempty"`
-	LocalBaseCursor      string                  `json:"local_base_cursor,omitempty"`
-	LocalEndCursor       string                  `json:"local_end_cursor,omitempty"`
-	HistoryReplayMode    string                  `json:"history_replay_mode,omitempty"`
-	IntegrityProtocol    string                  `json:"integrity_protocol,omitempty"`
-	Action               *workspaceActionRequest `json:"action,omitempty"`
-	CloseIdle            bool                    `json:"close_idle,omitempty"`
+	Type                string                  `json:"type"`
+	Selector            string                  `json:"selector,omitempty"`
+	AccountID           string                  `json:"account_id,omitempty"`
+	Username            string                  `json:"username,omitempty"`
+	PaneID              string                  `json:"pane_id,omitempty"`
+	Cols                int                     `json:"cols,omitempty"`
+	Rows                int                     `json:"rows,omitempty"`
+	TerminalScrollback  int                     `json:"terminal_scrollback,omitempty"`
+	HistoryGeneration   string                  `json:"history_generation,omitempty"`
+	WorkspaceGeneration string                  `json:"workspace_generation,omitempty"`
+	LocalBaseCursor     string                  `json:"local_base_cursor,omitempty"`
+	LocalEndCursor      string                  `json:"local_end_cursor,omitempty"`
+	HistoryReplayMode   string                  `json:"history_replay_mode,omitempty"`
+	IntegrityProtocol   string                  `json:"integrity_protocol,omitempty"`
+	Action              *workspaceActionRequest `json:"action,omitempty"`
+	CloseIdle           bool                    `json:"close_idle,omitempty"`
 }
 
 type agentResponse struct {
@@ -182,7 +181,6 @@ func runAgentCommand(args []string) error {
 		terminalScrollback := fs.Int("terminal-scrollback", fonts.DefaultTerminalScrollback, "terminal scrollback lines")
 		historyGeneration := fs.String("history-generation", "", "terminal history generation")
 		workspaceGeneration := fs.String("workspace-generation", "", "terminal workspace generation")
-		cacheProtocolVersion := fs.Int("cache-protocol-version", 0, "terminal cache protocol version")
 		localBaseCursor := fs.String("local-base-cursor", "", "local terminal history base cursor")
 		localEndCursor := fs.String("local-end-cursor", "", "local terminal history end cursor")
 		historyReplayMode := fs.String("history-replay-mode", "", "terminal history replay mode")
@@ -190,7 +188,7 @@ func runAgentCommand(args []string) error {
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		return runAgentAttachClient(*socketPath, *selector, *accountID, *paneID, *cols, *rows, *terminalScrollback, *cacheProtocolVersion, *workspaceGeneration, *historyGeneration, *localBaseCursor, *localEndCursor, *historyReplayMode, *integrityProtocol)
+		return runAgentAttachClient(*socketPath, *selector, *accountID, *paneID, *cols, *rows, *terminalScrollback, *workspaceGeneration, *historyGeneration, *localBaseCursor, *localEndCursor, *historyReplayMode, *integrityProtocol)
 	default:
 		return fmt.Errorf("unknown agent command %q", args[0])
 	}
@@ -401,7 +399,6 @@ func (d *agentDaemon) ensureWorkspaceLocked(request agentRequest) (*terminalWork
 		}
 		workspace := &terminalWorkspace{
 			selector:            d.selector,
-			cacheScopeID:        terminalCacheScopeID(d.accountID),
 			workspaceGeneration: workspaceGeneration,
 			username:            d.username,
 			rootDir:             "/",
@@ -418,9 +415,6 @@ func (d *agentDaemon) ensureWorkspaceLocked(request agentRequest) (*terminalWork
 	}
 	if d.workspace.selector == "" {
 		d.workspace.selector = d.selector
-	}
-	if d.workspace.cacheScopeID == "" && d.accountID != "" {
-		d.workspace.cacheScopeID = terminalCacheScopeID(d.accountID)
 	}
 	if d.workspace.workspaceGeneration == "" {
 		workspaceGeneration, err := newHistoryGeneration()
@@ -520,11 +514,10 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 		return
 	}
 	syncRequest := historySyncRequest{
-		generation:           strings.TrimSpace(request.HistoryGeneration),
-		workspaceGeneration:  strings.TrimSpace(request.WorkspaceGeneration),
-		cacheProtocolVersion: request.CacheProtocolVersion,
-		forceSnapshot:        strings.TrimSpace(request.HistoryReplayMode) == "snapshot",
-		integrityProtocol:    strings.TrimSpace(request.IntegrityProtocol),
+		generation:          strings.TrimSpace(request.HistoryGeneration),
+		workspaceGeneration: strings.TrimSpace(request.WorkspaceGeneration),
+		forceSnapshot:       strings.TrimSpace(request.HistoryReplayMode) == "snapshot",
+		integrityProtocol:   strings.TrimSpace(request.IntegrityProtocol),
 	}
 	base, baseErr := strconv.ParseUint(strings.TrimSpace(request.LocalBaseCursor), 10, 64)
 	end, endErr := strconv.ParseUint(strings.TrimSpace(request.LocalEndCursor), 10, 64)
@@ -535,12 +528,11 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 	}
 	pane, replayIdentity, err := workspace.paneForAttach(request.PaneID, syncRequest)
 	if err != nil {
-		if strings.Contains(err.Error(), "workspace generation") || strings.Contains(err.Error(), "cache protocol") || strings.Contains(err.Error(), "pane not found") {
+		if strings.Contains(err.Error(), "workspace generation") || strings.Contains(err.Error(), "pane not found") {
 			_ = writeAgentControlFrame(conn, map[string]any{
-				"type":                   "workspace-refresh-required",
-				"selector":               workspace.selector,
-				"cache_protocol_version": terminalCacheProtocolVersion,
-				"reason":                 err.Error(),
+				"type":     "workspace-refresh-required",
+				"selector": workspace.selector,
+				"reason":   err.Error(),
 			})
 			return
 		}
@@ -670,7 +662,7 @@ func runAgentRequestClient(socketPath, encodedRequest string) error {
 	return nil
 }
 
-func runAgentAttachClient(socketPath, selector, accountID, paneID string, cols, rows, terminalScrollback, cacheProtocolVersion int, workspaceGeneration, historyGeneration, localBaseCursor, localEndCursor, historyReplayMode, integrityProtocol string) error {
+func runAgentAttachClient(socketPath, selector, accountID, paneID string, cols, rows, terminalScrollback int, workspaceGeneration, historyGeneration, localBaseCursor, localEndCursor, historyReplayMode, integrityProtocol string) error {
 	if strings.TrimSpace(paneID) == "" {
 		return errors.New("pane is required")
 	}
@@ -680,20 +672,19 @@ func runAgentAttachClient(socketPath, selector, accountID, paneID string, cols, 
 	}
 	defer conn.Close()
 	request := agentRequest{
-		Type:                 "attach",
-		Selector:             strings.TrimSpace(selector),
-		AccountID:            strings.TrimSpace(accountID),
-		PaneID:               paneID,
-		Cols:                 cols,
-		Rows:                 rows,
-		TerminalScrollback:   terminalScrollback,
-		CacheProtocolVersion: cacheProtocolVersion,
-		WorkspaceGeneration:  strings.TrimSpace(workspaceGeneration),
-		HistoryGeneration:    strings.TrimSpace(historyGeneration),
-		LocalBaseCursor:      strings.TrimSpace(localBaseCursor),
-		LocalEndCursor:       strings.TrimSpace(localEndCursor),
-		HistoryReplayMode:    strings.TrimSpace(historyReplayMode),
-		IntegrityProtocol:    strings.TrimSpace(integrityProtocol),
+		Type:                "attach",
+		Selector:            strings.TrimSpace(selector),
+		AccountID:           strings.TrimSpace(accountID),
+		PaneID:              paneID,
+		Cols:                cols,
+		Rows:                rows,
+		TerminalScrollback:  terminalScrollback,
+		WorkspaceGeneration: strings.TrimSpace(workspaceGeneration),
+		HistoryGeneration:   strings.TrimSpace(historyGeneration),
+		LocalBaseCursor:     strings.TrimSpace(localBaseCursor),
+		LocalEndCursor:      strings.TrimSpace(localEndCursor),
+		HistoryReplayMode:   strings.TrimSpace(historyReplayMode),
+		IntegrityProtocol:   strings.TrimSpace(integrityProtocol),
 	}
 	data, err := json.Marshal(request)
 	if err != nil {
@@ -739,9 +730,7 @@ func writeAgentHistoryReplay(w io.Writer, identity terminalReplayIdentity, histo
 	if integrity {
 		start["integrity_protocol"] = "fast-v1"
 	}
-	if identity.cacheProtocolVersion == terminalCacheProtocolVersion && identity.cacheScopeID != "" && identity.workspaceGeneration != "" && identity.tabID != "" {
-		start["cache_protocol_version"] = terminalCacheProtocolVersion
-		start["cache_scope_id"] = identity.cacheScopeID
+	if identity.workspaceGeneration != "" && identity.tabID != "" {
 		start["workspace_generation"] = identity.workspaceGeneration
 		start["tab_id"] = identity.tabID
 	}
@@ -774,8 +763,7 @@ func writeAgentHistoryReplay(w io.Writer, identity terminalReplayIdentity, histo
 		"history_generation": history.generation,
 		"history_cursor":     strconv.FormatUint(history.deltaTo, 10),
 	}
-	if identity.cacheProtocolVersion == terminalCacheProtocolVersion && identity.workspaceGeneration != "" && identity.tabID != "" {
-		complete["cache_protocol_version"] = terminalCacheProtocolVersion
+	if identity.workspaceGeneration != "" && identity.tabID != "" {
 		complete["workspace_generation"] = identity.workspaceGeneration
 		complete["tab_id"] = identity.tabID
 	}

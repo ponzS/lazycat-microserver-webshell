@@ -29,7 +29,6 @@ export function createTerminalSessionResourceFactory({
     shellEl.dataset.connection = connect ? "connecting" : "idle";
     shellEl.dataset.renderReady = "false";
     shellEl.dataset.hasPresentedFrame = "false";
-    shellEl.dataset.previewReady = "false";
     shellEl.setAttribute("tabindex", "-1");
 
     const terminalHost = documentObject.createElement("div");
@@ -43,13 +42,6 @@ export function createTerminalSessionResourceFactory({
       term.options.mobilePixelScroll = getMobilePixelScroll() === true;
     }
     term.open(terminalHost);
-
-    const terminalPreview = documentObject.createElement("img");
-    terminalPreview.className = "terminal-cache-preview";
-    terminalPreview.alt = "";
-    terminalPreview.hidden = true;
-    terminalPreview.draggable = false;
-    terminalHost.appendChild(terminalPreview);
 
     const terminalFrameHold = documentObject.createElement("canvas");
     terminalFrameHold.className = "terminal-frame-hold";
@@ -68,7 +60,6 @@ export function createTerminalSessionResourceFactory({
       term,
       terminalFrameHold,
       terminalHost,
-      terminalPreview,
     };
   };
 

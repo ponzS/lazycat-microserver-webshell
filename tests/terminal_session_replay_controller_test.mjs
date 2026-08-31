@@ -60,7 +60,7 @@ test("session replay state owns cursor parsing, connect ranges, and authorizatio
     endCursor: 8n,
     historyGeneration: "history-1",
   };
-  assert.equal(terminalSessionHistoryRangeForConnect(session).source, "cache-v2");
+  assert.equal(terminalSessionHistoryRangeForConnect(session).source, "cache");
   session.historyCacheSnapshot.historyGeneration = "history-old";
   assert.equal(terminalSessionHistoryRangeForConnect(session), null);
 
@@ -157,11 +157,6 @@ test("replay commit finishes state before requesting the only visible full prese
     agentPreparing: true,
     allowGeneratedInputDuringReplay: true,
     appliedHistoryCursor: 8n,
-    cacheV2ReplayActive: false,
-    cacheV2ServerSnapshotPending: false,
-    cacheV2WarmReplayActive: false,
-    cacheV2WarmReplayReady: true,
-    cacheV2WarmReplaySeq: 1,
     closed: false,
     connectionChannel: "unified",
     connectionRetrying: true,
@@ -174,7 +169,7 @@ test("replay commit finishes state before requesting the only visible full prese
     historyStateReady: false,
     id: "pane-1",
     name: "target-1",
-    persistedHistoryCursor: 8n,
+    persistedHistoryCursor: 0n,
     reconnectAttempts: 2,
     replayAuthorization: "identified",
     replayCompletionPending: true,
@@ -195,10 +190,9 @@ test("replay commit finishes state before requesting the only visible full prese
     clearUnifiedRetry: () => events.push("clear-unified-retry"),
     isActivePane: () => true,
     hideStartupError: () => events.push("hide-startup-error"),
-    schedulePreviewCapture: () => events.push("schedule-preview"),
+    flushCache: () => events.push("flush-client-history"),
     setPresentationReady: (_session, ready) => events.push(`presentation-ready:${ready}`),
     ensurePresentation: () => events.push("ensure-final-presentation"),
-    scheduleCacheCompaction: () => events.push("schedule-compaction"),
     flushPendingInput: () => events.push("flush-input"),
   });
 
@@ -210,14 +204,13 @@ test("replay commit finishes state before requesting the only visible full prese
   assert.ok(events.indexOf("commit") < events.indexOf("presentation-ready:false"));
   assert.ok(events.indexOf("end-suppression") < events.indexOf("ensure-final-presentation"));
   assert.equal(events.filter((event) => event === "ensure-final-presentation").length, 1);
+  assert.equal(events.includes("flush-client-history"), false);
 });
 
-test("stale cache commit completion cannot update a replacement replay generation", async () => {
+test("stale client IndexedDB commit cannot update a replacement replay generation", async () => {
   let resolveCommit;
-  const marks = [];
   const session = {
     appliedHistoryCursor: 5n,
-    cacheV2ReplayActive: false,
     closed: false,
     connectionChannel: "fast",
     historyCacheDisabled: false,
@@ -226,7 +219,7 @@ test("stale cache commit completion cannot update a replacement replay generatio
     historyGeneration: "history-1",
     historyProtocolActive: true,
     historyReplayTargetCursor: 5n,
-    name: "target-1",
+    name: "client:target-1",
     persistedHistoryCursor: 1n,
     replayAuthorization: "identified",
     replayController: {
@@ -238,11 +231,9 @@ test("stale cache commit completion cannot update a replacement replay generatio
     shellEl: { dataset: {} },
   };
   const controller = createTerminalSessionReplayController({
-    getActiveName: () => "target-1",
+    getActiveName: () => "client:target-1",
+    isClientTarget: (name) => String(name).startsWith("client:"),
     flushCache: () => new Promise((resolve) => { resolveCommit = resolve; }),
-    usesCacheV2: () => true,
-    withCacheTimeout: (promise) => promise,
-    markRecoveryMetric: (_session, key) => marks.push(key),
   });
 
   assert.equal(controller.finishIfReady(session), true);
@@ -250,6 +241,5 @@ test("stale cache commit completion cannot update a replacement replay generatio
   resolveCommit();
   await Promise.resolve();
   await Promise.resolve();
-  assert.deepEqual(marks, []);
   assert.equal(session.historyCacheReplayCommitPending, true);
 });

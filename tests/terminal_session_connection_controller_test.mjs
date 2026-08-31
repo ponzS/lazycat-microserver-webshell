@@ -97,13 +97,11 @@ test("session connection lifecycle rejects stale connect and resume timer callba
   assert.equal(closes.length, 1);
 });
 
-test("warm replay extends attach readiness without treating parsed history as a visible frame", () => {
+test("attach readiness timeout is owned only by replay completion", () => {
   const clock = createClock();
   const closes = [];
   const socket = createSocket(1);
   const session = {
-    cacheV2WarmReplayActive: true,
-    cacheV2WarmReplayReady: false,
     closed: false,
     connectionChannel: "unified",
     id: "pane-1",
@@ -120,11 +118,6 @@ test("warm replay extends attach readiness without treating parsed history as a 
 
   lifecycle.startAttachReadyTimer(session, socket);
   clock.runTimeouts();
-  assert.equal(closes.length, 0);
-  assert.equal(clock.timeoutCount(), 1);
-
-  session.cacheV2WarmReplayReady = true;
-  clock.runTimeouts();
   assert.equal(closes.length, 1);
   assert.match(closes[0][2], /attach timed out/);
 });
@@ -136,8 +129,6 @@ test("socket health monitor closes only the current pane after a real timeout", 
   const sibling = { socket: createSocket(1), lastSocketHealthAt: 1000 };
   const session = {
     agentPreparing: false,
-    cacheV2WarmReplayActive: false,
-    cacheV2WarmReplayReady: false,
     connectionChannel: "unified",
     id: "pane-1",
     name: "target-1",

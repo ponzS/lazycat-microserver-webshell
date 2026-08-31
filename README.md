@@ -23,7 +23,7 @@ LightOS WebShell 的目标是为懒猫微服提供一个开箱即用的网页终
 - 使用实例内的持久 agent 管理终端工作区，刷新页面、重新打开页面或短暂断网后可重新连接到已有 tab 和 pane。
 - 服务升级后优先复用兼容的旧 agent，尽量保留正在运行的终端会话；协议不兼容时会明确提示。
 - 支持终端输出历史回放，减少重连后的上下文丢失。
-- LightOS 实例端使用 PTY 原始字节范围游标同步历史；容器页面在 workspace HTTP 响应确认账号、实例、workspace、tab 和 pane 身份后，从 Cache API v2 使用 8 块滚动预读恢复对应 history generation。本地历史和恢复期间排队的实时字节都会完整解析 ANSI、光标、模式、Kitty Graphics 和终端响应，但不提交中间 Canvas；追平服务端 `endCursor` 后只执行一次最终 full render，再切回普通实时渲染。第一批字节不是首帧。
+- LightOS 实例端使用 PTY 原始字节范围游标同步历史。普通容器打开 pane logical stream 时，在同一 Unified WebSocket 上直接接收 persistent agent 的权威 `snapshot + live`；浏览器不读取本地历史、不发送本地 cursor range，也不使用 Cache API。snapshot 和恢复期间的实时字节会完整解析 ANSI、光标、模式、Kitty Graphics 和终端响应，但不提交中间 Canvas；服务端 replay complete、队列追平并完成最终 full render 后才显示。第一批字节不是首帧。
 - 窗口尺寸、字号、字体、主题变化以及跨设备单击恢复尺寸时，只有确认终端几何确实变化才保留当前旧帧；后台 Ghostty 可继续渲染，当前尺寸的 full render 成功后一次性替换旧帧，不重新回放历史，也不等待 PTY 输出停顿。切换标签前会保留最后有效帧，激活后用当前状态的 full render 替换，避免黑屏。
 - Ghostty 每帧先完整物化当前可见 viewport，再原子提交 canvas；任一活动屏幕或 scrollback 行临时不可用时保留上一帧并自动重试，不把缺失行绘制成黑区。
 - 支持终端活动检测、自动标签命名、忙闲状态和当前工作目录显示。
@@ -33,7 +33,7 @@ LightOS WebShell 的目标是为懒猫微服提供一个开箱即用的网页终
 
 - 支持多标签页、上下/左右分屏、窗格关闭、标签重命名和标签排序。
 - 支持标签总览，可快速查看、切换、新建、关闭和拖拽排序标签。
-- 标签总览会按完整 cache-v2 身份读取未激活 pane 已提交的缩略图，因此不需要先逐个打开 tab 才能显示历史画面；缩略图不参与终端启动或同步状态。
+- 标签总览只复制已经完成提交的 live Canvas，或 identity 仍有效的 last-known-good hold frame；从未呈现的 pane 使用空缩略图，不触发历史回放或浏览器缓存恢复。
 - 支持终端内容搜索、结果跳转、全选缓冲区、复制选区、粘贴和链接识别/复制。
 - 支持上下文菜单和键盘快捷键操作。
 
@@ -127,9 +127,9 @@ node --test tests/*.mjs
 
 - 后端使用 Go 实现，Web UI 通过 `/=exec://8080` 由 LPK 启动。
 - 终端会话通过实例内 persistent agent 管理，并通过 WebSocket 转发到浏览器。普通容器的单条 Unified transport 复用只发生在 Provider 中转层；persistent agent 不需要修改，仍持续维护所有 PTY、任务、历史和 cursor。所有 logical pane 都允许普通输入，Provider 按 pane identity、stream generation 和 channel generation 校验，并根据活动优先级公平调度。`client:` PC target 仍由最多三条独立直连兼容。
-- 实例端终端历史由 persistent agent 作为可信数据源维护。容器浏览器使用 Cache API v2 在后台恢复字节，Ghostty 通过复用的 WASM 输入缓冲区批量解析历史，不绘制中间帧；服务端 replay complete、实时队列追平并完成最终 full render 后才显示 live canvas。新增 Cache 字节的持久化继续在后台完成，不阻塞本次 Canvas 显示。`client:` PC target 继续使用 IndexedDB 与原完整历史回放协议，暂不启用容器 cache-v2 warm replay。
-- HTML 入口使用 `/assets/<lpk-version>-<content-revision>/` 静态资源路径。即使误用相同 LPK 版本重新发布，只要二进制或 runtime 内容变化，JS/CSS/module/WASM URL 和 Service Worker cache 名称也会变化；内容寻址资源可长期缓存，旧 `/static/` 仅保留兼容。
-- PWA Service Worker 对当前 LPK 版本的 immutable 静态 app shell 使用 cache-first，版本 URL 变化负责主动更新；缓存未命中才联网，终端 API、WebSocket 和 Cache API 虚拟记录始终绕过 Service Worker。
+- 实例端终端历史由 persistent agent 作为可信数据源维护。普通容器只走服务端权威 snapshot/live，Ghostty 不绘制回放中间帧；`client:` PC target 继续使用隔离的 IndexedDB 与原完整历史协议，直到该后端完成 Unified 协议升级。
+- HTML 入口使用 `/assets/<lpk-version>-<content-revision>/` 静态资源路径。即使误用相同 LPK 版本重新发布，只要二进制或 runtime 内容变化，JS/CSS/module/WASM URL 也会变化；内容寻址资源可通过 HTTP immutable 缓存长期复用，旧 `/static/` 仅保留兼容。
+- 页面不注册 Service Worker、不提供 Web App Manifest，也不维护 PWA app-shell。历史版本遗留的本 WebShell Worker 和已知缓存会在启动后精确清理，不参与终端启动、离线 fallback 或资源调度。
 - 终端渲染使用项目内随包分发的 Ghostty Web 运行时资源。
 - 本项目不使用 `tmux`，也不使用 `xterm.js`。
 

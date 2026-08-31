@@ -27,7 +27,7 @@ controller 只持有模块级 `disposed` fence。session、mouse tracking、dial
 
 ## 测试与回归
 
-行为测试为 `terminal_policy_controller_test.mjs`，静态边界和 Service Worker 契约位于 `runtime_shortcuts_test.go`。最小回归：运行 `node --test tests/terminal_policy_controller_test.mjs` 和对应 Go runtime guard，确认精确入口匹配、Claude 参数、底部滚动及 dispose 门禁均通过。
+行为测试为 `terminal_policy_controller_test.mjs`，静态边界和版本化静态资源契约位于 `runtime_shortcuts_test.go`。最小回归：运行 `node --test tests/terminal_policy_controller_test.mjs` 和对应 Go runtime guard，确认精确入口匹配、Claude 参数、底部滚动及 dispose 门禁均通过。
 
 ## 不可破坏边界
 

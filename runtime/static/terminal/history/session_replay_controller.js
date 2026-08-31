@@ -19,11 +19,7 @@ export function createTerminalSessionReplayController({
   isClientTarget = () => false,
   hasQueuedOutput = () => false,
   flushCache = () => Promise.resolve(),
-  usesCacheV2 = () => false,
-  withCacheTimeout = (promise) => promise,
   disableCache = noop,
-  markRecoveryMetric = noop,
-  scheduleCacheCompaction = noop,
   endRenderSuppression = noop,
   clearOutputOverload = noop,
   clearAttachReadyTimer = noop,
@@ -34,7 +30,6 @@ export function createTerminalSessionReplayController({
   isActivePane = () => false,
   hideStartupError = noop,
   notifyDirectReplayReady = noop,
-  schedulePreviewCapture = noop,
   setPresentationReady = noop,
   ensurePresentation = noop,
   flushPendingInput = noop,
@@ -43,7 +38,6 @@ export function createTerminalSessionReplayController({
   isMeasurable = () => false,
   canvasMatchesExpectedSize = () => false,
   recordEvent = noop,
-  cacheCommitTimeoutMs = 3000,
   replayFailureLimit = 3,
   checkpointDelayMs = 48,
   lifecycle = createTerminalSessionReplayLifecycle({
@@ -64,7 +58,6 @@ export function createTerminalSessionReplayController({
       || !session
       || !terminalReplayCommitIsPending(session)
       || hasQueuedOutput(session)
-      || session.cacheV2ReplayActive
       || !terminalReplayIsAuthorized(session)
       || session.closed
       || session.name !== getActiveName()
@@ -73,7 +66,8 @@ export function createTerminalSessionReplayController({
       return false;
     }
     if (
-      session.historyProtocolActive
+      isClientTarget(session.name)
+      && session.historyProtocolActive
       && !session.historyCacheDisabled
       && session.persistedHistoryCursor < session.historyReplayTargetCursor
     ) {
@@ -83,25 +77,17 @@ export function createTerminalSessionReplayController({
         session.historyCacheReplayCommitSeq = commitSeq;
         const historyGeneration = session.historyGeneration;
         const replayTargetCursor = session.historyReplayTargetCursor;
-        const commit = flushCache(session);
-        const waitForCommit = usesCacheV2(session)
-          ? withCacheTimeout(commit, cacheCommitTimeoutMs, "Terminal cache commit timed out.")
-          : commit;
-        Promise.resolve(waitForCommit).catch((error) => disableCache(session, error)).finally(() => {
+        Promise.resolve(flushCache(session)).catch((error) => disableCache(session, error)).finally(() => {
           if (
             session.historyCacheReplayCommitSeq === commitSeq
             && !session.closed
             && session.historyGeneration === historyGeneration
             && session.historyReplayTargetCursor === replayTargetCursor
           ) {
-            markRecoveryMetric(session, "cacheCommitCompleteAt");
-            scheduleCacheCompaction(session);
             session.historyCacheReplayCommitPending = false;
           }
         });
       }
-    } else {
-      markRecoveryMetric(session, "cacheCommitCompleteAt");
     }
     session.replayCompletionPending = false;
     if (session.replayController?.phase === "awaiting_commit") {
@@ -120,13 +106,6 @@ export function createTerminalSessionReplayController({
     setTerminalReplayAuthorization(session, false);
     session.historyStateReady = true;
     session.historyCacheSnapshot = null;
-    session.cacheV2WarmReplaySeq = Number(session.cacheV2WarmReplaySeq || 0) + 1;
-    session.cacheV2WarmReplayActive = false;
-    session.cacheV2WarmReplayReady = false;
-    session.cacheV2WarmReplayPromise = null;
-    session.cacheV2WarmReplaySnapshot = null;
-    session.cacheV2ServerSnapshotPending = false;
-    session.cacheV2ServerSnapshotStartCursor = 0n;
     session.agentPreparing = false;
     clearOutputOverload(session);
     session.allowGeneratedInputDuringReplay = false;
@@ -147,15 +126,12 @@ export function createTerminalSessionReplayController({
     }
     if (session.connectionChannel === "fast") {
       notifyDirectReplayReady(session, Number(session.connectionLeaseID || 0));
-    } else if (session.connectionChannel === "unified") {
-      schedulePreviewCapture(session, { immediate: true });
     }
     setPresentationReady(session, false);
     ensurePresentation(session, {
       reason: "history_replay_complete",
       forceHistory: true,
     });
-    scheduleCacheCompaction(session);
     flushPendingInput(session);
     if (isClientTarget(getActiveName())) {
       syncConnectionDemands({ reason: "replay_ready" });
@@ -242,7 +218,9 @@ export function createTerminalSessionReplayController({
     isRetryPaused: terminalReplayRetryIsPaused,
     noteFailure,
     parseCursor: parseTerminalHistoryCursor,
-    rangeForConnect: terminalSessionHistoryRangeForConnect,
+    rangeForConnect: (session) => (
+      isClientTarget(session?.name) ? terminalSessionHistoryRangeForConnect(session) : null
+    ),
     resumeRetry,
     schedulePresentationCheckpoint: lifecycle.scheduleCheckpoint,
     setAuthorization: setTerminalReplayAuthorization,

@@ -467,17 +467,15 @@ func TestPersistentAgentNoticeIsConsumedOnce(t *testing.T) {
 func TestPersistentAgentAttachCommandArgsIncludeHistoryRange(t *testing.T) {
 	scope := normalizeAgentScope("demo@owner", "account-a")
 	args := persistentAgentAttachCommandArgs(scope, "pane-2", 132, 43, 22000, historySyncRequest{
-		cacheProtocolVersion: terminalCacheProtocolVersion,
-		workspaceGeneration:  "workspace-one",
-		generation:           "generation-one",
-		localBase:            12,
-		localEnd:             34,
-		hasRange:             true,
-		forceSnapshot:        true,
+		workspaceGeneration: "workspace-one",
+		generation:          "generation-one",
+		localBase:           12,
+		localEnd:            34,
+		hasRange:            true,
+		forceSnapshot:       true,
 	})
 	joined := strings.Join(args, "\x00")
 	for _, want := range []string{
-		"--cache-protocol-version\x002",
 		"--workspace-generation\x00workspace-one",
 		"--history-generation\x00generation-one",
 		"--local-base-cursor\x0012",

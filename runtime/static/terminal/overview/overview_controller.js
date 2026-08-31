@@ -1,6 +1,5 @@
 import { createTerminalOverviewLifecycle } from "./overview_lifecycle.js";
 import { createTerminalOverviewView } from "./overview_view.js";
-import { TerminalOverviewPreviewController } from "./terminal_overview_preview.js";
 
 const noop = () => {};
 
@@ -8,14 +7,8 @@ export function createTerminalOverviewController({
   documentObject = globalThis.document,
   windowObject = globalThis.window,
   terminalArea = documentObject?.getElementById?.("terminalArea"),
-  cache = null,
-  canUseCache = () => false,
-  cacheIdentityFor = () => null,
-  loadCacheManifest = async (identity) => cache?.loadManifest?.(identity) || null,
-  previewController = null,
   view = createTerminalOverviewView({ documentObject, windowObject, terminalArea }),
   lifecycleFactory = createTerminalOverviewLifecycle,
-  getTabs = () => [],
   getOrderedTabs = () => [],
   getActiveTabId = () => "",
   getActiveName = () => "",
@@ -31,7 +24,6 @@ export function createTerminalOverviewController({
   restoreActiveTab = async () => {},
   showToast = noop,
   measureTask = (_name, task) => task(),
-  consoleObject = globalThis.console,
 } = {}) {
   const mobileOverviewSwipeEdgeWidth = 24;
   const mobileOverviewSwipeAxisThreshold = 12;
@@ -46,9 +38,6 @@ export function createTerminalOverviewController({
 
   let started = false;
   let disposed = false;
-  let tabOverviewCachePreparationScheduled = false;
-  let tabOverviewCachePreparationHandle = 0;
-  let tabOverviewCachePreparationKind = "";
   let tabOverviewRenderFrame = 0;
   let tabOverviewFocusFrame = 0;
   let tabOverviewDragState = null;
@@ -59,7 +48,6 @@ export function createTerminalOverviewController({
   const ownedFrames = new Set();
   const tabOverviewReorderAnimationTimers = new Map();
 
-  const tabsSnapshot = () => Array.from(getTabs?.() || []);
   const orderedTabsSnapshot = () => Array.from(getOrderedTabs?.() || []);
   const hasTab = (tabId) => orderedTabsSnapshot().some((tab) => tab?.id === tabId);
   const now = () => windowObject?.performance?.now?.() ?? globalThis.performance?.now?.() ?? Date.now();
@@ -89,112 +77,11 @@ export function createTerminalOverviewController({
     windowObject?.clearTimeout?.(frame);
   };
 
-  const loadPaneTabOverviewPreviewManifest = async (pane) => {
-    const historyGeneration = String(pane?.historyGeneration || "").trim();
-    if (!canUseCache(pane)) {
-      return null;
-    }
-    // Hidden panes may not have attached yet. Their pane-level cache identity
-    // is already scoped by account, selector, workspace, tab and pane; once a
-    // history generation is known, require it strictly.
-    const expected = cacheIdentityFor(pane, historyGeneration);
-    if (!expected) {
-      return null;
-    }
-    const snapshot = await loadCacheManifest(expected);
-    if (
-      !snapshot
-      || (historyGeneration && snapshot.historyGeneration !== historyGeneration)
-      || !cache?.identityMatches?.(expected, snapshot, { requireHistory: Boolean(historyGeneration) })
-    ) {
-      return null;
-    }
-    return snapshot;
-  };
-
-  const overviewPreviewController = previewController || new TerminalOverviewPreviewController({
-    cache,
-    canUse: canUseCache,
-    identityFor: cacheIdentityFor,
-    loadManifest: loadPaneTabOverviewPreviewManifest,
-    onReady: () => scheduleTabOverviewRender(),
-    onError: (pane, error) => {
-      consoleObject?.warn?.("[terminal-cache-v2] overview preview load failed", {
-        name: pane?.name,
-        pane: pane?.id,
-        error: error?.message || String(error),
-      });
-    },
-  });
-
-  const sessionCacheV2OverviewPreviewMatches = (pane, prepared) => (
-    overviewPreviewController.matches?.(pane, prepared) === true
-  );
-
-  const preparePaneTabOverviewPreview = (pane) => overviewPreviewController.prepare?.(pane);
-
-  const prepareTabOverviewCachePreviews = (tab) => {
-    const activeTabId = getActiveTabId();
-    for (const pane of tab?.panes?.values?.() || []) {
-      // Background tabs must use an identity-checked cached image. A hidden
-      // live canvas may be stale, detached, or never have presented a frame.
-      if (pane.tabId !== activeTabId || !pane.renderReady || !pane.hasPresentedFrame) {
-        preparePaneTabOverviewPreview(pane);
-      }
-    }
-  };
-
-  const cancelWorkspaceTabOverviewCachePreviews = () => {
-    if (!tabOverviewCachePreparationScheduled) {
-      return;
-    }
-    if (tabOverviewCachePreparationKind === "idle" && typeof windowObject?.cancelIdleCallback === "function") {
-      windowObject.cancelIdleCallback(tabOverviewCachePreparationHandle);
-    } else if (tabOverviewCachePreparationHandle) {
-      windowObject?.clearTimeout?.(tabOverviewCachePreparationHandle);
-    }
-    tabOverviewCachePreparationScheduled = false;
-    tabOverviewCachePreparationHandle = 0;
-    tabOverviewCachePreparationKind = "";
-  };
-
-  const scheduleWorkspaceTabOverviewCachePreviews = () => {
-    if (tabOverviewCachePreparationScheduled || disposed) {
-      return;
-    }
-    tabOverviewCachePreparationScheduled = true;
-    const prepare = () => {
-      tabOverviewCachePreparationScheduled = false;
-      tabOverviewCachePreparationHandle = 0;
-      tabOverviewCachePreparationKind = "";
-      if (disposed) {
-        return;
-      }
-      for (const tab of tabsSnapshot()) {
-        prepareTabOverviewCachePreviews(tab);
-      }
-    };
-    if (typeof windowObject?.requestIdleCallback === "function") {
-      tabOverviewCachePreparationKind = "idle";
-      tabOverviewCachePreparationHandle = windowObject.requestIdleCallback(prepare, { timeout: 1500 });
-      return;
-    }
-    tabOverviewCachePreparationKind = "timeout";
-    tabOverviewCachePreparationHandle = windowObject?.setTimeout?.(prepare, 500) || 0;
-  };
-
   const paneOverviewSource = (pane) => {
-    const activeTabId = getActiveTabId();
     const liveCanvas = pane?.term?.canvas || pane?.term?.element?.querySelector?.("canvas");
     const liveFrame = pane?.renderReady && pane?.hasPresentedFrame ? liveCanvas : null;
     const heldFrame = isFrameHoldCurrent(pane) ? pane.terminalFrameHold : null;
-    const prepared = overviewPreviewController.get?.(pane) || pane?.cacheV2OverviewPreview;
-    const cachedPreview = sessionCacheV2OverviewPreviewMatches(pane, prepared)
-      ? prepared.image
-      : null;
-    return pane?.tabId === activeTabId
-      ? liveFrame || cachedPreview || heldFrame
-      : cachedPreview || heldFrame || (!canUseCache(pane) ? liveFrame : null);
+    return liveFrame || heldFrame;
   };
 
   const renderTabOverview = () => measureTask("tab overview render", () => {
@@ -212,14 +99,10 @@ export function createTerminalOverviewController({
     }) || [];
     for (const item of previewItems) {
       view.drawPreview?.(item.canvas, item.tab, paneOverviewSource);
-      prepareTabOverviewCachePreviews(item.tab);
     }
   });
 
   function scheduleTabOverviewRender() {
-    // Keep cached previews warm while closed so opening the overview never
-    // turns a background pane into a terminal replay or presentation gate.
-    scheduleWorkspaceTabOverviewCachePreviews();
     if (disposed || !isTabOverviewOpen() || tabOverviewRenderFrame) {
       return;
     }
@@ -913,9 +796,6 @@ export function createTerminalOverviewController({
   });
 
   return Object.freeze({
-    clearSessionPreview(session) {
-      overviewPreviewController.clear?.(session);
-    },
     close: closeTabOverview,
     consumeHistoryBack: openTabOverviewFromHistoryBack,
     dispose() {
@@ -925,7 +805,6 @@ export function createTerminalOverviewController({
       disposed = true;
       finishTabOverviewDrag({ cancel: true });
       stopTabOverviewDragTracking();
-      cancelWorkspaceTabOverviewCachePreviews();
       if (tabOverviewRenderFrame) {
         cancelFrame(tabOverviewRenderFrame);
         tabOverviewRenderFrame = 0;
@@ -941,11 +820,6 @@ export function createTerminalOverviewController({
       resetMobileOverviewEdgeSwipe();
       lifecycle.dispose?.();
       view.setOpen?.(false);
-      for (const tab of tabsSnapshot()) {
-        for (const pane of tab?.panes?.values?.() || []) {
-          overviewPreviewController.clear?.(pane);
-        }
-      }
     },
     isOpen: isTabOverviewOpen,
     open: openTabOverview,
@@ -957,7 +831,6 @@ export function createTerminalOverviewController({
       started = true;
       lifecycle.start?.();
       ensureMobileOverviewHistoryGuard();
-      scheduleWorkspaceTabOverviewCachePreviews();
     },
     updateWorkspaceLocation,
   });

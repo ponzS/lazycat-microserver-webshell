@@ -216,12 +216,10 @@ const createSession = (documentObject) => {
   shellEl.appendChild(terminalHost);
   const canvas = new FakeElement(documentObject, "terminal-canvas");
   const textarea = new FakeElement(documentObject, "terminal-textarea");
-  const terminalPreview = new FakeElement(documentObject, "terminal-cache-preview");
   const terminalFrameHold = new FakeElement(documentObject, "terminal-frame-hold");
   const compositionPreview = new FakeElement(documentObject, "terminal-composition-preview");
   terminalHost.appendChild(canvas);
   terminalHost.appendChild(textarea);
-  terminalHost.appendChild(terminalPreview);
   terminalHost.appendChild(terminalFrameHold);
   terminalHost.appendChild(compositionPreview);
 
@@ -260,7 +258,6 @@ const createSession = (documentObject) => {
     closed: false,
     shellEl,
     terminalHost,
-    terminalPreview,
     terminalFrameHold,
     compositionPreview,
     term,
@@ -401,7 +398,6 @@ test("IME install is idempotent and owns textarea geometry and host cleanup", ()
   assert.equal(harness.cleanups.length, 1);
   assert.equal(harness.calls.filter((call) => call === "install-keys").length, 1);
   assert.equal(extra.removed, true);
-  assert.equal(harness.session.terminalHost.childNodes.includes(harness.session.terminalPreview), true);
   assert.equal(harness.session.terminalHost.childNodes.includes(harness.session.terminalFrameHold), true);
   assert.equal(harness.session.terminalHost.childNodes.includes(harness.session.compositionPreview), true);
   assert.equal(harness.session.term.textarea.attributes.get("rows"), "1");

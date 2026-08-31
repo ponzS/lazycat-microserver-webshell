@@ -127,14 +127,6 @@ export function createTerminalSessionConnectionLifecycle({
       if (!isSocketOpen(currentSocket)) {
         return;
       }
-      if (
-        session.connectionChannel === "unified"
-        && session.cacheV2WarmReplayActive
-        && !session.cacheV2WarmReplayReady
-      ) {
-        markSocketHealth(session, currentSocket);
-        return;
-      }
       const lastHealth = Number(session.lastSocketHealthAt || 0);
       const healthTimeout = session.agentPreparing ? agentPrepareTimeoutMs : healthTimeoutMs;
       if (lastHealth > 0 && now() - lastHealth > healthTimeout) {
@@ -189,14 +181,6 @@ export function createTerminalSessionConnectionLifecycle({
     session.attachReadyTimer = windowObject?.setTimeout?.(() => {
       session.attachReadyTimer = 0;
       if (disposed || session.socket !== currentSocket || isReplayCommitted(session)) {
-        return;
-      }
-      if (
-        session.connectionChannel === "unified"
-        && session.cacheV2WarmReplayActive
-        && !session.cacheV2WarmReplayReady
-      ) {
-        startAttachReadyTimer(session, currentSocket, timeoutMs);
         return;
       }
       closeSocketForReconnect(

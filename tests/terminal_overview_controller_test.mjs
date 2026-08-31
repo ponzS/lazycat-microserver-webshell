@@ -131,24 +131,6 @@ const createLifecycleHarness = () => {
   };
 };
 
-const createPreviewHarness = () => {
-  const prepared = [];
-  const cleared = [];
-  return {
-    cleared,
-    prepared,
-    controller: {
-      clear(pane) { cleared.push(pane.id); },
-      get() { return null; },
-      matches() { return false; },
-      prepare(pane) {
-        prepared.push(pane.id);
-        return Promise.resolve(null);
-      },
-    },
-  };
-};
-
 const createTabs = () => {
   const paneA = { id: "pane-a", tabId: "tab-a", renderReady: true, hasPresentedFrame: true };
   const paneB = { id: "pane-b", tabId: "tab-b", renderReady: false, hasPresentedFrame: false };
@@ -157,20 +139,17 @@ const createTabs = () => {
   return { paneA, paneB, tabA, tabB, tabs: new Map([[tabA.id, tabA], [tabB.id, tabB]]) };
 };
 
-test("overview controller owns rendering, preview preparation and cleanup lifecycle", async () => {
+test("overview controller renders live or held frames without storage preparation", async () => {
   const windowHarness = createWindowHarness();
   const viewHarness = createViewHarness();
   const lifecycle = createLifecycleHarness();
-  const preview = createPreviewHarness();
-  const { tabs, paneA, paneB } = createTabs();
+  const { tabs } = createTabs();
   const actions = [];
   const controller = createTerminalOverviewController({
     documentObject: { documentElement: {}, body: {} },
     windowObject: windowHarness.windowObject,
     view: viewHarness.view,
     lifecycleFactory: lifecycle.factory.bind(lifecycle),
-    previewController: preview.controller,
-    getTabs: () => tabs.values(),
     getOrderedTabs: () => [...tabs.values()],
     getActiveTabId: () => "tab-a",
     prepareOpen: () => actions.push("prepare-open"),
@@ -182,9 +161,7 @@ test("overview controller owns rendering, preview preparation and cleanup lifecy
   controller.start();
   controller.start();
   assert.equal(lifecycle.starts, 1);
-  assert.equal(windowHarness.idle.size, 1);
-  windowHarness.runIdle();
-  assert.deepEqual(preview.prepared, [paneB.id]);
+  assert.equal(windowHarness.idle.size, 0);
 
   controller.open();
   assert.equal(controller.isOpen(), true);
@@ -216,7 +193,6 @@ test("overview controller owns rendering, preview preparation and cleanup lifecy
   controller.dispose();
   controller.dispose();
   assert.equal(lifecycle.disposes, 1);
-  assert.deepEqual(preview.cleared.sort(), [paneA.id, paneB.id]);
   assert.equal(windowHarness.idle.size, 0);
   assert.equal(controller.isOpen(), false);
 });
@@ -225,7 +201,6 @@ test("overview controller owns mobile history guard and browser-back opening", (
   const windowHarness = createWindowHarness();
   const viewHarness = createViewHarness();
   const lifecycle = createLifecycleHarness();
-  const preview = createPreviewHarness();
   const { tabs } = createTabs();
   let blocked = false;
   const controller = createTerminalOverviewController({
@@ -233,8 +208,6 @@ test("overview controller owns mobile history guard and browser-back opening", (
     windowObject: windowHarness.windowObject,
     view: viewHarness.view,
     lifecycleFactory: lifecycle.factory.bind(lifecycle),
-    previewController: preview.controller,
-    getTabs: () => tabs.values(),
     getOrderedTabs: () => [...tabs.values()],
     getActiveTabId: () => "tab-a",
     getActiveName: () => "demo",
@@ -271,15 +244,12 @@ test("overview controller opens from both mobile viewport edges", () => {
     const windowHarness = createWindowHarness();
     const viewHarness = createViewHarness();
     const lifecycle = createLifecycleHarness();
-    const preview = createPreviewHarness();
     const { tabs } = createTabs();
     const controller = createTerminalOverviewController({
       documentObject: { documentElement: { clientWidth: 390 }, body: {} },
       windowObject: windowHarness.windowObject,
       view: viewHarness.view,
       lifecycleFactory: lifecycle.factory.bind(lifecycle),
-      previewController: preview.controller,
-      getTabs: () => tabs.values(),
       getOrderedTabs: () => [...tabs.values()],
       getActiveTabId: () => "tab-a",
       isMobileLayout: () => true,

@@ -34,7 +34,7 @@ export const terminalSessionHistoryRangeForConnect = (session) => {
     generation: snapshotGeneration,
     baseCursor: snapshot.baseCursor,
     endCursor: snapshot.endCursor,
-    source: snapshot.historyGeneration ? "cache-v2" : "cache",
+    source: "cache",
   };
 };
 

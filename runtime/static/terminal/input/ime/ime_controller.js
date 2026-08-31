@@ -83,7 +83,6 @@ export function createTerminalIMEController({
     const keep = new Set([
       session.term?.canvas,
       session.term?.textarea,
-      session.terminalPreview,
       session.terminalFrameHold,
       session.compositionPreview,
     ].filter(Boolean));

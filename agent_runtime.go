@@ -1141,9 +1141,6 @@ func persistentAgentAttachCommandArgs(scope agentScope, paneID string, cols, row
 		"--terminal-scrollback",
 		strconv.Itoa(terminalScrollback),
 	}
-	if syncRequest.cacheProtocolVersion > 0 {
-		commandArgs = append(commandArgs, "--cache-protocol-version", strconv.Itoa(syncRequest.cacheProtocolVersion))
-	}
 	if syncRequest.workspaceGeneration != "" {
 		commandArgs = append(commandArgs, "--workspace-generation", syncRequest.workspaceGeneration)
 	}
