@@ -2,6 +2,19 @@ import { decodeFastBinaryFrame } from "./terminal_fast_integrity.js";
 
 const noop = () => {};
 
+const isNetworkFailureReason = (reason) => {
+  const normalized = String(reason || "").toLowerCase();
+  return normalized.includes("network")
+    || normalized.includes("websocket")
+    || normalized.includes("transport")
+    || normalized.includes("physical")
+    || normalized.includes("connection timed out")
+    || normalized.includes("connection reset")
+    || normalized.includes("connection aborted")
+    || normalized.includes("queue transport")
+    || normalized.includes("eof");
+};
+
 export function createTerminalSessionProtocolController({
   documentObject = globalThis.document,
   navigatorObject = globalThis.navigator,
@@ -991,6 +1004,9 @@ export function createTerminalSessionProtocolController({
       if (!intentionalTransportClose) {
         appendDebugWarning("终端 WebSocket 已断开", `${terminalLocationDescription(session)}, code=${event.code}, ${event.reason || "无原因"}`);
       }
+      const sharedPhysicalTransportLost = !isClientInstanceName(session.name)
+        && currentMultiplexedConnection
+        && terminalUnifiedTransport.isClosedConnection(currentMultiplexedConnection);
       const nextConnectionState = terminalReplay.isRetryPaused(session)
         ? "error"
         : intentionallyParked
@@ -999,10 +1015,11 @@ export function createTerminalSessionProtocolController({
           ? "closed"
           : schedulerCloseReason === "network_offline"
           ? "offline"
+          : sharedPhysicalTransportLost
+            || isNetworkFailureReason(schedulerCloseReason)
+            || isNetworkFailureReason(event.reason)
+          ? "network-error"
           : "reconnecting";
-      const sharedPhysicalTransportLost = !isClientInstanceName(session.name)
-        && currentMultiplexedConnection
-        && terminalUnifiedTransport.isClosedConnection(currentMultiplexedConnection);
       const retryableTransportClose = !intentionallyClosed && (usesMultiplexedTransport
         || isRetryableTerminalTransportError(schedulerCloseReason)
         || isRetryableTerminalTransportError(event.reason));
@@ -1083,7 +1100,7 @@ export function createTerminalSessionProtocolController({
       });
       appendDebugError("终端 WebSocket 错误", `${session.name}/${session.id}: ${event.message || "连接失败"}`);
       session.connectionRetrying = true;
-      session.shellEl.dataset.connection = "reconnecting";
+      session.shellEl.dataset.connection = "network-error";
       terminalOutput.flush(session);
       if (!isRetryableTerminalTransportError(event.message || "WebSocket connection failed.") && !session.startupErrorShown) {
         session.startupErrorShown = true;

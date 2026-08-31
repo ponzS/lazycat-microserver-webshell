@@ -237,3 +237,43 @@ test("terminal diagnostic timeline stays module-owned instead of mutating the se
   assert.equal(Object.hasOwn(session, "terminalEventTimeline"), false);
   controller.dispose();
 });
+
+test("runtime diagnostic timeline carries resume generation and redacts sensitive details", () => {
+  const harness = createHarness();
+  harness.storageValues.set("webshell.debugMode", "false");
+  harness.storageValues.set("webshell.debugLog", "false");
+  const controller = createDiagnosticsController({
+    ...harness,
+    startupDiagnostics: createStartupDiagnostics({ now: () => 0 }),
+    now: () => 30,
+  });
+  const session = {
+    id: "pane-1",
+    name: "demo",
+    connectionChannelGeneration: 2,
+    terminalReplayGeneration: 3,
+    historyGeneration: "history-1",
+    receivedHistoryCursor: 10n,
+    appliedHistoryCursor: 10n,
+    presentedHistoryCursor: 10n,
+  };
+
+  controller.recordRuntimeEvent("resume_signal", {
+    source: "focus",
+    resumeGeneration: 7,
+    token: "must-not-be-retained",
+  });
+  controller.recordTerminalSessionEvent(session, "presentation_commit_complete");
+
+  assert.deepEqual(controller.runtimeTimelineSnapshot(), [{
+    at: 30,
+    type: "resume_signal",
+    source: "focus",
+    resumeGeneration: 7,
+    token: "[redacted]",
+  }]);
+  assert.equal(controller.runtimeTimelineSnapshot()[0].token, "[redacted]");
+  assert.equal(controller.runtimeTimelineSnapshot()[0].payload, undefined);
+  assert.equal(Object.hasOwn(session, "terminalEventTimeline"), false);
+  controller.dispose();
+});

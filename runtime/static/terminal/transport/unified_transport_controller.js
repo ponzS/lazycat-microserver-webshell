@@ -3,6 +3,19 @@ import { createTerminalUnifiedHealthWatchdog } from "./terminal_unified_health.j
 
 const noop = () => {};
 
+const isNetworkFailureReason = (reason) => {
+  const normalized = String(reason || "").toLowerCase();
+  return normalized.includes("network")
+    || normalized.includes("websocket")
+    || normalized.includes("transport")
+    || normalized.includes("physical")
+    || normalized.includes("connection timed out")
+    || normalized.includes("connection reset")
+    || normalized.includes("connection aborted")
+    || normalized.includes("queue transport")
+    || normalized.includes("eof");
+};
+
 export function createTerminalUnifiedTransportController({
   windowObject = globalThis.window,
   createConnection = createTerminalUnifiedConnection,
@@ -26,6 +39,7 @@ export function createTerminalUnifiedTransportController({
   socketOpen = 1,
   socketClosing = 2,
   socketClosed = 3,
+  closeFenceMs = 500,
   healthCheckIntervalMs = 4 * 1000,
   pongTimeoutMs = 12 * 1000,
   transitionTimeoutMs = 12 * 1000,
@@ -42,6 +56,35 @@ export function createTerminalUnifiedTransportController({
   let recoveryPendingReason = "";
   let recoveryRetryTimer = 0;
   let disposed = false;
+
+  const closeFenceDelayMs = Math.max(250, Math.min(2000, Math.floor(Number(closeFenceMs) || 0)));
+
+  const createCloseFence = (observedConnection, delayMs = closeFenceDelayMs) => {
+    let timer = 0;
+    let fence;
+    fence = Promise.race([
+      Promise.resolve(observedConnection?.closed),
+      new Promise((resolve) => {
+        timer = windowObject?.setTimeout?.(resolve, delayMs) || 0;
+      }),
+    ]).finally(() => {
+      if (timer) {
+        windowObject?.clearTimeout?.(timer);
+      }
+    });
+    return fence;
+  };
+
+  const registerClosingFence = (fence) => {
+    closingPromise = fence;
+    fence.finally(() => {
+      if (closingPromise === fence) {
+        closingPromise = null;
+      }
+      syncNetworkMonitor();
+    });
+    return fence;
+  };
 
   const waitForClosures = async () => {
     if (closingPromise) {
@@ -71,15 +114,13 @@ export function createTerminalUnifiedTransportController({
     targetName = "";
     healthWatchdog?.stop?.();
     healthWatchdog = null;
-    let fence;
-    fence = Promise.resolve(current.closed).finally(() => {
-      if (closingPromise === fence) {
-        closingPromise = null;
+    const fence = createCloseFence(current);
+    fence.finally(() => {
+      if (expectedCloseReason === normalizedReason) {
         expectedCloseReason = "";
       }
-      syncNetworkMonitor();
     });
-    closingPromise = fence;
+    registerClosingFence(fence);
     closedConnections.add(current);
     current.close(4001, normalizedReason);
     return true;
@@ -154,41 +195,55 @@ export function createTerminalUnifiedTransportController({
     return true;
   };
 
-  const handlePhysicalDisconnect = (observedConnection, reason = "unified_transport_closed") => {
+  const handlePhysicalDisconnect = (
+    observedConnection,
+    reason = "unified_transport_closed",
+    { closeConnection = false } = {},
+  ) => {
     if (!observedConnection || closedConnections.has(observedConnection)) {
       return false;
     }
     closedConnections.add(observedConnection);
     healthWatchdog?.setConnection(null);
     if (!closingPromise) {
-      let closeFenceTimer = 0;
-      let closeFence;
-      closeFence = Promise.race([
-        Promise.resolve(observedConnection.closed),
-        new Promise((resolve) => {
-          closeFenceTimer = windowObject?.setTimeout?.(resolve, healthCheckIntervalMs) || 0;
-        }),
-      ]).finally(() => {
-        if (closeFenceTimer) {
-          windowObject?.clearTimeout?.(closeFenceTimer);
-        }
-        if (closingPromise === closeFence) {
-          closingPromise = null;
-        }
-      });
-      closingPromise = closeFence;
+      registerClosingFence(createCloseFence(observedConnection));
     }
     if (connection === observedConnection) {
       connection = null;
       targetName = "";
     }
     for (const pane of getSessions()) {
+      if (
+        !pane?.closed
+        && pane.name === getActiveName()
+        && pane.connectionChannel === "unified"
+        && pane.socket
+        && pane.socket.readyState !== socketClosed
+        && pane.socket.readyState !== socketClosing
+      ) {
+        // Preserve the physical failure reason through the logical close
+        // callback so the indicator cannot fall back to a generic gray retry
+        // state while the shared transport is still unavailable.
+        pane.connectionCloseReason = String(reason || "unified_transport_closed");
+        try {
+          pane.socket.close(4001, "unified_retry");
+        } catch (error) {
+        }
+      }
       if (!pane?.closed && pane.name === getActiveName() && pane.connectionChannel === "unified") {
         invalidateStartupError(pane, { hidePanel: true });
         pane.connectionRetrying = true;
         if (pane.shellEl?.dataset) {
-          pane.shellEl.dataset.connection = isOnline() ? "reconnecting" : "offline";
+          pane.shellEl.dataset.connection = isOnline()
+            ? (isNetworkFailureReason(reason) ? "network-error" : "reconnecting")
+            : "offline";
         }
+      }
+    }
+    if (closeConnection) {
+      try {
+        observedConnection.close(4001, String(reason || "unified_transport_closed"));
+      } catch (error) {
       }
     }
     appendDebugWarning("统一终端物理通道已断开，立即重建", String(reason || "unified_transport_closed"));
@@ -292,11 +347,7 @@ export function createTerminalUnifiedTransportController({
       },
       onPhysicalError: ({ message, connection: failedConnection }) => {
         appendDebugWarning("统一终端物理通道 WebSocket 错误，立即关闭重建", message);
-        handlePhysicalDisconnect(failedConnection, "unified_websocket_error");
-        try {
-          failedConnection.close(4001, "unified_websocket_error");
-        } catch (error) {
-        }
+        handlePhysicalDisconnect(failedConnection, "unified_websocket_error", { closeConnection: true });
       },
       onPhysicalClose: ({ connection: closedConnection, reason }) => {
         if (!expectedCloseReason) {

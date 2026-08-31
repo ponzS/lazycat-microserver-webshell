@@ -328,6 +328,12 @@ export function createTerminalResizeController({
     if (cols <= 0 || rows <= 0) {
       return false;
     }
+    if (session.hasPresentedFrame && !session.resizePresentationHold) {
+      if (!presentation()?.beginHold(session)) {
+        recordEvent(session, "resize_observed_deferred", { reason: "presentation_hold_unavailable" });
+        return false;
+      }
+    }
     clearOutputSettle(session);
     session.resizeFenceActive = true;
     session.resizeFenceTarget = {
@@ -338,6 +344,48 @@ export function createTerminalResizeController({
       viewport: viewport.capture(session.term),
     };
     return applyFence(session);
+  };
+
+  const clearPendingSizeClaim = (session) => {
+    if (!session) {
+      return null;
+    }
+    const options = session.pendingSizeClaimOptions || null;
+    session.pendingSizeClaim = false;
+    session.pendingSizeClaimOptions = null;
+    return options;
+  };
+
+  const queuePendingSizeClaim = (session, options = {}) => {
+    if (!session || session.closed) {
+      return false;
+    }
+    const current = session.pendingSizeClaimOptions || {};
+    session.pendingSizeClaim = true;
+    session.pendingSizeClaimOptions = {
+      forceFullRender: current.forceFullRender === true || options.forceFullRender === true,
+      hideUntilRender: current.hideUntilRender === true || options.hideUntilRender === true,
+    };
+    session.sizeClaimRequired = true;
+    return true;
+  };
+
+  const schedulePendingSizeClaim = (session) => {
+    if (!session?.pendingSizeClaim) {
+      return false;
+    }
+    return lifecycle.scheduleSessionFrame(session, "pending-size-claim", () => {
+      if (session.resizeAckPending) {
+        return;
+      }
+      if (!isVisible(session)) {
+        clearPendingSizeClaim(session);
+        presentation()?.cancelHold(session, { restoreReady: session.hasPresentedFrame === true });
+        return;
+      }
+      const options = clearPendingSizeClaim(session) || {};
+      claimForCurrentDevice(session, options);
+    });
   };
 
   let lifecycle;
@@ -546,11 +594,10 @@ export function createTerminalResizeController({
       if (session.resizeAckPending || session.tabId !== getActiveTabId()) {
         return;
       }
-      schedulePane(session, {
+      claimForCurrentDevice(session, {
         forceFullRender: true,
         hideUntilRender: true,
-        forceSizeSync: true,
-      }, { immediate: true });
+      });
     });
     return true;
   };
@@ -634,6 +681,12 @@ export function createTerminalResizeController({
       && (!resizeFenceTarget.pixelHeight || !session.serverPixelHeight || resizeFenceTarget.pixelHeight === session.serverPixelHeight)
     );
     if (resizeFenceMatchesAck) {
+      // WebSocket control and binary messages are delivered in order. Freeze
+      // the complete queue at the matching ACK boundary so every byte received
+      // before the ACK is parsed on the old Ghostty grid. Bytes delivered after
+      // this handler returns belong to the applied geometry and remain queued
+      // for the new grid.
+      session.resizeFenceDrainRemainingEntries = getOutputQueueEntryCount(session);
       applyFence(session);
     } else if (session.resizeFenceActive && requestedEpoch && epoch === requestedEpoch) {
       applyObservedResize(session, message);
@@ -655,7 +708,18 @@ export function createTerminalResizeController({
       session.sizeClaimRequired = true;
       session.sizeClaimed = false;
       session.requestedResizeClaim = false;
-      applyObservedResize(session, message);
+      if (session.pendingSizeClaim) {
+        clearOutputSettle(session);
+        clearFence(session);
+        schedulePendingSizeClaim(session);
+        return true;
+      }
+      clearOutputSettle(session);
+      clearFence(session);
+      endRenderSuppression(session, { render: false, reason: "resize" });
+      if (session.hasPresentedFrame) {
+        presentation()?.beginHold(session);
+      }
       return true;
     }
     if (!requestedEpoch || epoch === requestedEpoch || BigInt(epoch) > BigInt(requestedEpoch)) {
@@ -680,7 +744,9 @@ export function createTerminalResizeController({
         reason: "resize_applied",
         forceHistory: true,
       });
-      if (pendingResizeTarget && !terminalResizeTargetsMatch({
+      if (session.pendingSizeClaim) {
+        schedulePendingSizeClaim(session);
+      } else if (pendingResizeTarget && !terminalResizeTargetsMatch({
         cols: session.serverCols,
         rows: session.serverRows,
         pixelWidth: session.serverPixelWidth,
@@ -694,6 +760,7 @@ export function createTerminalResizeController({
             forceFullRender: true,
             hideUntilRender: true,
             forceSizeSync: true,
+            claimSize: requestWasClaim || (session.sizeClaimed === true && !session.sizeClaimRequired),
           }, { immediate: true });
         });
       }
@@ -741,7 +808,23 @@ export function createTerminalResizeController({
       session.requestedRows = session.serverRows;
       session.requestedPixelWidth = session.serverPixelWidth;
       session.requestedPixelHeight = session.serverPixelHeight;
-      applyObservedResize(session, message);
+      if (session.pendingSizeClaim) {
+        clearOutputSettle(session);
+        clearFence(session);
+        recordEvent(session, "resize_error", {
+          resizeErrorEpoch: epoch,
+          reason: "resize_owner_active",
+          pendingCurrentDeviceClaim: true,
+        });
+        schedulePendingSizeClaim(session);
+        return true;
+      }
+      clearOutputSettle(session);
+      clearFence(session);
+      endRenderSuppression(session, { render: false, reason: "resize" });
+      if (session.hasPresentedFrame) {
+        presentation()?.beginHold(session);
+      }
       return true;
     }
     clearOutputSettle(session);
@@ -829,6 +912,34 @@ export function createTerminalResizeController({
         pixelWidth: Math.max(0, Math.floor(Number(targetCanvas?.pixelWidth) || 0)),
         pixelHeight: Math.max(0, Math.floor(Number(targetCanvas?.pixelHeight) || 0)),
       };
+      // Once this pane has claimed the current device, every later geometry
+      // correction must retain that ownership.  Conversely, a passive fit
+      // must not overwrite a newer remote owner after a visible frame exists;
+      // an explicit current-device interaction has to reclaim it first.
+      const claimSizeForTransaction = shouldClaimSize
+        || (session.sizeClaimed === true && session.sizeClaimRequired !== true);
+      if (
+        !claimSizeForTransaction
+        && session.sizeClaimRequired === true
+        && session.hasPresentedFrame === true
+        && (dimensionsWillChange || forceSizeSync)
+      ) {
+        recordEvent(session, "resize_wait_current_device_claim", {
+          fittedCols: fittedDimensions.cols,
+          fittedRows: fittedDimensions.rows,
+          currentCols: sizeBefore.cols,
+          currentRows: sizeBefore.rows,
+          reason: "remote_owner_observed",
+        });
+        trace(session, "resize_wait_current_device_claim", {
+          fittedCols: fittedDimensions.cols,
+          fittedRows: fittedDimensions.rows,
+          currentCols: sizeBefore.cols,
+          currentRows: sizeBefore.rows,
+          reason: "remote_owner_observed",
+        });
+        return failedTerminalFit(true);
+      }
       const firstMeasuredFit = Number(session.measuredFitGeneration || 0) <= 0;
       const pendingResizeTarget = session.resizeAckPending ? {
         cols: session.requestedCols,
@@ -888,15 +999,15 @@ export function createTerminalResizeController({
       });
       if (canUseStableGeometryFastPath) {
         let sentTerminalSize = false;
-        const claimAlreadySatisfied = shouldClaimSize
+        const claimAlreadySatisfied = claimSizeForTransaction
           && session.sizeClaimed === true
           && !session.sizeClaimRequired;
-        const needsControlFrame = forceSizeSync || (shouldClaimSize && !claimAlreadySatisfied);
+        const needsControlFrame = forceSizeSync || (claimSizeForTransaction && !claimAlreadySatisfied);
         if (needsControlFrame && !session.resizeAckPending) {
           sentTerminalSize = sendSize(session, {
             force: true,
             dimensions: targetDimensions,
-            claim: shouldClaimSize,
+            claim: claimSizeForTransaction,
           });
         }
         let rendered = false;
@@ -913,7 +1024,7 @@ export function createTerminalResizeController({
           sizeChanged: false,
           canvasChanged: false,
           sentTerminalSize,
-          claimSent: sentTerminalSize && shouldClaimSize,
+          claimSent: sentTerminalSize && claimSizeForTransaction,
           rendered,
         };
       }
@@ -967,7 +1078,11 @@ export function createTerminalResizeController({
         && session.resizeEpochSupported === false
       );
       if (shouldHoldFrame) {
-        presentation()?.beginHold(session);
+        if (presentation()?.beginHold(session) !== true) {
+          recordEvent(session, "resize_deferred", { reason: "presentation_hold_unavailable" });
+          presentation()?.scheduleValidation(session, { forceHistory: true });
+          return failedTerminalFit(true);
+        }
       } else if (!shouldSettlePresentation) {
         presentation()?.beginHold(session, { capture: false });
       }
@@ -1002,7 +1117,7 @@ export function createTerminalResizeController({
         const sent = sendSize(session, {
           force: true,
           dimensions: targetDimensions,
-          claim: shouldClaimSize,
+          claim: claimSizeForTransaction,
         });
         if (sent) {
           recordEvent(session, "resize_fence_wait", {
@@ -1017,6 +1132,8 @@ export function createTerminalResizeController({
             rows: sizeBefore.rows,
             sizeChanged: false,
             canvasChanged: false,
+            sentTerminalSize: true,
+            claimSent: claimSizeForTransaction,
           };
         }
         endRenderSuppression(session, { render: false, reason: "resize" });
@@ -1071,7 +1188,7 @@ export function createTerminalResizeController({
       const sentTerminalSize = sendSize(session, {
         force: forceSizeSync,
         dimensions: targetDimensions,
-        claim: shouldClaimSize,
+        claim: claimSizeForTransaction,
       });
       updateSelectionHandles(session);
       if (
@@ -1113,7 +1230,7 @@ export function createTerminalResizeController({
         sizeChanged,
         canvasChanged,
         sentTerminalSize,
-        claimSent: sentTerminalSize && shouldClaimSize,
+        claimSent: sentTerminalSize && claimSizeForTransaction,
       };
     });
   };
@@ -1145,9 +1262,18 @@ export function createTerminalResizeController({
     return lifecycle.schedule(session, options, scheduleOptions);
   };
 
+  const schedulePresentationResize = (session, options = {}, scheduleOptions = {}) => (
+    schedulePane(session, {
+      ...options,
+      claimSize: options.claimSize === true
+        || (session?.sizeClaimed === true && session?.sizeClaimRequired !== true),
+    }, scheduleOptions)
+  );
+
   const cancelPane = (session) => {
     lifecycle.cancel(session);
     if (session) {
+      clearPendingSizeClaim(session);
       clearOutputSettle(session);
       clearFence(session);
       presentation()?.cancelHold(session);
@@ -1236,31 +1362,60 @@ export function createTerminalResizeController({
     return reassertSize(session, { force: true });
   };
 
-  const claimForCurrentDevice = (session) => {
+  const claimForCurrentDevice = (session, options = {}) => {
     if (disposed || !session || session.closed) {
       return false;
     }
-    const lastClaimAt = Number(session.lastSizeClaimAt || 0);
-    const hasClaimHistory = session.sizeClaimed === true || lastClaimAt > 0;
-    if (!session.sizeClaimRequired && hasClaimHistory) {
-      return false;
-    }
-    if (session.resizeAckPending) {
-      return false;
-    }
     if (!isVisible(session)) {
+      if (session.resizeAckPending && session.requestedResizeClaim !== true) {
+        return queuePendingSizeClaim(session, options);
+      }
       return claimSize(session, { force: true });
     }
     const fit = resizePane(session, {
+      forceFullRender: options.forceFullRender === true,
+      hideUntilRender: options.hideUntilRender === true,
       forceSizeSync: true,
       claimSize: true,
       settlePresentation: true,
     });
+    if (session.resizeAckPending && fit.claimSent !== true) {
+      const requestedTarget = {
+        cols: session.requestedCols,
+        rows: session.requestedRows,
+        pixelWidth: session.requestedPixelWidth,
+        pixelHeight: session.requestedPixelHeight,
+      };
+      const pendingTargetDiffers = Boolean(
+        session.pendingResizeTarget
+        && !terminalResizeTargetsMatch(requestedTarget, session.pendingResizeTarget)
+      );
+      if (session.requestedResizeClaim !== true || pendingTargetDiffers) {
+        return queuePendingSizeClaim(session, options);
+      }
+      return false;
+    }
     if (!fit.ok) {
       return claimSize(session, { force: true });
     }
-    return fit.claimSent === true || session.sizeClaimed === true;
+    return fit.claimSent === true;
   };
+
+  const claimTabForCurrentDevice = (tab, options = {}) => {
+    if (disposed || !tab) {
+      return false;
+    }
+    syncTabMobilePixelScroll(tab);
+    let handled = false;
+    for (const session of tab.panes.values()) {
+      handled = claimForCurrentDevice(session, options) || handled;
+    }
+    return handled;
+  };
+
+  const claimActiveTabForCurrentDevice = (options = {}) => (
+    claimTabForCurrentDevice(getCurrentTab(), options)
+  );
 
   const resizeTabForCurrentDevice = (tab, options = {}) => {
     if (disposed || !tab) {
@@ -1363,14 +1518,18 @@ export function createTerminalResizeController({
     size,
     isMeasurable,
     isVisible,
+    isCurrentDeviceClaimRequired: (session) => session?.sizeClaimRequired === true,
     canvasMatchesExpectedSize,
     sendSize,
     claimSize,
     claimForCurrentDevice,
+    claimTabForCurrentDevice,
+    claimActiveTabForCurrentDevice,
     reassertSize,
     reassertSizeForMouse,
     resizePane,
     schedulePane,
+    schedulePresentationResize,
     cancelPane,
     resizeTab,
     resizeActiveTab,
@@ -1402,13 +1561,17 @@ export function createTerminalResizeController({
         : false;
     },
     cancelTab: (tab) => lifecycle.cancelTab(tab),
-    disposeSession: (session) => lifecycle.disposeSession(session),
+    disposeSession(session) {
+      clearPendingSizeClaim(session);
+      lifecycle.disposeSession(session);
+    },
     dispose() {
       if (disposed) {
         return;
       }
       disposed = true;
       for (const session of ownedSessions) {
+        clearPendingSizeClaim(session);
         clearOutputSettle(session);
         clearFence(session);
       }

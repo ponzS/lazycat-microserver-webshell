@@ -197,6 +197,8 @@ const createHarness = ({ renderResult = true } = {}) => {
   const resizeSchedules = [];
   const recoveries = [];
   let now = 100;
+  let currentDeviceClaimRequired = false;
+  let viewportGeometryClaimPending = false;
   const controller = createTerminalPresentationController({
     windowObject: clock.windowObject,
     getActiveName: () => "target-1",
@@ -207,6 +209,8 @@ const createHarness = ({ renderResult = true } = {}) => {
     isReplayCommitPending: () => false,
     isPaneVisible: (candidate) => candidate.visible === true,
     isPaneMeasurable: (candidate) => candidate.measurable === true,
+    isCurrentDeviceClaimRequired: () => currentDeviceClaimRequired,
+    isViewportGeometryClaimPending: () => viewportGeometryClaimPending,
     canvasMatchesExpectedSize: (candidate) => candidate.canvasMatches === true,
     normalizeResizeEpoch: (value) => String(value || ""),
     scheduleResize: (candidate, options, scheduleOptions) => {
@@ -245,6 +249,12 @@ const createHarness = ({ renderResult = true } = {}) => {
     resizeRequests,
     resizeSchedules,
     session,
+    setCurrentDeviceClaimRequired: (value) => {
+      currentDeviceClaimRequired = value === true;
+    },
+    setViewportGeometryClaimPending: (value) => {
+      viewportGeometryClaimPending = value === true;
+    },
     setNow: (value) => {
       now = value;
     },
@@ -294,9 +304,12 @@ test("presentation controller holds the last frame until the current full render
 test("presentation controller never renders replay, resize, or invalid geometry intermediate states", () => {
   const {
     controller,
+    events,
     resizeRequests,
     resizeSchedules,
     session,
+    setCurrentDeviceClaimRequired,
+    setViewportGeometryClaimPending,
     setNow,
   } = createHarness();
   controller.installSession(session);
@@ -318,6 +331,18 @@ test("presentation controller never renders replay, resize, or invalid geometry 
 
   session.resizeAckPending = false;
   session.canvasMatches = false;
+  setCurrentDeviceClaimRequired(true);
+  assert.equal(controller.ensure(session, { reason: "remote_owner_pending" }), false);
+  assert.equal(resizeSchedules.length, 0);
+  assert.ok(events.some(({ event }) => event === "presentation_wait_current_device_claim"));
+
+  setCurrentDeviceClaimRequired(false);
+  setViewportGeometryClaimPending(true);
+  assert.equal(controller.ensure(session, { reason: "viewport_geometry_pending" }), false);
+  assert.equal(resizeSchedules.length, 0);
+  assert.ok(events.some(({ event }) => event === "presentation_wait_current_device_claim"));
+
+  setViewportGeometryClaimPending(false);
   assert.equal(controller.ensure(session, { reason: "geometry_pending" }), false);
   assert.equal(resizeSchedules.length, 1);
   assert.equal(session.term.renderNowCalls, 0);
@@ -423,6 +448,21 @@ test("direct not-ready transitions preserve an existing visible frame", () => {
   clock.flushFrames();
   assert.equal(session.terminalFrameHold.hidden, true);
   assert.equal(session.terminalFrameHeld, false);
+});
+
+test("a failed hold capture never hides the only known-good live frame", () => {
+  const { controller, session } = createHarness();
+  session.hasPresentedFrame = true;
+  session.renderReady = true;
+  session.term.canvas.width = 0;
+  session.term.canvas.height = 0;
+  controller.installSession(session);
+
+  assert.equal(controller.beginHold(session), false);
+  assert.equal(session.renderReady, true);
+  assert.equal(session.resizePresentationHold, false);
+  assert.equal(session.terminalFrameHeld, false);
+  assert.equal(session.terminalFrameHold.hidden, true);
 });
 
 test("presentation lifecycle removes Canvas listeners and rejects delayed callbacks after cleanup", () => {

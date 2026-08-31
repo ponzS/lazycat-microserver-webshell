@@ -45,6 +45,7 @@ const createHarness = () => {
   const calls = [];
   let scheduled = null;
   let instanceGeneration = 4;
+  let applyingWorkspaceState = false;
   const scheduler = {
     schedule(tabId, steps) { scheduled = { tabId, steps }; calls.push(`schedule:${tabId}`); },
     cancel() { calls.push("cancel"); scheduled = null; },
@@ -65,6 +66,7 @@ const createHarness = () => {
     tabRegistry: registry,
     tabView,
     getInstanceGeneration: () => instanceGeneration,
+    isApplyingWorkspaceState: () => applyingWorkspaceState,
     measureTask: (name, task) => { calls.push(`measure:${name}`); return task(); },
     presentationStateIsCurrent: (pane) => pane.id === "pane-1",
     holdPresentationFrame: (pane) => { calls.push(`hold:${pane.id}`); pane.terminalFrameHeld = true; },
@@ -81,6 +83,7 @@ const createHarness = () => {
     scrollTabButtonIntoView: () => calls.push("scroll"),
     scheduleOverviewRender: () => calls.push("overview"),
     scheduleVisibleTabResize: (tab, options) => calls.push(["resize", tab.id, options]),
+    claimVisibleTabSize: (tab, options) => calls.push(["claim-tab", tab.id, options]),
     syncConnectionDemands: (options) => calls.push(["membership", options]),
     persistActiveTab: async (tabId) => calls.push(`persist:${tabId}`),
     now: () => 123,
@@ -93,6 +96,7 @@ const createHarness = () => {
     getScheduled: () => scheduled,
     registry,
     second,
+    setApplyingWorkspaceState: (value) => { applyingWorkspaceState = value; },
     setInstanceGeneration: (value) => { instanceGeneration = value; },
   };
 };
@@ -114,7 +118,7 @@ test("tab activation preserves frames before visual commit and defers runtime st
   await Promise.resolve();
   assert.deepEqual(harness.calls.filter((value) => Array.isArray(value)), [
     ["active-pane", "tab-2", "pane-2", { focus: true, resize: false, syncConnection: false }],
-    ["resize", "tab-2", { immediate: false }],
+    ["claim-tab", "tab-2", { forceFullRender: true }],
     ["membership", { reason: "active_tab_changed", interactionSession: null }],
   ]);
   assert.ok(harness.calls.includes("persist:tab-2"));
@@ -146,4 +150,17 @@ test("tab activation arms release for an already-current frame held while hidden
   harness.controller.activate("tab-1");
 
   assert.ok(harness.calls.includes("release:pane-1"));
+});
+
+test("authoritative workspace apply fits a tab without claiming device ownership", () => {
+  const harness = createHarness();
+  harness.setApplyingWorkspaceState(true);
+  harness.controller.activate("tab-2", { claimCurrentDevice: false });
+  harness.getScheduled().steps.forEach((step) => step());
+
+  assert.equal(harness.calls.some((entry) => Array.isArray(entry) && entry[0] === "claim-tab"), false);
+  assert.deepEqual(
+    harness.calls.find((entry) => Array.isArray(entry) && entry[0] === "resize"),
+    ["resize", "tab-2", { immediate: false }],
+  );
 });

@@ -98,6 +98,13 @@ export function createTerminalIMEController({
     lifecycle.frame(session, () => resetHostViewport(session, options));
   };
 
+  const shouldReassertInputSize = (session) => Boolean(
+    session?.renderReady !== true
+      || session?.sizeClaimRequired === true
+      || session?.resizeAckPending === true
+      || session?.activationFitPending === true
+  );
+
   const prepareTextareaForInput = (session) => {
     const textarea = session?.term?.textarea;
     if (!textarea || session.composingIME || session.nativeDeleteInputPending) {
@@ -567,7 +574,9 @@ export function createTerminalIMEController({
   };
 
   const handleBeforeInput = (session, event) => {
-    reassertSize(session, { force: true });
+    if (shouldReassertInputSize(session)) {
+      reassertSize(session);
+    }
     const type = String(event.inputType || "");
     const textarea = session?.term?.textarea;
     if (
@@ -716,7 +725,9 @@ export function createTerminalIMEController({
 
   const handleTextareaInput = (session, event) => {
     event.stopPropagation();
-    reassertSize(session);
+    if (shouldReassertInputSize(session)) {
+      reassertSize(session);
+    }
     const textarea = session?.term?.textarea;
     if (!textarea) {
       return;
@@ -857,7 +868,9 @@ export function createTerminalIMEController({
     let mobileTapTouchState = null;
     let mobileTapFinishState = null;
     lifecycle.listen(session, host, "keydown", () => {
-      reassertSize(session, { force: true });
+      if (shouldReassertInputSize(session)) {
+        reassertSize(session);
+      }
     }, { capture: true });
     lifecycle.listen(session, textarea, "beforeinput", (event) => {
       handleBeforeInput(session, event);
@@ -932,7 +945,9 @@ export function createTerminalIMEController({
       }
       event.preventDefault();
       event.stopImmediatePropagation();
-      reassertSize(session, { force: true });
+      if (shouldReassertInputSize(session)) {
+        reassertSize(session);
+      }
       session.lastPasteText = text;
       session.lastPasteAt = now();
       Promise.resolve(pasteText(session, text)).catch((error) => showToast(error.message));

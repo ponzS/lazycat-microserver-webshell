@@ -714,7 +714,9 @@ body.split-resize-active * {
 .pane-shell[data-connection="reconnecting"]::after,
 .pane-shell[data-connection="offline"]::after,
 .pane-shell[data-connection="closed"]::after,
-.pane-shell[data-connection="error"]::after {
+.pane-shell[data-connection="error"]::after,
+.pane-shell[data-connection="network-error"]::after,
+.pane-shell[data-render-ready="false"]::after {
   opacity: 0.85;
 }
 
@@ -722,19 +724,23 @@ body.split-resize-active * {
   background: #22c55e;
 }
 
+.pane-shell[data-connection="connecting"]::after,
+.pane-shell[data-connection="reconnecting"]::after,
+.pane-shell[data-connection="closed"]::after,
 .pane-shell[data-connection="error"]::after,
-.pane-shell[data-connection="closed"]::after {
-  background: #ef4444;
-}
-
-.pane-shell[data-connection="offline"]::after,
-.pane-shell[data-connection="reconnecting"]::after {
-  background: #ef4444;
+.pane-shell[data-render-ready="false"]::after {
+  background: #94a3b8;
 }
 
 .pane-shell[data-connection="connecting"]::after,
 .pane-shell[data-connection="reconnecting"]::after {
   animation: pane-connection-breathe 1.35s ease-in-out infinite;
+}
+
+/* Explicit network faults stay red even while the renderer is catching up. */
+.pane-shell[data-connection="offline"]::after,
+.pane-shell[data-connection="network-error"]::after {
+  background: #ef4444;
 }
 
 @keyframes pane-connection-breathe {

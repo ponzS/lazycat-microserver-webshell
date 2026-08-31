@@ -8,8 +8,8 @@
 
 - `index.js`：模块唯一公开入口。
 - `app_lifecycle.js`：注册并清理页面 `online/offline`、显隐、焦点、页面进入/离开、resize、键盘、触摸恢复和存储心跳监听；以 generation 拒绝字体 ready 等迟到回调。
-- `runtime_recovery_controller.js`：online/offline、页面恢复、用户手势恢复、Unified close fence、终端重连范围和网络 banner 的应用级编排。
-- `runtime_recovery_lifecycle.js`：网络切换异步 generation、用户恢复节流和 dispose fence，拒绝离线后的迟到 close-wait 回调。
+- `runtime_recovery_controller.js`：online/offline、页面恢复、用户手势恢复、当前 active tab 的单一尺寸 claim、Unified close fence、终端重连范围和网络 banner 的应用级编排；focus/visible/pageshow 不得拆成普通 resize 后再 claim。页面恢复信号通过单飞 resume generation 合并，用户手势可以显式强制恢复；每个恢复代次有独立 2 秒 deadline 诊断，超时仍保持灰色待恢复语义。
+- `runtime_recovery_lifecycle.js`：网络切换异步 generation、前台恢复短窗口合并、用户恢复节流和 dispose fence，拒绝离线后的迟到 close-wait 回调。
 - `mobile_select_controller.js`：移动端原生 `select` 替代弹层、选项事件、定位和焦点/RAF 资源；不拥有设置值或业务状态。
 - `dialog_controller.js`：桌面确认/输入对话框与移动关闭确认 sheet 的 resolver、焦点、事件和 dispose 生命周期；不拥有业务操作状态。
 - `feedback/`：toast 和启动错误面板的 DOM 状态、timer 与销毁生命周期；不拥有错误或业务状态。

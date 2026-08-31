@@ -8,7 +8,7 @@
 
 ## 公开入口与状态
 
-外部只能从 `terminal/transport/index.js` 导入 API。`unified_transport_controller.js` 是页面唯一 Unified 物理连接、target、close fence、恢复任务和 watchdog 的 owner；`transport_runtime_controller.js` 独占 logical membership、channel generation、pane retry、可视顺序、direct demand generation 和 scheduler lease 编排；`transport_runtime_lifecycle.js` 独占 priority/retry timer、measurement RAF 和 logical sync microtask；`session_connection_controller.js` 是 pane 健康与失败分流 owner，`session_connection_lifecycle.js` 独占 connect、health、attach-ready、resume-probe 和 reconnect timer。所有 socket、timer 和迟到回调必须按 close fence、generation、target 和 logical identity 清理或拒绝。异常断线建立的 close fence 在旧 socket 真正关闭或 fence 超时前不得清除，也不得创建替代物理连接。
+外部只能从 `terminal/transport/index.js` 导入 API。`unified_transport_controller.js` 是页面唯一 Unified 物理连接、target、close fence、恢复任务和 watchdog 的 owner；`transport_runtime_controller.js` 独占 logical membership、channel generation、pane retry、可视顺序、direct demand generation 和 scheduler lease 编排；`transport_runtime_lifecycle.js` 独占 priority/retry timer、measurement RAF 和 logical sync microtask；`session_connection_controller.js` 是 pane 健康与失败分流 owner，`session_connection_lifecycle.js` 独占 connect、health、attach-ready、resume-probe 和 reconnect timer。所有 socket、timer 和迟到回调必须按 close fence、generation、target 和 logical identity 清理或拒绝。异常断线建立的 close fence 在旧 socket 真正关闭或 fence 超时前不得清除，也不得创建替代物理连接。logical attach/replay/resize retry 只写灰色 `reconnecting`，只有明确网络/物理 WebSocket 故障才写 `network-error`。
 
 物理 Unified WebSocket 已打开后新增 logical stream 时，必须先通过 `replace-subscriptions` 向 Provider 发布完整 membership，再允许发送该 identity 的 `set-priority` 或 `pane-control`。订阅更新 microtask 未完成时，priority 只更新本地 subscription；`replace-subscriptions` 成功后再补发已有 stream 的必要 priority 变化，避免 Provider 在 stream 尚未注册时拒绝控制帧。
 

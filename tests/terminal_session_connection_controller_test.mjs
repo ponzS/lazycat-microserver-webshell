@@ -191,6 +191,7 @@ test("reconnect policy keeps unified failures logical and scheduler-owns direct 
   assert.equal(controller.scheduleReconnect(direct, { immediate: true }), true);
   assert.equal(notified.length, 1);
   assert.equal(requested.length, 0);
+  assert.equal(direct.shellEl.dataset.connection, "reconnecting");
 });
 
 test("connection health routes offline, unified, and direct recovery through explicit commands", () => {

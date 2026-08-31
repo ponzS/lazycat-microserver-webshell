@@ -14,7 +14,7 @@
 - 页面不再注册 Service Worker，不再发布 Web App Manifest/PWA 图标，也不申请浏览器持久存储。静态资源仅通过 Provider 注入的内容寻址 `/assets/<asset-version>/` URL 和 HTTP immutable cache 发布。
 - 普通容器不再创建 Cache API v2 identity、manifest/chunk、warm replay、preview、compaction 或本地 cursor range。Unified logical stream 只携带 `workspace_generation`，并直接消费 persistent agent 的权威 `snapshot + live`。
 - `client:` target 继续由 `terminal/history/client_history_controller.js` 独占 IndexedDB load/write/flush/reset/delete；所有入口都以 `isClientTarget()` 为硬 guard，普通容器调用必须无副作用。
-- 总览不再读取缓存缩略图。缩略图只来自已提交 live Canvas 或仍有效的 last-known-good hold frame；从未呈现的 pane 保持空缩略图，不触发 replay。
+- 总览不读取旧 Cache API preview，但由 `terminal/overview/` 使用独立 IndexedDB 保存已提交 Canvas 的派生图片 Blob。来源顺序为 live Canvas、last-known-good hold frame、同 identity 持久图片；它不保存 PTY 字节/cursor，不触发 replay，也不参与终端恢复。
 - bootstrap 只保留旧 Worker/已知 Cache 名称的升级迁移资源：`index.html` 在版本化资源加载前，仅对已有 controller 的页面调用现有 registration 的 `update()`；新版页面启动后继续执行一次性清理器；Provider 同时在旧 `/service-worker.js` URL 提供无 fetch/预缓存/claim 的退役 Worker，使旧受控页面能删除已知缓存、注销 registration 并一次性重载。页面仍不注册 Service Worker，干净用户不请求退役脚本或增加导航；这些迁移资源不读取终端数据、不参与首屏、离线 fallback 或资源调度。
 - 本节取代下方旧迁移记录中关于 Service Worker 预缓存、Cache API v2、warm replay 和缓存 preview 的现行描述。旧记录只保留当时的架构背景，不得作为新实现依据。
 
@@ -252,7 +252,7 @@
 ### 2026-08-30：`terminal/rendering/` presentation
 
 - 已新增 `presentation_controller.js`、`presentation_state.js`、`presentation_view.js` 和 `presentation_lifecycle.js`，统一由 `terminal/rendering/index.js` 公开；render/presentation generation、RenderSnapshot、full-render gate、last-known-good frame、Canvas context 恢复、validation/retry/stall timer 和 RAF/listener 生命周期已从原入口实现迁出。
-- controller 只读取注入的 replay/resize/visibility/geometry 门禁，并通过显式回调请求 resize 或 transport 恢复；不推进 history cursor、不发送 WebSocket、不声明 resize owner，也不修改输入或输出队列。
+- controller 只读取注入的 replay/resize/visibility/geometry 门禁、resize 的 current-device claim required 和 viewport geometry claim pending 只读门禁，并通过显式回调请求 resize 或 transport 恢复；远端 owner observation 或 viewport 最终尺寸稳定提交前不得发送被动 geometry resize。不推进 history cursor、不发送 WebSocket、不声明 resize owner，也不修改输入或输出队列。
 - view 独占 live/hold Canvas 与 shell dataset 适配。host viewport 清理必须保留 frame hold；抓帧前还会恢复意外脱离的模块自有 hold Canvas，确保 live backing store 变化前旧帧已经覆盖当前 pane。
 - lifecycle 独占 presentation RAF、validation/retry timer、双 RAF frame release、Canvas context listener 和 Ghostty `onRender` disposable；session cleanup 与模块 dispose 后迟到回调不能继续提交画面。
 - `terminal_presentation_controller_test.mjs`、`TestRuntimeTerminalCanvasResidueGuard`、`TestTerminalPresentationControllerBehavior` 和 `TestRuntimeTerminalPresentationModuleBoundary` 固定 replay/resize 中间帧不可见、资源恢复、完整提交、stall 恢复、公开入口和禁止实现回流。
@@ -262,7 +262,7 @@
 
 - 已新增 `resize_controller.js`、`resize_lifecycle.js`、`geometry_state.js` 和 `viewport_controller.js`，并与既有 resize transaction、scheduler、size-sync 文件统一从 `terminal/resize/index.js` 公开。
 - requested/applied epoch、ACK fence、输出 settle、跨设备 owner observation、DOM fit、viewport snapshot、ResizeObserver、Ghostty resize disposable、RAF 和 timer 已从原入口实现迁出。
-- 稳定几何下的重复 fit 走 presentation-neutral fast path；同设备已成功 claim 时，pointer/focus/mouse 的重复 claim 和相同 in-flight target 都会去重。远端新 epoch 或 owner release 只标记下一次明确交互重新 claim，不会因相同几何自动触发呈现抖动。
+- 稳定几何下的重复 fit 走 presentation-neutral fast path；同设备已成功 claim 时，pointer/focus/mouse 的重复 claim 和相同 in-flight target 都会去重，presentation 的迟到字体/行高 geometry 修正通过 `schedulePresentationResize()` 继承当前 claim。远端新 epoch 或 owner release 只标记下一次明确交互重新 claim，并通过 `isCurrentDeviceClaimRequired()` 阻止 presentation 被动反抢，不会因相同几何自动触发呈现抖动。
 - ACK 前继续冻结本地网格并有界排空旧几何输出；ACK 后独立 settle。远端 observation 不自动 reclaim，单 pane resize 错误不关闭 Unified 物理连接，任何 resize 路径都不触发历史 replay 或展示中间帧。
 - `terminal_resize_controller_test.mjs` 覆盖稳定几何、ACK fence 和 claim 去重；scheduler/size-sync guard、`tests-auto/08-terminal-click-jitter/test.mjs` 和 `debug123` 原子呈现回归固定状态所有权、迟到资源清理、单页单 Unified 连接及 hold 覆盖。
 
@@ -285,7 +285,7 @@
 
 - 已新增 `viewport_controller.js`、`viewport_lifecycle.js` 和 `viewport_model.js`，统一从 `terminal/viewport/index.js` 公开。
 - visualViewport 高度/参考高度、iOS 键盘 inset、Android/客户端底部安全偏移、resize suppression、光标 pan、input viewport lock、方向恢复 generation、缩放拦截及其 listener/timer/RAF 已从原入口实现迁出。
-- controller 只通过注入命令协调 resize、IME DOM、selection、overview、移动菜单和标题；不读取 transport/history/cache，不建立或关闭 WebSocket，也不触发 replay/reset。方向和键盘变化只复用当前 Ghostty 内存状态并请求合法 resize/final render。
+- controller 只通过注入命令协调 resize、IME DOM、selection、overview、移动菜单和标题，并向 presentation 提供 `isGeometryClaimPending()` 只读门禁；不读取 transport/history/cache，不建立或关闭 WebSocket，也不触发 replay/reset。方向和键盘变化只复用当前 Ghostty 内存状态并请求合法 resize/final render。
 - lifecycle 独占 window/document touch/gesture、window/visualViewport resize/scroll、orientation listener 和全部恢复资源；重复 `start()` 幂等，dispose 后迟到 callback 不得修改 viewport、session 或 Canvas。
 - `terminal_viewport_controller_test.mjs` 5 项与 `TestRuntimeTerminalViewportModuleBoundary` 固定 iOS 键盘、Android safe offset、input lock 重基准、cursor pan、方向恢复、资源清理、Service Worker 资源和禁止实现回流 `global-runtime.js`。
 
@@ -347,22 +347,24 @@ startGlobalRuntime();
 | --- | --- | --- | --- |
 | 全局运行时 | `global-runtime.js` | feature controller 实例、全局 started/disposed、active target/generation、启动/恢复/销毁顺序 | 通过各模块公开 API 和只读快照编排；不复制模块内部状态 |
 | 应用生命周期工具 | `app/app_lifecycle.js` | 页面显隐、online/offline listener、局部 heartbeat 和 listener generation | 由 `global-runtime.js` 注入 handlers 并调用 `start/dispose` |
+| 应用恢复事务 | `app/runtime_recovery_controller.js`、`app/runtime_recovery_lifecycle.js` | resume generation、前台信号合并、2 秒恢复 deadline、网络恢复 close fence 和灰/红状态边界 | 只调用 transport/session/resize 的公开命令；不拥有终端协议、回放或 Canvas 状态 |
 | 应用快捷键 | `app/shortcuts/shortcut_controller.js`、`app/shortcuts/shortcut_lifecycle.js` | 动作路由、快捷键过滤、全屏命令生命周期 | 调用注入的 tab、设置、附件和终端公开命令 |
 | 对话框 | `app/dialog_controller.js` | confirm/prompt resolver、移动关闭 sheet、焦点与 Escape | 发布用户意图结果；调用方执行具体业务操作 |
 | 工作区 | `workspace/target_controller.js`、`workspace/target_lifecycle.js`、`workspace/workspace_api.js`、`workspace/persistence_controller.js`、`workspace/refresh_controller.js`、`workspace/state_apply_controller.js`、`workspace/tab_registry.js`、`workspace/tab_controller.js`、`workspace/tab_view.js`、`workspace/tab_activation_controller.js`、`workspace/tab_label_controller.js`、`workspace/tab_navigation_controller.js`、`workspace/activity_controller.js`、`workspace/layout_controller.js` | active selector/generation、Provider 请求、restore/活动 tab 持久化、refresh/retry、权威 apply、tab registry/CRUD/DOM/激活、标签标题/rename、最近 tab/顺序导航、activity、布局算法 | 发布只读 workspace snapshot 和用户 action，不接管终端协议 |
 | 终端 session | `terminal/session/session_controller.js` | session identity、子控制器引用、统一 cleanup | 组合各子模块，不直接实现协议或渲染算法 |
-| 物理与逻辑连接 | `terminal/transport/transport_controller.js` | Unified socket、client leases、stream/channel generation、重试 | 输出已验证的控制帧和二进制帧 |
+| 物理与逻辑连接 | `terminal/transport/unified_transport_controller.js`、`transport_runtime_controller.js` | Unified socket、client leases、stream/channel generation、重试 | 输出已验证的控制帧和二进制帧；普通 logical retry 只能派生灰点 |
 | 历史回放 | `terminal/history/replay_controller.js` | history generation、cursor、replay phase、authorization | 请求 render suppression、提交已验证字节 |
 | 输出流水线 | `terminal/output/output_controller.js` | output queue、queue generation、drain budget、turn ACK | 向终端运行时按序写入，不拥有 WebSocket |
 | `client:` 历史兼容 | `terminal/history/client_history_controller.js` | IndexedDB snapshot、persisted cursor、写入队列与 timer | 仅接受 `client:` session；普通容器调用无副作用 |
-| resize | `terminal/resize/resize_controller.js` | requested/applied/presented epoch、fence、settle、owner observation | 向 transport 发控制，向 rendering 提交几何变更 |
-| 移动 viewport | `terminal/viewport/viewport_controller.js` | visual viewport、键盘 inset、安全偏移、resize suppression、input viewport lock、方向 generation | 向 resize/IME/selection/overview 发显式命令，不读取历史或连接状态 |
+| resize | `terminal/resize/resize_controller.js` | requested/applied/presented epoch、fence、settle、owner observation、pending current-device claim | 向 transport 发控制，向 rendering 提交几何变更；普通在途 resize 不得吞掉显式 claim |
+| 浏览器 viewport | `terminal/viewport/viewport_controller.js` | layout/visual viewport signature、DPR/方向 generation、键盘 inset、安全偏移、resize suppression、input viewport lock | 稳定后向 resize 发布当前设备 claim，不读取历史或连接状态 |
 | 渲染与呈现 | `terminal/rendering/presentation_controller.js` | render generation、RenderSnapshot、hold frame、presentation gate | 只消费当前终端状态，不决定 history/transport 权威 |
+| 总览缩略图 | `terminal/overview/preview_controller.js`、`preview_store.js` | capture/load generation、decoded image、IndexedDB 图片 Blob、过期与容量 | 只接收已提交 Canvas；不保存 PTY/cursor，不参与 replay/ready |
 | 输入与 IME | `terminal/input/input_controller.js`、`terminal/input/ime/ime_controller.js` | input lock、pending queue、composition、helper textarea、generated response | 向 transport 发送已分类输入，不修改连接生命周期 |
 | 终端上下文菜单 | `terminal/interaction/context_menu_controller.js` | desktop/mobile target、动作可用性、触摸菜单抑制、移动菜单点击门禁 | 读取 tab/pane/selection 快照并调用显式命令，不修改工作区或终端权威状态 |
 | 主题外观 | `appearance/appearance_controller.js` | theme catalog、active theme、持久化、picker/settings theme DOM、timer/RAF/listener generation | 发布主题副本；rendering 负责应用到 Ghostty，不进入 replay |
 | 设置 | `settings/settings_controller.js` | 服务端 snapshot、本地偏好、PATCH 队列、字体/快捷键编辑状态、timer 和请求 generation | 通过只读 getter 与显式回调协调 appearance、diagnostics、devices 和终端适配 |
-| 诊断 | `diagnostics/diagnostics_controller.js` | debug mode、日志、性能和网络监控开关 | 订阅只读事件，不成为业务状态来源 |
+| 诊断 | `diagnostics/diagnostics_controller.js`、`diagnostics/terminal_timeline.js` | debug mode、日志、性能和网络监控开关、终端/页面运行时 trace 与 resume generation | 订阅只读事件，不成为业务状态来源；trace 不得驱动业务调度 |
 | 设备在线状态 | `devices/devices_controller.js` | 心跳开关与请求、短 TTL 列表视图、面板、timer 和 generation | 接收调试/页面生命周期信号，不接管账号或终端状态 |
 | 实例发现与切换器 | `instances/instances_controller.js` | 实例列表 snapshot、切换器、列表请求应用 generation、首页导航资源 | 读取活动 selector，向工作区发出切换命令，不接管工作区状态 |
 
@@ -484,7 +486,7 @@ runtime/static/
 
 ### 8. 浏览器历史兼容与旧存储清理
 
-- 普通容器没有浏览器历史缓存或 preview 持久化模块；服务端 snapshot/live 是唯一恢复路径。
+- 普通容器没有浏览器 PTY 历史缓存；服务端 snapshot/live 是唯一终端状态恢复路径。总览模块可持久化独立图片 Blob，但该数据不能参与任何 history/cursor/Ghostty 恢复。
 - `terminal/history/client_history_controller.js` 与 `terminal_history_cache.js` 仅为 `client:` 保留 IndexedDB 兼容能力，外部不得绕过 target guard 深度调用 store。
 - `app/bootstrap/legacy_storage_cleanup_controller.js` 只精确注销旧 WebShell Worker 并删除已知旧 Cache 名称；它是迁移清理器，不是运行时缓存 owner。
 
@@ -512,18 +514,19 @@ runtime/static/
 - renderer adapter 状态 owner：只持有模块 dispose 状态，并通过注入 getter 读取字体、字号和行高；patch 状态跟随具体 Ghostty renderer/terminal 实例，不拥有 tab/pane registry、history、resize、transport 或 presentation generation。
 - `global-runtime.js` 接线边界：只创建 renderer/presentation controller，注入现有 history、resize、transport 和工作区只读门禁，并在对应事件边界调用公开命令；不得保留 renderer patch、presentation 状态机、timer、RAF、Canvas listener 或 hold DOM 实现。
 - presentation 状态 owner：`presentation_state.js` 定义 session 字段，`presentation_controller.js` 唯一修改 render/presentation generation、RenderSnapshot、frame hold 状态、full render validation 和 stall recovery；`presentation_lifecycle.js` 唯一维护相关资源生命周期。
+- Ghostty 渲染边界：renderer 只物化并绘制已归一化 viewport，不反向修改 Terminal 状态；`Terminal.renderNow()` 在进入 renderer 前负责 viewport normalization。runtime suppression 按 reason 使用幂等集合，同一 reason 重复 begin 不增加底层 depth，未知 end 不得释放其他作用域。
 - presentation-ready 边界：`presentation_controller.js` 只报告 ready 信号；pending input、恢复指标、startup trace 和 Unified retry reset 的跨模块副作用由 `terminal/session/session_installation_controller.js` 的 `handlePresentationReady()` 编排。
 - 边界：不得决定历史或连接权威；只在完整可见 viewport 物化成功后提交；失败保留 last-known-good frame。
 
 ### 11. resize、几何与移动 viewport
 
-- 状态：DOM 测量、resize 请求/ACK/fence/settle、跨设备 owner observation、移动 visualViewport/keyboard inset/input lock 编排和两类资源生命周期均已完成迁移。
+- 状态：DOM 测量、resize 请求/ACK/fence/settle、跨设备 owner observation、显式 claim 升级、浏览器 viewport signature、移动 visualViewport/keyboard inset/input lock 编排和两类资源生命周期均已完成迁移。
 - 当前目录：`terminal/resize/` 与 `terminal/viewport/`；外部只能从各自 `index.js` 导入。resize 的 `viewport_controller.js` 只保存 resize 前后的 Ghostty scroll viewport 机械快照，不是移动 visualViewport owner；移动页面状态由 `terminal/viewport/viewport_controller.js` 唯一维护。
-- 公开 API：`createTerminalResizeController()` 提供尺寸读取、可测量判断、resize/claim/reassert、协议 ACK/error/owner 处理、输出 settle、tab 调度、session 安装和幂等销毁；既有 `TerminalResizeController`、scheduler 与 size-sync 继续作为模块内部使用的细粒度状态机和纯判断，并经公开入口导出供测试及受控调用。
+- 公开 API：`createTerminalResizeController()` 提供尺寸读取、可测量判断、resize/claim/reassert、当前 pane/tab 设备接管、协议 ACK/error/owner 处理、输出 settle、tab 调度、session 安装和幂等销毁；既有 `TerminalResizeController`、scheduler 与 size-sync 继续作为模块内部使用的细粒度状态机和纯判断，并经公开入口导出供测试及受控调用。
 - 状态 owner：`resize_controller.js` 唯一修改 requested/applied resize epoch、requested/server geometry、owner observation、ACK pending、fence、output settle、测量 generation 和 claim 状态；presented resize epoch 仍由 rendering/presentation 在最终 full render 成功后推进。
-- viewport 状态 owner：`terminal/viewport/viewport_controller.js` 唯一修改 visual viewport/reference height、keyboard inset、安全偏移、resize suppression、方向 generation 和 `session.inputViewportLock`；lifecycle 独占 touch/gesture、visualViewport/orientation listener、timer 和 RAF。
+- viewport 状态 owner：`terminal/viewport/viewport_controller.js` 唯一修改 layout/visual viewport signature、DPR/方向 generation、pending geometry、visual viewport/reference height、keyboard inset、安全偏移、resize suppression 和 `session.inputViewportLock`；lifecycle 独占 touch/gesture、window/visualViewport/orientation listener、timer 和 RAF。
 - `global-runtime.js` 接线边界：只创建 `terminalResize` 与 `terminalViewport` controller，注入 transport、output、rendering、IME、selection、overview 和工作区的显式命令或只读 getter；不得保留 resize/viewport 状态、observer/listener、RAF、timer、DOM fit、inset 或方向恢复实现。
-- 边界：ACK 前不切本地网格；远端新 epoch 只观察，不自动 reclaim；单 pane resize 失败不得关闭 Unified 物理连接；resize 只复用当前内存终端状态和 presentation hold，不触发或显示历史 replay、snapshot、重连或几何中间帧。
+- 边界：ACK 前不切本地网格；远端新 epoch 只观察，只有 tab/pane/focus/pageshow/input/稳定 viewport 等明确使用意图才能 reclaim；普通 resize 在途时显式 claim 必须排队升级；单 pane resize 失败不得关闭 Unified 物理连接；resize 只复用当前内存终端状态和 presentation hold，不触发或显示历史 replay、snapshot、重连或几何中间帧。
 
 ### 12. 输入队列、generated response 与输入锁
 
@@ -610,10 +613,10 @@ runtime/static/
 
 - 状态：总览和长截图均已完成迁移。总览 controller/view/lifecycle 独占总览状态、DOM 和资源；长截图工具只通过公开命令接收当前 session、移动快捷键和对话框依赖。
 - 当前目录：`terminal/overview/` 和 `terminal/screenshot/`。
-- 总览文件：`overview_controller.js`、`overview_view.js`、`overview_lifecycle.js` 和公开 `index.js`。
-- 总览状态 owner：controller 独占打开状态、RAF/timer、拖拽、移动端边缘手势和历史 guard；view/lifecycle 分别独占 DOM 与 listener 生命周期。
-- `global-runtime.js` 只注入只读工作区视图、last-known-good frame 查询和显式 tab 命令，并调用总览和长截图公开 API。
-- 边界：总览只使用已提交 live/hold Canvas，不能读取存储、触发 replay 或参与 Ghostty/input ready；截图必须冻结几何并在变化时中止。
+- 总览文件：`overview_controller.js`、`overview_view.js`、`overview_lifecycle.js`、`preview_controller.js`、`preview_store.js` 和公开 `index.js`。
+- 总览状态 owner：总览 controller 独占打开状态、RAF/timer、拖拽、移动端边缘手势和历史 guard；preview controller 独占 capture/load generation、debounce timer 与 decoded image；preview store 独占 IndexedDB 图片 transaction、64 项容量和 30 天过期清理；view/lifecycle 分别独占 DOM 与 listener 生命周期。
+- `global-runtime.js` 只注入只读工作区视图、last-known-good frame 查询、已提交 presentation 授权和显式 tab/pane 生命周期命令，并调用总览和长截图公开 API。
+- 边界：总览来源优先级固定为已提交 live、有效 hold、同 identity IndexedDB 图片；持久图不含 PTY/cursor，不能触发 replay、恢复 Ghostty 或参与 input ready。截图必须冻结几何并在变化时中止。
 
 ### 17. 主题、字体与终端外观
 
@@ -638,7 +641,7 @@ runtime/static/
 - 状态：已于 2026-08-30 完成第一阶段迁移。
 - 当前目录：`runtime/static/diagnostics/`。
 - 当前文件：`index.js`、`diagnostics_controller.js`、`network_context.js`、`diagnostics_lifecycle.js`、`diagnostics_view.js`、`debug_log.js`、`performance_meter.js`、`performance_tasks.js`、`network_monitor.js`、`startup_trace.js`、`terminal_timeline.js`。
-- 状态 owner：debug 总控、各诊断开关、日志去重、采样 timer 和动态模块加载。
+- 状态 owner：debug 总控、各诊断开关、日志去重、采样 timer、动态模块加载、终端时间线和有限的页面运行时 trace。
 - 边界：关闭调试总控后必须停止所有采样、listener 和 timer；诊断数据不能驱动业务状态。
 
 ### 20. 设备在线状态
@@ -743,7 +746,7 @@ Node 测试的物理位置统一保持在 `tests/`；按模块归属通过文件
 7. `settings/`：已完成，验证了字段级 PATCH、pending overlay、字体注册、两套快捷键编辑器、面板导航、timer/listener/dispose 和终端适配边界。
 8. `terminal/session/`：已完成，验证了 pane ID、完整初始状态、私有 cleanup、closed-before-detach、幂等销毁和兄弟 logical stream 隔离边界。
 9. 静态根目录独立模块归档：已完成，验证了公开入口、README、相对 import、版本化资源路径和既有行为测试不变；该步骤不代表核心 controller/lifecycle 迁移完成。
-10. `terminal/overview/`：已完成，验证了总览状态唯一 owner、DOM/lifecycle 隔离、live/hold Canvas 来源、拖拽/手势/历史 guard 和资源清理。
+10. `terminal/overview/`：已完成，验证了总览状态 owner、DOM/lifecycle 隔离、live/hold/persisted 图片来源、identity/generation guard、拖拽/手势/历史边界和资源清理。
 11. `terminal/interaction/` 上下文菜单子域：已完成，验证了 desktop/mobile target、动作分派、触摸合成菜单抑制、动态 pane/tab listener 和销毁清理边界。
 
 renderer adapter、presentation、resize、输入队列、IME、移动快捷键、移动 viewport、output、服务端 history replay、`client:` IndexedDB 兼容、session connection、Unified 物理 transport、应用命令和主题发送适配均已完成迁移。`global-runtime.js` 当前只保留全局状态声明、feature controller 创建、跨模块依赖接线、启动/恢复/页面生命周期和统一销毁顺序；其中的 `connectSession()` 仅是对 transport public API 的转发。后续新增功能仍需按独立 owner、controller、lifecycle 和行为 guard 落入对应目录。

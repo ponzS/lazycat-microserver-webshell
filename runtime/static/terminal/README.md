@@ -20,7 +20,7 @@
 - `resize/`：resize controller、scheduler 和尺寸同步。
 - `viewport/`：移动 visualViewport、软键盘、安全偏移和方向恢复。
 - `interaction/`、`mouse/`、`selection/`：菜单、搜索、剪贴板、链接、mouse 协议和选区。
-- `overview/`：标签总览、live/hold Canvas 缩略图、拖拽和移动端手势。
+- `overview/`：标签总览、live/hold/IndexedDB 派生图片缩略图、拖拽和移动端手势；持久图片不保存或恢复 PTY 历史。
 - `screenshot/`：终端长截图。
 - `input/`：输入队列、generated response、helper textarea、IME、焦点和移动快捷键。
 - `policy/`、`tui_adapters/`：工具识别策略和隔离的 TUI 适配器。

@@ -139,7 +139,7 @@ const createTabs = () => {
   return { paneA, paneB, tabA, tabB, tabs: new Map([[tabA.id, tabA], [tabB.id, tabB]]) };
 };
 
-test("overview controller renders live or held frames without storage preparation", async () => {
+test("overview controller renders live or held frames when no persisted source is available", async () => {
   const windowHarness = createWindowHarness();
   const viewHarness = createViewHarness();
   const lifecycle = createLifecycleHarness();
@@ -195,6 +195,80 @@ test("overview controller renders live or held frames without storage preparatio
   assert.equal(lifecycle.disposes, 1);
   assert.equal(windowHarness.idle.size, 0);
   assert.equal(controller.isOpen(), false);
+});
+
+test("overview controller prefers live and hold frames before persisted previews", async () => {
+  const windowHarness = createWindowHarness();
+  const lifecycle = createLifecycleHarness();
+  const paneLive = {
+    id: "pane-live",
+    tabId: "tab-live",
+    renderReady: true,
+    hasPresentedFrame: true,
+    term: { canvas: { id: "live", width: 100, height: 50 } },
+  };
+  const paneHold = {
+    id: "pane-hold",
+    tabId: "tab-hold",
+    renderReady: false,
+    hasPresentedFrame: false,
+    terminalFrameHold: { id: "hold", width: 100, height: 50 },
+  };
+  const paneStored = { id: "pane-stored", tabId: "tab-stored" };
+  const paneMissing = { id: "pane-missing", tabId: "tab-missing" };
+  const panes = [paneLive, paneHold, paneStored, paneMissing];
+  const tabs = panes.map((pane) => ({
+    id: pane.tabId,
+    activePaneId: pane.id,
+    panes: new Map([[pane.id, pane]]),
+  }));
+  const sources = [];
+  const prepared = [];
+  const deleted = [];
+  let previewDisposed = 0;
+  let previewCleaned = 0;
+  const persisted = { id: "stored", width: 100, height: 50 };
+  const previewController = {
+    capture: () => true,
+    captureAll: () => 4,
+    cleanup: () => { previewCleaned += 1; },
+    delete: (pane) => { deleted.push(pane.id); return Promise.resolve(true); },
+    dispose: () => { previewDisposed += 1; },
+    get: (pane) => pane === paneStored ? persisted : null,
+    prepare: (pane) => { prepared.push(pane.id); return Promise.resolve(null); },
+  };
+  let open = false;
+  const controller = createTerminalOverviewController({
+    documentObject: { documentElement: {}, body: {} },
+    windowObject: windowHarness.windowObject,
+    lifecycleFactory: lifecycle.factory.bind(lifecycle),
+    getOrderedTabs: () => tabs,
+    getActiveTabId: () => "tab-live",
+    isFrameHoldCurrent: (pane) => pane === paneHold,
+    previewController,
+    view: {
+      elements: { root: {}, grid: {} },
+      drawPreview(_canvas, tab, sourceForPane) {
+        sources.push(sourceForPane(tab.panes.get(tab.activePaneId))?.id || "");
+      },
+      focusActiveCard() {},
+      isOpen: () => open,
+      renderTabs: ({ orderedTabs }) => orderedTabs.map((tab) => ({ canvas: {}, tab })),
+      setOpen: (value) => { open = value; },
+    },
+  });
+
+  controller.start();
+  controller.open();
+  assert.deepEqual(sources, ["live", "hold", "stored", ""]);
+  assert.deepEqual(prepared, ["pane-missing"]);
+  assert.equal(previewCleaned, 1);
+  assert.equal(controller.capturePreview(paneLive), true);
+  assert.equal(controller.captureAllPreviews(panes), 4);
+  await controller.deletePreview(paneMissing);
+  assert.deepEqual(deleted, ["pane-missing"]);
+  controller.dispose();
+  assert.equal(previewDisposed, 1);
 });
 
 test("overview controller owns mobile history guard and browser-back opening", () => {

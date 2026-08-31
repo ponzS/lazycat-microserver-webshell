@@ -47,8 +47,105 @@ export async function run({ config, states, artifactsDir, eventLog, activity, pa
   }
   await eventLog({ status: "pass", action: "output-synchronized", marker, windows: ["desktop", "mobile"] });
 
+  const foldedViewport = mobile.page.viewportSize();
+  const unfoldedViewport = { width: 700, height: 900 };
+  await refreshResizeFrames(mobile);
+  const unfoldFrameCount = mobile.framesSent.length;
+  const unfoldErrors = mobile.resizeErrors;
+  await mobile.page.setViewportSize(unfoldedViewport);
+  const unfoldResult = await waitForResizeApplied(
+    mobile,
+    previous,
+    "portrait-unfold-mobile",
+    unfoldFrameCount,
+    unfoldErrors,
+  );
+  if (unfoldResult.expected.claim !== true) {
+    const diagnostics = await mobile.page.evaluate((frameCount) => ({
+      frames: (window.__testsAutoResizeFrames || []).slice(frameCount),
+      trace: (window.__testsAutoResizeTrace || []).slice(-120),
+    }), unfoldFrameCount);
+    throw new Error(`portrait-unfold-mobile: resize did not claim current-device ownership: ${JSON.stringify({
+      expected: unfoldResult.expected,
+      diagnostics,
+    })}`);
+  }
+  const unfoldFrames = await mobile.page.evaluate(
+    (frameCount) => (window.__testsAutoResizeFrames || []).slice(frameCount),
+    unfoldFrameCount,
+  );
+  if (unfoldFrames.some((frame) => frame.claim !== true)) {
+    const trace = await mobile.page.evaluate(() => (window.__testsAutoResizeTrace || []).slice(-160));
+    throw new Error(`portrait-unfold-mobile: passive resize raced the viewport claim: ${JSON.stringify({
+      frames: unfoldFrames,
+      trace,
+    })}`);
+  }
+  previous = unfoldResult.applied;
+  await eventLog({
+    status: "pass",
+    window: "mobile",
+    action: "portrait-unfold-mobile",
+    viewport: unfoldedViewport,
+    resize: unfoldResult.expected,
+    frames: unfoldFrames,
+    applied: unfoldResult.applied,
+  });
+
+  await refreshResizeFrames(mobile);
+  const foldFrameCount = mobile.framesSent.length;
+  const foldErrors = mobile.resizeErrors;
+  await mobile.page.setViewportSize(foldedViewport);
+  const foldResult = await waitForResizeApplied(
+    mobile,
+    previous,
+    "portrait-fold-mobile",
+    foldFrameCount,
+    foldErrors,
+  );
+  if (foldResult.expected.claim !== true) {
+    const diagnostics = await mobile.page.evaluate((frameCount) => ({
+      frames: (window.__testsAutoResizeFrames || []).slice(frameCount),
+      trace: (window.__testsAutoResizeTrace || []).slice(-120),
+    }), foldFrameCount);
+    throw new Error(`portrait-fold-mobile: resize did not claim current-device ownership: ${JSON.stringify({
+      expected: foldResult.expected,
+      diagnostics,
+    })}`);
+  }
+  const foldFrames = await mobile.page.evaluate(
+    (frameCount) => (window.__testsAutoResizeFrames || []).slice(frameCount),
+    foldFrameCount,
+  );
+  if (foldFrames.some((frame) => frame.claim !== true)) {
+    const trace = await mobile.page.evaluate(() => (window.__testsAutoResizeTrace || []).slice(-160));
+    throw new Error(`portrait-fold-mobile: passive resize raced the viewport claim: ${JSON.stringify({
+      frames: foldFrames,
+      trace,
+    })}`);
+  }
+  previous = foldResult.applied;
+  const foldCanvas = await terminal(mobile).locator("canvas").first().evaluate((node) => ({
+    width: node.width,
+    height: node.height,
+  }));
+  if (!foldCanvas.width || !foldCanvas.height) {
+    throw new Error(`portrait-fold-mobile: terminal canvas is blank (${foldCanvas.width}x${foldCanvas.height})`);
+  }
+  await mobile.page.screenshot({ path: path.join(artifactsDir, "00-mobile-fold-recovery.png") });
+  await eventLog({
+    status: "pass",
+    window: "mobile",
+    action: "portrait-fold-mobile",
+    viewport: foldedViewport,
+    resize: foldResult.expected,
+    frames: foldFrames,
+    applied: foldResult.applied,
+    canvas: foldCanvas,
+  });
+
   const alternating = [];
-  for (let round = 0; round < config.rounds; round += 1) alternating.push([mobile, "mobile"], [desktop, "desktop"]);
+  for (let round = 0; round < config.rounds; round += 1) alternating.push([desktop, "desktop"], [mobile, "mobile"]);
   for (let index = 0; index < alternating.length; index += 1) {
     const [state, name] = alternating[index];
     const action = `click-${name}-${index + 1}`;

@@ -651,7 +651,12 @@ func TestTerminalOverviewControllerBehavior(t *testing.T) {
 	if err != nil {
 		t.Skip("node is unavailable")
 	}
-	command := exec.Command(node, "--test", "tests/terminal_overview_controller_test.mjs")
+	command := exec.Command(
+		node,
+		"--test",
+		"tests/terminal_overview_controller_test.mjs",
+		"tests/terminal_overview_preview_test.mjs",
+	)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("terminal overview controller tests failed: %v\n%s", err, output)
@@ -3034,7 +3039,9 @@ func TestRuntimeTerminalSessionModuleBoundary(t *testing.T) {
 		`terminalStartupError?.dispose();`,
 		"const createPaneSession = (tab, instanceName, options) => (",
 		"terminalSessionInstallation.createPaneSession(tab, instanceName, options)",
-		"disposePaneSession: (pane) => terminalSessionController.dispose(pane),",
+		"disposePaneSession: (pane) => {",
+		"terminalOverview?.deletePreview(pane);",
+		"terminalSessionController.dispose(pane);",
 		"sessionRecovery = createTerminalSessionRecoveryController({",
 		"const detachSessionSocket = (session, currentSocket, options) => (",
 		"const resetTerminalForHistoryReplay = (session) => (",
@@ -3081,7 +3088,8 @@ func TestRuntimeTerminalSessionModuleBoundary(t *testing.T) {
 			t.Fatalf("createPaneSession must not rebuild session state via %q", forbidden)
 		}
 	}
-	if !strings.Contains(mainSource, "disposePaneSession: (pane) => terminalSessionController.dispose(pane),") {
+	if !strings.Contains(mainSource, "disposePaneSession: (pane) => {") ||
+		!strings.Contains(mainSource, "terminalSessionController.dispose(pane);") {
 		t.Fatal("disposePane must delegate to terminal session lifecycle")
 	}
 	for _, want := range []string{
@@ -3911,10 +3919,12 @@ func TestRuntimeTerminalViewportModuleBoundary(t *testing.T) {
 		`let terminalViewport = null;`,
 		`terminalViewport = createTerminalMobileViewportController({`,
 		`getActiveSession: () => activeSession(),`,
-		`resizeActiveTabForCurrentDevice: (options) => terminalResize?.resizeActiveTabForCurrentDevice(options),`,
+		`claimActiveTabForCurrentDevice: (options) => terminalResize?.claimActiveTabForCurrentDevice(options),`,
+		`isViewportGeometryClaimPending: () => terminalViewport?.isGeometryClaimPending() === true,`,
 		`resetHostViewport: (session, options) => terminalIME?.resetHostViewport(session, options),`,
 		`updateSelectionHandles: (session) => terminalSelection?.updateHandles(session),`,
-		`onRenderObserved: (session) => terminalViewport?.syncPan(session),`,
+		`onRenderObserved: (session) => {`,
+		`terminalViewport?.syncPan(session);`,
 		`isMobileKeyboardResizeSuppressed: () => terminalViewport?.isResizeSuppressed() === true,`,
 		`captureInputViewportLock: (session) => terminalViewport?.captureInputLock(session),`,
 		`releaseInputViewportLock: (session, options) => terminalViewport?.releaseInputLock(session, options),`,
@@ -3966,11 +3976,13 @@ func TestRuntimeTerminalViewportModuleBoundary(t *testing.T) {
 		`const captureTerminalInputViewportLock = (session) => {`,
 		`const releaseTerminalInputViewportLock = (session, { resync = true } = {}) => {`,
 		`const scheduleMobileKeyboardDismissRecovery = () => {`,
-		`const scheduleMobileOrientationViewportRecovery = () => {`,
+		`const scheduleViewportGeometryClaim = (reason, { force = false } = {}) => {`,
+		`const scheduleViewportGeometryValidation = (generation) => {`,
+		`const isGeometryClaimPending = () => {`,
 		`const syncMobileVisualViewport = ({`,
 		`inputLock.session.inputViewportLock = {`,
 		`keyboardActive: true,`,
-		`resizeActiveTabForCurrentDevice({ forceFullRender: true, hideUntilRender: true });`,
+		`scheduleViewportGeometryClaim("mobile_keyboard_dismiss", { force: true });`,
 		`start() {`,
 		`dispose() {`,
 	} {
@@ -4049,6 +4061,8 @@ func TestRuntimeTerminalOverviewModuleBoundary(t *testing.T) {
 	indexSource := read("runtime/static/terminal/overview/index.js")
 	controllerSource := read("runtime/static/terminal/overview/overview_controller.js")
 	lifecycleSource := read("runtime/static/terminal/overview/overview_lifecycle.js")
+	previewControllerSource := read("runtime/static/terminal/overview/preview_controller.js")
+	previewStoreSource := read("runtime/static/terminal/overview/preview_store.js")
 	viewSource := read("runtime/static/terminal/overview/overview_view.js")
 	readmeSource := read("runtime/static/terminal/overview/README.md")
 
@@ -4058,6 +4072,10 @@ func TestRuntimeTerminalOverviewModuleBoundary(t *testing.T) {
 		`getOrderedTabs,`,
 		`getActiveTabId,`,
 		`isFrameHoldCurrent: (session) => terminalPresentation.frameHoldIsCurrent(session),`,
+		`canPersistPreview: (session) => Boolean(`,
+		`terminalOverview?.capturePreview(session);`,
+		`terminalOverview?.captureAllPreviews(getAllSessions(), { immediate: true });`,
+		`terminalOverview?.deletePreview(pane);`,
 		`moveTab: (tabId, position) => moveTab(tabId, position),`,
 		`terminalOverview,`,
 		`terminalOverview?.dispose();`,
@@ -4092,6 +4110,8 @@ func TestRuntimeTerminalOverviewModuleBoundary(t *testing.T) {
 		`export { createTerminalOverviewController } from "./overview_controller.js";`,
 		`export { createTerminalOverviewLifecycle } from "./overview_lifecycle.js";`,
 		`export { createTerminalOverviewView } from "./overview_view.js";`,
+		`export { createTerminalOverviewPreviewController } from "./preview_controller.js";`,
+		`createTerminalOverviewPreviewStore,`,
 	} {
 		if !strings.Contains(indexSource, want) {
 			t.Fatalf("terminal overview public entry missing %q", want)
@@ -4105,7 +4125,9 @@ func TestRuntimeTerminalOverviewModuleBoundary(t *testing.T) {
 		`const paneOverviewSource = (pane) => {`,
 		`const liveFrame = pane?.renderReady && pane?.hasPresentedFrame ? liveCanvas : null;`,
 		`const heldFrame = isFrameHoldCurrent(pane) ? pane.terminalFrameHold : null;`,
-		`return liveFrame || heldFrame;`,
+		`const persistedFrame = overviewPreview.get(pane);`,
+		`overviewPreview.prepare(pane);`,
+		`return liveFrame || heldFrame || persistedFrame;`,
 		`const moveTabToOverviewIndex = async`,
 		`const animateTabOverviewReorder = (beforeRects) => {`,
 		`const updateTabOverviewDragAutoScroll = (state) => {`,
@@ -4114,9 +4136,48 @@ func TestRuntimeTerminalOverviewModuleBoundary(t *testing.T) {
 		`const handleMobileOverviewEdgeSwipeStart = (event) => {`,
 		`const handleMobileOverviewEdgeSwipeMove = (event) => {`,
 		`lifecycle.dispose?.();`,
+		`overviewPreview.dispose();`,
 	} {
 		if !strings.Contains(controllerSource, want) {
 			t.Fatalf("terminal overview controller guard missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		`createTerminalOverviewPreviewStore({`,
+		`canCapturePane = () => false,`,
+		`state.captureSeq += 1;`,
+		`state.loadSeq += 1;`,
+		`terminalOverviewPreviewKey(identityForPane(pane)) !== identityKey`,
+		`String(pane.historyGeneration || "").trim() !== historyGeneration`,
+		`store.save(identity, blob, {`,
+		`store.delete(identityForPane(pane))`,
+	} {
+		if !strings.Contains(previewControllerSource, want) {
+			t.Fatalf("terminal overview preview controller guard missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		`const defaultDatabaseName = "lcmd-webshell-overview-previews-v1";`,
+		`const defaultMaxEntries = 64;`,
+		`const defaultMaxAgeMs = 30 * 24 * 60 * 60 * 1000;`,
+		`database.createObjectStore("previews", { keyPath: "key" });`,
+		`identity.workspaceGeneration,`,
+		`historyGeneration: normalizePart(metadata.historyGeneration),`,
+		`blob,`,
+	} {
+		if !strings.Contains(previewStoreSource, want) {
+			t.Fatalf("terminal overview preview store guard missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"outputQueue",
+		"receivedHistoryCursor",
+		"localBaseCursor",
+		"writeReplay",
+		"new WebSocket",
+	} {
+		if strings.Contains(previewControllerSource+previewStoreSource, forbidden) {
+			t.Fatalf("terminal overview preview persistence must not own PTY/history/transport state %q", forbidden)
 		}
 	}
 	for _, forbidden := range []string{
@@ -5734,7 +5795,8 @@ func TestRuntimeMobileKeyboardPanTracksRenderedTerminal(t *testing.T) {
 	if markPosition < 0 || panPosition < 0 || panPosition < markPosition {
 		t.Fatal("terminal render completion must refresh the mobile keyboard pan after committing the rendered cursor")
 	}
-	if !strings.Contains(mainSource, `onRenderObserved: (session) => terminalViewport?.syncPan(session),`) {
+	if !strings.Contains(mainSource, `onRenderObserved: (session) => {`) ||
+		!strings.Contains(mainSource, `terminalViewport?.syncPan(session);`) {
 		t.Fatal("main presentation adapter must route render observation to mobile viewport pan sync")
 	}
 	lockBranch := sourceBetween(t, viewportSource,
@@ -6200,7 +6262,9 @@ func TestRuntimeTerminalPresentationModuleBoundary(t *testing.T) {
 		`terminalPresentation = createTerminalPresentationController({`,
 		`isReplayCommitted: (session) => terminalReplay.isCommitted(session),`,
 		`isPaneMeasurable: (session) => terminalResize?.isMeasurable(session) === true,`,
-		`scheduleResize: (session, options, scheduleOptions) => terminalResize?.schedulePane(session, options, scheduleOptions) === true,`,
+		`isCurrentDeviceClaimRequired: (session) => terminalResize?.isCurrentDeviceClaimRequired(session) === true,`,
+		`isViewportGeometryClaimPending: () => terminalViewport?.isGeometryClaimPending() === true,`,
+		`scheduleResize: (session, options, scheduleOptions) => terminalResize?.schedulePresentationResize(session, options, scheduleOptions) === true,`,
 		`recoverTransport: (session, reason, options) => terminalTransportRuntime?.recycleUnifiedSession(session, reason, options),`,
 		`presentation?.installSession?.(session);`,
 		`terminalPresentation.ensure(session, {`,
@@ -6237,6 +6301,8 @@ func TestRuntimeTerminalPresentationModuleBoundary(t *testing.T) {
 		`const renderAllowed = (session) => Boolean(`,
 		`const commitIfReady = (session) => {`,
 		`const ensure = (session, {`,
+		`if (isCurrentDeviceClaimRequired(session) || isViewportGeometryClaimPending(session)) {`,
+		`presentation_wait_current_device_claim`,
 		`const scheduleValidation = (session, { forceHistory = false } = {}) => {`,
 		`const recoverStalled = (session, now = Date.now()) => {`,
 		`installSession,`,
@@ -6915,7 +6981,8 @@ func TestRuntimeMobileBottomSafeAreaKeepsShortcutsAboveControls(t *testing.T) {
 		`applyMobileViewportInsets(0, nextSafeOffset, { keyboardActive: false });`,
 		`scheduleKeyboardDismissRecovery: () => terminalViewport?.scheduleKeyboardDismissRecovery(),`,
 		`scheduleKeyboardDismissRecovery();`,
-		`const nextInset = useKeyboardInset && measuredInset > mobileKeyboardInsetThresholdPx ? measuredInset : 0;`,
+		`const nextKeyboardActive = measuredInset > mobileKeyboardInsetThresholdPx`,
+		`const nextInset = useKeyboardInset && nextKeyboardActive ? measuredInset : 0;`,
 		`const applyMobileViewportInsets = (nextInset, nextSafeOffset, {`,
 		`const isMobileKeyboardResizeSuppressed = () => (`,
 		`syncActiveTerminalViewportForKeyboard();`,
@@ -7716,7 +7783,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"N = s - C >>> 0",
 		"this.requestRender({ full: !0 })",
 		"normalizeViewportBounds(A = this.viewportY)",
-		"E.normalizeViewportBounds(requestedViewportY)",
+		"g = Math.max(0, Math.min(i, Number.isFinite(requestedViewportY) ? requestedViewportY : 0));",
 		"this.ctx.fillRect(0, 0, this.canvas.width / this.devicePixelRatio, this.canvas.height / this.devicePixelRatio)",
 		"this.ctx.fillRect(0, C, this.canvas.width / this.devicePixelRatio, this.metrics.height)",
 		"i.text = D.grapheme_len > 0 && typeof A.getGraphemeString == \"function\" ? A.getGraphemeString(Math.floor(I / B.cols), I % B.cols) : String.fromCodePoint(D.codepoint || 32)",
@@ -7724,7 +7791,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"const text = typeof A.text == \"string\" ? A.text",
 		"materializeViewportLines(A, B, g, E, C)",
 		"const W = this.materializeViewportLines(A, D, g, i, E);",
-		"if (!this.renderer.render(this.wasmTerm, A, this.viewportY, this, this.scrollbarOpacity))",
+		"this.renderer.render(this.wasmTerm, A, this.normalizeViewportBounds(this.viewportY), this, this.scrollbarOpacity)",
 		"this.scheduleRenderRetry()",
 		"this.renderRetryDelayMs = Math.min(250, A * 2)",
 		"this.renderRetryTimer = window.setTimeout",
@@ -7858,7 +7925,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"const resizePane = (session, {",
 		"lifecycle = lifecycleFactory({")
 	holdIndex := strings.Index(resizeBlock, "if (shouldHoldFrame) {")
-	beginIndex := strings.Index(resizeBlock, "presentation()?.beginHold(session);")
+	beginIndex := strings.Index(resizeBlock, "if (presentation()?.beginHold(session) !== true) {")
 	dimensionsIndex := strings.Index(resizeBlock, "const dimensionsWillChange = !dimensionsEqual(session, fittedDimensions) || canvasNeedsResize;")
 	commitIndex := strings.Index(resizeBlock, "presentation()?.commitNow(session);")
 	if dimensionsIndex < 0 || holdIndex <= dimensionsIndex || beginIndex <= holdIndex || commitIndex <= beginIndex {
@@ -8297,11 +8364,20 @@ func TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard(t *testing.T) 
 		`animation: pane-connection-breathe 1.35s ease-in-out infinite;`,
 		`@keyframes pane-connection-breathe`,
 		`.pane-shell[data-connection="offline"]::after`,
+		`.pane-shell[data-connection="network-error"]::after`,
 		`.pane-shell[data-connection="closed"]::after`,
 	} {
 		if !strings.Contains(styleSource, want) {
 			t.Fatalf("runtime connection indicator style guard missing %q", want)
 		}
+	}
+	grayIndicator := strings.Index(styleSource, `.pane-shell[data-connection="connecting"]::after`)
+	redIndicator := strings.Index(styleSource, `.pane-shell[data-connection="offline"]::after,
+.pane-shell[data-connection="network-error"]::after {
+  background: #ef4444;
+}`)
+	if grayIndicator < 0 || redIndicator < 0 || redIndicator < grayIndicator {
+		t.Fatal("explicit network indicator must override gray render-pending indicator")
 	}
 	for _, want := range []string{
 		`id="settingsDebugLogToggle"`,
@@ -8545,7 +8621,7 @@ func TestRuntimeTerminalConnectionSchedulerGuard(t *testing.T) {
 		"let closingPromise = null;",
 		"const waitForClosures = async () => {",
 		"const scheduleRecovery = (reason = \"transport_failure\") => {",
-		"const handlePhysicalDisconnect = (observedConnection, reason = \"unified_transport_closed\") => {",
+		"const handlePhysicalDisconnect = (\n    observedConnection,\n    reason = \"unified_transport_closed\",\n    { closeConnection = false } = {},\n  ) => {",
 		"const startHealthWatchdog = (current) => {",
 		"const retryUnavailable = (reason = \"lifecycle_resume\") => {",
 		"const ensure = (requestedTargetName) => {",
@@ -9314,7 +9390,11 @@ func TestRuntimeTerminalSizeClaimSurvivesCrossClientResize(t *testing.T) {
 		`const sendSize = (session, { force = false, dimensions = null, claim = false } = {}) => {`,
 		`shouldSendTerminalSize({`,
 		`const claimSize = (session, { force = false } = {}) => {`,
-		`const claimForCurrentDevice = (session) => {`,
+		`const claimForCurrentDevice = (session, options = {}) => {`,
+		`const claimSizeForTransaction = shouldClaimSize`,
+		`session.sizeClaimRequired === true`,
+		`recordEvent(session, "resize_wait_current_device_claim"`,
+		`reason: "remote_owner_observed"`,
 		`forceSizeSync: true,`,
 		`settlePresentation: true,`,
 		`sendSize(session, { force: true, claim: true });`,
@@ -9336,7 +9416,7 @@ func TestRuntimeTerminalSizeClaimSurvivesCrossClientResize(t *testing.T) {
 		}
 	}
 	claimBlock := sourceBetween(t, resizeSource,
-		`const claimForCurrentDevice = (session) => {`,
+		`const claimForCurrentDevice = (session, options = {}) => {`,
 		`const resizeTabForCurrentDevice = (tab, options = {}) => {`)
 	if strings.Contains(claimBlock, `presentation()?.beginHold(session)`) {
 		t.Fatal("a size claim without a geometry change must not freeze terminal rendering")
@@ -9360,7 +9440,7 @@ func TestRuntimeTerminalSizeClaimSurvivesCrossClientResize(t *testing.T) {
 		{`const handlePageShow = () => {`, `return Object.freeze({`},
 	} {
 		body := sourceBetween(t, recoverySource, boundary[0], boundary[1])
-		if !strings.Contains(body, `claimActiveSize(getActiveSession());`) {
+		if !strings.Contains(body, `claimActiveTabSize({ forceFullRender: true`) {
 			t.Fatalf("runtime lifecycle size claim missing after %q", boundary[0])
 		}
 	}
@@ -9670,7 +9750,8 @@ func TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs(t *testing.T) {
 		"const resizeTabForCurrentDevice = (tab, options = {}) => {",
 		"const resizeActiveTabForCurrentDevice = (options = {}) => resizeTabForCurrentDevice(getCurrentTab(), options);",
 		"syncTabMobilePixelScroll(tab);",
-		"terminalResize.scheduleActiveTabWindowResize();",
+		"const claimActiveTabForCurrentDevice = (options = {}) => (",
+		"claimActiveTabForCurrentDevice: (options) => terminalResize?.claimActiveTabForCurrentDevice(options),",
 		"const isVisible = (session) => session?.tabId === getActiveTabId() && isMeasurable(session);",
 		"const resizePane = (session, {",
 		"visibleOnly = true,",
@@ -9680,6 +9761,9 @@ func TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs(t *testing.T) {
 		"session.fitAddon?.proposeDimensions?.();",
 		"const capturedViewport = viewport.capture(session.term);",
 		"const canvasNeedsResize = !canvasMatchesExpectedSize(session, fittedDimensions);",
+		"const claimSizeForTransaction = shouldClaimSize",
+		"recordEvent(session, \"resize_wait_current_device_claim\"",
+		"reason: \"remote_owner_observed\"",
 		"if (dimensionsWillChange) {",
 		"session.term.resize(fittedDimensions.cols, fittedDimensions.rows);",
 		"viewport.restore(session.term, capturedViewport);",
@@ -9773,16 +9857,16 @@ func TestRuntimeMobileOrientationKeepsTerminalStateAfterViewportSettle(t *testin
 	)
 
 	wantSnippets := []string{
-		"mobileOrientationViewportRecoveryDelays = [0, 80, 180, 360, 720],",
-		"mobileOrientationFinalSettleMs = 900,",
+		"viewportGeometryFinalSettleMs = 180,",
+		"viewportGeometryStableFrameCount = 2,",
 		"const currentMobileViewportOrientation = () => readMobileViewportOrientation({",
 		"const rememberMobileViewportOrientationChange = () => {",
-		"const scheduleMobileOrientationViewportRecovery = () => {",
-		`if (rememberMobileViewportOrientationChange() || lifecycle.hasTimeout("mobile-orientation-final")) {`,
-		"const shouldRecoverOrientation = orientationChanged",
-		`|| (detectOrientation && lifecycle.hasTimeout("mobile-orientation-final"));`,
-		"syncMobileVisualViewport({ detectOrientation: false });",
-		"resizeActiveTabForCurrentDevice();",
+		"const scheduleViewportGeometryClaim = (reason, { force = false } = {}) => {",
+		"const scheduleViewportGeometryValidation = (generation) => {",
+		"const isGeometryClaimPending = () => {",
+		"terminalViewportGeometryRequiresClaim(previous, current, {",
+		"claimActiveTabForCurrentDevice({",
+		"pendingViewportGeometry = measureTerminalViewportGeometry({ windowObject, documentObject });",
 		`listen(windowObject, "orientationchange", handlers.onOrientationChange || noop);`,
 		`listen(windowObject?.screen?.orientation, "change", handlers.onOrientationChange || noop);`,
 	}

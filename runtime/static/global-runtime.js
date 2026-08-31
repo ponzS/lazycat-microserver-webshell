@@ -241,6 +241,7 @@ export function startGlobalRuntime() {
     terminalUnifiedPaneRetryMaxDelayMs,
     terminalWebSocketHealthTimeoutMs,
     terminalResumeProbeTimeoutMs,
+    terminalResumeDeadlineMs,
     terminalUserRecoveryThrottleMs,
     terminalAttachReadyTimeoutMs,
     terminalAgentPrepareTimeoutMs,
@@ -753,13 +754,23 @@ export function startGlobalRuntime() {
     isReplayCommitPending: (session) => terminalReplay.commitIsPending(session),
     isPaneVisible: (session) => terminalResize?.isVisible(session) === true,
     isPaneMeasurable: (session) => terminalResize?.isMeasurable(session) === true,
+    isCurrentDeviceClaimRequired: (session) => terminalResize?.isCurrentDeviceClaimRequired(session) === true,
+    isViewportGeometryClaimPending: () => terminalViewport?.isGeometryClaimPending() === true,
     canvasMatchesExpectedSize: (session) => terminalResize?.canvasMatchesExpectedSize(session) === true,
     normalizeResizeEpoch: (value) => terminalResize?.normalizeEpoch(value) || "",
-    scheduleResize: (session, options, scheduleOptions) => terminalResize?.schedulePane(session, options, scheduleOptions) === true,
+    scheduleResize: (session, options, scheduleOptions) => terminalResize?.schedulePresentationResize(session, options, scheduleOptions) === true,
     sendResize: (session, options) => terminalResize?.sendSize(session, options) === true,
     recordEvent: (session, event, details) => recordTerminalSessionEvent(session, event, details),
     onReady: (session, details) => terminalSessionInstallation?.handlePresentationReady(session, details),
-    onRenderObserved: (session) => terminalViewport?.syncPan(session),
+    onRenderObserved: (session) => {
+      terminalViewport?.syncPan(session);
+      if (
+        terminalReplay?.isCommitted(session) === true
+        && terminalPresentation?.isCurrent(session) === true
+      ) {
+        terminalOverview?.capturePreview(session);
+      }
+    },
     recoverTransport: (session, reason, options) => terminalTransportRuntime?.recycleUnifiedSession(session, reason, options),
     isSocketOpen: (session) => session?.socket?.readyState === WebSocket.OPEN,
     now: () => performanceTaskNow(),
@@ -859,7 +870,7 @@ export function startGlobalRuntime() {
     getActiveSession: () => activeSession(),
     getSessions: () => getAllSessions(),
     hasActivePanes: () => Boolean(currentTab()?.panes.size),
-    resizeActiveTabForCurrentDevice: (options) => terminalResize?.resizeActiveTabForCurrentDevice(options),
+    claimActiveTabForCurrentDevice: (options) => terminalResize?.claimActiveTabForCurrentDevice(options),
     resetHostViewport: (session, options) => terminalIME?.resetHostViewport(session, options),
     positionInput: (session) => terminalIME?.positionInput(session),
     updateSelectionHandles: (session) => terminalSelection?.updateHandles(session),
@@ -1177,6 +1188,24 @@ export function startGlobalRuntime() {
     workspaceLocationURL,
     isMobileLayout,
     isFrameHoldCurrent: (session) => terminalPresentation.frameHoldIsCurrent(session),
+    canPersistPreview: (session) => Boolean(
+      !disposed
+      && session
+      && !session.closed
+      && session.renderReady
+      && session.hasPresentedFrame
+      && terminalReplay?.isCommitted(session) === true
+      && terminalPresentation?.isCurrent(session) === true
+    ),
+    onPreviewError: (session, error) => appendDebugWarning(
+      "[terminal-overview] preview persistence failed",
+      {
+        name: session?.name || "",
+        tab: session?.tabId || "",
+        pane: session?.id || "",
+        message: error?.message || String(error),
+      },
+    ),
     prepareOpen: () => {
       closeContextMenu();
       appearance.closePicker();
@@ -1221,6 +1250,7 @@ export function startGlobalRuntime() {
     syncCursorBlinkState: () => syncCursorBlinkState(),
     updateSelectionHandles: (session) => terminalSelection?.updateHandles(session),
     schedulePaneResize: (session, options, scheduleOptions) => terminalResize?.schedulePane(session, options, scheduleOptions),
+    claimCurrentDeviceSize: (session, options) => terminalResize?.claimForCurrentDevice(session, options),
     presentationIsCurrent: (session) => terminalPresentation?.isCurrent(session) === true,
     cancelPendingRender: (term) => terminalPresentation?.cancelPendingRender(term),
     connectPendingSession: (session) => terminalTransportRuntime?.connectPendingSession(session),
@@ -1767,7 +1797,10 @@ export function startGlobalRuntime() {
     isApplyingWorkspaceState,
     runApplying: (task) => workspaceStateApply ? workspaceStateApply.runApplying(task) : task(),
     createPaneSession: (tab, instanceName, options) => createPaneSession(tab, instanceName, options),
-    disposePaneSession: (pane) => terminalSessionController.dispose(pane),
+    disposePaneSession: (pane) => {
+      terminalOverview?.deletePreview(pane);
+      terminalSessionController.dispose(pane);
+    },
     renderTabLayout: (tab) => workspaceLayoutView.renderTabLayout(tab),
     splitLayout: (layout, paneId, direction, nextPaneId) => workspaceLayout.splitLayout(layout, paneId, direction, nextPaneId),
     removePaneFromLayout: (layout, paneId) => workspaceLayout.removePaneFromLayout(layout, paneId),
@@ -1825,6 +1858,7 @@ export function startGlobalRuntime() {
     scrollTabButtonIntoView: (button) => scrollTabButtonIntoView(button),
     scheduleOverviewRender: () => terminalOverview?.scheduleRender(),
     scheduleVisibleTabResize: (tab, options) => terminalResize.scheduleVisibleTab(tab, options),
+    claimVisibleTabSize: (tab, options) => terminalResize.claimTabForCurrentDevice(tab, options),
     syncConnectionDemands: (options) => terminalTransportRuntime?.syncConnectionDemands(options),
     persistActiveTab: (tabId) => persistActiveWorkspaceTab(tabId),
     showToast: (message) => showToast(message),
@@ -1892,7 +1926,6 @@ export function startGlobalRuntime() {
     getTabs: () => tabs.values(),
     getCurrentTab: () => currentTab(),
     getActiveName,
-    getActiveSession: () => activeSession(),
     isOnline: () => navigator.onLine !== false,
     clearUnifiedRetry: (session) => terminalTransportRuntime?.clearUnifiedRetry(session),
     isReplayRetryPaused: (session) => terminalReplay?.isRetryPaused(session) === true,
@@ -1909,14 +1942,34 @@ export function startGlobalRuntime() {
     closeUnifiedTransport: (reason) => terminalUnifiedTransport?.close(reason),
     rememberWorkspaceRestoreState: () => rememberWorkspaceRestoreState(),
     resumeDevices: () => devices.handleResume(),
-    resizeActiveTab: (options) => terminalResize?.resizeActiveTab(options),
-    claimActiveSize: (session) => terminalResize?.claimSize(session),
+    claimActiveTabSize: (options) => terminalResize?.claimActiveTabForCurrentDevice(options),
     resumeWorkspaceRetry: () => workspaceRefresh?.resumeRetry(),
     refreshWorkspaceActivity: (options) => workspaceActivity?.refreshActivity(options),
     updateSelection: () => terminalSelection?.update(),
     renderNetworkMonitor: () => renderTerminalNetworkMonitor(),
     showToast: (message) => showToast(message),
     appendDebugLog: (...args) => appendDebugLog(...args),
+    recordRuntimeEvent: (event, details) => diagnostics.recordRuntimeEvent(event, details),
+    recordMetric: (name, value) => recordTerminalRuntimeMetric(name, value),
+    isRecoveryReady: () => {
+      const tab = currentTab();
+      const panes = Array.from(tab?.panes?.values?.() || []).filter((pane) => (
+        !pane.closed && pane.name === getActiveName()
+      ));
+      return panes.length > 0 && panes.every((pane) => terminalPresentation?.isCurrent(pane) === true);
+    },
+    onResumeDeadline: () => {
+      const tab = currentTab();
+      for (const pane of tab?.panes?.values?.() || []) {
+        if (pane.closed || pane.name !== getActiveName() || !pane.shellEl?.dataset) {
+          continue;
+        }
+        if (pane.shellEl.dataset.connection !== "offline" && pane.shellEl.dataset.connection !== "network-error") {
+          pane.shellEl.dataset.connection = "reconnecting";
+        }
+      }
+    },
+    resumeDeadlineMs: terminalResumeDeadlineMs,
     lifecycleOptions: {
       now: () => Date.now(),
       userRecoveryThrottleMs: terminalUserRecoveryThrottleMs,
@@ -2111,7 +2164,6 @@ export function startGlobalRuntime() {
           closeMobileCloseConfirm(false);
         }
         appearance.handleResize();
-        terminalResize.scheduleActiveTabWindowResize();
         updateMobileActiveTabTitle();
         terminalSelection?.update();
         settings?.handleHostLayoutChange();
@@ -2131,6 +2183,7 @@ export function startGlobalRuntime() {
       onPageHide: () => {
         rememberWorkspaceRestoreState();
         settings?.flushPending();
+        terminalOverview?.captureAllPreviews(getAllSessions(), { immediate: true });
         clientHistory.touchAll();
         clientHistory.flushAll();
         devices.handlePageHide();
