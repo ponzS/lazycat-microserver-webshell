@@ -180,6 +180,18 @@ func TestLegacyWebShellStorageCleanupControllerBehavior(t *testing.T) {
 	}
 }
 
+func TestLegacyServiceWorkerRetirementBehavior(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is unavailable")
+	}
+	command := exec.Command(node, "--test", "tests/legacy_service_worker_retirement_test.mjs")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("legacy service worker retirement tests failed: %v\n%s", err, output)
+	}
+}
+
 func TestTerminalSessionReplayControllerBehavior(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -2658,6 +2670,9 @@ func TestRuntimeSnapshotOnlyAndPWARemovalContract(t *testing.T) {
 	protocolSource := string(mustReadRuntimeSource(t, "runtime/static/terminal/transport/session_protocol_controller.js"))
 	indexSource := string(mustReadRuntimeSource(t, "runtime/static/index.html"))
 	cleanupSource := string(mustReadRuntimeSource(t, "runtime/static/app/bootstrap/legacy_storage_cleanup_controller.js"))
+	retirementSource := string(mustReadRuntimeSource(t, "runtime/static/app/bootstrap/legacy_service_worker_retirement.js"))
+	retirementBrowserTestSource := string(mustReadRuntimeSource(t, "tests-auto/11-service-worker-retirement/test.mjs"))
+	providerSource := string(mustReadRuntimeSource(t, "main.go"))
 	for _, want := range []string{
 		`const historyConnectRange = isClientInstanceName(session.name)`,
 		`? terminalReplay.rangeForConnect(session)`,
@@ -2679,6 +2694,29 @@ func TestRuntimeSnapshotOnlyAndPWARemovalContract(t *testing.T) {
 	if strings.Contains(indexSource, `rel="manifest"`) || strings.Contains(indexSource, `apple-touch-icon`) {
 		t.Fatal("runtime index must not advertise PWA assets")
 	}
+	updateIndex := strings.Index(indexSource, `data-legacy-service-worker-update`)
+	assetIndex := strings.Index(indexSource, assetBasePlaceholder)
+	if updateIndex < 0 || assetIndex < 0 || updateIndex > assetIndex {
+		t.Fatal("legacy worker update trigger must run before versioned assets")
+	}
+	for _, want := range []string{
+		`if (!serviceWorker || !serviceWorker.controller) return;`,
+		`serviceWorker.getRegistration("./")`,
+		`registration?.update()`,
+	} {
+		if !strings.Contains(indexSource, want) {
+			t.Fatalf("legacy worker update trigger missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		`serviceWorker.register(`,
+		`location.reload(`,
+		`caches.open(`,
+	} {
+		if strings.Contains(indexSource, forbidden) {
+			t.Fatalf("legacy worker update trigger must not restore PWA or reload clean clients: %q", forbidden)
+		}
+	}
 	for _, want := range []string{
 		`legacyTerminalCacheName = "lcmd-webshell-terminal-v2"`,
 		`legacyAppShellCachePrefix = "lcmd-webshell-app-shell-"`,
@@ -2693,6 +2731,53 @@ func TestRuntimeSnapshotOnlyAndPWARemovalContract(t *testing.T) {
 	for _, forbidden := range []string{"createAppServiceWorkerController", "serviceWorkerController.register", "createTerminalCacheV2"} {
 		if strings.Contains(mainSource, forbidden) {
 			t.Fatalf("removed PWA/Cache API runtime returned: %q", forbidden)
+		}
+	}
+	for _, want := range []string{
+		`mux.HandleFunc("/service-worker.js", s.handleLegacyServiceWorkerRetirement)`,
+		`w.Header().Set("Cache-Control", "no-store")`,
+		`legacyServiceWorkerRetirementPath`,
+	} {
+		if !strings.Contains(providerSource, want) {
+			t.Fatalf("legacy service worker retirement endpoint missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		`self.addEventListener("install"`,
+		`self.skipWaiting()`,
+		`self.addEventListener("activate"`,
+		`self.clients.matchAll({ type: "window" })`,
+		`self.registration.unregister()`,
+		`client.navigate(client.url)`,
+		`legacyAppShellCachePrefix`,
+		`legacyTerminalCacheName`,
+	} {
+		if !strings.Contains(retirementSource, want) {
+			t.Fatalf("legacy service worker retirement guard missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		`addEventListener("fetch"`,
+		`caches.open(`,
+		`clients.claim(`,
+		`includeUncontrolled`,
+		`manifest.webmanifest`,
+	} {
+		if strings.Contains(retirementSource, forbidden) {
+			t.Fatalf("retirement worker must not restore PWA behavior %q", forbidden)
+		}
+	}
+	if strings.Contains(retirementBrowserTestSource, `registration.update(`) {
+		t.Fatal("real-browser retirement test must use the production HTML trigger instead of updating the registration directly")
+	}
+	for _, want := range []string{
+		`runtime/static/index.html`,
+		`legacyWorkerUpdateSource`,
+		"desktop.page.goto(`${fixture.url}?retire=1`",
+		`retirementNavigations = mainFrameNavigations - 1`,
+	} {
+		if !strings.Contains(retirementBrowserTestSource, want) {
+			t.Fatalf("real-browser retirement trigger guard missing %q", want)
 		}
 	}
 }

@@ -15,7 +15,7 @@
 - 普通容器不再创建 Cache API v2 identity、manifest/chunk、warm replay、preview、compaction 或本地 cursor range。Unified logical stream 只携带 `workspace_generation`，并直接消费 persistent agent 的权威 `snapshot + live`。
 - `client:` target 继续由 `terminal/history/client_history_controller.js` 独占 IndexedDB load/write/flush/reset/delete；所有入口都以 `isClientTarget()` 为硬 guard，普通容器调用必须无副作用。
 - 总览不再读取缓存缩略图。缩略图只来自已提交 live Canvas 或仍有效的 last-known-good hold frame；从未呈现的 pane 保持空缩略图，不触发 replay。
-- bootstrap 只保留一次性旧 Worker/已知 Cache 名称清理器，用于升级迁移；该清理器不读取终端数据、不参与首屏、离线 fallback 或资源调度。
+- bootstrap 只保留旧 Worker/已知 Cache 名称的升级迁移资源：`index.html` 在版本化资源加载前，仅对已有 controller 的页面调用现有 registration 的 `update()`；新版页面启动后继续执行一次性清理器；Provider 同时在旧 `/service-worker.js` URL 提供无 fetch/预缓存/claim 的退役 Worker，使旧受控页面能删除已知缓存、注销 registration 并一次性重载。页面仍不注册 Service Worker，干净用户不请求退役脚本或增加导航；这些迁移资源不读取终端数据、不参与首屏、离线 fallback 或资源调度。
 - 本节取代下方旧迁移记录中关于 Service Worker 预缓存、Cache API v2、warm replay 和缓存 preview 的现行描述。旧记录只保留当时的架构背景，不得作为新实现依据。
 
 ## 已完成迁移

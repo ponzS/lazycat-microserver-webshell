@@ -6,6 +6,16 @@
     <meta name="theme-color" content="#000000" />
     <meta name="lzcapp-navigation-bar-scheme" content="hidden" />
     <meta name="lzcapp-disable-dark" content="true" />
+    <!-- 这里只在旧worker存在时才会触发，确保能从旧版本可靠的更新 -->
+    <script data-legacy-service-worker-update>
+      (() => {
+        const serviceWorker = navigator.serviceWorker;
+        if (!serviceWorker || !serviceWorker.controller) return;
+        serviceWorker.getRegistration("./")
+          .then((registration) => registration?.update())
+          .catch(() => {});
+      })();
+    </script>
     <script src="__LCMD_ASSET_BASE__terminal/input/ime/ios_terminal_host.js"></script>
     <title>LCMD WebShell</title>
     <link rel="stylesheet" href="__LCMD_ASSET_BASE__style.css" />

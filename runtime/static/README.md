@@ -10,7 +10,7 @@
 - `ghostty-web.js`、`ghostty-vt.wasm`：随包发布的终端运行时。
 - `vendor/`：第三方宿主适配，只能通过明确公开 API 使用。
 
-当前页面不注册 Service Worker，不提供 Web App Manifest，也不使用 PWA app-shell 缓存。静态资源继续通过 Provider 注入的版本化 `/assets/<asset-version>/` URL 和 HTTP immutable 缓存发布；API、WebSocket 和终端历史不经过浏览器 Cache API。
+当前页面不注册 Service Worker，不提供 Web App Manifest，也不使用 PWA app-shell 缓存。`index.html` 在版本化资源之前仅对仍被旧 Worker 控制的页面调用一次现有 registration 的 `update()`；Provider 在旧 `/service-worker.js` URL 提供一次性退役脚本，使历史 registration 能够删除已知旧缓存、注销自身并重载受控页面。该触发器不注册 Worker、不直接重载页面，退役脚本没有 fetch listener、预缓存或 client claim；干净用户没有 controller，不会请求 Worker 或增加导航。静态资源继续通过 Provider 注入的版本化 `/assets/<asset-version>/` URL 和 HTTP immutable 缓存发布；API、WebSocket 和终端历史不经过浏览器 Cache API。
 
 ## 模块目录
 
