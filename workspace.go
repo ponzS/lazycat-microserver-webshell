@@ -1501,23 +1501,26 @@ func (h *paneHistory) trim(limit int) {
 	if limit <= 0 || h.bytes <= limit {
 		return
 	}
-	dropCount := 0
-	dropBytes := 0
-	for len(h.chunks)-dropCount > 1 && h.bytes-dropBytes > limit {
-		chunk := h.chunks[dropCount]
-		dropBytes += len(chunk)
-		dropCount++
+
+	dropBytes := h.bytes - limit
+	for dropBytes > 0 && len(h.chunks) > 0 {
+		chunk := h.chunks[0]
+		if dropBytes >= len(chunk) {
+			dropBytes -= len(chunk)
+			h.bytes -= len(chunk)
+			h.base += uint64(len(chunk))
+			h.chunks[0] = nil
+			h.chunks = h.chunks[1:]
+			continue
+		}
+
+		// A byte limit is a hard bound. Do not retain a whole chunk when only
+		// part of its prefix needs to be discarded.
+		h.chunks[0] = append([]byte(nil), chunk[dropBytes:]...)
+		h.bytes -= dropBytes
+		h.base += uint64(dropBytes)
+		dropBytes = 0
 	}
-	if dropCount == 0 {
-		return
-	}
-	for i := 0; i < dropCount; i++ {
-		h.chunks[i] = nil
-	}
-	remaining := append([][]byte(nil), h.chunks[dropCount:]...)
-	h.chunks = remaining
-	h.bytes -= dropBytes
-	h.base += uint64(dropBytes)
 	if h.bytes < 0 {
 		h.bytes = 0
 	}

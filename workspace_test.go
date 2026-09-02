@@ -1570,7 +1570,7 @@ func TestTerminalPaneAppendOutputUsesDynamicHistoryLimit(t *testing.T) {
 	pane.appendOutput([]byte("hello"))
 	pane.appendOutput([]byte(" world"))
 
-	if got, want := string(pane.history.snapshot().bytes()), " world"; got != want {
+	if got, want := string(pane.history.snapshot().bytes()), "world"; got != want {
 		t.Fatalf("pane history = %q, want %q", got, want)
 	}
 }
@@ -1681,6 +1681,22 @@ func TestPaneHistoryMaintainsAbsoluteRangeAfterTrim(t *testing.T) {
 	}
 	if got, want := history.end, uint64(8); got != want {
 		t.Fatalf("history end = %d, want %d", got, want)
+	}
+}
+
+func TestPaneHistoryTrimEnforcesHardByteLimitWithinChunk(t *testing.T) {
+	history := newTestPaneHistory("abcdef", "ghij")
+
+	history.trim(7)
+
+	if got, want := string(history.snapshot().bytes()), "defghij"; got != want {
+		t.Fatalf("history = %q, want %q", got, want)
+	}
+	if got, want := history.bytes, 7; got != want {
+		t.Fatalf("history bytes = %d, want %d", got, want)
+	}
+	if got, want := history.base, uint64(3); got != want {
+		t.Fatalf("history base = %d, want %d", got, want)
 	}
 }
 
@@ -1857,7 +1873,7 @@ func TestTerminalPaneAttachSnapshotSurvivesLaterTrim(t *testing.T) {
 	if got, want := string(history.bytes()), "oldkeep"; got != want {
 		t.Fatalf("snapshot history = %q, want %q", got, want)
 	}
-	if got, want := string(pane.history.snapshot().bytes()), "newer"; got != want {
+	if got, want := string(pane.history.snapshot().bytes()), "ewer"; got != want {
 		t.Fatalf("current history = %q, want %q", got, want)
 	}
 }
