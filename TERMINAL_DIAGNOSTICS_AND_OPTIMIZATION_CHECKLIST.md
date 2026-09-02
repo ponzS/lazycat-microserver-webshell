@@ -4,14 +4,15 @@
 最后更新：2026-09-02
 适用范围：`lazycat-microserver-webshell` 普通容器 WebShell，包含 PC 和移动端
 
-本文是当前终端首次加载变慢、持续输出放大、跨设备/分辨率切换后黑屏问题的审计基线。后续 agent 应先阅读本文，再阅读现有执行计划和相关模块，避免重复分析或重新引入已经排除的方案。
+本文是当前终端首次加载变慢、持续输出放大、跨设备/分辨率切换后黑屏问题的审计基线。后续 Agent 应从对应 `tests-auto` 场景的用户可见现象、自动化断言、截图/trace/JSONL 产物和真实运行日志出发，结合本文记录的事实证据定位问题，再阅读相关模块 README 和源码。本文不是替代场景文档的全局执行计划，也不要求恢复或阅读已经删除的旧计划文档。
 
-相关现有计划：
+相关架构与事实入口：
 
-- [`TERMINAL_SCHEDULING_EXECUTION_PLAN.md`](./TERMINAL_SCHEDULING_EXECUTION_PLAN.md)
-- [`docs/TERMINAL_REPLAY_AND_RESIZE_EXECUTION_PLAN.md`](./docs/TERMINAL_REPLAY_AND_RESIZE_EXECUTION_PLAN.md)
-- [`docs/TERMINAL_HISTORY_GAP_AND_BLACK_REGION_FIX_PLAN.md`](./docs/TERMINAL_HISTORY_GAP_AND_BLACK_REGION_FIX_PLAN.md)
-- [`docs/TERMINAL_UNIFIED_WEBSOCKET_EXECUTION_PLAN.md`](./docs/TERMINAL_UNIFIED_WEBSOCKET_EXECUTION_PLAN.md)
+- [`docs/ARCHITECTURE_AND_MODULE_MAP.md`](./docs/ARCHITECTURE_AND_MODULE_MAP.md)：当前后端/前端数据流、状态 owner、模块职责和文档路径导航。
+- [`tests-auto/README.md`](./tests-auto/README.md)：真实 Provider、persistent agent、PTY、WebSocket、浏览器/设备运行方式。
+- `tests-auto/<编号>-<场景名>/README.md`：具体场景的触发条件、基线、根因、方案、验证结果和已知限制。
+- 对应场景目录的 `artifacts/`：失败截图、trace、JSONL 事件和错误摘要。
+- 本文第 2 节及后续更新的真实日志证据：只作为已确认事实基线，不能替代目标场景的最新回归数据。
 
 ## 1. 已确认的架构边界
 
