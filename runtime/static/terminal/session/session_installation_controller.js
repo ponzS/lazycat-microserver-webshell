@@ -165,7 +165,7 @@ export function createTerminalSessionInstallationController({
     }
     appendStartupTrace(
       "真实终端 Canvas 已显示",
-      `pane=${session.id}`,
+      `pane=${session.id} startupElapsed=${Number(session.startupTraceStartedAt || 0) ? Math.max(0, (globalThis.performance?.now?.() || Date.now()) - Number(session.startupTraceStartedAt)) : 0}ms replayCommitted=${isReplayCommitted(session)} resizeEpoch=${String(session.appliedResizeEpoch || "")}`,
       { dedupeKey: `canvas-visible:${session.id}:${session.terminalReplayGeneration}` },
     );
     session.startupTraceActive = false;
@@ -194,6 +194,12 @@ export function createTerminalSessionInstallationController({
       tabId: tab.id,
       workspaceGeneration: getWorkspaceGeneration(),
     });
+
+    appendStartupTrace(
+      "终端 pane 已创建",
+      `pane=${session.id} tab=${session.tabId} target=${String(instanceName || "").trim()} connect=${Boolean(connect)} initialSize=${Number(session.initialCols || session.term?.cols || 0)}x${Number(session.initialRows || session.term?.rows || 0)}`,
+      { dedupeKey: `pane-created:${session.id}` },
+    );
 
     installFeatureControllers(session);
     installTitleListener(session);

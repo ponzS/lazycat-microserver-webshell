@@ -167,6 +167,7 @@ export function startGlobalRuntime() {
   document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const startupDiagnostics = createStartupDiagnostics();
   const markWebShellStartupMetric = startupDiagnostics.mark;
+  const serverLogSinceUnixMS = Date.now();
   const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).then(() => {
     markWebShellStartupMetric("ghosttyReadyAt");
     startupDiagnostics.trace("Ghostty WASM 已就绪");
@@ -707,10 +708,15 @@ export function startGlobalRuntime() {
   terminalUnifiedTransport = createTerminalUnifiedTransportController({
     windowObject: window,
     buildConnectionURL: (targetName) => {
-      return terminalUnifiedWebSocketURL(targetName, {
+      const url = terminalUnifiedWebSocketURL(targetName, {
         windowObject: window,
         clientID: serverRevision.getClientID(),
-      }).toString();
+      });
+      if (isDebugLogEnabled()) {
+        url.searchParams.set("server_logs", "1");
+        url.searchParams.set("server_log_since_ms", String(serverLogSinceUnixMS));
+      }
+      return url.toString();
     },
     getDisposed: () => disposed,
     isOnline: () => navigator.onLine !== false,
@@ -1452,6 +1458,7 @@ export function startGlobalRuntime() {
     appendDebugLog: (...args) => appendDebugLog(...args),
     appendDebugWarning: (...args) => appendDebugWarning(...args),
     appendDebugError: (...args) => appendDebugError(...args),
+    recordRuntimeEvent: (event, details) => diagnostics.recordRuntimeEvent(event, details),
     describeSession: (session) => terminalLocationDescription(session),
     socketConnecting: WebSocket.CONNECTING,
     socketOpen: WebSocket.OPEN,
@@ -1641,6 +1648,8 @@ export function startGlobalRuntime() {
     appendDebugLog,
     appendDebugWarning,
     appendDebugError,
+    isDebugLogEnabled,
+    serverLogSinceUnixMS,
     recordTerminalSessionEvent,
   });
 

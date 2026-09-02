@@ -709,23 +709,33 @@ func runAgentAttachClient(socketPath, selector, accountID, paneID string, cols, 
 }
 
 func writeAgentHistoryReplay(w io.Writer, identity terminalReplayIdentity, history paneHistorySnapshot, allowGeneratedInput bool, integrity bool, sequence, cursor *uint64) bool {
+	historyBytes := 0
+	for _, chunk := range history.chunks {
+		historyBytes += len(chunk)
+	}
+	replayStartedAt := time.Now()
+	replayFrames := 0
 	start := map[string]any{
-		"type":                  "history-replay-start",
-		"resize_protocol":       "epoch-v1",
-		"selector":              identity.selector,
-		"pane_id":               identity.paneID,
-		"allow_generated_input": allowGeneratedInput,
-		"history_generation":    history.generation,
-		"server_base_cursor":    strconv.FormatUint(history.serverBase, 10),
-		"server_end_cursor":     strconv.FormatUint(history.serverEnd, 10),
-		"sync_mode":             history.syncMode,
-		"delta_from_cursor":     strconv.FormatUint(history.deltaFrom, 10),
-		"delta_to_cursor":       strconv.FormatUint(history.deltaTo, 10),
-		"resize_epoch":          formatTerminalResizeEpoch(history.resizeEpoch),
-		"cols":                  history.cols,
-		"rows":                  history.rows,
-		"pixel_width":           history.pixelWidth,
-		"pixel_height":          history.pixelHeight,
+		"type":                          "history-replay-start",
+		"resize_protocol":               "epoch-v1",
+		"selector":                      identity.selector,
+		"pane_id":                       identity.paneID,
+		"allow_generated_input":         allowGeneratedInput,
+		"history_generation":            history.generation,
+		"server_base_cursor":            strconv.FormatUint(history.serverBase, 10),
+		"server_end_cursor":             strconv.FormatUint(history.serverEnd, 10),
+		"sync_mode":                     history.syncMode,
+		"delta_from_cursor":             strconv.FormatUint(history.deltaFrom, 10),
+		"delta_to_cursor":               strconv.FormatUint(history.deltaTo, 10),
+		"resize_epoch":                  formatTerminalResizeEpoch(history.resizeEpoch),
+		"cols":                          history.cols,
+		"rows":                          history.rows,
+		"pixel_width":                   history.pixelWidth,
+		"pixel_height":                  history.pixelHeight,
+		"server_history_bytes":          historyBytes,
+		"server_history_chunks":         len(history.chunks),
+		"server_replay_frames":          0,
+		"server_replay_started_unix_ms": replayStartedAt.UnixMilli(),
 	}
 	if integrity {
 		start["integrity_protocol"] = "fast-v1"
@@ -743,6 +753,7 @@ func writeAgentHistoryReplay(w io.Writer, identity terminalReplayIdentity, histo
 			if len(chunk) < chunkSize {
 				chunkSize = len(chunk)
 			}
+			replayFrames++
 			if integrity {
 				frame, err := encodeFastBinaryFrame(identity.selector, identity.paneID, history.generation, *sequence, *cursor, chunk[:chunkSize])
 				if err != nil || writeAgentFrame(w, agentFrameBinary, frame) != nil {
@@ -757,11 +768,17 @@ func writeAgentHistoryReplay(w io.Writer, identity terminalReplayIdentity, histo
 		}
 	}
 	complete := map[string]any{
-		"type":               "history-replay-complete",
-		"selector":           identity.selector,
-		"pane_id":            identity.paneID,
-		"history_generation": history.generation,
-		"history_cursor":     strconv.FormatUint(history.deltaTo, 10),
+		"type":                           "history-replay-complete",
+		"selector":                       identity.selector,
+		"pane_id":                        identity.paneID,
+		"history_generation":             history.generation,
+		"history_cursor":                 strconv.FormatUint(history.deltaTo, 10),
+		"server_history_bytes":           historyBytes,
+		"server_history_chunks":          len(history.chunks),
+		"server_replay_frames":           replayFrames,
+		"server_replay_started_unix_ms":  replayStartedAt.UnixMilli(),
+		"server_replay_finished_unix_ms": time.Now().UnixMilli(),
+		"server_replay_duration_ms":      time.Since(replayStartedAt).Milliseconds(),
 	}
 	if identity.workspaceGeneration != "" && identity.tabID != "" {
 		complete["workspace_generation"] = identity.workspaceGeneration

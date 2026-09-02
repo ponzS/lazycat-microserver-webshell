@@ -8,6 +8,7 @@ const createConnectionState = () => ({
   reconnectPending: false,
   reconnectAttempts: 0,
   startupTraceActive: false,
+  startupTraceStartedAt: 0,
   connectionRetrying: false,
   connectionLeaseID: 0,
   connectionLeaseClosing: false,
