@@ -447,6 +447,13 @@ export function startGlobalRuntime() {
     refreshNetworkView: renderTerminalNetworkMonitor,
     syncNetworkSockets: syncTerminalNetworkMonitorSockets,
   } = diagnostics;
+  if (window.__testsAutoPresentationProbe) {
+    window.__testsAutoTerminalTimelineSnapshot = () => getAllSessions().map((session) => ({
+      paneID: String(session?.id || ""),
+      tabID: String(session?.tabId || ""),
+      events: diagnostics.terminalTimelineSnapshot(session),
+    }));
+  }
   serverRevision = createServerRevisionController({
     windowObject: window,
     navigatorObject: navigator,
@@ -858,6 +865,7 @@ export function startGlobalRuntime() {
     getRenderer: () => terminalRenderer,
     getPresentation: () => terminalPresentation,
     getResize: () => terminalResize,
+    recordEvent: (session, event, details) => recordTerminalSessionEvent(session, event, details),
     isElement: (value) => value instanceof HTMLElement,
     registerSessionCleanup: (session, cleanup) => terminalSessionController?.addCleanup(session, cleanup),
     consoleObject: console,

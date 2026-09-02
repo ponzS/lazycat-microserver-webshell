@@ -33,6 +33,7 @@ export function createTerminalPresentationController({
   presentationResizeRetryMs = 1200,
   presentationStallTimeoutMs = 12 * 1000,
   presentationStallReconnectLimit = 2,
+  presentationRetryLimit = 8,
   view = createTerminalPresentationView({ windowObject, getBackground }),
   lifecycle = createTerminalPresentationLifecycle({
     windowObject,
@@ -108,6 +109,67 @@ export function createTerminalPresentationController({
     return session.terminalContentGeneration;
   };
 
+  const presentationGateDetails = (session) => {
+    const host = session?.terminalHost;
+    const hostRect = host?.getBoundingClientRect?.();
+    return {
+      documentHidden: windowObject?.document?.hidden === true,
+      activeTab: session?.tabId === getActiveTabId(),
+      paneVisible: isPaneVisible(session),
+      measurable: isPaneMeasurable(session),
+      canvasMatches: canvasMatchesExpectedSize(session),
+      activationFitPending: session?.activationFitPending === true,
+      resizeFenceActive: session?.resizeFenceActive === true,
+      resizeAckPending: session?.resizeAckPending === true,
+      resizeOutputSettleActive: session?.resizeOutputSettleActive === true,
+      presentationHold: session?.resizePresentationHold === true,
+      presentationCommitPending: session?.presentationCommitPending === true,
+      fullRenderPending: session?.fullRenderPending === true,
+      hasPresentedFrame: session?.hasPresentedFrame === true,
+      renderReady: session?.renderReady === true,
+      hostCssWidth: Number(hostRect?.width || 0),
+      hostCssHeight: Number(hostRect?.height || 0),
+      retryPending: session?.presentationRetryPending === true,
+      retryAttempts: Number(session?.presentationValidationAttempts || 0),
+      retryReason: String(session?.presentationRetryReason || ""),
+    };
+  };
+
+  const canvasDetails = (session) => {
+    const describe = (canvas) => {
+      if (!view.isCanvasElement(canvas)) {
+        return {
+          width: 0,
+          height: 0,
+          cssWidth: 0,
+          cssHeight: 0,
+          styleWidth: "",
+          styleHeight: "",
+          hidden: null,
+        };
+      }
+      const rect = canvas.getBoundingClientRect?.();
+      return {
+        width: Number(canvas.width || 0),
+        height: Number(canvas.height || 0),
+        cssWidth: Number(rect?.width || 0),
+        cssHeight: Number(rect?.height || 0),
+        styleWidth: String(canvas.style?.width || ""),
+        styleHeight: String(canvas.style?.height || ""),
+        hidden: canvas.hidden === true,
+      };
+    };
+    const renderer = session?.term?.renderer;
+    return {
+      windowDevicePixelRatio: Number(windowObject?.devicePixelRatio || 1),
+      rendererDevicePixelRatio: Number(renderer?.devicePixelRatio || 0),
+      liveCanvas: describe(view.canvasForSession(session)),
+      holdCanvas: describe(session?.terminalFrameHold),
+      terminalFrameHeld: session?.terminalFrameHeld === true,
+      resizePresentationHold: session?.resizePresentationHold === true,
+    };
+  };
+
   const frameIdentity = (session) => ({
     selector: String(session?.name || "").trim(),
     tabID: String(session?.tabId || "").trim(),
@@ -147,6 +209,7 @@ export function createTerminalPresentationController({
     }
     session.terminalFrameHeld = true;
     session.terminalFrameHoldIdentity = frameIdentity(session);
+    view.syncState(session);
     return true;
   };
 
@@ -158,6 +221,7 @@ export function createTerminalPresentationController({
     session.terminalFrameHoldIdentity = null;
     const released = view.releaseFrame(session);
     session.terminalFrameHeld = false;
+    view.syncState(session);
     return released;
   };
 
@@ -208,8 +272,8 @@ export function createTerminalPresentationController({
     );
   };
 
-  const setReady = (session, ready, { preserveFrame = true } = {}) => {
-    trace(session, "set_ready_enter", { ready: ready === true, preserveFrame });
+  const setReady = (session, ready, { preserveFrame = true, reason = "presentation_state" } = {}) => {
+    trace(session, "set_ready_enter", { ready: ready === true, preserveFrame, reason });
     if (!isUsable(session) || !session.shellEl) {
       return false;
     }
@@ -220,35 +284,44 @@ export function createTerminalPresentationController({
         holdFrame(session);
       }
     }
-    const becameReady = nextReady && !session.renderReady;
+    const previousReady = session.renderReady === true;
+    const becameReady = nextReady && !previousReady;
     session.renderReady = nextReady;
     session.presentationPending = !nextReady;
     view.syncState(session);
+    if (previousReady !== nextReady) {
+      recordEvent(session, "presentation_ready_state", {
+        ready: nextReady,
+        reason: String(reason || "presentation_state"),
+        ...presentationGateDetails(session),
+        ...canvasDetails(session),
+      });
+    }
     if (nextReady) {
       scheduleFrameRelease(session);
       onReady(session, { becameReady });
     }
-    trace(session, "set_ready_exit", { ready: nextReady, becameReady });
+    trace(session, "set_ready_exit", { ready: nextReady, becameReady, reason });
     return true;
   };
 
-  const beginHold = (session, { capture = true } = {}) => {
-    trace(session, "begin_hold_enter", { capture });
+  const beginHold = (session, { capture = true, recapture = false } = {}) => {
+    trace(session, "begin_hold_enter", { capture, recapture });
     if (!isUsable(session)) {
       return false;
     }
     // Several schedulers can observe one resize/replay transaction in the
     // same frame. Reuse its active hold instead of toggling canvases again.
     if (session.resizePresentationHold && !session.renderReady) {
-      if (capture && session.hasPresentedFrame && !hasVisibleHeldFrame(session)) {
+      if (capture && (recapture || (session.hasPresentedFrame && !hasVisibleHeldFrame(session)))) {
         if (!holdFrame(session)) {
-          recordEvent(session, "presentation_hold_unavailable", { capture });
-          trace(session, "begin_hold_unavailable", { capture, reused: true });
+          recordEvent(session, "presentation_hold_unavailable", { capture, recapture });
+          trace(session, "begin_hold_unavailable", { capture, recapture, reused: true });
           return false;
         }
       }
       cancelPendingRender(session.term);
-      trace(session, "begin_hold_reused", { capture });
+      trace(session, "begin_hold_reused", { capture, recapture });
       return true;
     }
     lifecycle.cancelFrameRelease(session);
@@ -258,9 +331,11 @@ export function createTerminalPresentationController({
       return false;
     }
     session.presentationCommitPending = false;
+    session.presentationRetryAttempts = 0;
+    session.presentationRetryExhausted = false;
     session.resizePresentationHold = true;
-    recordEvent(session, "presentation_hold");
-    setReady(session, false, { preserveFrame: capture });
+    recordEvent(session, "presentation_hold", canvasDetails(session));
+    setReady(session, false, { preserveFrame: capture, reason: "presentation_hold" });
     cancelPendingRender(session.term);
     trace(session, "begin_hold_exit", { capture });
     return true;
@@ -275,9 +350,7 @@ export function createTerminalPresentationController({
     if (releaseFrame) {
       releaseHold(session);
     }
-    if (restoreReady && session.hasPresentedFrame) {
-      setReady(session, true);
-    }
+      setReady(session, true, { reason: "cancel_hold_restore" });
     return true;
   };
 
@@ -407,7 +480,7 @@ export function createTerminalPresentationController({
     if (!isUsable(session)) {
       return false;
     }
-    setReady(session, false);
+    setReady(session, false, { reason: "sync_pending" });
     session.fullRenderPending = false;
     session.pendingRenderFitGeneration = 0;
     session.pendingRenderReplayGeneration = 0;
@@ -436,6 +509,7 @@ export function createTerminalPresentationController({
     lifecycle.clearTimeoutField(session, "presentationRetryTimer");
     session.presentationRetryPending = false;
     session.presentationRetryReason = "";
+    view.syncState(session);
     return true;
   };
 
@@ -485,17 +559,18 @@ export function createTerminalPresentationController({
     session.presentationDeferredReason = "";
     session.presentationStallStartedAt = 0;
     session.presentationStallLastAttemptAt = 0;
-    session.presentationStallReconnectAttempts = 0;
+    session.presentationRetryAttempts = 0;
+    session.presentationRetryExhausted = false;
     clearValidation(session);
     clearRetry(session);
-    recordEvent(session, "full_render_complete");
+    recordEvent(session, "full_render_complete", canvasDetails(session));
     if (session.presentationCommitPending && session.resizePresentationHold) {
       session.presentationCommitPending = false;
       session.resizePresentationHold = false;
     }
     view.syncState(session);
     if (!session.renderReady && !session.resizePresentationHold) {
-      setReady(session, true);
+      setReady(session, true, { reason: "render_commit" });
     }
     // A hold can outlive the first commit when validation/content renders run
     // while renderReady is already true. Re-arm the release fence for every
@@ -506,6 +581,7 @@ export function createTerminalPresentationController({
     }
     recordEvent(session, "presentation_commit_complete", {
       renderGeneration: session.renderGeneration,
+      ...canvasDetails(session),
     });
     trace(session, "commit_if_ready_success", { renderGeneration: session.renderGeneration });
     return true;
@@ -536,6 +612,7 @@ export function createTerminalPresentationController({
     if (!renderAllowed(session)) {
       recordEvent(session, "render_blocked", {
         reason: isReplayCommitted(session) ? "resize" : "replay",
+        ...presentationGateDetails(session),
       });
       return false;
     }
@@ -555,6 +632,7 @@ export function createTerminalPresentationController({
       setPendingRender(session);
       recordEvent(session, "render_blocked", {
         reason: isReplayCommitted(session) ? "resize" : "replay",
+        ...presentationGateDetails(session),
       });
       return false;
     }
@@ -587,7 +665,7 @@ export function createTerminalPresentationController({
     if (!isUsable(session)) {
       return false;
     }
-    setReady(session, false);
+    setReady(session, false, { reason: `deferred:${reason}` });
     cancelPendingRender(session.term);
     session.fullRenderPending = false;
     session.pendingRenderFitGeneration = 0;
@@ -595,7 +673,10 @@ export function createTerminalPresentationController({
     session.pendingRenderContentGeneration = 0;
     if (session.presentationDeferredReason !== reason) {
       session.presentationDeferredReason = reason;
-      recordEvent(session, "presentation_deferred", { reason });
+      recordEvent(session, "presentation_deferred", {
+        reason,
+        ...presentationGateDetails(session),
+      });
     }
     return true;
   };
@@ -654,12 +735,15 @@ export function createTerminalPresentationController({
       }
     } else if (!session.hasPresentedFrame) {
       // A first frame has no last-known-good canvas to preserve.
-      setReady(session, false, { preserveFrame: false });
+      setReady(session, false, { preserveFrame: false, reason: "presentation_first_frame" });
     }
     session.presentationDeferredReason = "";
     if (session.resizeFenceActive || session.resizeAckPending || session.resizeOutputSettleActive) {
       retryPendingResize(session, reason);
-      recordEvent(session, "presentation_wait_resize", { reason });
+      recordEvent(session, "presentation_wait_resize", {
+        reason,
+        ...presentationGateDetails(session),
+      });
       if (shouldScheduleValidation) {
         scheduleValidation(session, { forceHistory });
       }
@@ -668,7 +752,10 @@ export function createTerminalPresentationController({
     }
     if (session.activationFitPending || !canvasMatchesExpectedSize(session)) {
       if (isCurrentDeviceClaimRequired(session) || isViewportGeometryClaimPending(session)) {
-        recordEvent(session, "presentation_wait_current_device_claim", { reason });
+        recordEvent(session, "presentation_wait_current_device_claim", {
+          reason,
+          ...presentationGateDetails(session),
+        });
         if (shouldScheduleValidation) {
           scheduleValidation(session, { forceHistory });
         }
@@ -679,6 +766,10 @@ export function createTerminalPresentationController({
         forceFullRender: true,
         hideUntilRender: true,
       }, { immediate: true });
+      recordEvent(session, "presentation_wait_geometry", {
+        reason,
+        ...presentationGateDetails(session),
+      });
       if (shouldScheduleValidation) {
         scheduleValidation(session, { forceHistory });
       }
@@ -694,7 +785,10 @@ export function createTerminalPresentationController({
       }
       renderFullNow(session);
     }
-    recordEvent(session, "presentation_ensure", { reason });
+    recordEvent(session, "presentation_ensure", {
+      reason,
+      ...presentationGateDetails(session),
+    });
     if (shouldScheduleValidation) {
       scheduleValidation(session, { forceHistory });
     }
@@ -785,7 +879,22 @@ export function createTerminalPresentationController({
     if (session.presentationRetryPending) {
       return true;
     }
+    const retryAttempt = Number(session.presentationRetryAttempts || 0) + 1;
+    if (retryAttempt > Math.max(1, Number(presentationRetryLimit) || 1)) {
+      session.presentationRetryAttempts = retryAttempt;
+      session.presentationRetryExhausted = true;
+      recordEvent(session, "presentation_retry_exhausted", {
+        reason: session.presentationRetryReason,
+        attempts: retryAttempt,
+        limit: Math.max(1, Number(presentationRetryLimit) || 1),
+        ...presentationGateDetails(session),
+      });
+      return false;
+    }
+    session.presentationRetryAttempts = retryAttempt;
+    session.presentationRetryExhausted = false;
     session.presentationRetryPending = true;
+    view.syncState(session);
     const replayGeneration = Number(session.terminalReplayGeneration || 0);
     const connectionEpoch = Number(session.connectionEpoch || 0);
     const delay = Math.min(
@@ -794,6 +903,7 @@ export function createTerminalPresentationController({
     );
     return lifecycle.scheduleTimeoutField(session, "presentationRetryTimer", delay, () => {
       session.presentationRetryPending = false;
+      view.syncState(session);
       if (
         !isUsable(session)
         || !isActiveTarget(session)
@@ -806,6 +916,7 @@ export function createTerminalPresentationController({
       recordEvent(session, "presentation_retry_scheduled", {
         reason: session.presentationRetryReason || reason,
         delay,
+        ...presentationGateDetails(session),
       });
       scheduleFrame(session, `retry:${session.presentationRetryReason || reason}`);
       if (!isCurrent(session)) {
@@ -867,7 +978,7 @@ export function createTerminalPresentationController({
   const installSession = (session) => lifecycle.installSession(session, {
     onContextLost: (event) => {
       event?.preventDefault?.();
-      setReady(session, false);
+      setReady(session, false, { reason: "context_lost" });
       session.fullRenderPending = false;
       session.pendingRenderFitGeneration = 0;
       session.pendingRenderReplayGeneration = 0;

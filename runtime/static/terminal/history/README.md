@@ -18,7 +18,7 @@
 - `createTerminalHistoryCache()`：IndexedDB store 原语，仅由 client history controller 使用。
 - checkpoint API：能力与 payload 校验。
 
-普通容器 Unified open 必须携带 `workspace_generation`，不得携带 `history_generation`、`local_base_cursor` 或 `local_end_cursor`。snapshot 必须先在 render suppression 下 reset Ghostty，`history_replay_complete` 只表示 replay 数据已接收；只有 output queue 排空、cursor 连续且最终 full render 成功后才提交。`replay_output_drained` 是浏览器 output 已追平 replay 边界的诊断事件，不能替代 presentation commit。
+普通容器 Unified open 必须携带 `workspace_generation`，不得携带 `history_generation`、`local_base_cursor` 或 `local_end_cursor`。snapshot 必须先在 render suppression 下 reset Ghostty，`history_replay_complete` 只表示 replay 数据已接收；只有 `receivedHistoryCursor` 与目标 cursor 追平、output queue 排空、cursor 连续且最终 full render 成功后才提交。`replay_output_drained` 是浏览器 output 已追平 replay 边界的诊断事件，不能替代 presentation commit。
 
 ## 状态所有权与生命周期
 

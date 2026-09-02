@@ -61,6 +61,7 @@ export function createTerminalSessionReplayController({
       || !terminalReplayIsAuthorized(session)
       || session.closed
       || session.name !== getActiveName()
+      || (session.historyProtocolActive && session.receivedHistoryCursor < session.historyReplayTargetCursor)
       || (session.historyProtocolActive && session.appliedHistoryCursor < session.historyReplayTargetCursor)
     ) {
       return false;

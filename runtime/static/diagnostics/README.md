@@ -2,7 +2,7 @@
 
 ## 职责
 
-本目录负责 WebShell 前端的只读诊断能力：调试总控、错误日志、启动追踪、性能任务采样、FPS/刷新率显示、终端网络流量监视和终端事件时间线。
+本目录负责 WebShell 前端的只读诊断能力：调试总控、错误日志、启动追踪、一次性初始化性能、性能任务采样、FPS/刷新率显示、终端网络流量监视和终端事件时间线。
 
 诊断模块只观察应用状态并展示或记录结果，不得修改终端连接、历史、渲染、resize、输入、工作区或设备数据。设备心跳、强制 PC 模式等业务功能仍由各自模块维护，诊断模块只通过调试总控变更回调通知它们重新同步。
 
@@ -19,7 +19,8 @@
 
 `diagnostics_controller.js` 是以下状态的唯一 owner：
 
-- 调试模式、错误日志、网络监视器、FPS 监视器和性能任务开关。
+- 调试模式、错误日志、网络监视器、FPS 监视器、性能任务和初始化性能开关。
+- 初始化性能只跟踪页面启动与首个实际完成 presentation 的终端 session，首次 `presentation_commit_complete` 后冻结。
 - 调试日志记录、去重索引和 console/window 捕获状态。
 - 性能任务样本、FPS RAF、网络监视器动态模块 generation、采样 timer 和 socket instrumentation。
 - 每个终端 session 的诊断时间线。时间线保存在模块内部 `WeakMap`，不写入业务 session 对象。
@@ -45,6 +46,7 @@
 - `debug_log.js`：日志去重、脱敏、console/window 捕获和复制文本生成。
 - `performance_meter.js`：FPS/刷新率 RAF 与 DOM 生命周期。
 - `performance_tasks.js`：无 DOM 的性能任务采样器。
+- `initialization_performance.js`：一次性收集页面启动指标和候选终端 session 初始化事件，以第一个完成 presentation 的 session 作为结果，在首次终端 presentation commit 后冻结结果。
 - `network_monitor.js`：无业务依赖的 WebSocket 字节与速率采样器，按需加载。
 - `startup_trace.js`：启动指标 owner 和追踪队列。
 - `terminal_timeline.js`：终端/页面诊断时间线和 Ghostty runtime 计数适配。
@@ -55,8 +57,9 @@
 
 ## 测试与回归
 
+- `initialization_performance_test.mjs`：初始化性能开关默认关闭、首个终端 session 选择、跨 pane 隔离和首次渲染后的冻结行为。
 - `diagnostics_controller_test.mjs`：开关持久化、生命周期清理、迟到动态加载和业务回调边界。
 - `terminal_network_monitor_test.mjs`：WebSocket 字节、通道、速率和 dispose 行为。
 - `runtime_shortcuts_test.go`：公开入口、版本化静态资源和 `global-runtime.js` 不再持有诊断实现的静态契约。
 
-最小回归步骤：开启调试模式后分别启用错误日志、网络监视器、FPS 和性能任务；产生一次 console error 和终端流量；关闭调试总控，确认全部面板隐藏且不再采样；重新开启后确认子开关仍保持；离开页面后确认 WebSocket 方法、console 方法和全局监听均恢复。
+最小回归步骤：开启调试模式后分别启用错误日志、网络监视器、FPS、性能任务和初始化性能；打开一个首次加载的终端，确认初始化性能窗口出现在终端右上角，展示页面打开到终端渲染的总耗时和初始化事件耗时；首次 presentation commit 后数值不再变化，持续输入、resize 和网络流量不会新增初始化样本。关闭调试总控，确认全部面板隐藏且不再采样；离开页面后确认 WebSocket 方法、console 方法和全局监听均恢复。

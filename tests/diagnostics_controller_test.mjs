@@ -66,6 +66,10 @@ const diagnosticElementIDs = [
   "debugLogList",
   "debugLogCopy",
   "debugLogClear",
+  "initializationPerformancePanel",
+  "initializationPerformanceStatus",
+  "initializationPerformanceTotal",
+  "initializationPerformanceList",
   "performanceTaskMeter",
   "performanceTaskMeterList",
   "settingsDebugModeToggle",
@@ -74,6 +78,7 @@ const diagnosticElementIDs = [
   "settingsDebugOptions",
   "settingsPerformanceMeterToggle",
   "settingsPerformanceTasksToggle",
+  "settingsInitializationPerformanceToggle",
   "terminalNetworkMonitor",
   "terminalNetworkMonitorStatus",
   "terminalNetworkMonitorChannels",
@@ -174,6 +179,15 @@ test("diagnostics owns debug resources and rejects a late network monitor load a
   assert.equal(debugModeChanges, 1);
   assert.equal(harness.frames.size, 1);
   assert.equal(harness.windowListeners.get("error")?.size, 1);
+
+  assert.equal(harness.elements.get("settingsInitializationPerformanceToggle").checked, false);
+  const initializationToggle = harness.elements.get("settingsInitializationPerformanceToggle");
+  initializationToggle.checked = true;
+  initializationToggle.dispatch("change");
+  assert.equal(harness.storageValues.get("webshell.initializationPerformance"), "true");
+  assert.equal(harness.elements.get("initializationPerformancePanel")?.hidden, false);
+  initializationToggle.checked = false;
+  initializationToggle.dispatch("change");
 
   const debugToggle = harness.elements.get("settingsDebugModeToggle");
   debugToggle.checked = false;

@@ -188,7 +188,7 @@ const createSession = ({ renderResult = true } = {}) => {
   };
 };
 
-const createHarness = ({ renderResult = true } = {}) => {
+const createHarness = ({ renderResult = true, presentationRetryLimit = 8 } = {}) => {
   const clock = createFakeWindow();
   const session = createSession({ renderResult });
   const events = [];
@@ -239,6 +239,7 @@ const createHarness = ({ renderResult = true } = {}) => {
     presentationResizeRetryMs: 5,
     presentationStallTimeoutMs: 20,
     presentationStallReconnectLimit: 2,
+    presentationRetryLimit,
   });
   return {
     clock,
@@ -274,8 +275,8 @@ test("presentation controller holds the last frame until the current full render
   assert.equal(session.resizePresentationHold, true);
   assert.equal(session.terminalFrameHeld, true);
   assert.equal(session.terminalFrameHold.hidden, false);
-  assert.equal(session.terminalFrameHold.width, 120);
-  assert.equal(session.terminalFrameHold.height, 60);
+  assert.equal(session.terminalFrameHold.width, 240);
+  assert.equal(session.terminalFrameHold.height, 120);
   assert.equal(session.terminalFrameHold.parentElement, session.terminalHost);
   assert.deepEqual(session.terminalHost.children, [session.terminalFrameHold]);
 
@@ -492,6 +493,20 @@ test("presentation lifecycle removes Canvas listeners and rejects delayed callba
   assert.equal(session.term.renderNowCalls, 0);
   assert.equal(controller.dispose(), true);
   assert.equal(controller.dispose(), false);
+});
+
+test("presentation retry reaches an explicit exhausted state", () => {
+  const { clock, controller, events, session } = createHarness({ presentationRetryLimit: 2 });
+  controller.installSession(session);
+  session.canvasMatches = false;
+
+  assert.equal(controller.scheduleRetry(session, { reason: "test_retry" }), true);
+  clock.flushTimers();
+  assert.equal(controller.scheduleRetry(session, { reason: "test_retry" }), true);
+  clock.flushTimers();
+  assert.equal(controller.scheduleRetry(session, { reason: "test_retry" }), false);
+  assert.equal(session.presentationRetryExhausted, true);
+  assert.equal(events.filter(({ event }) => event === "presentation_retry_exhausted").length, 1);
 });
 
 test("presentation stall recovery resyncs only a committed active pane after bounded retries", () => {

@@ -43,6 +43,123 @@ const outputMetrics = (state) => state.page.evaluate(() => {
   return snapshot?.counters || {};
 });
 
+const presentationProbeSummary = (state) => state.page.evaluate((targetPaneID) => {
+  const samples = globalThis.__testsAutoPresentationProbe?.samples || [];
+  const panes = samples.flatMap((sample) => sample.panes.map((pane) => ({
+    ...pane,
+    at: sample.at,
+    devicePixelRatio: sample.devicePixelRatio,
+  }))).filter((pane) => !targetPaneID || pane.paneID === targetPaneID);
+  const summarizeCanvas = (key) => {
+    const entries = panes.map((pane) => pane[key]);
+    const visible = entries.filter((canvas) => canvas.hidden === false && canvas.width > 0 && canvas.height > 0);
+    const ratios = visible
+      .filter((canvas) => canvas.cssWidth > 0 && canvas.cssHeight > 0)
+      .map((canvas) => ({ width: canvas.width / canvas.cssWidth, height: canvas.height / canvas.cssHeight }));
+    return {
+      samples: entries.length,
+      visible: visible.length,
+      backingRatioMin: ratios.length > 0 ? Math.min(...ratios.map((ratio) => Math.min(ratio.width, ratio.height))) : 0,
+      backingRatioMax: ratios.length > 0 ? Math.max(...ratios.map((ratio) => Math.max(ratio.width, ratio.height))) : 0,
+      last: entries.at(-1) || null,
+    };
+  };
+  const states = panes.map((pane) => ({
+    paneID: pane.paneID,
+    tabID: pane.tabID,
+    connection: pane.connection,
+    renderReady: pane.renderReady,
+    hasPresentedFrame: pane.hasPresentedFrame,
+  }));
+  return {
+    count: panes.length,
+    devicePixelRatios: [...new Set(panes.map((pane) => Number(pane.devicePixelRatio || 0)))],
+    first: panes[0] || null,
+    last: panes.at(-1) || null,
+    renderNotReadySamples: states.filter((entry) => entry.renderReady !== "true").length,
+    holdVisibleSamples: panes.filter((pane) => pane.holdCanvas.hidden === false).length,
+    liveCanvas: summarizeCanvas("liveCanvas"),
+    holdCanvas: summarizeCanvas("holdCanvas"),
+  };
+}, state.activePaneID || "");
+
+const initialPresentationSummary = (state) => {
+  const pane = (state.initialTerminalTimeline || []).find((entry) => entry.paneID === state.activePaneID);
+  const events = pane?.events || [];
+  const first = (type) => events.find((event) => event.type === type) || null;
+  const socketOpen = first("socket_open");
+  const replayStart = first("history_replay_start");
+  const replayComplete = first("history_replay_complete");
+  const outputDrained = first("replay_output_drained");
+  const commit = first("presentation_commit_complete");
+  return {
+    paneID: state.activePaneID || pane?.paneID || "",
+    socketOpenAt: socketOpen?.startupElapsedMs ?? null,
+    replayBytes: Number(replayStart?.serverHistoryBytes || 0),
+    replayCompleteAt: replayComplete?.startupElapsedMs ?? null,
+    outputDrainedAt: outputDrained?.startupElapsedMs ?? null,
+    firstCommitAt: commit?.startupElapsedMs ?? null,
+    commitLatencyMs: socketOpen && commit
+      ? Math.max(0, Number(commit.startupElapsedMs) - Number(socketOpen.startupElapsedMs))
+      : null,
+    presentationRetryExhausted: events.filter((event) => event.type === "presentation_retry_exhausted").length,
+    available: Boolean(pane),
+  };
+};
+
+const assertInitialPresentation = (summary, windowName) => {
+  if (!summary.available || !summary.outputDrainedAt) {
+    return;
+  }
+  if (summary.firstCommitAt === null) {
+    throw new Error(`${windowName} active pane drained replay without an initial presentation commit: ${JSON.stringify(summary)}`);
+  }
+  if (summary.commitLatencyMs !== null && summary.commitLatencyMs > 2_000) {
+    throw new Error(`${windowName} active pane initial presentation exceeded 2s after socket open: ${JSON.stringify(summary)}`);
+  }
+  if (summary.presentationRetryExhausted > 0) {
+    throw new Error(`${windowName} active pane exhausted presentation retries during initial open: ${JSON.stringify(summary)}`);
+  }
+};
+
+const presentationRenderSummary = (state) => state.page.evaluate((targetPaneID) => {
+  const panes = globalThis.__testsAutoTerminalTimelineSnapshot?.() || [];
+  const pane = panes.find((entry) => entry.paneID === targetPaneID);
+  const events = pane?.events || [];
+  const renders = events.filter((event) => event.type === "full_render_start");
+  const commits = events.filter((event) => event.type === "presentation_commit_complete");
+  const ensures = events.filter((event) => event.type === "presentation_ensure");
+  const keyOf = (event) => JSON.stringify([
+    event.historyGeneration,
+    event.resizeEpoch,
+    event.receivedCursor,
+    event.appliedCursor,
+    event.presentedCursor,
+  ]);
+  const keys = new Map();
+  for (const event of renders) keys.set(keyOf(event), (keys.get(keyOf(event)) || 0) + 1);
+  return {
+    paneID: targetPaneID || "",
+    renderStarts: renders.length,
+    renderCompletes: events.filter((event) => event.type === "full_render_complete").length,
+    commits: commits.length,
+    ensureReasons: [...new Set(ensures.map((event) => event.reason).filter(Boolean))],
+    duplicateRenderKeys: [...keys.entries()].filter(([, count]) => count > 1).map(([key, count]) => ({ key, count })),
+    retryExhausted: events.filter((event) => event.type === "presentation_retry_exhausted").length,
+  };
+}, state.activePaneID || "");
+
+const initializationPerformancePanel = (state) => state.page.evaluate(() => {
+  const panel = document.getElementById("initializationPerformancePanel");
+  return {
+    available: Boolean(panel),
+    hidden: panel?.hidden !== false,
+    status: document.getElementById("initializationPerformanceStatus")?.textContent || "",
+    total: document.getElementById("initializationPerformanceTotal")?.textContent || "",
+    rows: document.querySelectorAll("#initializationPerformanceList .initialization-performance-row").length,
+  };
+});
+
 const metricDelta = (before, after, name) => (
   Number(after?.[name] || 0) - Number(before?.[name] || 0)
 );
@@ -152,6 +269,32 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   await desktop.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
   await mobile.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
 
+  const initialPresentation = {
+    desktop: initialPresentationSummary(desktop),
+    mobile: initialPresentationSummary(mobile),
+  };
+  assertInitialPresentation(initialPresentation.desktop, "desktop");
+  assertInitialPresentation(initialPresentation.mobile, "mobile");
+
+  const initializationPerformanceAvailable = {
+    desktop: (await initializationPerformancePanel(desktop)).available,
+    mobile: (await initializationPerformancePanel(mobile)).available,
+  };
+  if (config.enableInitializationPerformance && Object.values(initializationPerformanceAvailable).every(Boolean)) {
+    for (const state of [desktop, mobile]) {
+      await state.page.waitForFunction(() => {
+        const panel = document.getElementById("initializationPerformancePanel");
+        return panel && !panel.hidden
+          && document.getElementById("initializationPerformanceStatus")?.textContent === "已完成"
+          && document.getElementById("initializationPerformanceTotal")?.textContent !== "--";
+      }, { timeout: 60_000 });
+    }
+  }
+  const initializationPerformanceAtOpen = {
+    desktop: await initializationPerformancePanel(desktop),
+    mobile: await initializationPerformancePanel(mobile),
+  };
+
   const consoleErrors = [];
   const captureConsoleError = (windowName) => (message) => {
     if (message.type() === "error") consoleErrors.push(`${windowName}: ${message.text()}`);
@@ -256,14 +399,40 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     throw new Error(`console errors during output regression:\n${consoleErrors.join("\n")}`);
   }
 
+  const initializationPerformanceAtEnd = {
+    desktop: await initializationPerformancePanel(desktop),
+    mobile: await initializationPerformancePanel(mobile),
+  };
+  if (config.enableInitializationPerformance && Object.values(initializationPerformanceAvailable).every(Boolean)) {
+    for (const name of ["desktop", "mobile"]) {
+      if (initializationPerformanceAtEnd[name].total !== initializationPerformanceAtOpen[name].total) {
+        throw new Error(`${name} initialization performance changed after initialization: ${JSON.stringify({ atOpen: initializationPerformanceAtOpen[name], atEnd: initializationPerformanceAtEnd[name] })}`);
+      }
+    }
+  }
+
   assertNoFatalErrors();
   await eventLog({
     status: "pass",
     action: "terminal-output-real-environment",
     marker,
+    initialPresentation,
+    initializationPerformance: {
+      available: initializationPerformanceAvailable,
+      atOpen: initializationPerformanceAtOpen,
+      atEnd: initializationPerformanceAtEnd,
+    },
     resources,
     presentation,
     canvas: { before: canvasBefore, after: canvasAfter },
+    presentationProbe: {
+      desktop: await presentationProbeSummary(desktop),
+      mobile: await presentationProbeSummary(mobile),
+    },
+    presentationRenders: {
+      desktop: await presentationRenderSummary(desktop),
+      mobile: await presentationRenderSummary(mobile),
+    },
     metrics: {
       overloads,
       staleDrops,

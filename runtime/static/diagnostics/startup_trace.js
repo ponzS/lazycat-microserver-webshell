@@ -18,7 +18,9 @@ const metricNames = Object.freeze([
 
 export function createStartupDiagnostics({ now = defaultNow, pendingLimit = 64 } = {}) {
   const metrics = Object.fromEntries(metricNames.map((name) => [name, 0]));
-  metrics.moduleStartedAt = now();
+  const startedAt = now();
+  metrics.navigationStartedAt = startedAt;
+  metrics.moduleStartedAt = startedAt;
   const pending = [];
   let traceSink = null;
 

@@ -49,6 +49,9 @@ export const config = {
     : envFlag(process.env.TEST_FOREGROUND, true),
   localStaticDir: String(process.env.WEBSHELL_LOCAL_STATIC_DIR || "").trim(),
   mobileUserAgent: String(process.env.WEBSHELL_MOBILE_USER_AGENT || "").trim(),
+  mobileDeviceScaleFactor: Math.max(1, Number(process.env.WEBSHELL_MOBILE_DEVICE_SCALE_FACTOR || "1") || 1),
+  captureTerminalTimeline: envFlag(process.env.WEBSHELL_CAPTURE_TERMINAL_TIMELINE, false),
+  enableInitializationPerformance: envFlag(process.env.WEBSHELL_ENABLE_INITIALIZATION_PERFORMANCE, false),
 };
 
 const installLocalStaticRoute = async (context) => {
@@ -175,19 +178,72 @@ const createWindow = async (name, viewport, position) => {
     viewport,
     hasTouch: name === "mobile",
     isMobile: name === "mobile",
+    ...(name === "mobile" ? { deviceScaleFactor: config.mobileDeviceScaleFactor } : {}),
     ...(name === "mobile" && config.mobileUserAgent ? { userAgent: config.mobileUserAgent } : {}),
     ignoreHTTPSErrors: true,
     serviceWorkers: config.localStaticDir ? "block" : "allow",
   });
   await installLocalStaticRoute(context);
   const page = await context.newPage();
-  const state = { name, page, browser, context, framesSent: [], output: "", lastResize: null, fatalErrors: [], resizeErrors: 0 };
+  const state = { name, page, browser, context, framesSent: [], output: "", lastResize: null, fatalErrors: [], resizeErrors: 0, initialTerminalTimeline: [] };
   await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
-  await page.addInitScript(() => {
+  await page.addInitScript(({ captureTimeline, enableInitializationPerformance }) => {
+    if (captureTimeline || enableInitializationPerformance) {
+      window.localStorage.setItem("webshell.debugMode", "true");
+    }
+    if (captureTimeline) {
+      window.localStorage.setItem("webshell.debugLog", "true");
+    }
+    if (enableInitializationPerformance) {
+      window.localStorage.setItem("webshell.initializationPerformance", "true");
+    }
     window.__testsAutoResizeFrames = [];
     window.__testsAutoResizeTrace = [];
     window.__testsAutoTerminalOutput = "";
     window.__testsAutoSockets = [];
+    window.__testsAutoPresentationProbe = {
+      startedAt: performance.now(),
+      samples: [],
+      stopped: false,
+    };
+    const capturePresentationSample = () => {
+      const probe = window.__testsAutoPresentationProbe;
+      if (!probe || probe.stopped) return;
+      const describeCanvas = (canvas) => {
+        if (!(canvas instanceof HTMLCanvasElement)) {
+          return { width: 0, height: 0, cssWidth: 0, cssHeight: 0, hidden: null };
+        }
+        const rect = canvas.getBoundingClientRect();
+        return {
+          width: canvas.width,
+          height: canvas.height,
+          cssWidth: rect.width,
+          cssHeight: rect.height,
+          hidden: canvas.hidden === true,
+        };
+      };
+      probe.samples.push({
+        at: performance.now(),
+        devicePixelRatio: window.devicePixelRatio || 1,
+        panes: Array.from(document.querySelectorAll(".terminal-pane")).map((pane) => {
+          const shell = pane.querySelector(".pane-shell");
+          const liveCanvas = pane.querySelector(".terminal-host canvas:not(.terminal-frame-hold)");
+          const holdCanvas = pane.querySelector(".terminal-frame-hold");
+          return {
+            paneID: shell?.dataset?.paneId || "",
+            tabID: pane.dataset?.tabId || "",
+            connection: shell?.dataset?.connection || "",
+            renderReady: shell?.dataset?.renderReady || "",
+            hasPresentedFrame: shell?.dataset?.hasPresentedFrame || "",
+            liveCanvas: describeCanvas(liveCanvas),
+            holdCanvas: describeCanvas(holdCanvas),
+          };
+        }),
+      });
+      if (probe.samples.length > 8000) probe.samples.splice(0, probe.samples.length - 8000);
+      requestAnimationFrame(capturePresentationSample);
+    };
+    requestAnimationFrame(capturePresentationSample);
     window.__testsAutoSentMessages = [];
     const NativeWebSocket = window.WebSocket;
     const send = NativeWebSocket.prototype.send;
@@ -238,6 +294,9 @@ const createWindow = async (name, viewport, position) => {
         return socket;
       },
     });
+  }, {
+    captureTimeline: config.captureTerminalTimeline,
+    enableInitializationPerformance: config.enableInitializationPerformance,
   });
   page.on("console", (message) => {
     const text = message.text();
@@ -282,7 +341,10 @@ const createWindow = async (name, viewport, position) => {
   await page.goto(testURL, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForSelector(".terminal-pane.active .terminal-host", { timeout: 60_000 });
   await page.waitForTimeout(2_000);
-  await eventLog({ status: "pass", window: name, action: "open", viewport, loggedIn, url: page.url() });
+  state.initialTerminalTimeline = await page.evaluate(() => (
+    globalThis.__testsAutoTerminalTimelineSnapshot?.() || []
+  )).catch(() => []);
+  await eventLog({ status: "pass", window: name, action: "open", viewport, deviceScaleFactor: name === "mobile" ? config.mobileDeviceScaleFactor : 1, loggedIn, url: page.url() });
   return state;
 };
 
@@ -378,6 +440,29 @@ const createIsolatedTab = async (state) => {
   return url.toString();
 };
 
+const persistPresentationProbe = async (state, artifactsDir) => {
+  const presentationProbe = await state.page.evaluate(() => {
+    const probe = globalThis.__testsAutoPresentationProbe;
+    if (probe) probe.stopped = true;
+    return probe || { startedAt: 0, samples: [] };
+  }).catch(() => ({ startedAt: 0, samples: [] }));
+  const terminalTimeline = await state.page.evaluate(() => (
+    globalThis.__testsAutoTerminalTimelineSnapshot?.() || []
+  )).catch(() => []);
+  await fs.writeFile(
+    path.join(artifactsDir, `${state.name}-terminal-timeline.json`),
+    `${JSON.stringify(terminalTimeline)}\n`,
+  ).catch(() => {});
+  await fs.writeFile(
+    path.join(artifactsDir, `${state.name}-terminal-timeline-initial.json`),
+    `${JSON.stringify(state.initialTerminalTimeline || [])}\n`,
+  ).catch(() => {});
+  await fs.writeFile(
+    path.join(artifactsDir, `${state.name}-presentation-probe.json`),
+    `${JSON.stringify(presentationProbe)}\n`,
+  ).catch(() => {});
+};
+
 export const run = async (scenario) => {
   const states = {};
   try {
@@ -393,11 +478,13 @@ export const run = async (scenario) => {
     assertNoFatalErrors();
     await scenario({ config, states, artifactsDir, eventLog, activity, paneSize, waitForResizeApplied, refreshResizeFrames, refreshTerminalOutput, assertNoFatalErrors });
     assertNoFatalErrors();
+    await Promise.all(Object.values(states).map((state) => persistPresentationProbe(state, artifactsDir)));
     await eventLog({ status: "pass", action: "case-complete", artifactsDir });
   } catch (error) {
     const message = error?.stack || String(error);
     await fs.writeFile(errorsPath, `${message}\n`);
     for (const state of Object.values(states)) {
+      await persistPresentationProbe(state, artifactsDir);
       await state.page.screenshot({ path: path.join(artifactsDir, `${state.name}-failure.png`), fullPage: true }).catch(() => {});
     }
     await eventLog({ status: "error", action: "case-failed", message, artifactsDir });

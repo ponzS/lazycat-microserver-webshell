@@ -97,12 +97,14 @@ export function createTerminalPresentationView({
     );
     const cssWidth = hostCssWidth > 0 ? hostCssWidth : sourceCssWidth;
     const cssHeight = hostCssHeight > 0 ? hostCssHeight : sourceCssHeight;
-    hold.width = Math.max(1, Math.round(cssWidth));
-    hold.height = Math.max(1, Math.round(cssHeight));
+    hold.width = Math.max(1, Math.round(cssWidth * ratio));
+    hold.height = Math.max(1, Math.round(cssHeight * ratio));
     hold.style.width = "100%";
     hold.style.height = "100%";
     hold.style.objectPosition = "left top";
-    ctx.clearRect(0, 0, hold.width, hold.height);
+    ctx.save();
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, cssWidth, cssHeight);
     const offsetX = Number(sourceRect?.left) - Number(hostRect?.left);
     const offsetY = Number(sourceRect?.top) - Number(hostRect?.top);
     ctx.drawImage(
@@ -112,6 +114,7 @@ export function createTerminalPresentationView({
       sourceCssWidth,
       sourceCssHeight,
     );
+    ctx.restore();
     hold.hidden = false;
     return true;
   };
@@ -132,6 +135,9 @@ export function createTerminalPresentationView({
     }
     session.shellEl.dataset.renderReady = session.renderReady ? "true" : "false";
     session.shellEl.dataset.hasPresentedFrame = session.hasPresentedFrame ? "true" : "false";
+    session.shellEl.dataset.terminalFrameHeld = session.terminalFrameHeld === true ? "true" : "false";
+    session.shellEl.dataset.connectionRetrying = session.connectionRetrying === true ? "true" : "false";
+    session.shellEl.dataset.renderRecovery = session.presentationRetryPending === true ? "true" : "false";
     return true;
   };
 
