@@ -1,6 +1,6 @@
 # WebShell 终端初始化、Replay 与黑屏问题总结和执行清单
 
-状态：诊断阶段完成，等待按 P0 顺序实施
+状态：诊断基线已建立；P0/P1 中部分机制已经存在，等待按代码审计后的剩余缺口实施
 最后更新：2026-09-02
 适用范围：`lazycat-microserver-webshell` 普通容器 WebShell，包含 PC 和移动端
 
@@ -37,14 +37,14 @@
 
 ### 2.1 页面初始化和连接
 
-三次日志均显示基础启动较快：
+已有日志和本次 Mac 日志均显示基础启动较快：
 
-- 页面模块启动到 workspace/bootstrap 完成约 `0.43~0.72s`。
-- Ghostty WASM 在约 `0.05~0.46s` 内就绪。
-- WebSocket open 通常在页面启动后约 `0.61~1.06s`。
-- agent ensure 多数为 `0ms`，ping 约 `68~109ms`。
+- 页面模块启动到 workspace/bootstrap 完成约 `0.43~0.72s`；本次 Mac 为 `0.68s`。
+- Ghostty WASM 通常在 `0.05~0.46s` 内就绪；本次 Mac 为 `47ms`。
+- WebSocket open 通常在页面启动后约 `0.61~1.06s`；本次 Mac 在 `+943~955ms`，socket open latency 约 `250~256ms`。
+- 本次 Mac 的 agent ensure 为 `0~6ms`，已有一次 persistent agent ping 为 `333ms`。
 
-结论：目前没有证据证明页面初始化、Ghostty WASM、WebSocket upgrade 或 agent readiness 是接近 10 秒延迟的主因。
+结论：目前没有证据证明页面初始化、Ghostty WASM、WebSocket upgrade 或 agent readiness 是接近 10 秒延迟的主因。agent ping 仍需作为端到端时间线的一段单独记录，但不能把一次 `333ms` ping 解释为 4~6 秒的主要来源。
 
 ### 2.2 PC 日志：较小历史和 350KB 历史
 
@@ -63,7 +63,7 @@
 | pane-1 | 961 | 3.407s | `output_queued x1114`、`flush x142` | 最终稳定提交约 7.3s |
 | pane-2 | 81 | 1.646s | `output_queued x81`、`flush x11` | 数据较早处理完，但 presentation 仍可能被隐藏状态挡住 |
 
-两者历史字节相同，但 frame 数相差约 12 倍，replay 时间相差约 2 倍。服务端 replay 时间只有 `2~7ms`。
+两者历史字节相同，但 frame 数相差约 12 倍，replay 时间相差约 2 倍。这里的 `serverReplayDurationMs` 只表示 agent replay 写入其 attach 连接的耗时，不能代表 Provider queue、WebSocket 发送或浏览器 output drain 的端到端耗时。
 
 ### 2.3 移动端日志：350KB 历史
 
@@ -76,7 +76,23 @@
 
 移动端 pane-1 的 cursor 在 replay 后又增加约 `49,881 bytes`，说明 replay 期间或紧接着存在持续 live output。
 
-### 2.4 最关键的 cursor 证据
+### 2.4 新增 Mac 日志：三 pane 的对照证据
+
+本次 Mac 日志中三个 pane 都是 `350,000 bytes`，并且 `serverHistoryChunks` 与 `serverReplayFrames` 一致：
+
+| pane | history chunks/frames | 客户端 replayDuration | serverReplayDuration | completion 时 output queue |
+| --- | ---: | ---: | ---: | ---: |
+| pane-2 | 488 | 1,394ms | 42ms | 41,207 bytes |
+| pane-3 | 1,313 | 3,691ms | 116ms | 20,487 bytes |
+| pane-1 | 1,617 | 4,481ms | 135ms | 4,651 bytes |
+
+本次日志进一步支持 frame 碎片化与客户端 replay 时间相关：350KB 历史从 488 个 frame 增加到 1,617 个 frame 时，客户端 replay 时间从约 1.4s 增加到约 4.5s。它也确认 `history_replay_complete` 到达时浏览器 output queue 仍未完全 drain。
+
+pane-1 是活动 tab 的 pane，首次 Canvas 显示约为 `startupElapsed=5.55s`；之后 focus/resize 在约 `7.50s` 再次进入 `presentation_wait_resize`，最终约 `8.29s` 完成一次 full render。pane-2 和 pane-3 当时属于非活动 tab，`presentedCursor=0` 且 `presentation_deferred ... hidden` 只能证明隐藏 pane 被延迟，不能单凭这份日志证明它们已经永久黑屏；必须在切换到 tab-2 后验证最终 presentation commit。
+
+`xN` 日志必须按 `server_log_seq` 或事件 identity 去重。`x3` 的同一服务端日志表示 Unified fan-out 可能被三个 logical stream 观察到，不等于服务端执行了三次。
+
+### 2.5 最关键的 cursor 证据
 
 `history_replay_complete` 发生时，数据经常仍未处理完：
 
@@ -122,7 +138,7 @@ presentation_deferred reason=...hidden:hidden
 
 ## 3. 当前已经确认的根因
 
-### A. Replay frame 碎片化造成前端调度放大
+### A. Replay frame 碎片化造成前端调度放大（高置信度）
 
 同样数量级的历史字节，chunk/frame 数可以从几十增长到上千。每个 binary frame 都可能触发：
 
@@ -135,29 +151,17 @@ presentation_deferred reason=...hidden:hidden
 
 连续输出会让历史 replay 和 live output 进一步交错，放大这些任务的总数。
 
-### B. Unified 多 pane 之间存在潜在调度竞争
+### B. Unified 多 pane 之间存在潜在调度竞争（待验证）
 
-PC 日志中：
+PC、移动端和本次 Mac 日志都显示不同 pane 的 frame 数和 replay 时间差异，但这只能证明 frame 规模不同，不能单独证明一个 logical stream 阻塞了另一个 stream。当前 Go broker 已经有按 stream 的 priority/order、`512KiB`/`8ms` round budget 和 turn ACK。
 
-```text
-pane-1: 961 frames, 3.407s
-pane-2: 81 frames, 1.646s
-```
+因此当前可确认的是 frame 碎片化；stream 竞争仍是需要通过多 pane 压测和等待时间指标验证的假设。后续不能只根据 frame 数差异宣称存在公平性缺陷。
 
-移动端日志中：
+### C. Replay receive complete 早于 output drain（高置信度；代码已有部分修正）
 
-```text
-pane-1: 1641 frames, 3.562s
-pane-2: 88 frames, 0.179s
-```
+`history_replay_complete` 是 agent/transport 的接收完成通知，不等于浏览器 output queue 已 drain，也不等于 presentation 已 commit。当前代码已通过 `replayCompletionPending`、`finishIfReady()`、`receivedHistoryCursor`/`appliedHistoryCursor` 和 output flush 做了部分隔离。剩余工作是审计所有 legacy、Unified、resize 和恢复路径，并让诊断名称明确区分 receive、drain 和 presentation commit。
 
-这表明 frame 数量是主要因素，同时也说明高频 logical stream 可能影响同一 physical WebSocket 上其他 pane 的处理时机。后续 frame batching 必须配合 stream 公平调度，不能让一个 pane 独占物理连接。
-
-### C. Replay receive complete 早于 output drain
-
-当前 replay 完成事件上报过早。它可能让 resize、presentation、history validation、resume deadline 和 queue ACK 在 output 尚未追平时开始运行。
-
-### D. Presentation 被 hidden/measure 门控卡住
+### D. Presentation 被 hidden/measure 门控卡住（高置信度；永久黑屏仍需激活场景确认）
 
 至少一个 pane 在 queue 已排空、cursor 已追平后，仍然持续：
 
@@ -168,7 +172,7 @@ presentation_deferred reason=...hidden:hidden
 
 这与跨 tab、移动端页面可见性、分辨率切换和折叠屏恢复后的永久黑屏高度相关。
 
-### E. Full render 被重复触发
+### E. Full render 被重复触发（高置信度；当前代码存在直接触发路径）
 
 日志出现：
 
@@ -181,7 +185,7 @@ presentation_ensure x64~x73
 
 这些请求通常和 `queue_turn_complete`、`history_validation` 或 resume generation 相关，说明 queue turn、resume 和 presentation 之间仍然存在重复触发。
 
-### F. 移动端 focus/resize 会在已有稳定画面后重新进入等待
+### F. 移动端 focus/resize 会在已有稳定画面后重新进入等待（高置信度）
 
 移动端在 pane-1 已经达到：
 
@@ -207,8 +211,8 @@ presentation_wait_resize
 
 - Ghostty WASM 初始化慢：启动阶段约几十到几百毫秒。
 - WebSocket 建连慢：open 延迟约 `100~230ms`。
-- agent 启动慢：本次 ensure 命中缓存，主要为 `0ms`。
-- 服务端历史 replay 慢：服务端记录为 `2~10ms`。
+- agent readiness 不是首要延迟方向：本次 Mac ensure 为 `0~6ms`，但 ping 出现 `333ms`，因此只能排除“当前证据中的主要瓶颈”，不能排除所有环境下的 attach/Provider 延迟。
+- agent replay 写入阶段较短：本次为 `42~135ms`，但该指标不覆盖 `lightosctl`、Provider queue、WebSocket 发送和浏览器 drain，不能据此排除端到端服务路径。
 - 单纯减少历史字节：本次核心差异来自 frame/chunk 数，且历史容量由设置控制。
 - quick-resume tail：明确不采用。
 - screen checkpoint：明确不采用。
@@ -216,21 +220,37 @@ presentation_wait_resize
 
 ## 5. 执行清单
 
-状态标记：`[ ]` 待执行，`[~]` 执行中，`[x]` 已验证完成。
+状态标记：`[ ]` 待执行，`[~]` 已有部分机制但仍有剩余缺口，`[x]` 已验证完成。
 
-### P0-1：Replay frame batching 和 Unified stream 公平调度
+### P0-0：补齐端到端时间线和诊断语义
 
 状态：`[ ]`
 
-目标：在不改变权威 cursor 和 replay/live 语义的情况下，减少碎片 binary frame 数量。
+本项必须在继续用日志排除 Provider/queue/attach 瓶颈前完成，或至少与首轮真实回归并行完成。
+
+要求：
+
+- 明确区分 `canvas_element_visible`、`terminal_frame_committed` 和 `stable_presentation_complete`。
+- `agent_replay_write_duration_ms` 只描述 agent 向 attach 连接写 replay 的局部耗时；在 Provider queue、WebSocket 和浏览器分段指标补齐前，不得用它排除服务端端到端路径。
+- `provider_queue_wait_ms`、`websocket_send_duration_ms`、`client_first_replay_frame_ms`、`client_last_replay_frame_ms` 用于定位 Provider/queue/WebSocket 端到端分段耗时。
+- `client_output_drain_duration_ms`、`presentation_commit_duration_ms` 用于定位浏览器 drain 和最终呈现耗时。
+- hidden 原因拆分为结构化字段。
+- `history_replay_complete` 改名或补充 receive/drain 语义。
+- `xN` 聚合计数必须说明是诊断层去重，不直接等于服务端执行次数。
+- 服务端日志以 `server_log_seq` 去重；Unified fan-out 不应被误判为多个服务端请求。
+- 保留 `connectionEpoch`、`channelGeneration`、`historyGeneration`、`resizeEpoch` 和 cursor 字段。
+
+### P0-1：Replay frame batching
+
+状态：`[~]`（frame batching 待执行；公平性由独立的 P1-1 测量）
+
+目标：在不改变权威 cursor 和 replay/live 语义的情况下，减少碎片 binary frame 数量。当前 Go broker 已有每个 stream 的 priority/order、`512KiB`/`8ms` round budget 和 turn ACK；stream 公平性单独作为 P1-1 测量，不在本项中假设为缺陷。
 
 要求：
 
 - 服务端将多个小 history chunk 合并为有界大小的 replay frame。
 - 保留每个 frame 的绝对 cursor、history generation 和连续性。
 - replay frame 不得与 live output 混淆。
-- Unified physical writer 采用 logical stream 公平调度。
-- 一个 pane 的大 replay 不得独占物理连接。
 - 不要把整个历史一次性合并成无界消息。
 
 重点模块：
@@ -244,14 +264,30 @@ presentation_wait_resize
 
 - 相同 350KB 场景下 frame 数显著下降。
 - 持续输出时 replay 仍保持 cursor 连续。
-- 多 pane 同时启动时，其他 pane 的 live/replay 不被长时间阻塞。
-- replay 期间用户不可见中间 Canvas。
+- replay 期间用户不可见中间 Canvas；初始 replay 必须单独观察，不得只用稳定打开后的持续输出测试代替。
 
-### P0-2：拆分 replay receive、output drain 和 presentation commit
+### P1-1：Unified stream 公平性测量
 
 状态：`[ ]`
 
-目标：修正当前 `history_replay_complete` 语义过早的问题。
+当前 broker 已有按 stream 的 priority/order、`512KiB`/`8ms` round budget 和 turn ACK。现有日志只能证明不同 pane 的 frame 数和 replay 时间不同，不能证明 stream 竞争；本项只在真实多 pane 压测后决定是否需要调整调度器。
+
+要求：
+
+- 记录每个 stream 的首次服务延迟、最大连续占用时间、live output 最大等待时间和 queue turn 到 ACK 的耗时。
+- 让至少一个 pane 持续产生高频 replay/live output，同时观察其他 pane 的首帧、控制帧和 live output 延迟。
+- 区分 frame 数造成的单 pane 处理时间与 physical writer 跨 stream 阻塞。
+
+验收：
+
+- 有明确的多 pane 压测结果，能够判断现有 `512KiB`/`8ms` 调度是否满足目标。
+- 如果确认存在竞争，再单独调整 writer；如果未确认，保留现有调度并把 frame batching 作为独立优化。
+
+### P0-2：拆分 replay receive、output drain 和 presentation commit
+
+状态：`[~]`（receive/drain 门控已有；状态命名和边界待审计）
+
+目标：明确当前 `history-replay-complete` 只是接收完成通知，避免把它误认为 output drain 或 presentation commit。当前代码已通过 `replayCompletionPending`、`finishIfReady()`、`receivedHistoryCursor`/`appliedHistoryCursor` 和 output flush 做了部分隔离，不应重复创建另一套并行状态机。
 
 目标状态至少为：
 
@@ -283,14 +319,13 @@ presentation_committed
 验收：
 
 - 不再出现 replay 已完成但 `appliedCursor` 明显落后于 `receivedCursor` 的最终完成状态。
-- `presentedCursor` 未追平时不能报告 stable ready。
-- replay 过程不提交用户可见中间帧。
+- 不再把 `history_replay_complete` 事件本身当作 stable ready；最终 ready 必须同时满足 replay commit、output drain、有效 geometry 和 presentation commit。
 
 ### P0-3：Per-pane single-flight output flush
 
-状态：`[ ]`
+状态：`[~]`（有界 flush 和单调度 handle 已实现；并发/指标仍待审计）
 
-目标：将 replay 和 live output 收敛到每个 pane 唯一、有界的 drain 调度器。
+目标：确认 replay 和 live output 使用同一有序、有界的 drain 调度器，并修复仍可绕过该调度器的调用路径。当前 `output_lifecycle.js` 已为每个 pane 保存 RAF/timer handle，`output_controller.js` 已实现 bytes、entries、time budget 和连续数据合并；本项重点是补齐边界测试，不是重新建设基础 flush 架构。
 
 要求：
 
@@ -315,9 +350,9 @@ presentation_committed
 
 ### P0-4：Presentation 强制闭环和 last-known-good frame
 
-状态：`[ ]`
+状态：`[~]`（hold/commit/retry 已实现；隐藏原因、重试终止和灰点闭环待修复）
 
-目标：修复数据已经 drain 但 `presentedCursor=0` 的黑屏路径。
+目标：修复数据已 drain 但 presentation 未提交的黑屏路径，并区分隐藏 pane 的预期延迟与活动 pane 的异常停滞。当前已经存在 last-known-good frame hold、resize fence 和 presentation watchdog，但 `hidden`/`measure` 原因仍有合并，presentation retry 仍可能持续调度，需补充明确的 stalled/error 终态。
 
 要求：
 
@@ -341,9 +376,9 @@ presentation_committed
 - 出现 `receivedCursor == appliedCursor` 后，最终一定能得到 `presentation_committed` 或明确错误。
 - tab 切换、页面恢复和设备旋转后不会永久停留在 `presentation_deferred`。
 - resize 等待期间不出现主动清屏。
-- 健康 socket、有效 replay 和有效 Canvas 必须显示 `data-connection="open"`，不能遗留灰色呼吸点。
+- 健康 socket、有效 replay 和有效 Canvas 的 transport/presentation 状态必须可独立判断；`data-connection="open"` 不能掩盖 `data-render-ready="false"` 长期未收敛，也不能遗留灰色呼吸点。
 
-### P1-1：禁止 queue turn 直接触发重复 full render
+### P0-5：禁止 queue turn 直接触发重复 full render
 
 状态：`[ ]`
 
@@ -361,11 +396,11 @@ presentation_committed
 
 ### P1-2：限制 resume deadline 的副作用
 
-状态：`[ ]`
+状态：`[~]`（latest-only resume 和 deadline guard 已存在；副作用仍待真实场景验证）
 
 要求：
 
-- replay 正常进行时，`resume_deadline_exceeded` 只能记录诊断，不得直接启动 recovery、重新 attach 或清空 Canvas。
+- 当前 `onResumeDeadline()` 主要记录诊断并更新 pending UI 状态；必须验证它不会间接启动 recovery、重新 attach、resize 风暴或清空 Canvas。
 - deadline 超时后的动作必须绑定当前 generation。
 - 长 replay 场景应在 drain 后再判断是否真的需要恢复。
 - pageshow、focus、online 和宿主 resume 进入同一个 latest-only resume transaction。
@@ -384,7 +419,7 @@ presentation_committed
 
 ### P1-3：移动端 focus/resize/viewport 收敛
 
-状态：`[ ]`
+状态：`[~]`（latest-only geometry、resize epoch 和 ACK guard 已存在；移动端真实回归待完成）
 
 要求：
 
@@ -409,9 +444,9 @@ presentation_committed
 
 ### P1-4：合并 agent readiness 请求
 
-状态：`[ ]`
+状态：`[~]`（ensure single-flight 已存在；physical attach 的重复 ping 仍待评估）
 
-当前不是主要延迟，但日志显示同一启动事务有多次 `ensure`。
+当前不是主要延迟，但本次 Mac 日志显示 ensure 为 `0~6ms`、ping 为 `333ms`。服务端 `ensurePersistentAgent` 已按 target/account 使用 single-flight；剩余问题是一次页面 attach 是否仍产生不必要的重复 ping，以及去重是否会改变错误恢复语义。
 
 要求：
 
@@ -423,19 +458,6 @@ presentation_committed
 
 - 同一页面启动期间 ensure/ping 次数与实际 readiness transaction 数一致。
 - 不因去重导致 agent 重启或旧 session 丢失。
-
-### P2-1：改进诊断日志精度和语义
-
-状态：`[ ]`
-
-要求：
-
-- 明确区分 `canvas_element_visible`、`terminal_frame_committed` 和 `stable_presentation_complete`。
-- hidden 原因拆分为结构化字段。
-- `history_replay_complete` 改名或补充 receive/drain 语义。
-- `xN` 聚合计数必须说明是诊断层去重，不直接等于服务端执行次数。
-- 服务端日志以 `server_log_seq` 去重；Unified fan-out 不应被误判为多个服务端请求。
-- 保留 `connectionEpoch`、`channelGeneration`、`historyGeneration`、`resizeEpoch` 和 cursor 字段。
 
 ## 6. 禁止的回归方向
 
@@ -458,9 +480,9 @@ presentation_committed
 | 场景 | 需要观察的指标 |
 | --- | --- |
 | 0~25KB，空闲输出 | open、replay receive、drain、stable presentation |
-| 350KB，空闲输出 | frame 数、replay drain、full render 次数 |
+| 350KB，重新打开/重新 attach 的初始历史 | frame 数、first/last replay frame、replay receive、output drain、presentation commit、初始期间可见 Canvas |
 | 350KB，持续输出 | frame 数、live/replay 交错、queue bytes、flush 次数 |
-| 多 pane 同时启动 | logical stream 公平性、单 pane 是否阻塞其他 pane |
+| 三 pane 或多 pane 同时启动 | 每个 logical stream 的首次服务延迟、最大连续占用时间、live output 最大等待时间 |
 | 移动端 focus/软键盘 | resize epoch、ACK、presentation commit、last-known-good frame |
 | PC 改变窗口尺寸 | resize request/applied、旧 ACK 丢弃、Canvas 是否保留 |
 | tab 切换 | hidden/visible 原因、激活后的最终 presentation |
@@ -469,8 +491,8 @@ presentation_committed
 
 最低验收标准：
 
-- agent 已运行时，WebSocket open 到 stable presentation commit 的 p95 目标不超过 2 秒；大 replay 场景需单独记录数据量和 frame 数。
-- replay 期间用户可见中间 Canvas 提交次数为 0。
+- agent 已运行且 pane 可测量、页面可见、没有目标切换或用户操作干扰时，从 WebSocket `open` 到 stable presentation commit 的 p95 目标不超过 2 秒；350KB、持续输出、隐藏 pane 和 resize 场景必须分别报告，不能混成一个 p95。
+- 初始 replay 期间用户可见中间 Canvas 提交次数为 0；现有持续输出测试不能替代初始 replay 观察。
 - `receivedCursor`、`appliedCursor`、`presentedCursor` 只能按有效 generation 单调前进。
 - resize 期间不主动清空当前稳定画面。
 - 旧 ACK、旧 timer 和旧 Promise 回调不能改变当前 geometry、cursor 或 connection state。
@@ -482,12 +504,13 @@ presentation_committed
 分析新日志时：
 
 1. 先按 payload 中的 `startupElapsedMs`、`replayDurationMs` 和 cursor 排序，不要完全依赖日志行的墙上时间；异步日志和 `xN` 聚合可能导致显示顺序错乱。
-2. 服务端日志按 `server_log_seq` 去重。
-3. 先比较 `history bytes`、`chunks`、`binaryMessages`，再看 flush 和 presentation。
-4. 重点检查是否存在：
+2. `serverReplayDurationMs` 只代表 agent replay 写入 attach 连接的局部耗时；必须和 Provider/queue/WebSocket/浏览器分段时间一起分析，不能直接作为服务端端到端耗时。
+3. 服务端日志按 `server_log_seq` 去重。
+4. 先比较 `history bytes`、`chunks`、`binaryMessages`，再看 flush 和 presentation。
+5. 重点检查是否存在：
    - `history_replay_complete` 时 `appliedCursor < receivedCursor`；
-   - queue 已 drain 但 `presentedCursor=0`；
-   - `presentation_deferred ... hidden:hidden` 长时间重复；
+   - queue 已 drain 但 `presentedCursor=0`，且该 pane 当时确实是活动且可测量的；
+   - `presentation_deferred ... hidden:hidden` 长时间重复；先确认是非活动 tab/不可测量状态，不能直接判定黑屏；
    - `full_render_* xN` 高于合理的 geometry/generation 变化次数；
    - focus/resize 在已有稳定 presentation 后重新阻塞；
    - 同一 Unified connection 上一个 pane 的大量 frame 影响其他 pane。
@@ -496,15 +519,17 @@ presentation_committed
 ## 9. 推荐实施顺序
 
 ```text
-P0-1  replay frame batching + stream fairness
-  -> P0-2  replay receive/drain/presentation 状态拆分
-  -> P0-3  per-pane single-flight output flush
-  -> P0-4  presentation 强制闭环和 last-known-good frame
-  -> P1-1  删除 queue turn 驱动的重复 full render
-  -> P1-2  限制 resume deadline 副作用
-  -> P1-3  移动端 focus/resize/viewport 收敛
-  -> P1-4  agent readiness 去重
-  -> P2-1  诊断语义和指标清理
+P0-0  端到端时间线和诊断语义
+  -> P0-5  禁止 queue turn 直接触发重复 full render
+  -> P0-4  presentation hidden/measure、retry 和灰点闭环
+  -> P0-1  replay frame batching
+  -> P0-2  审计 replay receive/drain/presentation 边界
+  -> P0-3  审计 per-pane output flush 边界
+  -> P1-1  Unified stream 公平性压测
+  -> P1-3  移动端 focus/resize/viewport 回归
+  -> P1-2  resume deadline 副作用验证
+  -> P1-4  physical attach 重复 ping 评估
 ```
 
-第一批实施完成后，应重新采集至少一份 PC 和一份移动端的 `350KB + 持续输出` 日志，再决定是否需要进一步优化历史协议或 `lightosctl exec` 路径。
+
+第一批实施完成后，应重新采集至少一份 PC 和一份移动端的 `350KB` 初始历史 replay、`350KB + 持续输出` 和多 pane 同时启动日志，再决定是否需要进一步优化历史协议或 `lightosctl exec` 路径。
