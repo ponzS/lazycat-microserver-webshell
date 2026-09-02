@@ -2767,6 +2767,34 @@ func TestAgentHistoryReplayFramesIncludeSelectorAndPane(t *testing.T) {
 	}
 }
 
+func TestAgentHistoryReplayCoalescesSmallChunks(t *testing.T) {
+	var out bytes.Buffer
+	history := paneHistorySnapshot{
+		chunks:     [][]byte{[]byte("a"), []byte("bc"), []byte("def")},
+		generation: "generation-one",
+		deltaFrom:  10,
+		deltaTo:    16,
+	}
+	sequence, cursor := uint64(1), history.deltaFrom
+	if !writeAgentHistoryReplay(&out, terminalReplayIdentity{selector: "demo@owner", paneID: "pane-1"}, history, false, false, &sequence, &cursor) {
+		t.Fatal("writeAgentHistoryReplay returned false")
+	}
+	if _, _, err := readAgentFrame(&out); err != nil {
+		t.Fatalf("read replay start: %v", err)
+	}
+	frameType, frame, err := readAgentFrame(&out)
+	if err != nil {
+		t.Fatalf("read coalesced replay frame: %v", err)
+	}
+	if frameType != agentFrameBinary || string(frame) != "abcdef" {
+		t.Fatalf("unexpected coalesced replay frame: type=%q payload=%q", frameType, string(frame))
+	}
+	frameType, _, err = readAgentFrame(&out)
+	if err != nil || frameType != agentFrameText {
+		t.Fatalf("read replay complete: type=%q err=%v", frameType, err)
+	}
+}
+
 func TestAgentHistoryReplayUsesBoundedChunks(t *testing.T) {
 	var out bytes.Buffer
 	payload := bytes.Repeat([]byte{'y'}, historyReplayChunk*2+11)
@@ -2845,7 +2873,7 @@ func TestAgentHistoryReplayFastIntegrityEnvelope(t *testing.T) {
 	}
 }
 
-func TestAgentHistoryReplayWritesMultipleChunksInOrder(t *testing.T) {
+func TestAgentHistoryReplayCoalescesChunksInOrder(t *testing.T) {
 	var out bytes.Buffer
 	history := paneHistorySnapshot{chunks: [][]byte{[]byte("one"), []byte("two")}}
 	sequence, cursor := uint64(1), history.deltaFrom
@@ -2860,14 +2888,13 @@ func TestAgentHistoryReplayWritesMultipleChunksInOrder(t *testing.T) {
 	if frameType != agentFrameText {
 		t.Fatalf("expected text start frame, got %q", frameType)
 	}
-	for _, want := range []string{"one", "two"} {
-		frameType, payload, err := readAgentFrame(&out)
-		if err != nil {
-			t.Fatalf("reading replay chunk returned error: %v", err)
-		}
-		if frameType != agentFrameBinary || string(payload) != want {
-			t.Fatalf("unexpected replay chunk: type=%q payload=%q want=%q", frameType, string(payload), want)
-		}
+
+	frameType, payload, err := readAgentFrame(&out)
+	if err != nil {
+		t.Fatalf("reading coalesced replay chunk returned error: %v", err)
+	}
+	if frameType != agentFrameBinary || string(payload) != "onetwo" {
+		t.Fatalf("unexpected coalesced replay chunk: type=%q payload=%q", frameType, string(payload))
 	}
 	frameType, _, err = readAgentFrame(&out)
 	if err != nil {

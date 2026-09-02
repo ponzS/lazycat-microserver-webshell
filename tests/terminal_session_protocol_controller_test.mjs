@@ -45,10 +45,10 @@ class FakeSocket {
   }
 }
 
-const createReplay = ({ range = null, events = [] } = {}) => ({
+const createReplay = ({ range = null, events = [], committed = false } = {}) => ({
   controller: new TerminalReplayController(),
   isRetryPaused: () => false,
-  isCommitted: () => false,
+  isCommitted: () => committed,
   rangeForConnect: () => {
     events.push("range");
     return range;
@@ -109,9 +109,9 @@ const createSession = ({
   term: { cols: 100, rows: 30, focus() {} },
 });
 
-const createController = ({ session, unified = false, client = false, historyRange = null, physicalLost = false } = {}) => {
+const createController = ({ session, unified = false, client = false, historyRange = null, physicalLost = false, replayCommitted = false } = {}) => {
   const events = [];
-  const replay = createReplay({ range: historyRange, events });
+  const replay = createReplay({ range: historyRange, events, committed: replayCommitted });
   const clientHistory = createClientHistory(events);
   const socketTimers = [];
   const opens = [];
@@ -177,7 +177,7 @@ const createController = ({ session, unified = false, client = false, historyRan
     invalidate() {},
     beginHold() {},
     markSyncPending() {},
-    ensure() {},
+    ensure(...args) { events.push(["presentation-ensure", args]); },
   };
   const controller = createTerminalSessionProtocolController({
     documentObject: { hidden: false },
@@ -358,4 +358,23 @@ test("stale transport callbacks are ignored after the session epoch changes", as
   socket.emit("open");
   assert.equal(harness.opens.filter((entry) => entry?.directOpen).length, 0);
   assert.deepEqual(harness.closes, []);
+});
+
+test("queue turn completion does not directly trigger a full presentation render", async () => {
+  const session = createSession({ channel: "unified", leaseID: 0, channelGeneration: 3 });
+  const harness = createController({ session, unified: true, replayCommitted: true });
+  assert.equal(await harness.controller.connectSession(session, { channel: "unified", channelGeneration: 3 }), true);
+
+  session.socket.emit("message", {
+    queueMetadata: { paneID: "pane-1", streamID: "stream-1", channelGeneration: 3 },
+    data: JSON.stringify({
+      type: "queue-turn-complete",
+      applied_cursor: "1",
+      applied_sequence: "1",
+    }),
+  });
+
+  assert.equal(harness.events.filter((event) => (
+    Array.isArray(event) && event[0] === "presentation-ensure"
+  )).length, 0);
 });

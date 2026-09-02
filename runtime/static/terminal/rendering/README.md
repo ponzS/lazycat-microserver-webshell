@@ -6,6 +6,8 @@
 
 完整画面只能在当前 identity、generation、viewport 和 presentation 条件都有效时提交；失败、重连、snapshot 等待或 resize/replay 事务期间必须保留旧帧，禁止显示历史回放中间过程。
 
+字号或窗口几何变化期间，presentation hold 必须保持与 live renderer 相同的 DPR：hold canvas 的 backing width/height 应按 CSS 尺寸乘以 renderer DPR 分配，并在绘制时保持正确的坐标变换。当前代码事实是 `holdFrame()` 使用 CSS 宽高创建 hold canvas，且 CSS 使用 `image-rendering: auto`，因此高 DPR 设备上可能出现被平滑放大的模糊旧帧；该问题待与 presentation 延迟一并验证和修复。
+
 ## 公开入口与状态
 
 外部只能从 `terminal/rendering/index.js` 导入 API。`createTerminalRendererAdapter()` 是 renderer patch 的唯一安装入口；`createTerminalPresentationController()` 是 presentation 状态、提交门禁和生命周期的唯一 owner；`createTerminalPresentationState()` 只提供 session 初始化快照；`RenderSnapshot` 持有一次呈现身份；frame scheduler 持有 latest-only RAF；Kitty graphics 模块只维护图片协议 patch 所需状态。

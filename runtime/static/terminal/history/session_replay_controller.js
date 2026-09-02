@@ -89,6 +89,16 @@ export function createTerminalSessionReplayController({
         });
       }
     }
+    recordEvent(session, "replay_output_drained", {
+      receivedCursor: session.receivedHistoryCursor?.toString?.() || "",
+      appliedCursor: session.appliedHistoryCursor?.toString?.() || "",
+      targetCursor: session.historyReplayTargetCursor?.toString?.() || "",
+      outputQueueBytes: Number(session.outputQueueSize || 0),
+      outputQueueEntries: Number(session.outputQueue?.length || 0),
+      historyGeneration: String(session.historyGeneration || ""),
+      connectionEpoch: Number(session.connectionEpoch || 0),
+      channelGeneration: Number(session.connectionChannelGeneration || 0),
+    });
     session.replayCompletionPending = false;
     if (session.replayController?.phase === "awaiting_commit") {
       session.replayController.commit();

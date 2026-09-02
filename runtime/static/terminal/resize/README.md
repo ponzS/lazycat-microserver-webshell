@@ -14,6 +14,8 @@ ACK 前不得切换本地 Ghostty 网格。matching ACK 到达时必须重新冻
 
 远端尺寸只作为 observation，本设备只有在明确的 pointer、focus、viewport 或 owner release 边界才重新 claim。resize、snapshot、重连和历史恢复的任何中间过程都不得显示，也不得通过重新 replay 历史掩盖几何问题。
 
+resize/字号事务期间显示的 last-known-good hold frame 不能降低清晰度：hold canvas 的 backing dimensions 必须与 live Ghostty canvas 使用相同 DPR。当前已记录的待验证风险是 hold canvas 按 CSS 尺寸分配且 `image-rendering: auto`，在高 DPR 设备上可能被平滑放大而模糊；这不是已确认的全局 DPR 降低。
+
 ## 公开入口与契约
 
 外部只能从 `terminal/resize/index.js` 导入。
