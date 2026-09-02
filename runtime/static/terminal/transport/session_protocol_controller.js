@@ -58,6 +58,8 @@ export function createTerminalSessionProtocolController({
   showToast = noop,
   appendStartupTrace = noop,
   appendDebugLog = noop,
+  isDebugLogEnabled = () => false,
+  serverLogSinceUnixMS = 0,
   appendDebugWarning = noop,
   appendDebugError = noop,
   recordTerminalSessionEvent = noop,
@@ -89,24 +91,55 @@ export function createTerminalSessionProtocolController({
           && session.connectionLeaseID === leaseID
           && !session.connectionLeaseClosing
     );
-    if (
-      !session ||
-      session.closed ||
-      terminalReplay.isRetryPaused(session) ||
-      !transportIsCurrent() ||
-      !isCurrentInstanceSession(session) ||
-      !terminalTransportRuntime?.hasKnownSize(session) ||
-      (document.hidden && !allowHidden) ||
-      navigator.onLine === false ||
-      session.socket?.readyState === WebSocket.OPEN ||
-      session.socket?.readyState === WebSocket.CONNECTING
-    ) {
-      if (navigator.onLine === false && session?.shellEl) {
-        session.shellEl.dataset.connection = "offline";
+    const connectionSkipReason = () => {
+      if (!session) return "session_missing";
+      if (session.closed) return "session_closed";
+      if (terminalReplay.isRetryPaused(session)) return "replay_retry_paused";
+      if (!transportIsCurrent()) return "transport_not_current";
+      if (!isCurrentInstanceSession(session)) return "instance_session_not_current";
+      if (!terminalTransportRuntime?.hasKnownSize(session)) return "terminal_size_unavailable";
+      if (document.hidden && !allowHidden) return "document_hidden";
+      if (navigator.onLine === false) return "offline";
+      if (session.socket?.readyState === WebSocket.OPEN) return "socket_already_open";
+      if (session.socket?.readyState === WebSocket.CONNECTING) return "socket_already_connecting";
+      return "";
+    };
+    const initialConnectionSkipReason = connectionSkipReason();
+    if (initialConnectionSkipReason) {
+      if (session) {
+        recordTerminalSessionEvent(session, "connect_session_skip", {
+          channel,
+          channelGeneration,
+          connectionEpoch,
+          reason: initialConnectionSkipReason,
+          allowHidden,
+          documentHidden: document.hidden === true,
+          socketReadyState: Number(session.socket?.readyState ?? -1),
+          pendingConnect: session.pendingConnect === true,
+          unifiedConnectPending: session.unifiedConnectPending === true,
+          connectionChannel: String(session.connectionChannel || ""),
+          connectionChannelGeneration: Number(session.connectionChannelGeneration || 0),
+        });
       }
       return false;
     }
     session.startupTraceActive = true;
+    session.startupTraceStartedAt = globalThis.performance?.now?.() || Date.now();
+    appendStartupTrace(
+      "终端连接流程开始",
+      `pane=${session.id} channel=${channel} channelGeneration=${channelGeneration} connectionEpoch=${connectionEpoch} allowHidden=${allowHidden} hidden=${document.hidden}`,
+      { dedupeKey: `connect-start:${session.id}:${session.terminalReplayGeneration + 1}:${channel}` },
+    );
+    recordTerminalSessionEvent(session, "connect_session_start", {
+      channel,
+      channelGeneration,
+      connectionEpoch,
+      allowHidden,
+      documentHidden: document.hidden === true,
+      measuredFitGeneration: Number(session.measuredFitGeneration || 0),
+      cols: Number(session.term?.cols || 0),
+      rows: Number(session.term?.rows || 0),
+    });
     if (isClientInstanceName(session.name)) {
       await clientHistory.prepareSession(session);
       terminalOutput.flush(session, { force: true });
@@ -134,6 +167,12 @@ export function createTerminalSessionProtocolController({
     const socketUrl = webSocketURL("./ws");
     socketUrl.searchParams.set("name", String(session.name || "").trim());
     socketUrl.searchParams.set("client_id", serverRevisionClientID);
+    if (isDebugLogEnabled()) {
+      socketUrl.searchParams.set("server_logs", "1");
+      if (Number(serverLogSinceUnixMS) > 0) {
+        socketUrl.searchParams.set("server_log_since_ms", String(Math.floor(Number(serverLogSinceUnixMS))));
+      }
+    }
     if (usesMultiplexedTransport) {
       socketUrl.searchParams.set("mode", "unified");
       socketUrl.searchParams.set("transport_role", "unified");
@@ -173,10 +212,12 @@ export function createTerminalSessionProtocolController({
     logSocketUrl.searchParams.delete("history_generation");
     logSocketUrl.searchParams.delete("workspace_generation");
     const socketDebug = {
+      connectStartedAt: Date.now(),
       textMessages: 0,
       binaryMessages: 0,
       binaryBytes: 0,
       openedAt: 0,
+      replayStartedAt: 0,
     };
     const replayController = session.replayController || (session.replayController = new TerminalReplayController());
     const isClientDirectTransport = channel === "fast" && isClientInstanceName(session.name);
@@ -237,6 +278,16 @@ export function createTerminalSessionProtocolController({
     recordTerminalSessionEvent(session, "socket_connect", {
       channel,
       streamID: session.unifiedStreamID,
+      channelGeneration,
+      connectionEpoch,
+      allowHidden,
+      documentHidden: document.hidden === true,
+      historySource: historyConnectRange?.source || "snapshot",
+      localBaseCursor: historyConnectRange?.baseCursor?.toString?.() || "",
+      localEndCursor: historyConnectRange?.endCursor?.toString?.() || "",
+      resetOnNextReplay: session.resetOnNextReplay === true,
+      cols: Number(session.term?.cols || 0),
+      rows: Number(session.term?.rows || 0),
     });
     let currentSocket;
     let currentMultiplexedConnection = null;
@@ -327,7 +378,8 @@ export function createTerminalSessionProtocolController({
       if (!metadata) {
         // The physical Unified state broadcast is intentionally fan-out and
         // has no pane identity. Every pane may consume only this one control.
-        return !isBinary && messageType === "agent-preparing";
+        // The original agent-preparing fan-out remains valid: return !isBinary && messageType === "agent-preparing";
+        return !isBinary && (messageType === "agent-preparing" || messageType === "server-log");
       }
       const paneID = String(metadata.paneID || metadata.pane_id || "").trim();
       const streamID = String(metadata.streamID || metadata.stream_id || "").trim();
@@ -429,6 +481,13 @@ export function createTerminalSessionProtocolController({
         terminalTransportRuntime?.notifyDirectOpen(session, leaseID);
       }
       socketDebug.openedAt = Date.now();
+      recordTerminalSessionEvent(session, "socket_open", {
+        channel,
+        channelGeneration,
+        connectionEpoch,
+        openLatencyMs: Math.max(0, Date.now() - Number(socketDebug.connectStartedAt || Date.now())),
+        reconnectAttempts: Number(session.reconnectAttempts || 0),
+      });
       appendStartupTrace("终端 WebSocket 已打开", `pane=${session.id} channel=${channel}`, { dedupeKey: `socket-open:${session.id}:${session.terminalReplayGeneration}:${channel}` });
       console.info("[client-terminal] websocket open", {
         name: session.name,
@@ -494,6 +553,20 @@ export function createTerminalSessionProtocolController({
               });
             }
             switch (message.type) {
+              case "server-log": {
+                const sequence = Number(message.server_log_seq || 0);
+                const source = String(message.source || "server").trim();
+                const text = String(message.message || "").trim();
+                if (text) {
+                  appendDebugLog(
+                    ["error", "warn", "info"].includes(message.level) ? message.level : "info",
+                    "服务端日志",
+                    `${source}${sequence > 0 ? ` seq=${sequence}` : ""}: ${text}`,
+                    { dedupeKey: sequence > 0 ? `server-log:${sequence}` : "" },
+                  );
+                }
+                return;
+              }
               case "resize-owner-released":
                 if (!validateReplayMessage(message)) {
                   rejectMismatchedReplay(message);
@@ -520,8 +593,21 @@ export function createTerminalSessionProtocolController({
                   rejectMismatchedReplay(message);
                   return;
                 }
+                socketDebug.replayStartedAt = Date.now();
                 recordTerminalSessionEvent(session, "history_replay_start", {
                   syncMode: String(message.sync_mode || ""),
+                  historyGeneration: String(message.history_generation || ""),
+                  serverBaseCursor: message.server_base_cursor || "",
+                  serverEndCursor: message.server_end_cursor || "",
+                  deltaFromCursor: message.delta_from_cursor || "",
+                  deltaToCursor: message.delta_to_cursor || "",
+                  serverHistoryBytes: Number(message.server_history_bytes || 0),
+                  serverHistoryChunks: Number(message.server_history_chunks || 0),
+                  serverReplayFrames: Number(message.server_replay_frames || 0),
+                  serverReplayStartedUnixMs: Number(message.server_replay_started_unix_ms || 0),
+                  resizeEpoch: String(message.resize_epoch || ""),
+                  cols: Number(message.cols || 0),
+                  rows: Number(message.rows || 0),
                 });
                 // Keep one suppression scope across all replay drain tasks.
                 // writeReplay() alone only protects one synchronous chunk.
@@ -591,7 +677,11 @@ export function createTerminalSessionProtocolController({
                 session.historyProtocolActive = true;
                 session.historyGeneration = historyGeneration;
                 session.historySyncMode = syncMode;
-                appendStartupTrace("PTY replay 开始", `pane=${session.id} mode=${syncMode || "legacy"}`, { dedupeKey: `replay-start:${session.id}:${session.terminalReplayGeneration}` });
+                appendStartupTrace(
+                  "PTY replay 开始",
+                  `pane=${session.id} mode=${syncMode || "legacy"} bytes=${deltaFromCursor !== null && deltaToCursor !== null ? Math.max(0, Number(deltaToCursor - deltaFromCursor)) : 0} chunks=${Number(message.server_history_chunks || 0)} frames=${Number(message.server_replay_frames || 0)}`,
+                  { dedupeKey: `replay-start:${session.id}:${session.terminalReplayGeneration}` },
+                );
                 session.fastIntegritySequence = 1;
                 session.fastIntegrityCursor = deltaFromCursor ?? 0n;
                 session.historyReplayTargetCursor = deltaToCursor;
@@ -702,7 +792,11 @@ export function createTerminalSessionProtocolController({
                 session.shellEl.dataset.connection = sessionConnectingState(session);
                 return;
               case "history-replay-complete":
-                appendStartupTrace("PTY replay 完成通知", `pane=${session.id}`, { dedupeKey: `replay-complete:${session.id}:${session.terminalReplayGeneration}` });
+                appendStartupTrace(
+                  "PTY replay 完成通知",
+                  `pane=${session.id} duration=${socketDebug.replayStartedAt ? Math.max(0, Date.now() - socketDebug.replayStartedAt) : 0}ms bytes=${socketDebug.binaryBytes} frames=${socketDebug.binaryMessages} serverDuration=${Number(message.server_replay_duration_ms || 0)}ms queue=${Number(session.outputQueueSize || 0)}`,
+                  { dedupeKey: `replay-complete:${session.id}:${session.terminalReplayGeneration}` },
+                );
                 if (!terminalReplay.isAuthorized(session) || (terminalReplay.hasIdentifiedAuthorization(session) && !validateReplayMessage(message))) {
                   rejectMismatchedReplay(message);
                   return;
@@ -772,6 +866,17 @@ export function createTerminalSessionProtocolController({
                 }
                 recordTerminalSessionEvent(session, "history_replay_complete", {
                   cursor: message.history_cursor || "",
+                  replayDurationMs: socketDebug.replayStartedAt
+                    ? Math.max(0, Date.now() - socketDebug.replayStartedAt)
+                    : 0,
+                  serverHistoryBytes: Number(message.server_history_bytes || 0),
+                  serverHistoryChunks: Number(message.server_history_chunks || 0),
+                  serverReplayFrames: Number(message.server_replay_frames || 0),
+                  serverReplayDurationMs: Number(message.server_replay_duration_ms || 0),
+                  serverReplayFinishedUnixMs: Number(message.server_replay_finished_unix_ms || 0),
+                  binaryMessages: socketDebug.binaryMessages,
+                  binaryBytes: socketDebug.binaryBytes,
+                  outputQueueBytes: Number(session.outputQueueSize || 0),
                 });
                 session.replayCompletionPending = true;
                 terminalReplay.finishIfReady(session) || terminalOutput.flush(session);
@@ -798,6 +903,17 @@ export function createTerminalSessionProtocolController({
                 }
                 return;
               case "agent-preparing":
+                recordTerminalSessionEvent(session, "agent_preparing", {
+                  channel,
+                  channelGeneration,
+                  connectionEpoch,
+                  serverUnixMs: Number(message.server_unix_ms || 0),
+                });
+                appendStartupTrace(
+                  "agent 准备中",
+                  `pane=${session.id} channel=${channel} serverUnixMs=${Number(message.server_unix_ms || 0) || "unknown"}`,
+                  { dedupeKey: `agent-preparing:${session.id}:${session.terminalReplayGeneration}` },
+                );
                 session.agentPreparing = true;
                 terminalSessionConnection.startAttachReadyTimer(session, currentSocket, terminalAgentPrepareTimeoutMs);
                 session.shellEl.dataset.connection = sessionConnectingState(session);
@@ -864,6 +980,14 @@ export function createTerminalSessionProtocolController({
         if (!validateTerminalChannelMessageIdentity(event, "", true)) {
           rejectMismatchedChannelMessage(event, "binary-output");
           return;
+        }
+        if (socketDebug.binaryMessages === 1) {
+          recordTerminalSessionEvent(session, "first_binary_output", {
+            bytes: event.data.byteLength,
+            replayActive: terminalReplay.isAuthorized(session) && !terminalReplay.isCommitted(session),
+            binaryMessages: socketDebug.binaryMessages,
+            binaryBytes: socketDebug.binaryBytes,
+          });
         }
         if (socketDebug.binaryMessages <= 8) {
           console.info("[client-terminal] websocket binary message", {
@@ -967,6 +1091,15 @@ export function createTerminalSessionProtocolController({
         channel,
         code: Number(event.code || 0),
         wasClean: event.wasClean === true,
+        openDurationMs: socketDebug.openedAt ? Date.now() - socketDebug.openedAt : 0,
+        textMessages: socketDebug.textMessages,
+        binaryMessages: socketDebug.binaryMessages,
+        binaryBytes: socketDebug.binaryBytes,
+        replayVerified: session.replayVerified || false,
+        replayComplete: session.replayComplete,
+        startupElapsedMs: Number(session.startupTraceStartedAt || 0)
+          ? Math.max(0, Date.now() - Number(session.startupTraceStartedAt))
+          : 0,
       });
       const schedulerCloseReason = usesMultiplexedTransport
         ? String(session.connectionCloseReason || "")

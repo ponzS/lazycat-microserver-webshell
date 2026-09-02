@@ -220,8 +220,27 @@ export function createTerminalOutputController({
       return true;
     }
     lifecycle.clear(state);
+    const traceFlush = state.startupTraceActive || !isReplayCommitted(state);
+    const flushStartedAt = now();
+    if (traceFlush) {
+      recordEvent(state, "output_flush_enter", {
+        force,
+        queuedEntries: state.outputQueue.length,
+        queuedBytes: state.outputQueueSize,
+        maxBytes: Number(maxBytes || 0),
+        maxEntries: Number(maxEntries || 0),
+        maxTimeMs: Number(maxTimeMs || 0),
+        scheduleRemainder,
+      });
+    }
     const queue = state.outputQueue;
     if (queue.length === 0) {
+      if (traceFlush) {
+        recordEvent(state, "output_flush_empty", {
+          durationMs: Math.max(0, now() - flushStartedAt),
+          replayComplete: state.replayComplete === true,
+        });
+      }
       finishHistoryReplayIfReady(state);
       trySendPendingQueueTurnAck(state);
       return true;
@@ -253,7 +272,6 @@ export function createTerminalOutputController({
     }
     let drained = false;
     measureTask("output flush", () => {
-      const flushStartedAt = now();
       const flushQueue = [];
       const restQueue = [];
       let flushedBytes = 0;
@@ -383,6 +401,19 @@ export function createTerminalOutputController({
         recordPerformanceTask("terminal force flush", duration);
       }
       drained = state.outputQueueSize <= 0;
+      if (traceFlush) {
+        recordEvent(state, "output_flush_exit", {
+          durationMs: Math.max(0, now() - flushStartedAt),
+          flushedBytes,
+          flushedEntries: flushQueue.length,
+          wrote,
+          drained,
+          remainingBytes: state.outputQueueSize,
+          remainingEntries: state.outputQueue.length,
+          replayEntries: flushQueue.filter((entry) => entry.replayOutput).length,
+          scheduledRemainder: !drained && scheduleRemainder,
+        });
+      }
       trySendPendingQueueTurnAck(state);
       if (!drained && scheduleRemainder) {
         lifecycle.schedule(state, () => flush(state), flushFallbackMs);
@@ -497,6 +528,18 @@ export function createTerminalOutputController({
     }
     if (trackHistory && endCursor !== null && nextHistoryCursor !== endCursor) {
       throw new Error("Terminal history output range does not match payload length.");
+    }
+    if (state.startupTraceActive || !isReplayCommitted(state)) {
+      recordEvent(state, "output_queued", {
+        bytes: terminalOutputByteLength(outputData),
+        replayOutput,
+        deferRender,
+        queueEntries: state.outputQueue.length,
+        queueBytes: state.outputQueueSize,
+        historySource,
+        historyStartCursor: startCursor?.toString?.() || "",
+        historyEndCursor: endCursor?.toString?.() || "",
+      });
     }
     if (state.outputQueueSize >= maxQueuedBytes) {
       handleOverload(state, "queued output exceeded hard limit");

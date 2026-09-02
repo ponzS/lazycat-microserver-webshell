@@ -69,6 +69,7 @@ export function createTerminalTransportRuntimeController({
   appendDebugLog = noop,
   appendDebugWarning = noop,
   appendDebugError = noop,
+  recordRuntimeEvent = noop,
   describeSession = (session) => `${session?.name || "unknown"}/${session?.id || "unknown"}`,
   now = () => Date.now(),
   random = () => Math.random(),
@@ -271,6 +272,14 @@ export function createTerminalTransportRuntimeController({
       "统一终端 logical stream 将重试",
       `${describeSession(session)}, 第 ${attempt} 次, ${delay}ms 后: ${reason}`,
     );
+    recordRuntimeEvent("unified_pane_retry_scheduled", {
+      paneID: session.id,
+      target: session.name,
+      reason,
+      attempt,
+      delay,
+      immediate,
+    });
     return true;
   };
 
@@ -312,6 +321,14 @@ export function createTerminalTransportRuntimeController({
     if (session.shellEl?.dataset) {
       session.shellEl.dataset.connection = sessionConnectingState(session);
     }
+    recordRuntimeEvent("unified_session_connect_start", {
+      paneID: session.id,
+      target: session.name,
+      channelGeneration: generation,
+      streamID: session.unifiedStreamID,
+      retryAttempts: lifecycle.getUnifiedRetryAttempts(session),
+      measurable: sessionHasKnownSize(session),
+    });
     Promise.resolve(connectSession(session, {
       allowHidden: true,
       channel: "unified",
@@ -549,6 +566,17 @@ export function createTerminalTransportRuntimeController({
       session.lastUserInteractionAt = now();
       schedulePriorityDecay(session);
     }
+    recordRuntimeEvent("terminal_connection_request", {
+      paneID: session.id,
+      target: getActiveName(),
+      reason,
+      userInteraction,
+      immediate,
+      allowHidden,
+      measurable: Number(session.measuredFitGeneration || 0) > 0,
+      connectionChannel: String(session.connectionChannel || ""),
+      connectionEpoch: Number(session.connectionEpoch || 0),
+    });
     session.pendingConnect = false;
     if (!isClientTarget(getActiveName())) {
       refreshMembership({

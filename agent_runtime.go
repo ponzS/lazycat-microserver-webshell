@@ -451,15 +451,22 @@ func parsePersistentAgentResponse(output []byte) (agentResponse, error) {
 
 func ensurePersistentAgent(ctx context.Context, scope agentScope) (string, error) {
 	scope = normalizeAgentScope(scope.Selector, scope.AccountID)
+	startedAt := time.Now()
+	log.Printf("persistent agent ensure start: scope=%s", scope.Selector)
 	if err := validateInstanceSelector(scope.Selector); err != nil {
+		log.Printf("persistent agent ensure complete: scope=%s duration_ms=%d success=false err=%v", scope.Selector, time.Since(startedAt).Milliseconds(), err)
 		return "", err
 	}
 	if scope.AccountID == "" {
-		return "", errors.New("account id is required")
+		err := errors.New("account id is required")
+		log.Printf("persistent agent ensure complete: scope=%s duration_ms=%d success=false err=%v", scope.Selector, time.Since(startedAt).Milliseconds(), err)
+		return "", err
 	}
-	return persistentAgentEnsures.do(ctx, scope.cacheKey(), func(sharedCtx context.Context) (string, error) {
+	username, err := persistentAgentEnsures.do(ctx, scope.cacheKey(), func(sharedCtx context.Context) (string, error) {
 		return ensurePersistentAgentOnce(sharedCtx, scope)
 	})
+	log.Printf("persistent agent ensure complete: scope=%s duration_ms=%d success=%t", scope.Selector, time.Since(startedAt).Milliseconds(), err == nil)
+	return username, err
 }
 
 func ensurePersistentAgentOnce(ctx context.Context, scope agentScope) (string, error) {
@@ -807,9 +814,12 @@ func pingPersistentAgent(ctx context.Context, scope agentScope) bool {
 
 func pingPersistentAgentError(ctx context.Context, scope agentScope) error {
 	scope = normalizeAgentScope(scope.Selector, scope.AccountID)
+	startedAt := time.Now()
+	log.Printf("persistent agent ping start: scope=%s", scope.Selector)
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	_, err := runPersistentAgentRequest(ctx, scope, agentRequest{Type: "ping", Selector: scope.Selector, AccountID: scope.AccountID})
+	log.Printf("persistent agent ping complete: scope=%s duration_ms=%d success=%t", scope.Selector, time.Since(startedAt).Milliseconds(), err == nil)
 	return err
 }
 
@@ -978,8 +988,8 @@ func (s *pluginServer) handleAgentStartupError(w http.ResponseWriter, r *http.Re
 
 func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, scope agentScope, paneID string, cols, rows, terminalScrollback int, syncRequest historySyncRequest) error {
 	scope = normalizeAgentScope(scope.Selector, scope.AccountID)
+	log.Printf("terminal pane attach start: scope=%s pane=%s cols=%d rows=%d scrollback=%d", scope.Selector, paneID, cols, rows, terminalScrollback)
 	if !websocket.IsWebSocketUpgrade(r) {
-		http.Error(w, "websocket upgrade is required", http.StatusBadRequest)
 		return nil
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -991,7 +1001,18 @@ func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, s
 	conn.SetReadLimit(websocketReadLimit)
 
 	var writeMu sync.Mutex
-	_ = writeWebSocketJSONLocked(conn, &writeMu, map[string]any{"type": "agent-preparing"})
+	var writeJSON = func(payload any) error {
+		return writeWebSocketJSONLocked(conn, &writeMu, payload)
+	}
+	var stopServerLogs func()
+	if serverLogDiagnosticsEnabled(r.URL.Query().Get("server_logs")) {
+		stopServerLogs = startServerLogForwarder(writeJSON, parseServerLogAfter(r.URL.Query().Get("server_log_after")), parseServerLogSince(r.URL.Query().Get("server_log_since_ms")))
+		defer stopServerLogs()
+	}
+	_ = writeJSON(map[string]any{
+		"type":           "agent-preparing",
+		"server_unix_ms": time.Now().UnixMilli(),
+	})
 
 	if _, err := ensurePersistentAgent(r.Context(), scope); err != nil {
 		_ = writeWebSocketJSONLocked(conn, &writeMu, agentConnectionErrorPayload(err))
@@ -1025,7 +1046,12 @@ func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, s
 		return nil
 	}
 	var stderr bytes.Buffer
-	command.Stderr = &stderr
+	stderrLog := &serverLogWriter{
+		hub:    processServerLogHub,
+		source: fmt.Sprintf("lightosctl pane=%s", paneID),
+	}
+	stderrCapture := io.MultiWriter(&stderr, stderrLog)
+	command.Stderr = stderrCapture
 	if err := command.Start(); err != nil {
 		_ = writeWebSocketJSONLocked(conn, &writeMu, agentConnectionErrorPayload(err))
 		return nil
@@ -1038,7 +1064,9 @@ func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, s
 	}
 	waitDone := make(chan error, 1)
 	go func() {
-		waitDone <- command.Wait()
+		err := command.Wait()
+		stderrLog.flush()
+		waitDone <- err
 	}()
 	var stopOnce sync.Once
 	stopAttach := func() {

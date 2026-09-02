@@ -79,6 +79,7 @@ type terminalQueueServerMessage struct {
 	StreamID          string          `json:"stream_id,omitempty"`
 	ChannelGeneration uint64          `json:"channel_generation,omitempty"`
 	State             string          `json:"state,omitempty"`
+	ServerUnixMS      int64           `json:"server_unix_ms,omitempty"`
 	Message           string          `json:"message,omitempty"`
 	Payload           json.RawMessage `json:"payload,omitempty"`
 }
@@ -113,10 +114,11 @@ type terminalQueuePaneStream struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	command *exec.Cmd
-	stdin   io.WriteCloser
-	stdout  io.ReadCloser
-	stderr  bytes.Buffer
+	command   *exec.Cmd
+	stdin     io.WriteCloser
+	stdout    io.ReadCloser
+	stderr    bytes.Buffer
+	stderrLog *serverLogWriter
 
 	stdinMu sync.Mutex
 	stopMu  sync.Mutex
@@ -208,10 +210,17 @@ func (s *pluginServer) attachPersistentPaneQueue(w http.ResponseWriter, r *http.
 		return writeMessage(websocket.TextMessage, data)
 	}
 
+	var stopServerLogs func()
+	if serverLogDiagnosticsEnabled(r.URL.Query().Get("server_logs")) {
+		stopServerLogs = startServerLogForwarder(writeJSON, parseServerLogAfter(r.URL.Query().Get("server_log_after")), parseServerLogSince(r.URL.Query().Get("server_log_since_ms")))
+		defer stopServerLogs()
+	}
+
 	_ = writeJSON(terminalQueueServerMessage{
 		Type:            "queue-state",
 		ProtocolVersion: terminalQueueProtocolVersion,
 		State:           "agent-preparing",
+		ServerUnixMS:    time.Now().UnixMilli(),
 	})
 
 	scope := normalizeAgentScope(selector, accountID)
@@ -655,7 +664,12 @@ func (b *terminalQueueBroker) startPaneStream(subscription terminalQueueSubscrip
 		priority:     clampTerminalStreamPriority(subscription.Priority),
 		exited:       make(chan struct{}),
 	}
-	command.Stderr = &stream.stderr
+	stderrLog := &serverLogWriter{
+		hub:    processServerLogHub,
+		source: fmt.Sprintf("lightosctl pane=%s", subscription.PaneID),
+	}
+	stream.stderrLog = stderrLog
+	command.Stderr = io.MultiWriter(&stream.stderr, stderrLog)
 	if err := command.Start(); err != nil {
 		cancel()
 		_ = stdin.Close()
@@ -664,6 +678,7 @@ func (b *terminalQueueBroker) startPaneStream(subscription terminalQueueSubscrip
 	}
 	go func() {
 		_ = command.Wait()
+		stderrLog.flush()
 		close(stream.exited)
 	}()
 	if subscription.Foreground != "" || subscription.Background != "" || subscription.Cursor != "" {

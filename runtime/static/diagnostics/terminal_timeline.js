@@ -69,6 +69,9 @@ export function createTerminalTimeline({
     const runtimeContext = getRuntimeContext?.() || {};
     const event = {
       at: Math.round(now()),
+      startupElapsedMs: Number(session.startupTraceStartedAt || 0) > 0
+        ? Math.max(0, Math.round(now() - Number(session.startupTraceStartedAt)))
+        : 0,
       type: String(type || "unknown"),
       resumeGeneration: Number(runtimeContext.resumeGeneration || 0),
       channelGeneration: Number(session.connectionChannelGeneration || 0),

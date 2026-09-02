@@ -420,13 +420,24 @@ export const createTerminalQueueConnection = ({
         }
         if (message.type === "pane-control") {
           routePaneControl(message);
+        } else if (message.type === "server-log") {
+          for (const entry of logicalStreams.values()) {
+            entry.listeners.dispatch("message", {
+              type: "message",
+              data: JSON.stringify(message),
+              target: entry.socket,
+            });
+          }
         } else if (message.type === "queue-pong") {
           physicalLastPongAt = Date.now();
         } else if (message.type === "queue-state" && message.state === "agent-preparing") {
           for (const entry of logicalStreams.values()) {
             entry.listeners.dispatch("message", {
               type: "message",
-              data: JSON.stringify({ type: "agent-preparing" }),
+              data: JSON.stringify({
+                type: "agent-preparing",
+                server_unix_ms: Number(message.server_unix_ms || 0),
+              }),
               target: entry.socket,
             });
           }
