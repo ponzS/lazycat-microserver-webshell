@@ -996,7 +996,6 @@ func TestRuntimeTabActivationPresentationRecoveryGuard(t *testing.T) {
 	runtimeSource := source + "\n" + protocolSource + "\n" + replaySource + "\n" + resizeSource + "\n" + outputSource
 	for _, want := range []string{
 		"reason: \"history_replay_complete\"",
-		"reason: \"queue_turn_complete\"",
 		"presentation()?.scheduleFrame(session, \"tab_activated\")",
 		"reason: \"resize_applied\"",
 		"reason: \"resize_error\"",
@@ -1067,8 +1066,8 @@ func TestRuntimeTabActivationPresentationRecoveryGuard(t *testing.T) {
 	queueTurnBlock := sourceBetween(t, protocolSource,
 		`case "queue-turn-complete":`,
 		`case "agent-preparing":`)
-	if !strings.Contains(queueTurnBlock, "terminalPresentation.ensure(session, {") {
-		t.Fatal("Queue turn completion must use the same final presentation gate")
+	if !strings.Contains(queueTurnBlock, "completeQueueTurn") || strings.Contains(queueTurnBlock, "terminalPresentation.ensure(session, {") {
+		t.Fatal("Queue turn completion must not directly start a presentation render")
 	}
 	for _, forbidden := range []string{
 		"const deferPanePresentation =",
@@ -6267,7 +6266,7 @@ func TestRuntimeTerminalPresentationModuleBoundary(t *testing.T) {
 		`scheduleResize: (session, options, scheduleOptions) => terminalResize?.schedulePresentationResize(session, options, scheduleOptions) === true,`,
 		`recoverTransport: (session, reason, options) => terminalTransportRuntime?.recycleUnifiedSession(session, reason, options),`,
 		`presentation?.installSession?.(session);`,
-		`terminalPresentation.ensure(session, {`,
+		`ensurePresentation: (session, options) => terminalPresentation?.ensure(session, options),`,
 		`terminalPresentation?.dispose();`,
 	} {
 		if !strings.Contains(mainSource, want) {

@@ -747,25 +747,41 @@ func writeAgentHistoryReplay(w io.Writer, identity terminalReplayIdentity, histo
 	if err := writeAgentControlFrame(w, start); err != nil {
 		return false
 	}
-	for _, chunk := range history.chunks {
-		for len(chunk) > 0 {
-			chunkSize := historyReplayChunk
-			if len(chunk) < chunkSize {
-				chunkSize = len(chunk)
-			}
-			replayFrames++
-			if integrity {
-				frame, err := encodeFastBinaryFrame(identity.selector, identity.paneID, history.generation, *sequence, *cursor, chunk[:chunkSize])
-				if err != nil || writeAgentFrame(w, agentFrameBinary, frame) != nil {
-					return false
-				}
-				*sequence = *sequence + 1
-				*cursor += uint64(chunkSize)
-			} else if err := writeAgentFrame(w, agentFrameBinary, chunk[:chunkSize]); err != nil {
+	pending := make([]byte, 0, historyReplayChunk)
+	flushPending := func() bool {
+		if len(pending) == 0 {
+			return true
+		}
+		replayFrames++
+		if integrity {
+			frame, err := encodeFastBinaryFrame(identity.selector, identity.paneID, history.generation, *sequence, *cursor, pending)
+			if err != nil || writeAgentFrame(w, agentFrameBinary, frame) != nil {
 				return false
 			}
+			*sequence = *sequence + 1
+			*cursor += uint64(len(pending))
+		} else if err := writeAgentFrame(w, agentFrameBinary, pending); err != nil {
+			return false
+		}
+		pending = pending[:0]
+		return true
+	}
+	for _, chunk := range history.chunks {
+		for len(chunk) > 0 {
+			available := historyReplayChunk - len(pending)
+			if available == 0 {
+				if !flushPending() {
+					return false
+				}
+				available = historyReplayChunk
+			}
+			chunkSize := min(len(chunk), available)
+			pending = append(pending, chunk[:chunkSize]...)
 			chunk = chunk[chunkSize:]
 		}
+	}
+	if !flushPending() {
+		return false
 	}
 	complete := map[string]any{
 		"type":                           "history-replay-complete",

@@ -17,7 +17,7 @@
 - `index.js`：唯一公开入口。
 - `session_connection_controller.js`：pane 连接健康判断、direct/unified 重连分流和 scheduler 协作。
 - `session_connection_lifecycle.js`：connect/health/attach/resume/reconnect timer、默认 ping JSON serializer 与迟到 socket guard。
-- `session_protocol_controller.js`：建立当前 lease/logical stream 的 WebSocket、绑定 open/message/close/error 生命周期，并把 history、binary output、Queue ACK 和进程状态事件路由到显式依赖；不拥有跨模块状态。
+- `session_protocol_controller.js`：建立当前 lease/logical stream 的 WebSocket、绑定 open/message/close/error 生命周期，并把 history、binary output、Queue ACK 和进程状态事件路由到显式依赖；`queue-turn-complete` 只交给 output controller 做 cursor/ACK 边界处理，不直接启动 presentation full render；不拥有跨模块状态。
 - `transport_runtime_controller.js`：logical membership、pane retry、Unified stream generation、可视优先级和 `client:` direct scheduler 编排。
 - `transport_runtime_lifecycle.js`：连接优先级衰减、logical retry timer、测量 RAF、sync microtask 和 session 清理。
 - `unified_transport_controller.js`：页面级 Unified 物理连接、target、close fence、watchdog 和恢复生命周期。

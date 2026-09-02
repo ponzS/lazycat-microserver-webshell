@@ -877,6 +877,10 @@ export function createTerminalSessionProtocolController({
                   binaryMessages: socketDebug.binaryMessages,
                   binaryBytes: socketDebug.binaryBytes,
                   outputQueueBytes: Number(session.outputQueueSize || 0),
+                  replayPhase: "receive_complete",
+                  stableReady: false,
+                  presentationCommitted: false,
+                  serverReplayDurationScope: "agent_attach_write",
                 });
                 session.replayCompletionPending = true;
                 terminalReplay.finishIfReady(session) || terminalOutput.flush(session);
@@ -894,12 +898,8 @@ export function createTerminalSessionProtocolController({
                     rejectHistorySync(turnResult.reason);
                     return;
                   }
-                  if (turnResult?.status === "accepted" && terminalReplay.isCommitted(session)) {
-                    terminalPresentation.ensure(session, {
-                      reason: "queue_turn_complete",
-                      forceHistory: true,
-                    });
-                  }
+                  // Output flush schedules the coalesced presentation validation after
+                  // applying the turn. A queue turn must not start another full render.
                 }
                 return;
               case "agent-preparing":

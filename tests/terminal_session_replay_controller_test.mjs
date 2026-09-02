@@ -191,6 +191,7 @@ test("replay commit finishes state before requesting the only visible full prese
     isActivePane: () => true,
     hideStartupError: () => events.push("hide-startup-error"),
     flushCache: () => events.push("flush-client-history"),
+    recordEvent: (_session, event, details) => events.push({ event, details }),
     setPresentationReady: (_session, ready) => events.push(`presentation-ready:${ready}`),
     ensurePresentation: () => events.push("ensure-final-presentation"),
     flushPendingInput: () => events.push("flush-input"),
@@ -201,6 +202,7 @@ test("replay commit finishes state before requesting the only visible full prese
   assert.equal(session.historyStateReady, true);
   assert.equal(session.replayAuthorization, false);
   assert.equal(session.shellEl.dataset.connection, "open");
+  assert.equal(events.filter((entry) => entry.event === "replay_output_drained").length, 1);
   assert.ok(events.indexOf("commit") < events.indexOf("presentation-ready:false"));
   assert.ok(events.indexOf("end-suppression") < events.indexOf("ensure-final-presentation"));
   assert.equal(events.filter((event) => event === "ensure-final-presentation").length, 1);
