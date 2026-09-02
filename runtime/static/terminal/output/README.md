@@ -17,7 +17,7 @@
 - `terminalOutputByteLength()`、`terminalOutputByteChunkEnd()`、`splitTerminalOutputText()`、`coalesceTerminalOutputBatch()`：无状态字节测量、Unicode/UTF-8 安全分片和批次合并算法。
 - `MAX_QUEUED_TERMINAL_OUTPUT_BYTES`：供 history 的网络暂存队列复用同一 4 MiB 内存 guard，不表示 history 状态归 output 所有。
 
-Queue turn complete 只登记待确认 cursor/sequence。只有对应输出已经按序写入 Ghostty、输出队列为空且 `appliedHistoryCursor` 到达边界后才发送 ACK；ACK 不等待 Canvas 绘制。默认 ACK serializer 由 `output_controller.js` 持有，会再次校验当前 socket、Unified channel、connection epoch 和 channel generation 后才发送 JSON；单 pane ACK 失败只能请求该 logical stream 恢复，不能关闭 Unified 物理连接或影响兄弟 pane。
+Queue turn complete 只登记待确认 cursor/sequence。只有对应输出已经按序写入 Ghostty、输出队列为空且 `appliedHistoryCursor` 到达边界后才发送 ACK；ACK 不等待 Canvas 绘制。默认 ACK serializer 由 `output_controller.js` 持有，会再次校验当前 socket、Unified channel、connection epoch 和 channel generation 后才发送 JSON；单 pane ACK 失败只能请求该 logical stream 恢复，不能关闭 Unified 物理连接或影响兄弟 pane。output lifecycle 对每个 pane 只允许一个待执行的 RAF/fallback timer；重复 schedule 不创建新任务，flush 入口会清理另一句柄。
 
 ## 状态所有权
 

@@ -304,7 +304,7 @@ export function createTerminalResizeController({
     syncViewportPan(session);
     updateSelectionHandles(session);
     if (isReplayCommitted(session)) {
-      presentation()?.setReady(session, false);
+      presentation()?.setReady(session, false, { reason: "resize_fence_apply" });
     }
     if (!scheduleOutputSettle(session)) {
       endRenderSuppression(session, { render: false, reason: "resize" });
@@ -836,7 +836,7 @@ export function createTerminalResizeController({
     if (session.resizePresentationHold) {
       presentation()?.cancelHold(session);
       if (session.hasPresentedFrame) {
-        presentation()?.setReady(session, false);
+        presentation()?.setReady(session, false, { reason: "resize_error" });
       }
     }
     consoleObject?.warn?.("[terminal-resize] resize rejected", {
@@ -1095,7 +1095,7 @@ export function createTerminalResizeController({
         // A real geometry transition explicitly captured the old frame above.
         // Stable forced renders must not create another hold just because the
         // caller requested hide-until-render behavior.
-        presentation()?.setReady(session, false, { preserveFrame: false });
+        presentation()?.setReady(session, false, { preserveFrame: false, reason: "resize_transaction" });
       }
       if (canDeferLocalResize) {
         clearOutputSettle(session);
@@ -1183,7 +1183,7 @@ export function createTerminalResizeController({
         resetAfterInitialFit(session);
       }
       if (fitGenerationChanged && isReplayCommitted(session)) {
-        presentation()?.setReady(session, false, { preserveFrame: false });
+        presentation()?.setReady(session, false, { preserveFrame: false, reason: "resize_fit_changed" });
       }
       const sentTerminalSize = sendSize(session, {
         force: forceSizeSync,

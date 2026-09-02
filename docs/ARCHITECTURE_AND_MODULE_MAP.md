@@ -192,7 +192,13 @@ global-runtime
 
 实际 controller 之间只能通过显式依赖、公开 API、事件或只读快照交互。不要因为某个功能同时涉及多个终端域，就把状态重新放回 `global-runtime.js` 或创建新的共享大对象。
 
-## 4. 后端状态和实现地图
+## 3.3 诊断模块
+
+| 责任域 | 公开入口 | 模块文档 | 主要职责 |
+| --- | --- | --- | --- |
+| 页面与终端诊断 | `runtime/static/diagnostics/index.js` | [`diagnostics/README.md`](../runtime/static/diagnostics/README.md) | 调试开关、启动追踪、一次性初始化性能、运行时性能/网络采样和终端诊断时间线 |
+
+初始化性能由 diagnostics controller 持有开关和生命周期，只观察 `startupDiagnostics` 与候选终端 session 的公开事件，以第一个完成 `presentation_commit_complete` 的 session 作为结果；完成后冻结，不参与终端连接、replay、resize 或渲染调度。
 
 | 文件 | 状态/责任 |
 | --- | --- |

@@ -24,15 +24,23 @@ const installGeometrySampler = async (page) => page.evaluate(() => {
     samples.push({
       at: Math.round(performance.now() - startedAt),
       kind,
+      devicePixelRatio: Number(window.devicePixelRatio || 1),
       host: rect(host),
       live: rect(live),
       hold: rect(hold),
       liveBacking: { width: Number(live?.width || 0), height: Number(live?.height || 0) },
+      liveScale: {
+        x: host ? Number(live?.getBoundingClientRect?.().width || 0) / Math.max(1, Number(host.getBoundingClientRect?.().width || 0)) : 0,
+        y: host ? Number(live?.getBoundingClientRect?.().height || 0) / Math.max(1, Number(host.getBoundingClientRect?.().height || 0)) : 0,
+      },
       holdBacking: { width: Number(hold?.width || 0), height: Number(hold?.height || 0) },
       liveStyle: { width: live?.style?.width || "", height: live?.style?.height || "" },
+      liveVisibility: live ? getComputedStyle(live).visibility : "",
       holdStyle: { width: hold?.style?.width || "", height: hold?.style?.height || "" },
       holdHidden: hold?.hidden !== false,
       renderReady: shell?.dataset?.renderReady || "",
+      renderRecovery: shell?.dataset?.renderRecovery || "",
+      terminalFrameHeld: shell?.dataset?.terminalFrameHeld || "",
       hasPresentedFrame: shell?.dataset?.hasPresentedFrame || "",
     });
   };
@@ -102,15 +110,21 @@ const assertNoUnsafeHold = (label, result) => {
       && sample.renderReady === "false"
       && sample.holdHidden
   ));
-  if (unsafe.length || visible.some((sample) => (
+  const unsafeLiveDuringHold = result.samples.filter((sample) => (
+    sample.holdHidden === false
+      && sample.renderReady === "false"
+      && sample.hasPresentedFrame === "true"
+      && sample.liveVisibility !== "hidden"
+  ));
+  if (unsafe.length || unsafeLiveDuringHold.length || visible.some((sample) => (
     sample.hold.top < sample.host.top - 1
       || sample.hold.top + sample.hold.height > sample.host.top + sample.host.height + 1
       || sample.hold.left < sample.host.left - 1
       || sample.hold.left + sample.hold.width > sample.host.left + sample.host.width + 1
-      || Math.abs(sample.holdBacking.width - sample.host.width) > 2
-      || Math.abs(sample.holdBacking.height - sample.host.height) > 2
+      || Math.abs(sample.holdBacking.width - sample.host.width * Math.max(1, sample.devicePixelRatio || 1)) > 2
+      || Math.abs(sample.holdBacking.height - sample.host.height * Math.max(1, sample.devicePixelRatio || 1)) > 2
   ))) {
-    throw new Error(`${label}: unsafe presentation geometry ${JSON.stringify({ unsafe, visible })}`);
+    throw new Error(`${label}: unsafe presentation geometry ${JSON.stringify({ unsafe, unsafeLiveDuringHold, visible })}`);
   }
   const last = result.samples.at(-1);
   if (last && last.holdHidden === false) {
@@ -128,13 +142,21 @@ const triggerFontSize = (page, key = "=") => page.evaluate((value) => {
   }));
 }, key);
 
+const triggerMobileZoom = async (page, action) => {
+  const button = page.locator(`[data-mobile-action="${action}"]`).first();
+  if (await button.count() === 0) {
+    throw new Error(`mobile shortcut is unavailable: ${action}`);
+  }
+  await button.click();
+};
+
 const tabIDs = (page) => page.locator("#tabs .tab").evaluateAll((buttons) => (
   buttons.map((button) => ({ id: button.dataset.tabId || "", active: button.classList.contains("active") }))
 ));
 
 export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   if (!config.localStaticDir) throw new Error("WEBSHELL_LOCAL_STATIC_DIR is required");
-  const { desktop } = states;
+  const { desktop, mobile } = states;
   const page = desktop.page;
   const host = activeHost(page);
   await page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
@@ -157,6 +179,15 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     },
   });
   assertNoUnsafeHold("font-size", fontResult);
+
+  await installGeometrySampler(mobile.page);
+  await resetSampler(mobile.page, "mobile-zoom-start");
+  await triggerMobileZoom(mobile.page, "zoom_in");
+  await mobile.page.waitForTimeout(250);
+  await triggerMobileZoom(mobile.page, "zoom_out");
+  await mobile.page.waitForTimeout(1_000);
+  const mobileZoomResult = await readSamples(mobile.page);
+  assertNoUnsafeHold("mobile-zoom", mobileZoomResult);
 
   await installGeometrySampler(page);
   await resetSampler(page, "viewport-start");
@@ -190,6 +221,14 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     currentTab,
     otherTab,
     font: { visibleHold: visibleHoldSamples(fontResult).length, geometryChanges: geometryChanges(fontResult).length, events: fontResult.events, samples: fontResult.samples, resizeTrace: fontResult.resizeTrace, presentationTrace: fontResult.presentationTrace },
+    mobileZoom: {
+      visibleHold: visibleHoldSamples(mobileZoomResult).length,
+      geometryChanges: geometryChanges(mobileZoomResult).length,
+      events: mobileZoomResult.events,
+      samples: mobileZoomResult.samples,
+      resizeTrace: mobileZoomResult.resizeTrace,
+      presentationTrace: mobileZoomResult.presentationTrace,
+    },
     viewport: { visibleHold: visibleHoldSamples(viewportResult).length, geometryChanges: geometryChanges(viewportResult).length, events: viewportResult.events, samples: viewportResult.samples, resizeTrace: viewportResult.resizeTrace, presentationTrace: viewportResult.presentationTrace },
     tab: { visibleHold: visibleHoldSamples(tabResult).length, geometryChanges: geometryChanges(tabResult).length, events: tabResult.events, samples: tabResult.samples, resizeTrace: tabResult.resizeTrace, presentationTrace: tabResult.presentationTrace },
   });

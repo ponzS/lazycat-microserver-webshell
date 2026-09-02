@@ -39,6 +39,20 @@ const formatTaskMs = (value) => {
   return `${ms.toFixed(2)}ms`;
 };
 
+const formatInitializationMs = (value) => {
+  const ms = Number(value);
+  if (!Number.isFinite(ms) || ms < 0) {
+    return "--";
+  }
+  return ms >= 100 ? `${Math.round(ms)}ms` : `${ms.toFixed(1)}ms`;
+};
+
+const initializationStatusLabel = (status) => ({
+  idle: "未启用",
+  collecting: "采集中",
+  complete: "已完成",
+})[status] || "采集中";
+
 export function createDiagnosticsView({ documentObject = globalThis.document } = {}) {
   const byID = (id) => documentObject?.getElementById?.(id) || null;
   const elements = {
@@ -46,12 +60,17 @@ export function createDiagnosticsView({ documentObject = globalThis.document } =
     debugLogList: byID("debugLogList"),
     debugLogCopy: byID("debugLogCopy"),
     debugLogClear: byID("debugLogClear"),
+    initializationPerformancePanel: byID("initializationPerformancePanel"),
+    initializationPerformanceStatus: byID("initializationPerformanceStatus"),
+    initializationPerformanceTotal: byID("initializationPerformanceTotal"),
+    initializationPerformanceList: byID("initializationPerformanceList"),
     performanceTaskMeter: byID("performanceTaskMeter"),
     performanceTaskMeterList: byID("performanceTaskMeterList"),
     settingsDebugModeToggle: byID("settingsDebugModeToggle"),
     settingsDebugLogToggle: byID("settingsDebugLogToggle"),
     settingsNetworkMonitorToggle: byID("settingsNetworkMonitorToggle"),
     settingsDebugOptions: byID("settingsDebugOptions"),
+    settingsInitializationPerformanceToggle: byID("settingsInitializationPerformanceToggle"),
     settingsPerformanceMeterToggle: byID("settingsPerformanceMeterToggle"),
     settingsPerformanceTasksToggle: byID("settingsPerformanceTasksToggle"),
     terminalNetworkMonitorPanel: byID("terminalNetworkMonitor"),
@@ -209,6 +228,36 @@ export function createDiagnosticsView({ documentObject = globalThis.document } =
         elements.terminalNetworkMonitorUsageDetail.textContent = `接收 ${receivedUsage} MB · 发送 ${sentUsage} MB`;
       }
     },
+    renderInitializationPerformance(state, { visible = false } = {}) {
+      if (elements.initializationPerformancePanel) {
+        elements.initializationPerformancePanel.hidden = !visible;
+      }
+      if (elements.initializationPerformanceStatus) {
+        elements.initializationPerformanceStatus.textContent = initializationStatusLabel(state?.status);
+      }
+      if (elements.initializationPerformanceTotal) {
+        elements.initializationPerformanceTotal.textContent = formatInitializationMs(state?.totalMs);
+      }
+      if (!elements.initializationPerformanceList) {
+        return;
+      }
+      elements.initializationPerformanceList.textContent = "";
+      for (const rowData of state?.rows || []) {
+        const row = documentObject.createElement("div");
+        row.className = "initialization-performance-row";
+        const name = documentObject.createElement("span");
+        name.className = "initialization-performance-name";
+        name.textContent = rowData.label || rowData.name || "初始化事件";
+        const duration = documentObject.createElement("strong");
+        duration.className = "initialization-performance-duration";
+        duration.textContent = formatInitializationMs(rowData.durationMs);
+        const elapsed = documentObject.createElement("small");
+        elapsed.className = "initialization-performance-elapsed";
+        elapsed.textContent = `累计 ${formatInitializationMs(rowData.elapsedMs)}`;
+        row.append(name, duration, elapsed);
+        elements.initializationPerformanceList.appendChild(row);
+      }
+    },
     renderPerformanceTasks(rows, { visible = false } = {}) {
       if (elements.performanceTaskMeter) {
         elements.performanceTaskMeter.hidden = !visible;
@@ -255,6 +304,7 @@ export function createDiagnosticsView({ documentObject = globalThis.document } =
         elements.settingsDebugOptions.hidden = !debugMode;
       }
       for (const [element, checked] of [
+        [elements.settingsInitializationPerformanceToggle, state.initializationPerformance],
         [elements.settingsDebugLogToggle, state.debugLog],
         [elements.settingsNetworkMonitorToggle, state.networkMonitor],
         [elements.settingsPerformanceMeterToggle, state.performanceMeter],

@@ -1,0 +1,186 @@
+const startupMetricLabels = Object.freeze({
+  navigationStartedAt: "页面开始",
+  moduleStartedAt: "诊断模块启动",
+  ghosttyReadyAt: "Ghostty 就绪",
+  themeReadyAt: "主题就绪",
+  settingsReadyAt: "设置就绪",
+  instancesReadyAt: "实例列表就绪",
+  workspaceRequestStartedAt: "工作区请求开始",
+  workspaceReadyAt: "工作区数据就绪",
+  workspaceAppliedAt: "工作区应用完成",
+});
+
+const terminalEventLabels = Object.freeze({
+  connect_session_start: "终端会话开始",
+  socket_connect: "终端连接开始",
+  socket_open: "终端连接建立",
+  agent_preparing: "Agent 准备",
+  history_replay_start: "历史回放开始",
+  first_binary_output: "首个终端数据",
+  history_replay_complete: "历史回放接收完成",
+  replay_output_drained: "回放输出排空",
+  resize_applied: "终端尺寸应用",
+  presentation_render_start: "终端渲染开始",
+  full_render_start: "完整渲染开始",
+  presentation_commit_complete: "终端渲染完成",
+});
+
+const defaultNow = () => (
+  globalThis.performance && typeof globalThis.performance.now === "function"
+    ? globalThis.performance.now()
+    : Date.now()
+);
+
+const finiteTime = (value) => {
+  const time = Number(value);
+  return Number.isFinite(time) && time > 0 ? time : 0;
+};
+
+const formatEventName = (name) => terminalEventLabels[name] || startupMetricLabels[name] || String(name || "初始化事件");
+
+export function createInitializationPerformance({
+  startupDiagnostics = null,
+  now = defaultNow,
+  onChange = () => {},
+} = {}) {
+  let enabled = false;
+  let disposed = false;
+  let completed = false;
+  let sessionID = "";
+  let startupEvents = [];
+  let terminalEvents = [];
+  let terminalEventsBySession = new Map();
+  let result = null;
+
+  const emit = () => {
+    onChange(snapshot());
+  };
+
+  const buildResult = (finishedAt) => {
+    const metrics = startupDiagnostics?.snapshot?.() || {};
+    const metricEvents = Object.entries(startupMetricLabels)
+      .map(([name]) => ({
+        name,
+        label: formatEventName(name),
+        source: "页面初始化",
+        at: finiteTime(metrics[name]),
+      }))
+      .filter((event) => event.at > 0);
+    const eventMap = new Map();
+    for (const event of [...metricEvents, ...startupEvents, ...terminalEvents]) {
+      const key = `${event.source}:${event.name}:${event.at}`;
+      if (!eventMap.has(key)) {
+        eventMap.set(key, event);
+      }
+    }
+    const events = [...eventMap.values()].sort((left, right) => left.at - right.at);
+    const navigationStartedAt = finiteTime(metrics.navigationStartedAt) || events[0]?.at || finishedAt;
+    const rows = [];
+    let previousAt = navigationStartedAt;
+    for (const event of events) {
+      if (event.at < navigationStartedAt) {
+        continue;
+      }
+      rows.push({
+        name: event.name,
+        label: event.label,
+        source: event.source,
+        durationMs: Math.max(0, event.at - previousAt),
+        elapsedMs: Math.max(0, event.at - navigationStartedAt),
+      });
+      previousAt = event.at;
+    }
+    const totalAt = Math.max(finishedAt, terminalEvents.at(-1)?.at || finishedAt);
+    return {
+      status: "complete",
+      sessionID,
+      rows,
+      totalMs: Math.max(0, totalAt - navigationStartedAt),
+      startedAt: navigationStartedAt,
+      finishedAt: totalAt,
+    };
+  };
+
+  const snapshot = () => {
+    if (result) {
+      return { enabled, ...result, rows: result.rows.map((row) => ({ ...row })) };
+    }
+    return {
+      enabled,
+      status: enabled ? "collecting" : "idle",
+      sessionID,
+      rows: [],
+      totalMs: 0,
+      startedAt: finiteTime(startupDiagnostics?.getMetric?.("navigationStartedAt")),
+      finishedAt: 0,
+    };
+  };
+
+  const recordTerminalEvent = (session, name) => {
+    if (!enabled || disposed || completed || !session) {
+      return;
+    }
+    const id = String(session.id || session.name || "");
+    if (!id) {
+      return;
+    }
+    const at = finiteTime(now());
+    if (!at) {
+      return;
+    }
+    const events = terminalEventsBySession.get(id) || [];
+    terminalEventsBySession.set(id, events);
+    events.push({
+      name: String(name || "terminal_event"),
+      label: formatEventName(name),
+      source: "终端初始化",
+      at,
+    });
+    if (name === "presentation_commit_complete") {
+      sessionID = id;
+      terminalEvents = events;
+      completed = true;
+      result = buildResult(at);
+    }
+    emit();
+  };
+
+  return {
+    dispose() {
+      disposed = true;
+      enabled = false;
+      terminalEvents = [];
+      startupEvents = [];
+      sessionID = "";
+      result = null;
+    },
+    isEnabled() {
+      return enabled;
+    },
+    recordStartupEvent(name) {
+      if (!enabled || disposed || completed) {
+        return;
+      }
+      const at = finiteTime(now());
+      if (!at) {
+        return;
+      }
+      startupEvents.push({
+        name: String(name || "startup_event"),
+        label: formatEventName(name),
+        source: "页面初始化",
+        at,
+      });
+      emit();
+    },
+    recordTerminalEvent,
+    setEnabled(nextEnabled) {
+      if (disposed) {
+        return;
+      }
+      enabled = nextEnabled === true;
+      emit();
+    },
+    snapshot,
+  };
+}

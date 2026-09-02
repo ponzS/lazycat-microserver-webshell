@@ -13,7 +13,7 @@
 
 ## 目录约定
 
-每组用例一个独立目录，目录内至少包含一个 `test.mjs` 和一个 `README.md`。脚本产生的截图、JSONL 点击事件日志、trace 和错误摘要写入该组的 `artifacts/`，不会混入源码。
+每组用例一个独立目录，目录内至少包含一个 `test.mjs` 和一个 `README.md`。脚本产生的截图、JSONL 点击事件日志、trace、presentation probe/timeline 和错误摘要写入该组的 `artifacts/`，不会混入源码。
 
 ## 运行全部用例
 
@@ -59,5 +59,8 @@ cd lazycat-microserver-webshell
 - `PW_CHANNEL`：Chrome channel，默认 `chrome`。
 - `WEBSHELL_LOCAL_STATIC_DIR`：可选。设置为 `runtime/static` 的绝对路径后，测试仍使用测试机的真实 API/WebSocket/PTY，但把版本化静态资源映射到当前工作区，并阻止 Service Worker；用于验证尚未安装的前端改动。
 - `WEBSHELL_MOBILE_USER_AGENT`：可选。仅覆盖移动测试窗口的 User-Agent，用于在桌面 Chrome 中进入 Android/iOS 平台专属 visualViewport、键盘或宿主分支。
+- `WEBSHELL_MOBILE_DEVICE_SCALE_FACTOR`：可选。设置移动测试 context 的 device scale factor，用于高 DPR Canvas/hold 诊断；默认值为 `1`，不代表产品运行时 DPR 配置。
+- `WEBSHELL_CAPTURE_TERMINAL_TIMELINE`：可选。设置为 `1` 时在页面初始化前打开 debug timeline，便于在 artifacts 中保存结构化终端事件；默认关闭。
+- `WEBSHELL_ENABLE_INITIALIZATION_PERFORMANCE`：可选。仅用于真机回归，设置为 `1` 时在页面初始化前开启初始化性能指标并自动开启调试模式；默认关闭。
 
 总入口按目录名排序后逐组串行执行；任何一组失败会立即停止并返回非零退出码。

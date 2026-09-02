@@ -29,6 +29,9 @@ export function createTerminalSessionResourceFactory({
     shellEl.dataset.connection = connect ? "connecting" : "idle";
     shellEl.dataset.renderReady = "false";
     shellEl.dataset.hasPresentedFrame = "false";
+    shellEl.dataset.terminalFrameHeld = "false";
+    shellEl.dataset.connectionRetrying = "false";
+    shellEl.dataset.renderRecovery = "false";
     shellEl.setAttribute("tabindex", "-1");
 
     const terminalHost = documentObject.createElement("div");

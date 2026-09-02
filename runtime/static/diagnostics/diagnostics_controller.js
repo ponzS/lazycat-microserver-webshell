@@ -4,6 +4,7 @@ import {
   createNetworkMonitorLifecycle,
 } from "./diagnostics_lifecycle.js";
 import { createDiagnosticsView } from "./diagnostics_view.js";
+import { createInitializationPerformance } from "./initialization_performance.js";
 import { createPerformanceMeter } from "./performance_meter.js";
 import { createPerformanceTaskMonitor } from "./performance_tasks.js";
 import {
@@ -40,6 +41,7 @@ export function createDiagnosticsController({
     networkMonitor: `${storagePrefix}.networkMonitor`,
     performanceMeter: `${storagePrefix}.performanceMeter`,
     performanceTasks: `${storagePrefix}.performanceTasks`,
+    initializationPerformance: `${storagePrefix}.initializationPerformance`,
   };
   const readStoredFlag = (key) => {
     try {
@@ -60,12 +62,21 @@ export function createDiagnosticsController({
     networkMonitor: readStoredFlag(storageKeys.networkMonitor),
     performanceMeter: readStoredFlag(storageKeys.performanceMeter),
     performanceTasks: readStoredFlag(storageKeys.performanceTasks),
+    initializationPerformance: readStoredFlag(storageKeys.initializationPerformance),
   };
   let started = false;
   let disposed = false;
   let resumeGeneration = 0;
   const view = createDiagnosticsView({ documentObject });
 
+  const initializationPerformance = createInitializationPerformance({
+    startupDiagnostics,
+    now,
+    onChange: (snapshot) => view.renderInitializationPerformance(snapshot, {
+      visible: state.debugMode && state.initializationPerformance && !disposed,
+    }),
+  });
+  initializationPerformance.setEnabled(state.debugMode && state.initializationPerformance);
   const debugLog = createDebugLog({
     windowObject,
     consoleObject,
@@ -107,6 +118,7 @@ export function createDiagnosticsController({
       dedupeKey: `startup:${dedupeKey}`,
       retainWhenDisabled: true,
     });
+    initializationPerformance.recordStartupEvent(event);
   };
   const detachStartupTrace = startupDiagnostics?.setTraceSink?.(appendStartupTrace) || (() => {});
   const terminalTimeline = createTerminalTimeline({
@@ -136,6 +148,10 @@ export function createDiagnosticsController({
     const debugLogActive = state.debugMode && state.debugLog && !disposed;
     debugLog.setState({ capture: debugLogActive, show: debugLogActive });
     const runtimeActive = started && !disposed && state.debugMode;
+    initializationPerformance.setEnabled(!disposed && state.debugMode && state.initializationPerformance);
+    view.renderInitializationPerformance(initializationPerformance.snapshot(), {
+      visible: state.debugMode && state.initializationPerformance && !disposed,
+    });
     performanceMeter.setActive(runtimeActive && state.performanceMeter);
     performanceTaskMonitor.setEnabled(runtimeActive && state.performanceTasks);
     view.renderPerformanceTasks(performanceTaskMonitor.snapshot({ limit: 10 }), {
@@ -166,6 +182,7 @@ export function createDiagnosticsController({
       onNetworkMonitorChange: () => updateFlag("networkMonitor", view.elements.settingsNetworkMonitorToggle),
       onPerformanceMeterChange: () => updateFlag("performanceMeter", view.elements.settingsPerformanceMeterToggle),
       onPerformanceTasksChange: () => updateFlag("performanceTasks", view.elements.settingsPerformanceTasksToggle),
+      onInitializationPerformanceChange: () => updateFlag("initializationPerformance", view.elements.settingsInitializationPerformanceToggle),
       onDebugLogCopy: async () => {
         const text = debugLog.clipboardText();
         if (!text) {
@@ -205,6 +222,7 @@ export function createDiagnosticsController({
       lifecycle.dispose();
       networkMonitorLifecycle.dispose();
       performanceTaskMonitor.setEnabled(false);
+      initializationPerformance.dispose();
       performanceMeter.dispose();
       debugLog.dispose();
       detachStartupTrace();
@@ -224,7 +242,11 @@ export function createDiagnosticsController({
     },
     recordTerminalRuntimeMaxMetric,
     recordTerminalRuntimeMetric,
-    recordTerminalSessionEvent: terminalTimeline.record,
+    recordTerminalSessionEvent(session, event, details = {}) {
+      const result = terminalTimeline.record(session, event, details);
+      initializationPerformance.recordTerminalEvent(session, event);
+      return result;
+    },
     recordRuntimeEvent,
     refreshNetworkView() {
       networkMonitorLifecycle.refresh();
@@ -242,6 +264,9 @@ export function createDiagnosticsController({
       view.renderDebugLog(debugLog.snapshot(), {
         visible: state.debugMode && state.debugLog && !disposed,
       });
+      view.renderInitializationPerformance(initializationPerformance.snapshot(), {
+        visible: state.debugMode && state.initializationPerformance && !disposed,
+      });
       view.renderPerformanceTasks(performanceTaskMonitor.snapshot({ limit: 10 }), {
         visible: started && state.debugMode && state.performanceTasks && !disposed,
       });
@@ -249,6 +274,9 @@ export function createDiagnosticsController({
     },
     syncNetworkSockets(options = {}) {
       networkMonitorLifecycle.syncSockets(options);
+    },
+    terminalTimelineSnapshot(session) {
+      return terminalTimeline.snapshot(session);
     },
     runtimeTimelineSnapshot() {
       return runtimeTimeline.snapshot();

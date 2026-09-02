@@ -171,6 +171,8 @@ presentation_deferred reason=...hidden:hidden
 - `presentation_view.js` 的 `holdFrame()` 将 hold canvas 的 `width`/`height` 设置为 CSS 宽高，而不是 CSS 宽高乘以 renderer DPR；虽然读取了 `ratio`，但没有用于 hold backing store 的尺寸。
 - `runtime/static/style.css` 对 `.terminal-frame-hold` 设置 `image-rendering: auto`，低分辨率 backing canvas 会被浏览器平滑放大到高 DPR 显示尺寸，形成模糊旧帧。
 - 因此当前更像是“hold frame 的有效 DPR 为 1 + presentation/resize 等待过长”，而不是主动降低 live renderer 的 DPR。正常 presentation commit 后应恢复 live 高 DPR canvas；如果 commit 被延迟，模糊会持续更久。
+- 2026-09-02 的高 DPR 诊断运行使用 `WEBSHELL_MOBILE_DEVICE_SCALE_FACTOR=3`，实测 mobile pane 的 live Canvas 约为 `1170x2268` 对应 CSS `390x756`，backing ratio 约为 `3`；可见 hold Canvas 为 `390x726` 对应 CSS `390x726`，backing ratio 为 `1`。该数据直接支持 hold canvas backing store 未按 DPR 分配的假设。该次运行在既有场景的临时 tab 激活等待处失败，不能作为完整功能回归结果，但 probe 已保存并足以作为尺寸诊断证据。
+- 默认 DPR=1 的成功 `05-terminal-output` probe 还观察到 resize hold 期间 live/hold 尺寸短暂不一致，例如桌面 live `1440x855`、hold `1440x862`，移动端 live `390x722`、hold `390x726`；因此需要将“hold backing DPR 不一致”和“hold 与当前 host/live CSS 尺寸不一致”作为两个独立检查项。
 
 后续需要在真实高 DPR 设备上同时记录 `window.devicePixelRatio`、`term.renderer.devicePixelRatio`、live canvas 的 CSS/backing 尺寸、hold canvas 的 CSS/backing 尺寸，以及 hold 显示到 release 的持续时间，确认该假设并与浏览器缩放、宿主合成和字体本身的抗锯齿效果区分。该问题与 P0-4/P1-3 的 presentation hold、resize 收敛一起处理。
 
@@ -262,7 +264,7 @@ presentation_wait_resize
 
 ### P0-0：补齐端到端时间线和诊断语义
 
-状态：`[~]`（receive/drain 语义已补充；Provider/queue/WebSocket 分段指标仍待补齐）
+状态：`[~]`（receive/drain 语义、Canvas/DPR probe 和初始化采样已补充；Provider/queue/WebSocket 分段指标仍待补齐）
 
 本项必须在继续用日志排除 Provider/queue/attach 瓶颈前完成，或至少与首轮真实回归并行完成。
 
@@ -270,6 +272,7 @@ presentation_wait_resize
 
 - 明确区分 `canvas_element_visible`、`terminal_frame_committed` 和 `stable_presentation_complete`。
 - `history_replay_complete` 事件已补充 `replayPhase="receive_complete"`、`stableReady=false` 和 `presentationCommitted=false`；`replay_output_drained` 事件已在 output queue 追平并通过 cursor 边界后记录。
+- presentation hold、full render complete 和 presentation commit 事件现在记录 live/hold Canvas 的 CSS/backing 尺寸、window/renderer DPR 及 hold 状态；`tests-auto` 从页面初始化阶段采集相同 probe。
 - `agent_replay_write_duration_ms` 只描述 agent 向 attach 连接写 replay 的局部耗时；在 Provider queue、WebSocket 和浏览器分段指标补齐前，不得用它排除服务端端到端路径。
 - `provider_queue_wait_ms`、`websocket_send_duration_ms`、`client_first_replay_frame_ms`、`client_last_replay_frame_ms` 用于定位 Provider/queue/WebSocket 端到端分段耗时。
 - `client_output_drain_duration_ms`、`presentation_commit_duration_ms` 用于定位浏览器 drain 和最终呈现耗时。
@@ -302,6 +305,7 @@ presentation_wait_resize
 验收：
 
 - 当前 Go 单元测试已验证多个相邻小 history chunk 合并后内容顺序保持不变，并继续满足单 frame `historyReplayChunk` 上限；真实 `tests-auto` 使用远程 Provider，尚未验证部署后的 server frame 数下降。
+- 高 DPR probe 已证明测试设备上 live Canvas 可按 DPR 分配，而可见 hold Canvas 仍按 1x backing ratio；默认 DPR=1 的成功运行还观察到 hold 与 live/host 的短暂尺寸差异。
 - 持续输出时 replay 仍保持 cursor 连续。
 - replay 期间用户不可见中间 Canvas；初始 replay 必须单独观察，不得只用稳定打开后的持续输出测试代替。
 
@@ -324,7 +328,9 @@ presentation_wait_resize
 
 ### P0-2：拆分 replay receive、output drain 和 presentation commit
 
-状态：`[~]`（receive/drain 门控已有；状态命名和边界待审计）
+状态：`[~]`（receive cursor guard、统一 finish/drain 入口和 generation guard 已补充；异常路径断言仍待扩展）
+
+本轮验证：`node --test tests/*.mjs` 共 399 项通过，`go test ./...` 通过；真实 `05-terminal-output` 默认 DPR 和 `WEBSHELL_MOBILE_DEVICE_SCALE_FACTOR=3` 均通过。
 
 目标：明确当前 `history-replay-complete` 只是接收完成通知，避免把它误认为 output drain 或 presentation commit。当前代码已通过 `replayCompletionPending`、`finishIfReady()`、`receivedHistoryCursor`/`appliedHistoryCursor` 和 output flush 做了部分隔离，不应重复创建另一套并行状态机。
 
@@ -345,7 +351,8 @@ presentation_committed
 - 只有 `receivedCursor == appliedCursor` 且 output queue 排空，才进入 `replay_output_drained`。
 - presentation、history validation 和最终 ready 状态等待 drain。
 - 所有状态转换绑定 `connectionEpoch`、`channelGeneration`、`historyGeneration`。
-- 旧 generation 的 drain/ACK/render 回调直接丢弃。
+- 旧 generation 的 output queue 条目会在 flush identity 检查中丢弃并请求 history resync；recovery 会清队列、取消 suppression 并重置 replay pending。
+- 新增回归验证：`receivedHistoryCursor` 尚未到达 target 时，`finishIfReady()` 不得结束 replay。
 
 重点模块：
 
@@ -364,7 +371,9 @@ presentation_committed
 
 状态：`[~]`（有界 flush 和单调度 handle 已实现；并发/指标仍待审计）
 
-目标：确认 replay 和 live output 使用同一有序、有界的 drain 调度器，并修复仍可绕过该调度器的调用路径。当前 `output_lifecycle.js` 已为每个 pane 保存 RAF/timer handle，`output_controller.js` 已实现 bytes、entries、time budget 和连续数据合并；本项重点是补齐边界测试，不是重新建设基础 flush 架构。
+当前实现审计结果：`output_lifecycle.js` 为每个 pane 同时维护一个 RAF 和一个 fallback timer；调度重复请求直接返回 false，任一回调进入 `flush()` 时清理另一句柄。`output_controller.js` 的 replay/live 共用有序队列，并在 queue identity、connection epoch、channel generation 和 history generation 不匹配时丢弃旧条目并请求 resync。`finishHistoryReplayIfReady()` 只在队列空或 drain 完成后调用，新增 receive cursor guard 后不会仅凭 applied cursor 结束 replay。
+
+回归：`terminal_output_controller_test.mjs` 已覆盖有界 drain、Queue ACK 仅在 cursor 应用后发送、stale generation 丢弃、dispose 清理 RAF/timer 和 overload resync；`terminal_session_replay_controller_test.mjs` 新增 receive cursor 未到 target 时不得 finish。仍待增加真实场景的 flush/render 数量关联统计。
 
 要求：
 
@@ -389,18 +398,25 @@ presentation_committed
 
 ### P0-4：Presentation 强制闭环和 last-known-good frame
 
-状态：`[~]`（hold/commit/retry 已实现；隐藏原因、重试终止和灰点闭环待修复）
+状态：`[~]`（gate 诊断、hold DPR、retry 上限和初始 presentation 断言已补充；初始 presentation 偶发漏唤醒、hold/live 尺寸收敛和灰点闭环待修复）
 
 目标：修复数据已 drain 但 presentation 未提交的黑屏路径，并区分隐藏 pane 的预期延迟与活动 pane 的异常停滞。当前已经存在 last-known-good frame hold、resize fence 和 presentation watchdog，但 `hidden`/`measure` 原因仍有合并，presentation retry 仍可能持续调度，需补充明确的 stalled/error 终态。
 
+当前已完成的诊断和局部修复：
+
+- 已增加 `presentationGateDetails()`，在 hidden、resize、geometry、current-device-claim、render blocked、retry 和 ensure 事件中记录页面/Tab/pane 可见性、可测量性、fit、resize flags、Canvas 匹配和 retry 状态。
+- `presentation_retry_scheduled` 已增加每个 generation 的有限计数（默认上限 8），超限记录 `presentation_retry_exhausted`，不再无限创建 retry timer；成功 commit 或新的 hold transaction 会重置计数。隐藏/非活动 pane 的激活仍由 tab activation 事务重新触发，不依赖无限后台重试。
+- hold canvas 已按 renderer DPR 分配 backing store，并通过 view/controller 单测及 `WEBSHELL_MOBILE_DEVICE_SCALE_FACTOR=3` 的真实 `05-terminal-output` 场景验证。
+- `tests-auto` 已在每个窗口 `open` 后保存 initial terminal timeline，避免后续持续输出覆盖每 pane 的 96 条环形事件；成功/失败均保存最终 timeline 和 presentation probe。
+- 新增可选的一次性初始化性能窗口：`webshell.initializationPerformance` 默认关闭，开启后由 diagnostics 在 controller 创建后捕获页面启动指标、启动 trace 和候选终端 session，首个 `presentation_commit_complete` 后冻结，并展示页面打开到终端渲染总耗时；冻结后不再记录运行时 output、resize 或网络指标。
+- 移动端仍需修复 `replay_output_drained -> resize_applied` 后未及时唤醒 presentation；hold/live CSS 尺寸短暂不一致和灰点状态仍未闭环。
+
 要求：
 
-- 将 `document.hidden`、tab inactive、pane hidden、Canvas zero size、fit pending、resize pending 分开记录。
-- replay drain、resize applied、tab active、page visible 后合并为一次 presentation transaction。
 - 同一 generation 内只允许一个 in-flight full render。
 - retry 必须有明确终止条件，不能无限每 250ms 重试。
 - presentation 等待期间保留 last-known-good frame，不清空 Canvas。
-- hold frame 的 backing dimensions 必须按 CSS 尺寸乘以当前 renderer DPR 分配，字号/窗口变化期间不得用 1x canvas 平滑放大旧帧造成模糊；live canvas 与 hold canvas 的 CSS/backing 尺寸需分别记录。
+- hold frame 的 backing dimensions 必须按 CSS 尺寸乘以当前 renderer DPR 分配，且 hold 的可见 CSS 尺寸必须与当前 host/live presentation 尺寸一致；字号/窗口变化期间不得用 1x canvas 或过期尺寸平滑放大旧帧造成模糊。live canvas 与 hold canvas 的 CSS/backing 尺寸需分别记录。
 - 从 hidden/measure 恢复后必须明确执行 `fit -> resize -> full render -> commit`。
 - 新增移动端证据要求：`replay_output_drained` 后若已经 `resize_applied`，必须在同一 generation 内产生唯一的 `presentation_commit_complete`；不能依赖 focus、字体变化或下一次 resize 才唤醒 pending presentation。
 
@@ -436,7 +452,8 @@ presentation_committed
 
 - 同一初始化事务的 `full_render_*` 不再出现几十次重复计数。
 - render 次数与 geometry/generation 变化相关，而不是与 queue turn 数量相关。
-- 当前已通过 queue-turn Node 协议回归、全量 Node 测试 `396` 项、`go test ./...` 和真实 `05-terminal-output` 安全回归；真实场景尚未直接采集 full render 次数，因此本项仍不能标记为完成。
+- 最新成功真实运行已按 active pane 保存 full-render 统计：一次运行记录个位数 render，另一次记录 6 次 render 并出现 1 个相同状态 key；持续输出、resize 和 validation 会改变 cursor，因此重复 key 仍需结合触发原因和 generation 判定，不能直接作为无效重复。
+- 当前尚未实施 P0-5 的 latest-only render transaction；queue turn 直接调用已移除，真实 full-render 去重仍待后续修复。
 
 ### P1-2：限制 resume deadline 的副作用
 

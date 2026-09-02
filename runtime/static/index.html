@@ -97,6 +97,17 @@
           <button class="empty-state-action" id="emptyStateAction" type="button" aria-label="新建终端">新建终端</button>
         </div>
         <div class="debug-overlay" id="debugOverlay">
+          <div class="initialization-performance-panel" id="initializationPerformancePanel" aria-live="polite" hidden>
+            <div class="initialization-performance-head">
+              <span class="initialization-performance-title">初始化性能</span>
+              <span class="initialization-performance-status" id="initializationPerformanceStatus">采集中</span>
+            </div>
+            <div class="initialization-performance-total">
+              <span>页面打开到终端渲染</span>
+              <strong id="initializationPerformanceTotal">--</strong>
+            </div>
+            <div class="initialization-performance-list" id="initializationPerformanceList"></div>
+          </div>
           <div class="performance-task-meter" id="performanceTaskMeter" aria-live="off" hidden>
             <div class="performance-task-meter-title">性能监视器</div>
             <div class="performance-task-meter-list" id="performanceTaskMeterList"></div>
@@ -363,6 +374,14 @@
                       <span>采集并显示前端任务耗时</span>
                     </span>
                     <input class="settings-switch-input" id="settingsPerformanceTasksToggle" type="checkbox" />
+                    <span class="settings-switch" aria-hidden="true"></span>
+                  </label>
+                  <label class="settings-switch-row" for="settingsInitializationPerformanceToggle">
+                    <span class="settings-switch-label">
+                      <span>初始化性能指标</span>
+                      <span>首次加载终端时显示初始化事件耗时，完成后停止采样，默认关闭</span>
+                    </span>
+                    <input class="settings-switch-input" id="settingsInitializationPerformanceToggle" type="checkbox" />
                     <span class="settings-switch" aria-hidden="true"></span>
                   </label>
                   <label class="settings-switch-row" for="settingsDebugLogToggle">

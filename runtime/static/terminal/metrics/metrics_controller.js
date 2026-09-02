@@ -26,6 +26,7 @@ export function createTerminalMetricsController({
   getResize = () => null,
   isElement = defaultIsElement,
   registerSessionCleanup = noop,
+  recordEvent = noop,
   consoleObject = globalThis.console,
 } = {}) {
   let disposed = false;
@@ -124,6 +125,49 @@ export function createTerminalMetricsController({
     return true;
   };
 
+  const visualDetails = (session) => {
+    const host = session?.terminalHost;
+    const live = session?.term?.canvas || session?.term?.renderer?.getCanvas?.();
+    const hold = session?.terminalFrameHold;
+    const rect = (element) => {
+      const value = element?.getBoundingClientRect?.();
+      return {
+        width: Number(value?.width || 0),
+        height: Number(value?.height || 0),
+        left: Number(value?.left || 0),
+        top: Number(value?.top || 0),
+      };
+    };
+    const describeCanvas = (canvas) => ({
+      css: rect(canvas),
+      backing: { width: Number(canvas?.width || 0), height: Number(canvas?.height || 0) },
+      style: { width: String(canvas?.style?.width || ""), height: String(canvas?.style?.height || "") },
+      hidden: canvas?.hidden === true,
+    });
+    return {
+      fontSize: Number(session?.term?.options?.fontSize || session?.term?.renderer?.fontSize || 0),
+      rendererFontSize: Number(session?.term?.renderer?.fontSize || 0),
+      windowDevicePixelRatio: Number(windowObject?.devicePixelRatio || 1),
+      rendererDevicePixelRatio: Number(session?.term?.renderer?.devicePixelRatio || 0),
+      cols: Number(session?.term?.cols || 0),
+      rows: Number(session?.term?.rows || 0),
+      host: rect(host),
+      live: describeCanvas(live),
+      hold: describeCanvas(hold),
+      renderReady: session?.renderReady === true,
+      hasPresentedFrame: session?.hasPresentedFrame === true,
+      terminalFrameHeld: session?.terminalFrameHeld === true,
+      resizePresentationHold: session?.resizePresentationHold === true,
+      resizeAckPending: session?.resizeAckPending === true,
+      resizeFenceActive: session?.resizeFenceActive === true,
+      resizeOutputSettleActive: session?.resizeOutputSettleActive === true,
+      fontMetricsGeneration: Number(session?.fontMetricsGeneration || 0),
+      measuredFitGeneration: Number(session?.measuredFitGeneration || 0),
+      presentedFitGeneration: Number(session?.presentedFitGeneration || 0),
+      renderGeneration: Number(session?.renderGeneration || 0),
+    };
+  };
+
   const applyFontSize = (value) => {
     if (disposed) {
       return false;
@@ -133,12 +177,32 @@ export function createTerminalMetricsController({
       if (!session?.term?.options) {
         return;
       }
-      // See applyFontFamily: the option setter resizes the renderer inline.
-      if (session.term.options.fontSize !== value) {
-        getPresentation()?.beginHold?.(session);
+      const previousFontSize = Number(session.term.options.fontSize || session.term.renderer?.fontSize || 0);
+      const changed = previousFontSize !== Number(value);
+      if (changed) {
+        session.fontSizeChangeDebug = { requestedFontSize: Number(value) || 0 };
+        recordEvent(session, "font_size_change_start", {
+          requestedFontSize: Number(value) || 0,
+          previousFontSize,
+          ...visualDetails(session),
+        });
+        getPresentation()?.beginHold?.(session, { recapture: true });
       }
       session.term.options.fontSize = value;
-      refresh(session, { deferFitRetry: true, claimSize: true });
+      if (changed) {
+        recordEvent(session, "font_size_change_after_setter", {
+          requestedFontSize: Number(value) || 0,
+          ...visualDetails(session),
+        });
+      }
+      const refreshed = refresh(session, { deferFitRetry: true, claimSize: true });
+      if (changed) {
+        recordEvent(session, "font_size_change_refresh_scheduled", {
+          requestedFontSize: Number(value) || 0,
+          refreshResult: refreshed,
+          ...visualDetails(session),
+        });
+      }
     });
     return true;
   };
@@ -212,6 +276,25 @@ export function createTerminalMetricsController({
               && !session.fullRenderPending
               && !session.resizeAckPending
               && !session.resizePresentationHold));
+        if (session.fontSizeChangeDebug) {
+          recordEvent(session, "font_size_change_fit", {
+            requestedFontSize: session.fontSizeChangeDebug.requestedFontSize,
+            forceSizeSync,
+            settled,
+            fit: fit ? {
+              ok: fit.ok === true,
+              pending: fit.pending === true,
+              cols: Number(fit.cols || 0),
+              rows: Number(fit.rows || 0),
+              sizeChanged: fit.sizeChanged === true,
+              canvasChanged: fit.canvasChanged === true,
+            } : null,
+            ...visualDetails(session),
+          });
+          if (settled) {
+            session.fontSizeChangeDebug = null;
+          }
+        }
         return { ok: true, settled };
       } catch (error) {
         consoleObject?.warn?.("[terminal-font] failed to refresh terminal metrics", error);

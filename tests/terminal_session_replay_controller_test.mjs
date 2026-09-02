@@ -144,6 +144,26 @@ test("replay failure pauses only after the bounded limit and can be resumed", ()
   assert.equal(logs.length, 1);
 });
 
+test("replay cannot finish before the received cursor reaches the target", () => {
+  const session = {
+    appliedHistoryCursor: 8n,
+    closed: false,
+    historyProtocolActive: true,
+    historyReplayTargetCursor: 8n,
+    receivedHistoryCursor: 7n,
+    name: "target-1",
+    replayAuthorization: "identified",
+    replayCompletionPending: true,
+  };
+  const controller = createTerminalSessionReplayController({
+    getActiveName: () => "target-1",
+    hasQueuedOutput: () => false,
+  });
+
+  assert.equal(controller.finishIfReady(session), false);
+  assert.equal(session.replayCompletionPending, true);
+});
+
 test("replay commit finishes state before requesting the only visible full presentation", () => {
   const events = [];
   const replayController = {

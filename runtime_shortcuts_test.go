@@ -1208,7 +1208,7 @@ func TestRuntimeTerminalDiagnosticTimelineGuard(t *testing.T) {
 		}
 	}
 	if !strings.Contains(mainSource, `recordEvent: (session, event, details) => recordTerminalSessionEvent(session, event, details),`) ||
-		!strings.Contains(presentationSource, `recordEvent(session, "full_render_complete");`) {
+		!strings.Contains(presentationSource, `recordEvent(session, "full_render_complete", canvasDetails(session));`) {
 		t.Fatal("terminal presentation completion must remain routed into the diagnostics timeline")
 	}
 	if strings.Contains(mainSource, "terminalEventTimeline:") {
@@ -7579,7 +7579,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"syncReferences(session);",
 		"clearBuffer(session);",
 		"clearCanvas(session);",
-		"const setReady = (session, ready, { preserveFrame = true } = {}) => {",
+		"const setReady = (session, ready, { preserveFrame = true, reason = \"presentation_state\" } = {}) => {",
 		"session.shellEl.dataset.renderReady = session.renderReady ? \"true\" : \"false\";",
 		"const markSyncPending = (session) => {",
 		"session.fullRenderPending = false;",
@@ -7588,7 +7588,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"view.clearCanvas(session);",
 		"const holdFrame = (session) => {",
 		"const releaseHold = (session) => {",
-		"const beginHold = (session, { capture = true } = {}) => {",
+		"const beginHold = (session, { capture = true, recapture = false } = {}) => {",
 		"presentationCommitPending: false,",
 		"session.shellEl.dataset.hasPresentedFrame = session.hasPresentedFrame ? \"true\" : \"false\";",
 		"const markRendered = (session) => {",
@@ -7607,7 +7607,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"canvasMatchesExpectedSize(session)",
 		"session.hasPresentedFrame = true;",
 		"!session.renderReady && !session.resizePresentationHold",
-		"setReady(session, true);",
+		"setReady(session, true, { reason: \"render_commit\" });",
 		"const stateIsCurrent = (session) => {",
 		"session.renderSnapshot.equals(current)",
 		"const cancelPendingRender = (term) => {",
@@ -7901,7 +7901,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		"const discard = (session) => {",
 	)
 	presentationBlock := sourceBetween(t, string(presentationControllerData),
-		"const beginHold = (session, { capture = true } = {}) => {",
+		"const beginHold = (session, { capture = true, recapture = false } = {}) => {",
 		"const cancelHold = (session, { restoreReady = false, releaseFrame = false } = {}) => {")
 	if strings.Contains(presentationBlock, "scheduleTerminalPresentationCommit") || strings.Contains(presentationBlock, "terminalPresentationQuietMs") {
 		t.Fatal("presentation hold must not wait for an output quiet window")
@@ -7996,7 +7996,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	}
 	holdBlock := sourceBetween(t, string(presentationControllerData),
 		"const frameIdentity = (session) => ({",
-		"const beginHold = (session, { capture = true } = {}) => {")
+		"const beginHold = (session, { capture = true, recapture = false } = {}) => {")
 	for _, want := range []string{
 		`selector: String(session?.name || "").trim()`,
 		`tabID: String(session?.tabId || "").trim()`,
@@ -8022,7 +8022,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	}
 	frameReleaseBlock := sourceBetween(t, string(presentationControllerData),
 		"const scheduleFrameRelease = (session) => {",
-		"const setReady = (session, ready, { preserveFrame = true } = {}) => {")
+		"const setReady = (session, ready, { preserveFrame = true, reason = \"presentation_state\" } = {}) => {")
 	for _, want := range []string{
 		"lifecycle.scheduleFrameRelease(session, {",
 		"session.tabId === getActiveTabId()",
@@ -8035,8 +8035,8 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		}
 	}
 	setReadyBlock := sourceBetween(t, string(presentationControllerData),
-		"const setReady = (session, ready, { preserveFrame = true } = {}) => {",
-		"const beginHold = (session, { capture = true } = {}) => {")
+		"const setReady = (session, ready, { preserveFrame = true, reason = \"presentation_state\" } = {}) => {",
+		"const beginHold = (session, { capture = true, recapture = false } = {}) => {")
 	if strings.Contains(setReadyBlock, "releaseHold(session);") {
 		t.Fatal("render completion must not synchronously remove the last-known-good frame")
 	}
@@ -8359,7 +8359,7 @@ func TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard(t *testing.T) 
 	}
 	for _, want := range []string{
 		`.pane-shell[data-connection="connecting"]::after`,
-		`.pane-shell[data-connection="reconnecting"]::after`,
+		`.pane-shell[data-connection="reconnecting"][data-connection-retrying="true"]::after`,
 		`animation: pane-connection-breathe 1.35s ease-in-out infinite;`,
 		`@keyframes pane-connection-breathe`,
 		`.pane-shell[data-connection="offline"]::after`,

@@ -26,6 +26,8 @@ export const createTerminalPresentationState = () => ({
   presentationRetryTimer: 0,
   presentationRetryPending: false,
   presentationRetryReason: "",
+  presentationRetryAttempts: 0,
+  presentationRetryExhausted: false,
   presentationCommitPending: false,
   hasPresentedFrame: false,
   resizePresentationHold: false,
