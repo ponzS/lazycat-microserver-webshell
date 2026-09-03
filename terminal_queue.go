@@ -73,15 +73,22 @@ type terminalQueueClientMessage struct {
 }
 
 type terminalQueueServerMessage struct {
-	Type              string          `json:"type"`
-	ProtocolVersion   int             `json:"protocol_version"`
-	PaneID            string          `json:"pane_id,omitempty"`
-	StreamID          string          `json:"stream_id,omitempty"`
-	ChannelGeneration uint64          `json:"channel_generation,omitempty"`
-	State             string          `json:"state,omitempty"`
-	ServerUnixMS      int64           `json:"server_unix_ms,omitempty"`
-	Message           string          `json:"message,omitempty"`
-	Payload           json.RawMessage `json:"payload,omitempty"`
+	Type                            string          `json:"type"`
+	ProtocolVersion                 int             `json:"protocol_version"`
+	PaneID                          string          `json:"pane_id,omitempty"`
+	StreamID                        string          `json:"stream_id,omitempty"`
+	ChannelGeneration               uint64          `json:"channel_generation,omitempty"`
+	State                           string          `json:"state,omitempty"`
+	ServerUnixMS                    int64           `json:"server_unix_ms,omitempty"`
+	ServerPrepareDurationMS         int64           `json:"server_prepare_duration_ms,omitempty"`
+	ServerAgentEnsureDurationMS     int64           `json:"server_agent_ensure_duration_ms,omitempty"`
+	ServerAgentValidationDurationMS int64           `json:"server_agent_validation_duration_ms,omitempty"`
+	AgentProtocolVersion            string          `json:"agent_protocol_version,omitempty"`
+	PreferredAgentProtocolVersion   string          `json:"preferred_agent_protocol_version,omitempty"`
+	AgentProtocolUpdateAvailable    bool            `json:"agent_protocol_update_available,omitempty"`
+	AgentProtocolUpdateRequired     bool            `json:"agent_protocol_update_required,omitempty"`
+	Message                         string          `json:"message,omitempty"`
+	Payload                         json.RawMessage `json:"payload,omitempty"`
 }
 
 type terminalQueueBinaryHeader struct {
@@ -194,6 +201,7 @@ func (s *pluginServer) attachPersistentPaneQueue(w http.ResponseWriter, r *http.
 	if err != nil {
 		return err
 	}
+	queueAcceptedAt := time.Now()
 	defer conn.Close()
 	conn.EnableWriteCompression(false)
 	conn.SetReadLimit(websocketReadLimit)
@@ -220,34 +228,64 @@ func (s *pluginServer) attachPersistentPaneQueue(w http.ResponseWriter, r *http.
 		Type:            "queue-state",
 		ProtocolVersion: terminalQueueProtocolVersion,
 		State:           "agent-preparing",
-		ServerUnixMS:    time.Now().UnixMilli(),
+		ServerUnixMS:    queueAcceptedAt.UnixMilli(),
 	})
 
 	scope := normalizeAgentScope(selector, accountID)
-	if _, err := ensurePersistentAgent(r.Context(), scope); err != nil {
-		payload, _ := json.Marshal(agentConnectionErrorPayload(err))
+	agentEnsureStartedAt := time.Now()
+	_, ensureErr := ensurePersistentAgent(r.Context(), scope)
+	agentEnsureFinishedAt := time.Now()
+	agentProtocolCurrent := unsupportedAgentProtocolVersion(ensureErr)
+	agentProtocolUpdateRequired := agentProtocolCurrent != ""
+	if ensureErr != nil && !agentProtocolUpdateRequired {
+		payload, _ := json.Marshal(agentConnectionErrorPayload(ensureErr))
 		_ = writeJSON(terminalQueueServerMessage{
 			Type:            "queue-error",
 			ProtocolVersion: terminalQueueProtocolVersion,
-			Message:         err.Error(),
+			Message:         ensureErr.Error(),
 			Payload:         payload,
 		})
 		return nil
 	}
-	if err := pingPersistentAgentError(r.Context(), scope); err != nil {
-		rememberIncompatiblePersistentAgentNotice(scope, err)
-		markPersistentAgentNotRunning(scope)
-		if _, ensureErr := ensurePersistentAgent(r.Context(), scope); ensureErr != nil {
-			payload, _ := json.Marshal(agentConnectionErrorPayload(ensureErr))
-			_ = writeJSON(terminalQueueServerMessage{
-				Type:            "queue-error",
-				ProtocolVersion: terminalQueueProtocolVersion,
-				Message:         ensureErr.Error(),
-				Payload:         payload,
-			})
-			return nil
+	agentValidationStartedAt := agentEnsureFinishedAt
+	if !agentProtocolUpdateRequired {
+		response, validationErr := pingPersistentAgentResponse(r.Context(), scope)
+		if validationErr == nil {
+			agentProtocolCurrent = strings.TrimSpace(response.Version)
+		} else if version := unsupportedAgentProtocolVersion(validationErr); version != "" {
+			agentProtocolCurrent = version
+			agentProtocolUpdateRequired = true
+		} else {
+			markPersistentAgentNotRunning(scope)
+			_, retryErr := ensurePersistentAgent(r.Context(), scope)
+			if retryErr != nil {
+				payload, _ := json.Marshal(agentConnectionErrorPayload(retryErr))
+				_ = writeJSON(terminalQueueServerMessage{
+					Type:            "queue-error",
+					ProtocolVersion: terminalQueueProtocolVersion,
+					Message:         retryErr.Error(),
+					Payload:         payload,
+				})
+				return nil
+			}
+			response, validationErr = pingPersistentAgentResponse(r.Context(), scope)
+			if validationErr != nil {
+				payload, _ := json.Marshal(agentConnectionErrorPayload(validationErr))
+				_ = writeJSON(terminalQueueServerMessage{
+					Type:            "queue-error",
+					ProtocolVersion: terminalQueueProtocolVersion,
+					Message:         validationErr.Error(),
+					Payload:         payload,
+				})
+				return nil
+			}
+			agentProtocolCurrent = strings.TrimSpace(response.Version)
 		}
 	}
+	if agentProtocolCurrent == "" {
+		agentProtocolCurrent = agentProtocolVersion
+	}
+	agentProtocolUpdateAvailable := agentProtocolCurrent != agentProtocolVersion
 
 	clientID := strings.TrimSpace(r.URL.Query().Get("client_id"))
 	if clientID == "" {
@@ -257,12 +295,24 @@ func (s *pluginServer) attachPersistentPaneQueue(w http.ResponseWriter, r *http.
 	defer broker.close()
 	go broker.runWriter()
 
+	queueReadyAt := time.Now()
 	if err := writeJSON(terminalQueueServerMessage{
-		Type:            "queue-ready",
-		ProtocolVersion: terminalQueueProtocolVersion,
-		State:           "open",
+		Type:                            "queue-ready",
+		ProtocolVersion:                 terminalQueueProtocolVersion,
+		State:                           "open",
+		ServerUnixMS:                    queueReadyAt.UnixMilli(),
+		ServerPrepareDurationMS:         queueReadyAt.Sub(queueAcceptedAt).Milliseconds(),
+		ServerAgentEnsureDurationMS:     agentEnsureFinishedAt.Sub(agentEnsureStartedAt).Milliseconds(),
+		ServerAgentValidationDurationMS: queueReadyAt.Sub(agentValidationStartedAt).Milliseconds(),
+		AgentProtocolVersion:            agentProtocolCurrent,
+		PreferredAgentProtocolVersion:   agentProtocolVersion,
+		AgentProtocolUpdateAvailable:    agentProtocolUpdateAvailable,
+		AgentProtocolUpdateRequired:     agentProtocolUpdateRequired,
 	}); err != nil {
 		return nil
+	}
+	if agentProtocolUpdateRequired {
+		return holdTerminalQueueForProtocolUpdate(conn, writeJSON)
 	}
 
 	_ = conn.SetReadDeadline(time.Now().Add(websocketReadTimeout))
@@ -318,6 +368,27 @@ func (s *pluginServer) attachPersistentPaneQueue(w http.ResponseWriter, r *http.
 				broker.writePaneError(message.PaneID, message.StreamID, message.ChannelGeneration, err)
 			}
 		case "queue-ping":
+			_ = writeJSON(terminalQueueServerMessage{
+				Type:            "queue-pong",
+				ProtocolVersion: terminalQueueProtocolVersion,
+			})
+		}
+	}
+}
+
+func holdTerminalQueueForProtocolUpdate(conn *websocket.Conn, writeJSON func(any) error) error {
+	_ = conn.SetReadDeadline(time.Now().Add(websocketReadTimeout))
+	for {
+		messageType, payload, err := conn.ReadMessage()
+		if err != nil {
+			return nil
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(websocketReadTimeout))
+		if messageType != websocket.TextMessage {
+			continue
+		}
+		var message terminalQueueClientMessage
+		if json.Unmarshal(payload, &message) == nil && strings.TrimSpace(message.Type) == "queue-ping" {
 			_ = writeJSON(terminalQueueServerMessage{
 				Type:            "queue-pong",
 				ProtocolVersion: terminalQueueProtocolVersion,
@@ -563,6 +634,7 @@ func validateTerminalQueueSubscription(subscription terminalQueueSubscription) (
 }
 
 func (b *terminalQueueBroker) replaceSubscriptions(subscriptions []terminalQueueSubscription, terminalScrollback int) error {
+	subscriptionsReceivedAt := time.Now()
 	maxSubscriptions := b.maxSubscriptions
 	if maxSubscriptions <= 0 {
 		maxSubscriptions = terminalQueueMaxSubscriptions
@@ -605,12 +677,19 @@ func (b *terminalQueueBroker) replaceSubscriptions(subscriptions []terminalQueue
 		stream.stop()
 	}
 
-	for _, paneID := range desiredOrder {
+	for subscriptionIndex, paneID := range desiredOrder {
 		want, exists := desired[paneID]
 		if !exists {
 			continue
 		}
-		stream, err := b.startPaneStream(want.subscription, want.syncRequest, terminalScrollback)
+		stream, err := b.startPaneStream(
+			want.subscription,
+			want.syncRequest,
+			terminalScrollback,
+			subscriptionsReceivedAt,
+			subscriptionIndex,
+			len(desiredOrder),
+		)
 		if err != nil {
 			b.writePaneError(want.subscription.PaneID, want.subscription.StreamID, want.subscription.ChannelGeneration, err)
 			continue
@@ -632,7 +711,15 @@ func (b *terminalQueueBroker) replaceSubscriptions(subscriptions []terminalQueue
 	return nil
 }
 
-func (b *terminalQueueBroker) startPaneStream(subscription terminalQueueSubscription, syncRequest historySyncRequest, terminalScrollback int) (*terminalQueuePaneStream, error) {
+func (b *terminalQueueBroker) startPaneStream(
+	subscription terminalQueueSubscription,
+	syncRequest historySyncRequest,
+	terminalScrollback int,
+	subscriptionsReceivedAt time.Time,
+	subscriptionIndex int,
+	subscriptionCount int,
+) (*terminalQueuePaneStream, error) {
+	processStartRequestedAt := time.Now()
 	streamCtx, cancel := context.WithCancel(b.ctx)
 	command := exec.CommandContext(streamCtx, lightosctlPath, persistentAgentAttachCommandArgs(
 		b.scope,
@@ -692,7 +779,17 @@ func (b *terminalQueueBroker) startPaneStream(subscription terminalQueueSubscrip
 			_ = stream.writeAgentFrame(agentFrameResize, payload)
 		}
 	}
-	stream.enqueueControl(map[string]any{"type": "agent-preparing"})
+	processStartedAt := time.Now()
+	stream.enqueueControl(map[string]any{
+		"type":                                "logical-attach-start",
+		"server_unix_ms":                      processStartedAt.UnixMilli(),
+		"queue_subscription_received_unix_ms": subscriptionsReceivedAt.UnixMilli(),
+		"queue_wait_duration_ms":              processStartRequestedAt.Sub(subscriptionsReceivedAt).Milliseconds(),
+		"process_start_duration_ms":           processStartedAt.Sub(processStartRequestedAt).Milliseconds(),
+		"subscription_index":                  subscriptionIndex + 1,
+		"subscription_count":                  subscriptionCount,
+	})
+	stream.enqueueControl(map[string]any{"type": "agent-preparing", "server_unix_ms": processStartedAt.UnixMilli()})
 	return stream, nil
 }
 

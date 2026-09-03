@@ -5,6 +5,7 @@ import { createAppDOMRegistry } from "../runtime/static/app/index.js";
 
 const ids = [
   "tabs", "newTab", "mobileActiveTabTitle", "terminalArea", "emptyState", "emptyStateAction",
+  "agentProtocolUpdateNotice",
   "startupErrorPanel", "startupErrorText", "networkBanner", "toast",
   "dialogBackdrop", "dialogPanel", "dialogTitle", "dialogMessage", "dialogInput", "dialogCancel", "dialogOK",
   "mobileShortcuts", "mobileCloseConfirmSheet", "mobileCloseConfirmScrim", "mobileCloseConfirmHandle",
@@ -36,6 +37,7 @@ test("DOM registry groups and freezes page references", () => {
   assert.equal(registry.dialog.ok.id, "dialogOK");
   assert.equal(registry.mobile.closeConfirmSheet.id, "mobileCloseConfirmSheet");
   assert.equal(registry.startup.toast.id, "toast");
+  assert.equal(registry.agentProtocolUpdate.notice.id, "agentProtocolUpdateNotice");
   assert.equal(Object.isFrozen(registry), true);
   assert.equal(Object.isFrozen(registry.workspace), true);
   assert.equal(harness.requested.length, ids.length);

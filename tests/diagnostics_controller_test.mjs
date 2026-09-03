@@ -68,6 +68,7 @@ const diagnosticElementIDs = [
   "debugLogClear",
   "initializationPerformancePanel",
   "initializationPerformanceStatus",
+  "initializationPerformanceCopy",
   "initializationPerformanceTotal",
   "initializationPerformanceList",
   "performanceTaskMeter",
@@ -159,6 +160,7 @@ test("diagnostics owns debug resources and rejects a late network monitor load a
   let resolveNetworkModule;
   let monitorCreations = 0;
   let debugModeChanges = 0;
+  const copiedInitializationData = [];
   const networkModulePromise = new Promise((resolve) => {
     resolveNetworkModule = resolve;
   });
@@ -169,6 +171,10 @@ test("diagnostics owns debug resources and rejects a late network monitor load a
     networkModuleLoader: () => networkModulePromise,
     onDebugModeChange: () => {
       debugModeChanges += 1;
+    },
+    copyText: async (text) => {
+      copiedInitializationData.push(text);
+      return true;
     },
     now: () => 20,
   });
@@ -186,6 +192,19 @@ test("diagnostics owns debug resources and rejects a late network monitor load a
   initializationToggle.dispatch("change");
   assert.equal(harness.storageValues.get("webshell.initializationPerformance"), "true");
   assert.equal(harness.elements.get("initializationPerformancePanel")?.hidden, false);
+  controller.recordTerminalSessionEvent({ id: "pane-init" }, "presentation_commit_complete", {
+    reason: "render_commit",
+    renderReady: true,
+    resizeAckPending: false,
+    liveCanvas: { width: 390, height: 713 },
+  });
+  harness.elements.get("initializationPerformanceCopy").dispatch("click");
+  await Promise.resolve();
+  assert.equal(copiedInitializationData.length, 1);
+  assert.match(copiedInitializationData[0], /初始化性能/);
+  assert.match(copiedInitializationData[0], /终端渲染完成/);
+  assert.match(copiedInitializationData[0], /"reason":"render_commit"/);
+  assert.match(copiedInitializationData[0], /"liveCanvas":\{"width":390/);
   initializationToggle.checked = false;
   initializationToggle.dispatch("change");
 

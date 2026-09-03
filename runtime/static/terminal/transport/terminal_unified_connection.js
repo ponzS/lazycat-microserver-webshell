@@ -15,6 +15,7 @@ export const createTerminalUnifiedConnection = ({
   onProtocolError = () => {},
   onPhysicalError = () => {},
   onPhysicalClose = () => {},
+  onPhysicalEvent = () => {},
 } = {}) => {
   if (!url || typeof WebSocketImpl !== "function") {
     throw new TypeError("terminal unified connection requires a URL and WebSocket implementation");
@@ -29,6 +30,7 @@ export const createTerminalUnifiedConnection = ({
     onProtocolError,
     onPhysicalError,
     onPhysicalClose,
+    onPhysicalEvent,
     keepAliveWhenEmpty: true,
   });
   return {

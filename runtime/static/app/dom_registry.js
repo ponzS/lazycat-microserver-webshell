@@ -23,6 +23,9 @@ export function createAppDOMRegistry({ documentObject = globalThis.document } = 
   }
   return Object.freeze({
     workspace,
+    agentProtocolUpdate: freezeGroup({
+      notice: get("agentProtocolUpdateNotice"),
+    }),
     startup: freezeGroup({
       errorPanel: get("startupErrorPanel"),
       errorText: get("startupErrorText"),

@@ -9,6 +9,10 @@ const socketOpen = 1;
 const socketClosing = 2;
 const socketClosed = 3;
 
+let nextPhysicalConnectionID = 0;
+
+const defaultNow = () => globalThis.performance?.now?.() || Date.now();
+
 const normalizePriority = (value) => Math.max(0, Math.min(3, Math.floor(Number(value) || 0)));
 
 const normalizeIdentity = (descriptor = {}) => {
@@ -137,7 +141,9 @@ export const createTerminalQueueConnection = ({
   onProtocolError = () => {},
   onPhysicalError = () => {},
   onPhysicalClose = () => {},
+  onPhysicalEvent = () => {},
   keepAliveWhenEmpty = false,
+  now = defaultNow,
 } = {}) => {
   if (!url || typeof WebSocketImpl !== "function") {
     throw new TypeError("terminal queue connection requires a URL and WebSocket implementation");
@@ -145,11 +151,19 @@ export const createTerminalQueueConnection = ({
 
   const logicalStreams = new Map();
   let physicalSocket = null;
+  let physicalConnectionID = "";
+  let physicalCreatedAt = 0;
+  let physicalOpenLatencyMs = 0;
   let physicalReadyState = socketClosed;
   let disposed = false;
   let subscriptionUpdatePending = false;
+  let subscriptionRevision = 0;
   let physicalErrorDispatched = false;
   let physicalLastPongAt = 0;
+  let agentProtocolVersion = "";
+  let preferredAgentProtocolVersion = "";
+  let agentProtocolUpdateAvailable = false;
+  let agentProtocolUpdateRequired = false;
   let resolveClosed;
   const closed = new Promise((resolve) => { resolveClosed = resolve; });
   let closedResolved = false;
@@ -165,9 +179,16 @@ export const createTerminalQueueConnection = ({
 
   const snapshot = () => ({
     physicalReadyState,
+    physicalConnectionID,
+    physicalCreatedAt,
+    physicalOpenLatencyMs,
     logicalCount: logicalStreams.size,
     paneIDs: Array.from(logicalStreams.values(), (entry) => entry.identity.paneID),
     physicalLastPongAt,
+    agentProtocolVersion,
+    preferredAgentProtocolVersion,
+    agentProtocolUpdateAvailable,
+    agentProtocolUpdateRequired,
     physicalRole: "queue",
   });
   const emitState = () => onStateChange(snapshot());
@@ -201,6 +222,13 @@ export const createTerminalQueueConnection = ({
       subscriptionUpdatePending = true;
       return false;
     }
+    subscriptionRevision += 1;
+    onPhysicalEvent({
+      type: "logical_subscriptions_sent",
+      physicalConnectionID,
+      logicalCount: entries.length,
+      subscriptionRevision,
+    });
     for (const entry of entries) {
       const nextPriority = normalizePriority(entry.subscription.priority);
       if (entry.lastSentPriority === null) {
@@ -387,6 +415,18 @@ export const createTerminalQueueConnection = ({
       return;
     }
     physicalReadyState = socketConnecting;
+    physicalConnectionID = `physical-${++nextPhysicalConnectionID}`;
+    physicalCreatedAt = Number(now()) || Date.now();
+    physicalOpenLatencyMs = 0;
+    agentProtocolVersion = "";
+    preferredAgentProtocolVersion = "";
+    agentProtocolUpdateAvailable = false;
+    agentProtocolUpdateRequired = false;
+    onPhysicalEvent({
+      type: "physical_websocket_create_start",
+      physicalConnectionID,
+      logicalCount: logicalStreams.size,
+    });
     const socket = new WebSocketImpl(String(url));
     physicalSocket = socket;
     socket.binaryType = "arraybuffer";
@@ -397,6 +437,13 @@ export const createTerminalQueueConnection = ({
       }
       physicalReadyState = socketOpen;
       physicalErrorDispatched = false;
+      physicalOpenLatencyMs = Math.max(0, (Number(now()) || Date.now()) - physicalCreatedAt);
+      onPhysicalEvent({
+        type: "physical_websocket_open",
+        physicalConnectionID,
+        physicalOpenLatencyMs,
+        logicalCount: logicalStreams.size,
+      });
       sendSubscriptions();
       for (const entry of logicalStreams.values()) {
         if (entry.readyState === socketConnecting) {
@@ -431,6 +478,12 @@ export const createTerminalQueueConnection = ({
         } else if (message.type === "queue-pong") {
           physicalLastPongAt = Date.now();
         } else if (message.type === "queue-state" && message.state === "agent-preparing") {
+          onPhysicalEvent({
+            type: "physical_server_agent_prepare_start",
+            physicalConnectionID,
+            logicalCount: logicalStreams.size,
+            serverUnixMs: Number(message.server_unix_ms || 0),
+          });
           for (const entry of logicalStreams.values()) {
             entry.listeners.dispatch("message", {
               type: "message",
@@ -441,6 +494,25 @@ export const createTerminalQueueConnection = ({
               target: entry.socket,
             });
           }
+        } else if (message.type === "queue-ready") {
+          agentProtocolVersion = String(message.agent_protocol_version || "").trim();
+          preferredAgentProtocolVersion = String(message.preferred_agent_protocol_version || "").trim();
+          agentProtocolUpdateAvailable = message.agent_protocol_update_available === true;
+          agentProtocolUpdateRequired = message.agent_protocol_update_required === true;
+          emitState();
+          onPhysicalEvent({
+            type: "physical_server_ready",
+            physicalConnectionID,
+            logicalCount: logicalStreams.size,
+            serverUnixMs: Number(message.server_unix_ms || 0),
+            serverPrepareDurationMs: Number(message.server_prepare_duration_ms || 0),
+            serverAgentEnsureDurationMs: Number(message.server_agent_ensure_duration_ms || 0),
+            serverAgentValidationDurationMs: Number(message.server_agent_validation_duration_ms || 0),
+            agentProtocolVersion,
+            preferredAgentProtocolVersion,
+            agentProtocolUpdateAvailable,
+            agentProtocolUpdateRequired,
+          });
         } else if (message.type === "queue-error") {
           const detail = String(message.payload?.message || message.message || "terminal queue connection failed");
           if (!message.payload || message.payload.retryable !== true) {

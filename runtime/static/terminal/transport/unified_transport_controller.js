@@ -34,6 +34,7 @@ export function createTerminalUnifiedTransportController({
   syncNetworkMonitor = noop,
   appendDebugWarning = noop,
   appendDebugError = noop,
+  onPhysicalEvent = noop,
   queueMicrotaskImpl = (callback) => queueMicrotask(callback),
   socketConnecting = 0,
   socketOpen = 1,
@@ -354,6 +355,10 @@ export function createTerminalUnifiedTransportController({
           handlePhysicalDisconnect(closedConnection, reason || "unified_websocket_closed");
         }
       },
+      onPhysicalEvent: (event) => onPhysicalEvent({
+        ...event,
+        targetName: normalizedTarget,
+      }),
       onProtocolError: (error, identity) => {
         appendDebugError(
           "统一终端协议错误",
@@ -386,15 +391,21 @@ export function createTerminalUnifiedTransportController({
     && targetName === String(value || "").trim()
   );
 
-  const snapshot = () => Object.freeze({
-    connection,
-    targetName,
-    physicalReadyState: connection?.snapshot?.().physicalReadyState ?? socketClosed,
-    closing: Boolean(closingPromise),
-    expectedCloseReason,
-    recoveryScheduled,
-    recoveryRunning,
-  });
+  const snapshot = () => {
+    const currentSnapshot = connection?.snapshot?.() || {};
+    return Object.freeze({
+      connection,
+      targetName,
+      physicalReadyState: currentSnapshot.physicalReadyState ?? socketClosed,
+      physicalConnectionID: String(currentSnapshot.physicalConnectionID || ""),
+      logicalCount: Number(currentSnapshot.logicalCount || 0),
+      logicalPaneIDs: Array.isArray(currentSnapshot.paneIDs) ? [...currentSnapshot.paneIDs] : [],
+      closing: Boolean(closingPromise),
+      expectedCloseReason,
+      recoveryScheduled,
+      recoveryRunning,
+    });
+  };
 
   const dispose = (reason = "page_disposed") => {
     if (disposed) {

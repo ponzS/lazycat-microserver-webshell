@@ -67,6 +67,23 @@ func isUnsupportedAgentProtocolError(err error) bool {
 	return errors.As(err, &protocolErr)
 }
 
+func unsupportedAgentProtocolVersion(err error) string {
+	var protocolErr *unsupportedAgentProtocolError
+	if !errors.As(err, &protocolErr) {
+		return ""
+	}
+	return strings.TrimSpace(protocolErr.version)
+}
+
+func isSupportedAgentProtocolVersion(version string) bool {
+	switch strings.TrimSpace(version) {
+	case agentProtocolV8, agentProtocolVersion:
+		return true
+	default:
+		return false
+	}
+}
+
 func isContainerUnavailableError(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "container does not exist")
 }
@@ -443,7 +460,7 @@ func parsePersistentAgentResponse(output []byte) (agentResponse, error) {
 		}
 		return response, errors.New(response.Error)
 	}
-	if response.Version != "" && response.Version != agentProtocolVersion {
+	if response.Version != "" && !isSupportedAgentProtocolVersion(response.Version) {
 		return agentResponse{}, &unsupportedAgentProtocolError{version: response.Version}
 	}
 	return response, nil
@@ -535,10 +552,8 @@ func ensurePersistentAgentOnce(ctx context.Context, scope agentScope) (string, e
 	trace.add("pre-start ping failed: %v", preStartPingErr)
 	rememberIncompatiblePersistentAgentNotice(scope, preStartPingErr)
 	if isUnsupportedAgentProtocolError(preStartPingErr) {
-		trace.add("confirmed incompatible active daemon; replacing socket owner")
-		if err := reconcilePersistentAgentDaemons(ctx, scope, true, trace); err != nil {
-			return "", trace.errorf("persistent webshell agent protocol replacement failed: %v", err)
-		}
+		trace.add("active daemon requires an explicit protocol update")
+		return username, preStartPingErr
 	}
 	if err := startPersistentAgent(ctx, scope, username, trace); err != nil {
 		trace.add("start command failed: %v", err)
@@ -613,7 +628,7 @@ func rememberIncompatiblePersistentAgentNotice(scope agentScope, err error) {
 	if !isUnsupportedAgentProtocolError(err) {
 		return
 	}
-	rememberPersistentAgentNotice(scope, "WebShell agent 协议已更新，旧终端会话无法复用，已创建新的终端会话。")
+	rememberPersistentAgentNotice(scope, "检测到终端服务协议待更新，请在终端右上角查看详情。")
 }
 
 func ensureAgentBinaryInstalled(ctx context.Context, scope agentScope, trace *persistentAgentStartupTrace) (string, error) {
@@ -812,14 +827,19 @@ func pingPersistentAgent(ctx context.Context, scope agentScope) bool {
 	return pingPersistentAgentError(ctx, scope) == nil
 }
 
-func pingPersistentAgentError(ctx context.Context, scope agentScope) error {
+func pingPersistentAgentResponse(ctx context.Context, scope agentScope) (agentResponse, error) {
 	scope = normalizeAgentScope(scope.Selector, scope.AccountID)
 	startedAt := time.Now()
 	log.Printf("persistent agent ping start: scope=%s", scope.Selector)
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	_, err := runPersistentAgentRequest(ctx, scope, agentRequest{Type: "ping", Selector: scope.Selector, AccountID: scope.AccountID})
+	response, err := runPersistentAgentRequest(ctx, scope, agentRequest{Type: "ping", Selector: scope.Selector, AccountID: scope.AccountID})
 	log.Printf("persistent agent ping complete: scope=%s duration_ms=%d success=%t", scope.Selector, time.Since(startedAt).Milliseconds(), err == nil)
+	return response, err
+}
+
+func pingPersistentAgentError(ctx context.Context, scope agentScope) error {
+	_, err := pingPersistentAgentResponse(ctx, scope)
 	return err
 }
 

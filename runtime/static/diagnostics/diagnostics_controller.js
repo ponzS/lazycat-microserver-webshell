@@ -111,14 +111,14 @@ export function createDiagnosticsController({
   );
   const appendError = (message, details = "") => appendLog("error", message, details);
   const appendWarning = (message, details = "") => appendLog("warn", message, details);
-  const appendStartupTrace = (event, details = "", { dedupeKey = event } = {}) => {
+  const appendStartupTrace = (event, details = "", { dedupeKey = event, diagnosticDetails = {} } = {}) => {
     const moduleStartedAt = startupDiagnostics?.getMetric?.("moduleStartedAt") || 0;
     const elapsed = Math.max(0, Math.round(now() - moduleStartedAt));
     appendLog("info", `[startup +${elapsed}ms] ${event}`, details, {
       dedupeKey: `startup:${dedupeKey}`,
       retainWhenDisabled: true,
     });
-    initializationPerformance.recordStartupEvent(event);
+    initializationPerformance.recordStartupEvent(event, diagnosticDetails);
   };
   const detachStartupTrace = startupDiagnostics?.setTraceSink?.(appendStartupTrace) || (() => {});
   const terminalTimeline = createTerminalTimeline({
@@ -183,6 +183,17 @@ export function createDiagnosticsController({
       onPerformanceMeterChange: () => updateFlag("performanceMeter", view.elements.settingsPerformanceMeterToggle),
       onPerformanceTasksChange: () => updateFlag("performanceTasks", view.elements.settingsPerformanceTasksToggle),
       onInitializationPerformanceChange: () => updateFlag("initializationPerformance", view.elements.settingsInitializationPerformanceToggle),
+      onInitializationPerformanceCopy: async () => {
+        const text = view.initializationPerformanceClipboardText(initializationPerformance.snapshot());
+        try {
+          if (await copyText(text)) {
+            showToast("初始化性能数据已复制。");
+            return;
+          }
+        } catch (error) {
+        }
+        showToast("复制初始化性能数据失败。");
+      },
       onDebugLogCopy: async () => {
         const text = debugLog.clipboardText();
         if (!text) {
@@ -244,7 +255,7 @@ export function createDiagnosticsController({
     recordTerminalRuntimeMetric,
     recordTerminalSessionEvent(session, event, details = {}) {
       const result = terminalTimeline.record(session, event, details);
-      initializationPerformance.recordTerminalEvent(session, event);
+      initializationPerformance.recordTerminalEvent(session, event, details);
       return result;
     },
     recordRuntimeEvent,

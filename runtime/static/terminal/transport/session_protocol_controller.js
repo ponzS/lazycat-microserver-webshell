@@ -126,7 +126,7 @@ export function createTerminalSessionProtocolController({
     session.startupTraceActive = true;
     session.startupTraceStartedAt = globalThis.performance?.now?.() || Date.now();
     appendStartupTrace(
-      "终端连接流程开始",
+      usesMultiplexedTransport ? "逻辑层 socket 连接流程开始" : "终端连接流程开始",
       `pane=${session.id} channel=${channel} channelGeneration=${channelGeneration} connectionEpoch=${connectionEpoch} allowHidden=${allowHidden} hidden=${document.hidden}`,
       { dedupeKey: `connect-start:${session.id}:${session.terminalReplayGeneration + 1}:${channel}` },
     );
@@ -277,7 +277,7 @@ export function createTerminalSessionProtocolController({
     });
     recordTerminalSessionEvent(session, "socket_connect", {
       channel,
-      streamID: session.unifiedStreamID,
+      logicalStreamID: session.unifiedStreamID,
       channelGeneration,
       connectionEpoch,
       allowHidden,
@@ -328,6 +328,20 @@ export function createTerminalSessionProtocolController({
       } catch (error) {
       }
       return false;
+    }
+    if (usesMultiplexedTransport) {
+      appendStartupTrace(
+        "逻辑层 socket 创建",
+        `pane=${session.id} logicalStreamID=${String(session.unifiedStreamID || "")} channelGeneration=${channelGeneration}`,
+        {
+          dedupeKey: `logical-socket-create:${session.id}:${channelGeneration}`,
+          diagnosticDetails: {
+            logicalStreamID: session.unifiedStreamID,
+            channelGeneration,
+            connectionEpoch,
+          },
+        },
+      );
     }
     session.socket = currentSocket;
     syncTerminalNetworkMonitorSockets();
@@ -481,14 +495,36 @@ export function createTerminalSessionProtocolController({
         terminalTransportRuntime?.notifyDirectOpen(session, leaseID);
       }
       socketDebug.openedAt = Date.now();
+      const unifiedSnapshot = usesMultiplexedTransport
+        ? terminalUnifiedTransport?.snapshot?.()
+        : null;
       recordTerminalSessionEvent(session, "socket_open", {
         channel,
         channelGeneration,
         connectionEpoch,
         openLatencyMs: Math.max(0, Date.now() - Number(socketDebug.connectStartedAt || Date.now())),
         reconnectAttempts: Number(session.reconnectAttempts || 0),
+        physicalConnectionID: String(unifiedSnapshot?.physicalConnectionID || ""),
+        physicalReadyState: Number(unifiedSnapshot?.physicalReadyState ?? -1),
+        logicalStreamID: String(session.unifiedStreamID || ""),
+        logicalCount: Number(unifiedSnapshot?.logicalCount || 0),
       });
-      appendStartupTrace("终端 WebSocket 已打开", `pane=${session.id} channel=${channel}`, { dedupeKey: `socket-open:${session.id}:${session.terminalReplayGeneration}:${channel}` });
+      appendStartupTrace(
+        usesMultiplexedTransport ? "逻辑层 socket 已打开" : "终端 WebSocket 已打开",
+        `pane=${session.id} channel=${channel}`,
+        {
+          dedupeKey: `socket-open:${session.id}:${session.terminalReplayGeneration}:${channel}`,
+          diagnosticDetails: {
+            channel,
+            channelGeneration,
+            connectionEpoch,
+            physicalConnectionID: String(unifiedSnapshot?.physicalConnectionID || ""),
+            physicalReadyState: Number(unifiedSnapshot?.physicalReadyState ?? -1),
+            logicalStreamID: String(session.unifiedStreamID || ""),
+            logicalCount: Number(unifiedSnapshot?.logicalCount || 0),
+          },
+        },
+      );
       console.info("[client-terminal] websocket open", {
         name: session.name,
         pane: session.id,
@@ -537,6 +573,8 @@ export function createTerminalSessionProtocolController({
               || message.type === "history-replay-complete"
               || message.type === "process-exit"
               || message.type === "agent-preparing"
+              || message.type === "logical-attach-start"
+              || message.type === "agent-attach-ready"
             ) {
               console.info("[client-terminal] websocket control message", {
                 name: session.name,
@@ -587,6 +625,32 @@ export function createTerminalSessionProtocolController({
                   return;
                 }
                 terminalResize.handleError(session, message);
+                return;
+              case "logical-attach-start":
+                recordTerminalSessionEvent(session, "logical_attach_start", {
+                  channel,
+                  channelGeneration,
+                  connectionEpoch,
+                  serverUnixMs: Number(message.server_unix_ms || 0),
+                  queueSubscriptionReceivedUnixMs: Number(message.queue_subscription_received_unix_ms || 0),
+                  queueWaitDurationMs: Number(message.queue_wait_duration_ms || 0),
+                  processStartDurationMs: Number(message.process_start_duration_ms || 0),
+                  subscriptionIndex: Number(message.subscription_index || 0),
+                  subscriptionCount: Number(message.subscription_count || 0),
+                });
+                return;
+              case "agent-attach-ready":
+                recordTerminalSessionEvent(session, "agent_attach_ready", {
+                  channel,
+                  channelGeneration,
+                  connectionEpoch,
+                  serverUnixMs: Number(message.server_unix_ms || 0),
+                  agentAttachStartedUnixMs: Number(message.agent_attach_started_unix_ms || 0),
+                  agentWorkspaceReadyDurationMs: Number(message.agent_workspace_ready_duration_ms || 0),
+                  agentPaneResolveDurationMs: Number(message.agent_pane_resolve_duration_ms || 0),
+                  agentHistorySnapshotDurationMs: Number(message.agent_history_snapshot_duration_ms || 0),
+                  agentAttachPrepareDurationMs: Number(message.agent_attach_prepare_duration_ms || 0),
+                });
                 return;
               case "history-replay-start":
                 if (!validateReplayMessage(message)) {

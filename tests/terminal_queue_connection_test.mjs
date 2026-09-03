@@ -135,9 +135,11 @@ test("physical close notifies the physical owner before logical streams", async 
   assert.deepEqual(events, ["physical", "logical"]);
 });
 test("unified connection multiplexes three live panes over one physical socket", async () => {
+  const physicalEvents = [];
   const connection = createTerminalUnifiedConnection({
     url: "/ws?mode=unified&transport_role=unified",
     WebSocketImpl: FakeWebSocket,
+    onPhysicalEvent: (event) => physicalEvents.push(event),
   });
   const sockets = [
     connection.open(subscription("pane-1")),
@@ -147,10 +149,47 @@ test("unified connection multiplexes three live panes over one physical socket",
   assert.equal(FakeWebSocket.instances.length, 1);
   assert.equal(connection.snapshot().logicalCount, 3);
   assert.equal(connection.snapshot().physicalRole, "unified");
+  const physicalConnectionID = connection.snapshot().physicalConnectionID;
+  assert.match(physicalConnectionID, /^physical-\d+$/);
   assert.equal(terminalUnifiedTransportProtocolVersion, terminalQueueProtocolVersion);
 
   const physical = FakeWebSocket.instances[0];
   physical.emit("open");
+  assert.equal(connection.snapshot().physicalConnectionID, physicalConnectionID);
+  assert.deepEqual(physicalEvents.map((event) => event.type), [
+    "physical_websocket_create_start",
+    "physical_websocket_open",
+    "logical_subscriptions_sent",
+  ]);
+  assert.equal(physicalEvents[0].physicalConnectionID, physicalEvents[1].physicalConnectionID);
+  assert.equal(physicalEvents[1].logicalCount, 3);
+  assert.equal(physicalEvents[2].subscriptionRevision, 1);
+  physical.emit("message", {
+    data: JSON.stringify({ type: "queue-state", state: "agent-preparing", server_unix_ms: 1700000000000 }),
+  });
+  physical.emit("message", {
+    data: JSON.stringify({
+      type: "queue-ready",
+      state: "open",
+      server_unix_ms: 1700000000042,
+      server_prepare_duration_ms: 42,
+      server_agent_ensure_duration_ms: 30,
+      server_agent_validation_duration_ms: 12,
+      agent_protocol_version: "lcmd-webshell-agent-v8",
+      preferred_agent_protocol_version: "lcmd-webshell-agent-v9",
+      agent_protocol_update_available: true,
+      agent_protocol_update_required: false,
+    }),
+  });
+  assert.deepEqual(physicalEvents.slice(-2).map((event) => event.type), [
+    "physical_server_agent_prepare_start",
+    "physical_server_ready",
+  ]);
+  assert.equal(physicalEvents.at(-1).serverPrepareDurationMs, 42);
+  assert.equal(physicalEvents.at(-1).agentProtocolVersion, "lcmd-webshell-agent-v8");
+  assert.equal(physicalEvents.at(-1).preferredAgentProtocolVersion, "lcmd-webshell-agent-v9");
+  assert.equal(physicalEvents.at(-1).agentProtocolUpdateAvailable, true);
+  assert.equal(connection.snapshot().agentProtocolUpdateAvailable, true);
   const replace = physical.sent.find((payload) => JSON.parse(payload).type === "replace-subscriptions");
   assert.equal(JSON.parse(replace).subscriptions.length, 3);
 
