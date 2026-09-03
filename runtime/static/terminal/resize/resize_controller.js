@@ -94,6 +94,84 @@ export function createTerminalResizeController({
   const canvasMatchesExpectedSize = (session, dimensions = size(session)) => (
     terminalCanvasMatchesExpectedSize(session, dimensions, { getPixelSize, isCanvasElement })
   );
+  const visualDetails = (session, target = null) => {
+    const hostRect = session?.terminalHost?.getBoundingClientRect?.();
+    const describeCanvas = (canvas) => {
+      if (!canvas || !isCanvasElement(canvas)) {
+        return { width: 0, height: 0, cssWidth: 0, cssHeight: 0, styleWidth: "", styleHeight: "", hidden: null };
+      }
+      const rect = canvas?.getBoundingClientRect?.();
+      const computed = windowObject?.getComputedStyle?.(canvas);
+      return {
+        width: Number(canvas.width || 0),
+        height: Number(canvas.height || 0),
+        cssWidth: Number(rect?.width || 0),
+        cssHeight: Number(rect?.height || 0),
+        styleWidth: String(canvas.style?.width || ""),
+        styleHeight: String(canvas.style?.height || ""),
+        hidden: canvas.hidden === true,
+        display: String(computed?.display || ""),
+        visibility: String(computed?.visibility || ""),
+        opacity: String(computed?.opacity || ""),
+        transform: String(computed?.transform || ""),
+      };
+    };
+    const live = session?.term?.canvas || session?.term?.renderer?.getCanvas?.();
+    const local = size(session);
+    return {
+      viewport: {
+        innerWidth: Number(windowObject?.innerWidth || 0),
+        innerHeight: Number(windowObject?.innerHeight || 0),
+        devicePixelRatio: Number(windowObject?.devicePixelRatio || 1),
+        visualWidth: Number(windowObject?.visualViewport?.width || 0),
+        visualHeight: Number(windowObject?.visualViewport?.height || 0),
+        visualScale: Number(windowObject?.visualViewport?.scale || 0),
+      },
+      host: {
+        cssWidth: Number(hostRect?.width || 0),
+        cssHeight: Number(hostRect?.height || 0),
+      },
+      localSize: local,
+      terminalSize: {
+        cols: Number(session?.term?.cols || 0),
+        rows: Number(session?.term?.rows || 0),
+      },
+      serverSize: {
+        cols: Number(session?.serverCols || 0),
+        rows: Number(session?.serverRows || 0),
+        pixelWidth: Number(session?.serverPixelWidth || 0),
+        pixelHeight: Number(session?.serverPixelHeight || 0),
+      },
+      requestedSize: {
+        cols: Number(session?.requestedCols || 0),
+        rows: Number(session?.requestedRows || 0),
+        pixelWidth: Number(session?.requestedPixelWidth || 0),
+        pixelHeight: Number(session?.requestedPixelHeight || 0),
+      },
+      targetSize: target ? {
+        cols: Number(target.cols || 0),
+        rows: Number(target.rows || 0),
+        pixelWidth: Number(target.pixelWidth || 0),
+        pixelHeight: Number(target.pixelHeight || 0),
+      } : null,
+      resizeEpochs: {
+        requested: String(session?.requestedResizeEpoch || ""),
+        applied: String(session?.appliedResizeEpoch || ""),
+        presented: String(session?.presentedResizeEpoch || ""),
+      },
+      flags: {
+        sizeClaimRequired: session?.sizeClaimRequired === true,
+        sizeClaimed: session?.sizeClaimed === true,
+        resizeAckPending: session?.resizeAckPending === true,
+        resizeFenceActive: session?.resizeFenceActive === true,
+        resizePresentationHold: session?.resizePresentationHold === true,
+        terminalFrameHeld: session?.terminalFrameHeld === true,
+        renderReady: session?.renderReady === true,
+      },
+      liveCanvas: describeCanvas(live),
+      holdCanvas: describeCanvas(session?.terminalFrameHold),
+    };
+  };
   const viewport = viewportFactory({
     captureViewport,
     cancelFrame: (frame) => windowObject.cancelAnimationFrame(frame),
@@ -535,6 +613,8 @@ export function createTerminalResizeController({
       requestedResizeEpoch: resizeEpoch,
       cols,
       rows,
+      claim,
+      ...visualDetails(session, target),
     });
     trace(session, "send_size_sent", {
       claim,
@@ -586,7 +666,10 @@ export function createTerminalResizeController({
     session.sizeClaimRequired = true;
     session.sizeClaimed = false;
     session.requestedResizeClaim = false;
-    recordEvent(session, "resize_owner_released", { appliedResizeEpoch: epoch });
+    recordEvent(session, "resize_owner_released", {
+      appliedResizeEpoch: epoch,
+      ...visualDetails(session),
+    });
     if (!isVisible(session)) {
       return true;
     }
@@ -670,6 +753,11 @@ export function createTerminalResizeController({
       appliedResizeEpoch: epoch,
       cols: session.serverCols,
       rows: session.serverRows,
+      pixelWidth: session.serverPixelWidth,
+      pixelHeight: session.serverPixelHeight,
+      requestWasClaim,
+      remoteEpoch: Boolean(requestedEpoch && BigInt(epoch) > BigInt(requestedEpoch)),
+      ...visualDetails(session, ackDimensions),
     });
     const resizeFenceTarget = session.resizeFenceTarget;
     const resizeFenceMatchesAck = Boolean(
@@ -996,6 +1084,15 @@ export function createTerminalResizeController({
         hasPresentedFrame: session.hasPresentedFrame === true,
         measuredFitGeneration: Number(session.measuredFitGeneration || 0),
         presentedFitGeneration: Number(session.presentedFitGeneration || 0),
+      });
+      recordEvent(session, "resize_visual_measure", {
+        fittedCols: fittedDimensions.cols,
+        fittedRows: fittedDimensions.rows,
+        canvasNeedsResize,
+        dimensionsWillChange,
+        stablePresentation,
+        canUseStableGeometryFastPath,
+        ...visualDetails(session, targetDimensions),
       });
       if (canUseStableGeometryFastPath) {
         let sentTerminalSize = false;
@@ -1509,6 +1606,10 @@ export function createTerminalResizeController({
       serverRows: session.serverRows,
       serverPixelWidth: session.serverPixelWidth,
       serverPixelHeight: session.serverPixelHeight,
+    });
+    recordEvent(session, "resize_server_geometry_observed", {
+      ...visualDetails(session),
+      source: "workspace_pane_state",
     });
     return true;
   };

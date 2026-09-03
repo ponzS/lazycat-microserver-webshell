@@ -163,6 +163,7 @@ export function createTerminalPresentationController({
         };
       }
       const rect = canvas.getBoundingClientRect?.();
+      const computed = windowObject?.getComputedStyle?.(canvas);
       return {
         width: Number(canvas.width || 0),
         height: Number(canvas.height || 0),
@@ -171,14 +172,59 @@ export function createTerminalPresentationController({
         styleWidth: String(canvas.style?.width || ""),
         styleHeight: String(canvas.style?.height || ""),
         hidden: canvas.hidden === true,
+        display: String(computed?.display || ""),
+        visibility: String(computed?.visibility || ""),
+        opacity: String(computed?.opacity || ""),
+        transform: String(computed?.transform || ""),
       };
     };
     const renderer = session?.term?.renderer;
+    const live = view.canvasForSession(session);
+    const hold = session?.terminalFrameHold;
+    const hostRect = session?.terminalHost?.getBoundingClientRect?.();
+    const localCanvas = live && view.isCanvasElement(live)
+      ? { width: Number(live.width || 0), height: Number(live.height || 0) }
+      : { width: 0, height: 0 };
     return {
       windowDevicePixelRatio: Number(windowObject?.devicePixelRatio || 1),
       rendererDevicePixelRatio: Number(renderer?.devicePixelRatio || 0),
+      visualViewport: {
+        width: Number(windowObject?.visualViewport?.width || 0),
+        height: Number(windowObject?.visualViewport?.height || 0),
+        scale: Number(windowObject?.visualViewport?.scale || 0),
+        offsetLeft: Number(windowObject?.visualViewport?.offsetLeft || 0),
+        offsetTop: Number(windowObject?.visualViewport?.offsetTop || 0),
+      },
+      terminal: {
+        cols: Number(session?.term?.cols || 0),
+        rows: Number(session?.term?.rows || 0),
+        fontSize: Number(session?.term?.options?.fontSize || renderer?.fontSize || 0),
+      },
+      serverGeometry: {
+        cols: Number(session?.serverCols || 0),
+        rows: Number(session?.serverRows || 0),
+        pixelWidth: Number(session?.serverPixelWidth || 0),
+        pixelHeight: Number(session?.serverPixelHeight || 0),
+      },
+      requestedGeometry: {
+        cols: Number(session?.requestedCols || 0),
+        rows: Number(session?.requestedRows || 0),
+        pixelWidth: Number(session?.requestedPixelWidth || 0),
+        pixelHeight: Number(session?.requestedPixelHeight || 0),
+      },
+      resizeEpochs: {
+        requested: String(session?.requestedResizeEpoch || ""),
+        applied: String(session?.appliedResizeEpoch || ""),
+        presented: String(session?.presentedResizeEpoch || ""),
+      },
+      host: {
+        cssWidth: Number(hostRect?.width || 0),
+        cssHeight: Number(hostRect?.height || 0),
+      },
+      localCanvas,
       liveCanvas: describe(view.canvasForSession(session)),
-      holdCanvas: describe(session?.terminalFrameHold),
+      holdCanvas: describe(hold),
+      holdIdentity: session?.terminalFrameHoldIdentity || null,
       terminalFrameHeld: session?.terminalFrameHeld === true,
       resizePresentationHold: session?.resizePresentationHold === true,
     };
@@ -224,6 +270,7 @@ export function createTerminalPresentationController({
     session.terminalFrameHeld = true;
     session.terminalFrameHoldIdentity = frameIdentity(session);
     view.syncState(session);
+    recordEvent(session, "presentation_hold_capture", canvasDetails(session));
     return true;
   };
 
@@ -236,6 +283,10 @@ export function createTerminalPresentationController({
     const released = view.releaseFrame(session);
     session.terminalFrameHeld = false;
     view.syncState(session);
+    recordEvent(session, "presentation_hold_release", {
+      released,
+      ...canvasDetails(session),
+    });
     return released;
   };
 
@@ -361,6 +412,11 @@ export function createTerminalPresentationController({
     }
     session.presentationCommitPending = false;
     session.resizePresentationHold = false;
+    recordEvent(session, "presentation_hold_cancel", {
+      restoreReady,
+      releaseFrame,
+      ...canvasDetails(session),
+    });
     if (releaseFrame) {
       releaseHold(session);
     }
