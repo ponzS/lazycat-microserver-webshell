@@ -125,8 +125,13 @@ func TestParsePersistentAgentResponseRejectsEmptyOutput(t *testing.T) {
 	}
 }
 
-func TestParsePersistentAgentResponseClassifiesProtocolMismatch(t *testing.T) {
-	_, err := parsePersistentAgentResponse([]byte(`{"ok":true,"version":"lcmd-webshell-agent-v6"}`))
+func TestParsePersistentAgentResponseSupportsPreviousProtocol(t *testing.T) {
+	response, err := parsePersistentAgentResponse([]byte(`{"ok":true,"version":"lcmd-webshell-agent-v8"}`))
+	if err != nil || response.Version != agentProtocolV8 {
+		t.Fatalf("previous protocol response = %+v, err = %v", response, err)
+	}
+
+	_, err = parsePersistentAgentResponse([]byte(`{"ok":true,"version":"lcmd-webshell-agent-v6"}`))
 	if !isUnsupportedAgentProtocolError(err) {
 		t.Fatalf("protocol mismatch error = %v, want typed unsupported protocol error", err)
 	}
@@ -236,11 +241,15 @@ func TestEnsurePersistentAgentPingsBeforeInstalling(t *testing.T) {
 		`trace.add("pre-install ping failed: %v", preInstallPingErr)`,
 		"rememberIncompatiblePersistentAgentNotice(scope, preInstallPingErr)",
 		"if isUnsupportedAgentProtocolError(preStartPingErr) {",
-		"reconcilePersistentAgentDaemons(ctx, scope, true, trace)",
+		`trace.add("active daemon requires an explicit protocol update")`,
+		"return username, preStartPingErr",
 	} {
 		if !strings.Contains(block, want) {
 			t.Fatalf("ensurePersistentAgent reuse guard missing %q", want)
 		}
+	}
+	if strings.Contains(block, "reconcilePersistentAgentDaemons(ctx, scope, true, trace)") {
+		t.Fatal("initialization must not replace an active agent without explicit confirmation")
 	}
 	pingSuccessBlock := sourceBetween(t, block,
 		"if preInstallRunning {",
@@ -456,8 +465,8 @@ func TestPersistentAgentNoticeIsConsumedOnce(t *testing.T) {
 
 	rememberIncompatiblePersistentAgentNotice(scope, &unsupportedAgentProtocolError{version: "old"})
 
-	if got := consumePersistentAgentNotice(scope); !strings.Contains(got, "旧终端会话无法复用") {
-		t.Fatalf("consumePersistentAgentNotice() = %q, want protocol notice", got)
+	if got := consumePersistentAgentNotice(scope); !strings.Contains(got, "待更新") {
+		t.Fatalf("consumePersistentAgentNotice() = %q, want protocol update notice", got)
 	}
 	if got := consumePersistentAgentNotice(scope); got != "" {
 		t.Fatalf("second consumePersistentAgentNotice() = %q, want empty", got)

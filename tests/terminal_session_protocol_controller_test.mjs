@@ -226,7 +226,7 @@ const createController = ({ session, unified = false, client = false, historyRan
     appendDebugLog: () => {},
     appendDebugWarning: () => {},
     appendDebugError: () => {},
-    recordTerminalSessionEvent: () => {},
+    recordTerminalSessionEvent: (_session, name, details) => events.push(["terminal-event", name, details]),
   });
   return { controller, session, opens, closes, socketTimers, unified, events };
 };
@@ -271,6 +271,38 @@ test("Unified protocol controller opens one logical stream with generation and i
   assert.equal(harness.events.includes("prepare"), false);
   assert.equal(harness.events.includes("range"), false);
   assert.equal(session.socket?.readyState, FakeSocket.OPEN);
+
+  const queueMetadata = { paneID: "pane-1", streamID: "stream-1", channelGeneration: 3 };
+  session.socket.emit("message", {
+    queueMetadata,
+    data: JSON.stringify({
+      type: "logical-attach-start",
+      server_unix_ms: 1700000000100,
+      queue_subscription_received_unix_ms: 1700000000090,
+      queue_wait_duration_ms: 7,
+      process_start_duration_ms: 3,
+      subscription_index: 2,
+      subscription_count: 6,
+    }),
+  });
+  session.socket.emit("message", {
+    queueMetadata,
+    data: JSON.stringify({
+      type: "agent-attach-ready",
+      server_unix_ms: 1700000000200,
+      agent_attach_started_unix_ms: 1700000000120,
+      agent_workspace_ready_duration_ms: 10,
+      agent_pane_resolve_duration_ms: 20,
+      agent_history_snapshot_duration_ms: 50,
+      agent_attach_prepare_duration_ms: 80,
+    }),
+  });
+  const attachStart = harness.events.find((event) => Array.isArray(event) && event[1] === "logical_attach_start");
+  const attachReady = harness.events.find((event) => Array.isArray(event) && event[1] === "agent_attach_ready");
+  assert.equal(attachStart?.[2].subscriptionCount, 6);
+  assert.equal(attachStart?.[2].queueWaitDurationMs, 7);
+  assert.equal(attachReady?.[2].agentAttachPrepareDurationMs, 80);
+  assert.equal(attachReady?.[2].agentHistorySnapshotDurationMs, 50);
 });
 
 test("a physical unified disconnect keeps the network-error indicator through logical close", async () => {

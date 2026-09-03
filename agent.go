@@ -27,7 +27,8 @@ import (
 )
 
 const (
-	agentProtocolVersion = "lcmd-webshell-agent-v8"
+	agentProtocolVersion = "lcmd-webshell-agent-v9"
+	agentProtocolV8      = "lcmd-webshell-agent-v8"
 
 	agentFrameBinary         = byte('B')
 	agentFrameText           = byte('T')
@@ -506,6 +507,7 @@ func (d *agentDaemon) workspaceActivity(ctx context.Context, request agentReques
 }
 
 func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *bufio.Reader, request agentRequest) {
+	attachStartedAt := time.Now()
 	d.mu.Lock()
 	workspace, err := d.ensureWorkspaceLocked(request)
 	d.mu.Unlock()
@@ -513,6 +515,7 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 		_ = writeAgentControlFrame(conn, map[string]any{"type": "process-exit", "message": err.Error(), "exit_code": -1})
 		return
 	}
+	workspaceReadyAt := time.Now()
 	syncRequest := historySyncRequest{
 		generation:          strings.TrimSpace(request.HistoryGeneration),
 		workspaceGeneration: strings.TrimSpace(request.WorkspaceGeneration),
@@ -539,6 +542,7 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 		_ = writeAgentControlFrame(conn, map[string]any{"type": "process-exit", "message": err.Error(), "exit_code": -1})
 		return
 	}
+	paneResolvedAt := time.Now()
 	history, client, allowGeneratedInputDuringReplay, err := pane.attachClient(syncRequest)
 	if err != nil {
 		_ = writeAgentControlFrame(conn, map[string]any{
@@ -550,6 +554,7 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 		})
 		return
 	}
+	historyReadyAt := time.Now()
 	inputLockOwner := fmt.Sprintf("attach:%p", conn)
 	defer func() {
 		pane.setInputBlockedBy(inputLockOwner, false)
@@ -562,6 +567,15 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 	fastCursor := history.deltaFrom
 	go func() {
 		defer close(writerDone)
+		_ = writeAgentControlFrame(conn, map[string]any{
+			"type":                               "agent-attach-ready",
+			"server_unix_ms":                     historyReadyAt.UnixMilli(),
+			"agent_attach_started_unix_ms":       attachStartedAt.UnixMilli(),
+			"agent_workspace_ready_duration_ms":  workspaceReadyAt.Sub(attachStartedAt).Milliseconds(),
+			"agent_pane_resolve_duration_ms":     paneResolvedAt.Sub(workspaceReadyAt).Milliseconds(),
+			"agent_history_snapshot_duration_ms": historyReadyAt.Sub(paneResolvedAt).Milliseconds(),
+			"agent_attach_prepare_duration_ms":   historyReadyAt.Sub(attachStartedAt).Milliseconds(),
+		})
 		if !writeAgentHistoryReplay(conn, replayIdentity, history, allowGeneratedInputDuringReplay, request.IntegrityProtocol == "fast-v1", &fastSequence, &fastCursor) {
 			return
 		}

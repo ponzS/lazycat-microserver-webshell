@@ -87,6 +87,7 @@ test("session installation preserves feature order and wires explicit DOM comman
   });
   const controller = createTerminalSessionInstallationController({
     sessionController,
+    appendStartupTrace: (name) => events.push(`startup:${name}`),
     presentation: feature("presentation", { clearCanvas: () => events.push("presentation:clear") }),
     output: feature("output"),
     clearRuntimeBuffer: () => events.push("runtime:clear"),
@@ -133,7 +134,7 @@ test("session installation preserves feature order and wires explicit DOM comman
   const created = controller.createPaneSession(tab, "instance-a");
   assert.equal(created, session);
   assert.equal(tab.panes.get("pane-1"), session);
-  assert.deepEqual(events.slice(0, 7), [
+  assert.deepEqual(events.filter((entry) => !entry.startsWith("startup:" )).slice(0, 7), [
     "presentation:install",
     "output:install",
     "runtime:clear",
@@ -147,6 +148,12 @@ test("session installation preserves feature order and wires explicit DOM comman
   assert.equal(session.shellEl.count("pointerdown"), 1);
   assert.equal(session.shellEl.count("focusin"), 1);
   assert.equal(session.terminalHost.count("paste"), 1);
+
+  controller.handlePresentationReady(session);
+  assert.equal(events.includes("startup:真实终端 Canvas 已显示"), false);
+  session.hasPresentedFrame = true;
+  controller.handlePresentationReady(session);
+  assert.equal(events.includes("startup:真实终端 Canvas 已显示"), true);
 
   session.shellEl.dispatch("pointerdown");
   session.shellEl.dispatch("focusin");
@@ -193,6 +200,7 @@ test("session installation owns presentation-ready cross-feature side effects", 
   const session = makeSession();
   session.connectionChannel = "unified";
   session.terminalReplayGeneration = 3;
+  session.hasPresentedFrame = true;
   const controller = createTerminalSessionInstallationController({
     sessionController: {
       create: () => session,

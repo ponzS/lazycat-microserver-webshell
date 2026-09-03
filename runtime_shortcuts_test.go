@@ -8328,7 +8328,7 @@ func TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard(t *testing.T) 
 		"dedupeWindowMs = 5000,",
 		"const lastSeen = new Map();",
 		"const append = (level, message, details = \"\", { dedupeKey = \"\", retainWhenDisabled = false } = {}) => {",
-		"const appendStartupTrace = (event, details = \"\", { dedupeKey = event } = {}) => {",
+		"const appendStartupTrace = (event, details = \"\", { dedupeKey = event, diagnosticDetails = {} } = {}) => {",
 		"entry.count = Number(entry.count || 1) + 1;",
 		"count.textContent = `x${entry.count}`;",
 		"lastSeen.clear();",

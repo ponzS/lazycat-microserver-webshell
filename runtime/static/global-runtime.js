@@ -144,6 +144,7 @@ import {
   createAppFeedbackController,
   createAppLayoutController,
   createAppLifecycle,
+  createAgentProtocolUpdateController,
   createAppRuntimeRecoveryController,
   createAppShortcutController,
   createDialogController,
@@ -183,6 +184,9 @@ export function startGlobalRuntime() {
       terminalArea,
       emptyState,
       emptyStateAction,
+    },
+    agentProtocolUpdate: {
+      notice: agentProtocolUpdateNotice,
     },
     startup: {
       errorPanel: startupErrorPanel,
@@ -368,6 +372,7 @@ export function startGlobalRuntime() {
   const isApplyingWorkspaceState = () => workspaceStateApply?.isApplying() === true;
   const applyWorkspaceState = (state, options) => workspaceStateApply?.apply(state, options) || false;
   let serverRevision = null;
+  let agentProtocolUpdate = null;
   let suppressBeforeUnloadOnce = false;
   let suppressBeforeUnloadResetTimer = 0;
   let mobileSelect = null;
@@ -738,6 +743,32 @@ export function startGlobalRuntime() {
     syncNetworkMonitor: () => syncTerminalNetworkMonitorSockets(),
     appendDebugWarning: (...args) => appendDebugWarning(...args),
     appendDebugError: (...args) => appendDebugError(...args),
+    onPhysicalEvent: ({ type, ...details } = {}) => {
+      if (type === "physical_websocket_create_start") {
+        agentProtocolUpdate?.beginTarget(details.targetName);
+      } else if (type === "physical_server_ready") {
+        agentProtocolUpdate?.observe(details);
+      }
+      const eventNames = {
+        physical_websocket_create_start: "物理 WebSocket 创建开始",
+        physical_websocket_open: "物理 WebSocket 已打开",
+        logical_subscriptions_sent: "逻辑层订阅已发送",
+        physical_server_agent_prepare_start: "物理通道服务端 Agent 准备开始",
+        physical_server_ready: "物理通道服务端已就绪",
+      };
+      const name = eventNames[type];
+      if (!name) {
+        return;
+      }
+      appendStartupTrace(
+        name,
+        `physicalConnectionID=${String(details.physicalConnectionID || "")} logicalCount=${Number(details.logicalCount || 0)}${details.physicalOpenLatencyMs !== undefined ? ` openLatencyMs=${Number(details.physicalOpenLatencyMs || 0)}` : ""}${details.serverPrepareDurationMs !== undefined ? ` serverPrepareDurationMs=${Number(details.serverPrepareDurationMs || 0)}` : ""}`,
+        {
+          dedupeKey: `${type}:${String(details.physicalConnectionID || "")}:${Number(details.subscriptionRevision || 0)}`,
+          diagnosticDetails: details,
+        },
+      );
+    },
     socketConnecting: WebSocket.CONNECTING,
     socketOpen: WebSocket.OPEN,
     socketClosing: WebSocket.CLOSING,
@@ -1329,13 +1360,28 @@ export function startGlobalRuntime() {
   );
   const promptDialog = (title, value) => dialogController?.promptDialog(title, value) || Promise.resolve(null);
 
+  agentProtocolUpdate = createAgentProtocolUpdateController({
+    windowObject: window,
+    notice: agentProtocolUpdateNotice,
+    getActiveName,
+    getTerminalInput: () => terminalInput,
+    openDialog: (options) => openDialog(options),
+    suppressBeforeUnloadForNavigation: () => suppressBeforeUnloadForNavigation(),
+    showToast: (message) => showToast(message),
+    appendDebugLog: (...args) => appendDebugLog(...args),
+    appendDebugError: (...args) => appendDebugError(...args),
+  });
+
   const refreshTerminalMetrics = (session, options) => (
     terminalMetrics?.refresh(session, options) === true
   );
 
   terminalPolicy = createTerminalPolicyController({
     windowObject: window,
-    isDialogOpen: () => serverRevision?.isDialogOpen() === true,
+    isDialogOpen: () => (
+      serverRevision?.isDialogOpen() === true
+      || agentProtocolUpdate?.isDialogOpen() === true
+    ),
     captureViewport: (term) => terminalRenderer?.captureViewport(term),
     normalizeBottomViewport: (term) => terminalRenderer?.normalizeBottomViewport(term),
     hasMouseTracking: (session) => terminalMouse?.hasTracking(session) === true,
@@ -1928,7 +1974,8 @@ export function startGlobalRuntime() {
       activeWorkspaceGeneration = "";
     },
     syncNetworkSockets: (options) => syncTerminalNetworkMonitorSockets(options),
-    onTargetChange: () => {
+    onTargetChange: ({ name }) => {
+      agentProtocolUpdate?.beginTarget(name);
       instances.handleActiveTargetChange();
       serviceForwarding.handleTargetChange();
       attachments.handleTargetChange();
@@ -2239,6 +2286,7 @@ export function startGlobalRuntime() {
         terminalSessionController?.disposeAll(getAllSessions());
         terminalStartupError?.dispose();
         serverRevision?.dispose();
+        agentProtocolUpdate?.dispose();
         terminalTransportRuntime?.dispose("page_disposed");
         terminalSessionConnection.dispose();
         terminalReplay.dispose();

@@ -1,4 +1,9 @@
 export { createAppLifecycle } from "./app_lifecycle.js";
+export {
+  createAgentProtocolUpdateAPI,
+  createAgentProtocolUpdateController,
+  createAgentProtocolUpdateView,
+} from "./agent_protocol_update/index.js";
 export { createAppRuntimeRecoveryController } from "./runtime_recovery_controller.js";
 export { createAppRuntimeRecoveryLifecycle } from "./runtime_recovery_lifecycle.js";
 export { createMobileSelectController } from "./mobile_select_controller.js";

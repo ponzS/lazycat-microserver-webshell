@@ -395,6 +395,7 @@ func (s *pluginServer) run(ctx context.Context) error {
 	mux.HandleFunc("/api/workspace", s.handleWorkspace)
 	mux.HandleFunc("/api/workspace/activity", s.handleWorkspaceActivity)
 	mux.HandleFunc("/api/agent/startup-error", s.handleAgentStartupError)
+	mux.HandleFunc("/api/agent/protocol-update", s.handleAgentProtocolUpdate)
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.Handle("/assets/", versionedStaticFileServer(filepath.Join(s.rootDir, "runtime", "static"), s.currentAssetVersion))
 	mux.Handle("/static/", http.StripPrefix("/static/", staticFileServer(filepath.Join(s.rootDir, "runtime", "static"))))

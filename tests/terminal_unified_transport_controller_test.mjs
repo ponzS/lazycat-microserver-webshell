@@ -19,6 +19,7 @@ const createHarness = () => {
   const logicalSyncs = [];
   const membershipRefreshes = [];
   const reconnects = [];
+  const physicalEvents = [];
   const sessions = [{
     closed: false,
     connectionChannel: "unified",
@@ -108,6 +109,7 @@ const createHarness = () => {
     refreshMembership: (options) => membershipRefreshes.push(options),
     reconnectWorkspaceSessions: (options) => reconnects.push(options),
     scheduleLogicalSync: (options) => logicalSyncs.push(options),
+    onPhysicalEvent: (event) => physicalEvents.push(event),
   });
 
   return {
@@ -118,6 +120,7 @@ const createHarness = () => {
     membershipRefreshes,
     queuedMicrotasks,
     reconnects,
+    physicalEvents,
     sessions,
     timers,
     setActiveName(value) {
@@ -148,6 +151,12 @@ test("unified transport creates and reuses one physical connection for a target"
   assert.equal(harness.controller.setPriority("pane-1", 9), true);
   assert.deepEqual(first.priorities, [{ paneID: "pane-1", priority: 9 }]);
   assert.equal(harness.controller.getPhysicalSocket().id, 1);
+  first.options.onPhysicalEvent({ type: "physical_server_ready", agentProtocolUpdateAvailable: true });
+  assert.deepEqual(harness.physicalEvents, [{
+    type: "physical_server_ready",
+    agentProtocolUpdateAvailable: true,
+    targetName: "target-a",
+  }]);
 });
 
 test("target replacement waits for the prior physical close fence", async () => {

@@ -29,11 +29,27 @@ test("initialization performance is disabled by default and freezes after first 
   assert.equal(changes.length, 0);
 
   performance.setEnabled(true);
+  performance.recordStartupEvent("物理通道服务端已就绪", {
+    serverPrepareDurationMs: 42,
+    serverAgentEnsureDurationMs: 30,
+    cookie: "must-not-be-retained",
+  });
   clock = 150;
   startup.mark("ghosttyReadyAt");
   performance.recordStartupEvent("Ghostty WASM 已就绪");
   const session = { id: "pane-1" };
-  performance.recordTerminalEvent(session, "connect_session_start");
+  performance.recordTerminalEvent(session, "connect_session_start", {
+    reason: "test_connect",
+    renderReady: false,
+    token: "must-not-be-retained",
+  });
+  clock = 180;
+  performance.recordTerminalEvent(session, "agent_attach_ready", {
+    serverUnixMs: 1700000000200,
+    agentAttachPrepareDurationMs: 80,
+    agentHistorySnapshotDurationMs: 50,
+    selector: "must-not-be-retained",
+  });
   clock = 220;
   performance.recordTerminalEvent(session, "history_replay_start");
   clock = 420;
@@ -44,7 +60,27 @@ test("initialization performance is disabled by default and freezes after first 
   assert.equal(result.sessionID, "pane-1");
   assert.equal(result.totalMs, 320);
   assert.ok(result.rows.some((row) => row.label === "Ghostty WASM 已就绪"));
+  assert.deepEqual(result.rows.find((row) => row.name === "物理通道服务端已就绪"), {
+    name: "物理通道服务端已就绪",
+    label: "物理通道服务端已就绪",
+    source: "终端初始化",
+    durationMs: 0,
+    elapsedMs: 0,
+    details: {
+      serverPrepareDurationMs: 42,
+      serverAgentEnsureDurationMs: 30,
+    },
+  });
   assert.ok(result.rows.some((row) => row.label === "终端渲染完成"));
+  assert.deepEqual(result.rows.find((row) => row.name === "connect_session_start")?.details, {
+    reason: "test_connect",
+    renderReady: false,
+  });
+  assert.deepEqual(result.rows.find((row) => row.name === "agent_attach_ready")?.details, {
+    serverUnixMs: 1700000000200,
+    agentAttachPrepareDurationMs: 80,
+    agentHistorySnapshotDurationMs: 50,
+  });
   const rowCount = result.rows.length;
 
   clock = 900;
@@ -60,10 +96,12 @@ test("initialization performance ignores other panes and can be hidden without r
   const performance = createInitializationPerformance({ startupDiagnostics: startup, now: () => clock });
   performance.setEnabled(true);
   performance.recordTerminalEvent({ id: "pane-1" }, "connect_session_start");
+  performance.recordStartupEvent("终端 WebSocket 已打开");
   clock = 100;
   performance.recordTerminalEvent({ id: "pane-2" }, "presentation_commit_complete");
   assert.equal(performance.snapshot().status, "complete");
   assert.equal(performance.snapshot().sessionID, "pane-2");
+  assert.equal(performance.snapshot().rows.find((row) => row.name === "终端 WebSocket 已打开")?.source, "终端初始化");
   const totalMs = performance.snapshot().totalMs;
   performance.recordTerminalEvent({ id: "pane-1" }, "presentation_commit_complete");
   assert.equal(performance.snapshot().totalMs, totalMs);

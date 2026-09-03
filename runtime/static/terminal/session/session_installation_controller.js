@@ -163,12 +163,14 @@ export function createTerminalSessionInstallationController({
         { dedupeKey: `input-ready:${session.id}:${session.terminalReplayGeneration}` },
       );
     }
-    appendStartupTrace(
-      "真实终端 Canvas 已显示",
-      `pane=${session.id} startupElapsed=${Number(session.startupTraceStartedAt || 0) ? Math.max(0, (globalThis.performance?.now?.() || Date.now()) - Number(session.startupTraceStartedAt)) : 0}ms replayCommitted=${isReplayCommitted(session)} resizeEpoch=${String(session.appliedResizeEpoch || "")}`,
-      { dedupeKey: `canvas-visible:${session.id}:${session.terminalReplayGeneration}` },
-    );
-    session.startupTraceActive = false;
+    if (session.hasPresentedFrame === true) {
+      appendStartupTrace(
+        "真实终端 Canvas 已显示",
+        `pane=${session.id} startupElapsed=${Number(session.startupTraceStartedAt || 0) ? Math.max(0, (globalThis.performance?.now?.() || Date.now()) - Number(session.startupTraceStartedAt)) : 0}ms replayCommitted=${isReplayCommitted(session)} resizeEpoch=${String(session.appliedResizeEpoch || "")}`,
+        { dedupeKey: `canvas-visible:${session.id}:${session.terminalReplayGeneration}` },
+      );
+    }
+    session.startupTraceActive = session.hasPresentedFrame !== true;
     if (becameReady && session.connectionChannel === "unified") {
       clearUnifiedRetry(session, { resetAttempts: true });
     }

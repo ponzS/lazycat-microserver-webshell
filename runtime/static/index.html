@@ -86,6 +86,7 @@
         </div>
       </header>
       <main class="terminal-area" id="terminalArea">
+        <button class="agent-protocol-update-notice" id="agentProtocolUpdateNotice" type="button" aria-haspopup="dialog" hidden>检测到终端服务协议待更新，点击查看详情</button>
         <div class="search-panel" id="searchPanel" hidden>
           <input class="search-input" id="searchInput" type="search" autocomplete="off" spellcheck="false" aria-label="搜索终端" />
           <span class="search-count" id="searchCount">0/0</span>
@@ -100,7 +101,10 @@
           <div class="initialization-performance-panel" id="initializationPerformancePanel" aria-live="polite" hidden>
             <div class="initialization-performance-head">
               <span class="initialization-performance-title">初始化性能</span>
-              <span class="initialization-performance-status" id="initializationPerformanceStatus">采集中</span>
+              <div class="initialization-performance-actions">
+                <span class="initialization-performance-status" id="initializationPerformanceStatus">采集中</span>
+                <button class="initialization-performance-copy" id="initializationPerformanceCopy" type="button" aria-label="复制初始化性能数据" title="复制初始化性能数据">复制</button>
+              </div>
             </div>
             <div class="initialization-performance-total">
               <span>页面打开到终端渲染</span>

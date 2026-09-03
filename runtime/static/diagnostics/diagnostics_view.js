@@ -62,6 +62,7 @@ export function createDiagnosticsView({ documentObject = globalThis.document } =
     debugLogClear: byID("debugLogClear"),
     initializationPerformancePanel: byID("initializationPerformancePanel"),
     initializationPerformanceStatus: byID("initializationPerformanceStatus"),
+    initializationPerformanceCopy: byID("initializationPerformanceCopy"),
     initializationPerformanceTotal: byID("initializationPerformanceTotal"),
     initializationPerformanceList: byID("initializationPerformanceList"),
     performanceTaskMeter: byID("performanceTaskMeter"),
@@ -227,6 +228,28 @@ export function createDiagnosticsView({ documentObject = globalThis.document } =
       if (elements.terminalNetworkMonitorUsageDetail) {
         elements.terminalNetworkMonitorUsageDetail.textContent = `接收 ${receivedUsage} MB · 发送 ${sentUsage} MB`;
       }
+    },
+    initializationPerformanceClipboardText(state) {
+      const snapshot = state || {};
+      const lines = [
+        "初始化性能",
+        `状态: ${initializationStatusLabel(snapshot.status)}`,
+        `总耗时: ${formatInitializationMs(snapshot.totalMs)}`,
+      ];
+      if (snapshot.sessionID) {
+        lines.push(`Session: ${snapshot.sessionID}`);
+      }
+      lines.push("时间线:");
+      for (const row of snapshot.rows || []) {
+        const source = row.source || "页面初始化";
+        const label = row.label || row.name || "初始化事件";
+        const eventName = row.name && row.name !== row.label ? ` (${row.name})` : "";
+        const details = row.details && Object.keys(row.details).length > 0
+          ? ` · 详情 ${JSON.stringify(row.details)}`
+          : "";
+        lines.push(`- [${source}] ${label}${eventName}: ${formatInitializationMs(row.durationMs)} · 累计 ${formatInitializationMs(row.elapsedMs)}${details}`);
+      }
+      return lines.join("\n");
     },
     renderInitializationPerformance(state, { visible = false } = {}) {
       if (elements.initializationPerformancePanel) {
