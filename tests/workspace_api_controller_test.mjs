@@ -90,6 +90,39 @@ test("workspace API rejects current selector mismatches and ignores stale respon
   assert.throws(() => ensureWorkspaceResponseSelector({ selector: "other" }, "demo", "Activity"), /Activity selector mismatch/);
 });
 
+test("workspace API surfaces protocol mismatch before terminal Queue startup", async () => {
+  const observed = [];
+  const payload = {
+    error: "终端服务协议版本不一致，需要确认更新。",
+    current_protocol_version: "lcmd-webshell-agent-v20",
+    preferred_protocol_version: "lcmd-webshell-agent-v9",
+    agent_protocol_update_available: true,
+    agent_protocol_update_required: true,
+  };
+  const api = createWorkspaceAPI({
+    windowObject: { location: { href: "https://webshell.test/app/" } },
+    fetchImpl: async () => jsonResponse(null, {
+      ok: false,
+      status: 409,
+      text: JSON.stringify(payload),
+    }),
+    getActiveName: () => "demo@owner",
+    observeAgentProtocolUpdate: (state) => observed.push(state),
+  });
+
+  await assert.rejects(
+    api.fetchState(),
+    (error) => error.agentProtocolUpdateRequired === true && /需要确认更新/.test(error.message),
+  );
+  assert.deepEqual(observed, [{
+    targetName: "demo@owner",
+    agentProtocolVersion: "lcmd-webshell-agent-v20",
+    preferredAgentProtocolVersion: "lcmd-webshell-agent-v9",
+    agentProtocolUpdateAvailable: true,
+    agentProtocolUpdateRequired: true,
+  }]);
+});
+
 test("workspace API reports Provider response errors", async () => {
   const api = createWorkspaceAPI({
     windowObject: { location: { href: "https://webshell.test/app/" } },

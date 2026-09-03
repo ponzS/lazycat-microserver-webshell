@@ -93,16 +93,19 @@ export function createAppBootstrapController({
       workspaceContext?.instanceName,
       workspaceContext?.generation,
     );
+    const protocolUpdateRequired = workspaceOutcome.error?.agentProtocolUpdateRequired === true;
     if (!requestIsCurrent) {
       await Promise.resolve(refreshWorkspaceWithRetry({ focus: true })).catch((error) => {
         showToast(error.message || "Workspace is temporarily unavailable. Retrying.");
       });
     } else if (workspaceOutcome.error) {
-      scheduleWorkspaceRetry({
-        focus: true,
-        instanceName: getActiveName(),
-        generation: getActiveGeneration(),
-      });
+      if (!protocolUpdateRequired) {
+        scheduleWorkspaceRetry({
+          focus: true,
+          instanceName: getActiveName(),
+          generation: getActiveGeneration(),
+        });
+      }
       showToast(workspaceOutcome.error.message || "Workspace is temporarily unavailable. Retrying.");
     } else {
       applyWorkspace(workspaceOutcome.result, { focus: true });
@@ -112,8 +115,10 @@ export function createAppBootstrapController({
       `active=${getActiveName() || "无"} tabs=${getTabCount()}`,
       { dedupeKey: "bootstrap-complete" },
     );
-    startWorkspaceActivity();
-    Promise.resolve(refreshWorkspaceActivity({ silent: true })).catch(() => {});
+    if (!protocolUpdateRequired) {
+      startWorkspaceActivity();
+      Promise.resolve(refreshWorkspaceActivity({ silent: true })).catch(() => {});
+    }
     return true;
   };
 

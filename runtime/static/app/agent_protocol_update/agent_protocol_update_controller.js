@@ -27,6 +27,7 @@ export function createAgentProtocolUpdateController({
   let updating = false;
   let reloadPending = false;
   let reloadTimer = 0;
+  let requiredPromptKey = "";
   let state = {
     targetName: "",
     currentProtocolVersion: "",
@@ -148,6 +149,7 @@ export function createAgentProtocolUpdateController({
         updateAvailable: false,
         updateRequired: false,
       };
+      requiredPromptKey = "";
       render();
       return true;
     },
@@ -191,6 +193,15 @@ export function createAgentProtocolUpdateController({
         updateRequired: agentProtocolUpdateRequired === true,
       };
       render();
+      if (state.updateAvailable && state.updateRequired) {
+        const promptKey = `${state.targetName}\u0000${state.currentProtocolVersion}\u0000${state.preferredProtocolVersion}`;
+        if (requiredPromptKey !== promptKey) {
+          requiredPromptKey = promptKey;
+          showUpdateDialog().catch((error) => {
+            appendDebugError("终端服务协议更新确认失败", error?.message || String(error));
+          });
+        }
+      }
       return true;
     },
     showUpdateDialog,

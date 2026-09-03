@@ -28,7 +28,6 @@ import (
 
 const (
 	agentProtocolVersion = "lcmd-webshell-agent-v9"
-	agentProtocolV8      = "lcmd-webshell-agent-v8"
 
 	agentFrameBinary         = byte('B')
 	agentFrameText           = byte('T')
@@ -162,10 +161,11 @@ func runAgentCommand(args []string) error {
 		selector := fs.String("selector", "", "instance selector")
 		accountID := fs.String("account", "", "webshell account id")
 		replaceActive := fs.Bool("replace-active", false, "replace the active daemon after a confirmed protocol mismatch")
+		forceProtocolReplacement := fs.Bool("force-protocol-replacement", false, "replace an active daemon whose ping protocol cannot be decoded")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		count, err := reconcileAgentDaemons(*socketPath, *selector, *accountID, *replaceActive)
+		count, err := reconcileAgentDaemonsWithOptions(*socketPath, *selector, *accountID, *replaceActive, *forceProtocolReplacement)
 		if err != nil {
 			return err
 		}

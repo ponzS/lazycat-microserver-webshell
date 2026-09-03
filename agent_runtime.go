@@ -25,16 +25,17 @@ import (
 )
 
 const (
-	agentInstallPath        = "/usr/local/bin/lcmd-webshell-agent"
-	agentManifestPath       = "/usr/local/bin/.lcmd-webshell-agent.manifest"
-	defaultAgentSocketPath  = "/tmp/lcmd-webshell-agent.sock"
-	agentLogPath            = "/tmp/lcmd-webshell-agent.log"
-	agentReadyMarker        = "__LCMD_WEBSHELL_AGENT_READY__"
-	agentInstallCachePrefix = agentProtocolVersion + "\t"
-	commandOutputSnippetMax = 1024
-	websocketReadTimeout    = 30 * time.Second
-	websocketWriteTimeout   = 5 * time.Second
-	agentEnsureTimeout      = 60 * time.Second
+	agentInstallPath            = "/usr/local/bin/lcmd-webshell-agent"
+	agentManifestPath           = "/usr/local/bin/.lcmd-webshell-agent.manifest"
+	defaultAgentSocketPath      = "/tmp/lcmd-webshell-agent.sock"
+	agentLogPath                = "/tmp/lcmd-webshell-agent.log"
+	agentReadyMarker            = "__LCMD_WEBSHELL_AGENT_READY__"
+	agentInstallCachePrefix     = agentProtocolVersion + "\t"
+	commandOutputSnippetMax     = 1024
+	unknownAgentProtocolVersion = "unknown"
+	websocketReadTimeout        = 30 * time.Second
+	websocketWriteTimeout       = 5 * time.Second
+	agentEnsureTimeout          = 60 * time.Second
 )
 
 func agentSelectorHash(selector string) string {
@@ -75,13 +76,8 @@ func unsupportedAgentProtocolVersion(err error) string {
 	return strings.TrimSpace(protocolErr.version)
 }
 
-func isSupportedAgentProtocolVersion(version string) bool {
-	switch strings.TrimSpace(version) {
-	case agentProtocolV8, agentProtocolVersion:
-		return true
-	default:
-		return false
-	}
+func isCurrentAgentProtocolVersion(version string) bool {
+	return strings.TrimSpace(version) == agentProtocolVersion
 }
 
 func isContainerUnavailableError(err error) bool {
@@ -454,14 +450,18 @@ func parsePersistentAgentResponse(output []byte) (agentResponse, error) {
 	if err := json.Unmarshal(trimmed, &response); err != nil {
 		return agentResponse{}, fmt.Errorf("invalid agent response: %w: output=%s", err, commandOutputSnippet(output))
 	}
+	version := strings.TrimSpace(response.Version)
+	if version == "" {
+		version = unknownAgentProtocolVersion
+	}
+	if !isCurrentAgentProtocolVersion(version) {
+		return agentResponse{}, &unsupportedAgentProtocolError{version: version}
+	}
 	if !response.OK {
 		if response.Error == "" {
 			response.Error = "agent request failed"
 		}
 		return response, errors.New(response.Error)
-	}
-	if response.Version != "" && !isSupportedAgentProtocolVersion(response.Version) {
-		return agentResponse{}, &unsupportedAgentProtocolError{version: response.Version}
 	}
 	return response, nil
 }
@@ -510,6 +510,10 @@ func ensurePersistentAgentOnce(ctx context.Context, scope agentScope) (string, e
 	} else {
 		trace.add("pre-install ping failed: %v", preInstallPingErr)
 		rememberIncompatiblePersistentAgentNotice(scope, preInstallPingErr)
+		if isUnsupportedAgentProtocolError(preInstallPingErr) {
+			trace.add("active daemon protocol differs; waiting for explicit update before installing the packaged agent")
+			return username, preInstallPingErr
+		}
 		if isContainerUnavailableError(preInstallPingErr) {
 			return "", trace.errorf("persistent webshell agent target container unavailable: %v", preInstallPingErr)
 		}
@@ -861,7 +865,7 @@ func reconcilePersistentAgentDaemons(ctx context.Context, scope agentScope, repl
 	}
 	stage := "daemon reconcile"
 	if replaceActive {
-		args = append(args, "--replace-active")
+		args = append(args, "--replace-active", "--force-protocol-replacement")
 		stage = "incompatible daemon reconcile"
 	}
 	output, err := exec.CommandContext(reconcileCtx, lightosctlPath, args...).CombinedOutput()

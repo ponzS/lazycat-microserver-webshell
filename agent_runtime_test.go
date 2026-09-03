@@ -125,15 +125,25 @@ func TestParsePersistentAgentResponseRejectsEmptyOutput(t *testing.T) {
 	}
 }
 
-func TestParsePersistentAgentResponseSupportsPreviousProtocol(t *testing.T) {
-	response, err := parsePersistentAgentResponse([]byte(`{"ok":true,"version":"lcmd-webshell-agent-v8"}`))
-	if err != nil || response.Version != agentProtocolV8 {
-		t.Fatalf("previous protocol response = %+v, err = %v", response, err)
+func TestParsePersistentAgentResponseRequiresExactProtocolVersion(t *testing.T) {
+	response, err := parsePersistentAgentResponse([]byte(`{"ok":true,"version":"lcmd-webshell-agent-v9"}`))
+	if err != nil || response.Version != agentProtocolVersion {
+		t.Fatalf("current protocol response = %+v, err = %v", response, err)
 	}
 
-	_, err = parsePersistentAgentResponse([]byte(`{"ok":true,"version":"lcmd-webshell-agent-v6"}`))
-	if !isUnsupportedAgentProtocolError(err) {
-		t.Fatalf("protocol mismatch error = %v, want typed unsupported protocol error", err)
+	for _, version := range []string{"lcmd-webshell-agent-v1", "lcmd-webshell-agent-v8", "lcmd-webshell-agent-v20"} {
+		_, err = parsePersistentAgentResponse([]byte(fmt.Sprintf(`{"ok":true,"version":%q}`, version)))
+		if !isUnsupportedAgentProtocolError(err) || unsupportedAgentProtocolVersion(err) != version {
+			t.Fatalf("protocol %s error = %v, want typed mismatch carrying the exact version", version, err)
+		}
+	}
+	_, err = parsePersistentAgentResponse([]byte(`{"ok":true}`))
+	if !isUnsupportedAgentProtocolError(err) || unsupportedAgentProtocolVersion(err) != unknownAgentProtocolVersion {
+		t.Fatalf("empty protocol error = %v, want unknown typed mismatch", err)
+	}
+	_, err = parsePersistentAgentResponse([]byte(`{"ok":false,"version":"lcmd-webshell-agent-v20","error":"future request rejected"}`))
+	if !isUnsupportedAgentProtocolError(err) || unsupportedAgentProtocolVersion(err) != "lcmd-webshell-agent-v20" {
+		t.Fatalf("future rejected response error = %v, want version mismatch before business error", err)
 	}
 	if isUnsupportedAgentProtocolError(errors.New("agent request timed out")) {
 		t.Fatal("ordinary agent failure must not authorize active daemon replacement")

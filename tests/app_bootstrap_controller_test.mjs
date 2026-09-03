@@ -50,6 +50,29 @@ test("app bootstrap starts modules, prepares prerequisites and applies the curre
   assert.ok(calls.includes("activity:start"));
 });
 
+test("protocol mismatch pauses bootstrap retries and activity until explicit update", async () => {
+  const calls = [];
+  const mismatch = new Error("终端服务协议版本不一致，需要确认更新。");
+  mismatch.agentProtocolUpdateRequired = true;
+  const controller = createAppBootstrapController({
+    ghosttyReady: Promise.resolve(),
+    getActiveName: () => "demo@owner",
+    getActiveGeneration: () => 3,
+    isCurrentRequest: () => true,
+    requestWorkspace: async () => { throw mismatch; },
+    scheduleWorkspaceRetry: () => calls.push("retry"),
+    startWorkspaceActivity: () => calls.push("activity:start"),
+    refreshWorkspaceActivity: async () => calls.push("activity:refresh"),
+    showToast: (message) => calls.push(["toast", message]),
+  });
+
+  assert.equal(await controller.start(), true);
+  assert.equal(calls.includes("retry"), false);
+  assert.equal(calls.includes("activity:start"), false);
+  assert.equal(calls.includes("activity:refresh"), false);
+  assert.ok(calls.some((entry) => Array.isArray(entry) && entry[0] === "toast"));
+});
+
 test("app bootstrap rejects stale workspace apply and ignores prerequisites after dispose", async () => {
   const calls = [];
   const ghostty = deferred();

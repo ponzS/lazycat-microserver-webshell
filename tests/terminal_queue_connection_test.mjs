@@ -175,10 +175,10 @@ test("unified connection multiplexes three live panes over one physical socket",
       server_prepare_duration_ms: 42,
       server_agent_ensure_duration_ms: 30,
       server_agent_validation_duration_ms: 12,
-      agent_protocol_version: "lcmd-webshell-agent-v8",
+      agent_protocol_version: "lcmd-webshell-agent-v20",
       preferred_agent_protocol_version: "lcmd-webshell-agent-v9",
       agent_protocol_update_available: true,
-      agent_protocol_update_required: false,
+      agent_protocol_update_required: true,
     }),
   });
   assert.deepEqual(physicalEvents.slice(-2).map((event) => event.type), [
@@ -186,9 +186,10 @@ test("unified connection multiplexes three live panes over one physical socket",
     "physical_server_ready",
   ]);
   assert.equal(physicalEvents.at(-1).serverPrepareDurationMs, 42);
-  assert.equal(physicalEvents.at(-1).agentProtocolVersion, "lcmd-webshell-agent-v8");
+  assert.equal(physicalEvents.at(-1).agentProtocolVersion, "lcmd-webshell-agent-v20");
   assert.equal(physicalEvents.at(-1).preferredAgentProtocolVersion, "lcmd-webshell-agent-v9");
   assert.equal(physicalEvents.at(-1).agentProtocolUpdateAvailable, true);
+  assert.equal(physicalEvents.at(-1).agentProtocolUpdateRequired, true);
   assert.equal(connection.snapshot().agentProtocolUpdateAvailable, true);
   const replace = physical.sent.find((payload) => JSON.parse(payload).type === "replace-subscriptions");
   assert.equal(JSON.parse(replace).subscriptions.length, 3);

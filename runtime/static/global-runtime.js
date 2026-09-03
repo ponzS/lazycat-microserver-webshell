@@ -1096,6 +1096,7 @@ export function startGlobalRuntime() {
     getTerminalSize: () => terminalSizeQuery(),
     isCurrentRequest: (name, generation) => isCurrentInstanceRequest(name, generation),
     observeServerRevision: (state) => serverRevision.observe(state),
+    observeAgentProtocolUpdate: (state) => agentProtocolUpdate?.observe(state),
     applyWorkspaceState: (state, options) => applyWorkspaceState(state, options),
   });
   const workspaceActivityURL = (name) => workspaceAPI.activityURL(name);
