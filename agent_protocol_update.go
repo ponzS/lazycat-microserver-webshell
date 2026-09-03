@@ -21,6 +21,31 @@ type agentProtocolUpdateResponse struct {
 	PreferredProtocolVersion string `json:"preferred_protocol_version"`
 }
 
+type agentProtocolMismatchResponse struct {
+	Error                    string `json:"error"`
+	CurrentProtocolVersion   string `json:"current_protocol_version"`
+	PreferredProtocolVersion string `json:"preferred_protocol_version"`
+	UpdateAvailable          bool   `json:"agent_protocol_update_available"`
+	UpdateRequired           bool   `json:"agent_protocol_update_required"`
+}
+
+func writeAgentProtocolMismatch(w http.ResponseWriter, err error) bool {
+	version := unsupportedAgentProtocolVersion(err)
+	if version == "" {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(agentProtocolMismatchResponse{
+		Error:                    "终端服务协议版本不一致，需要确认更新。",
+		CurrentProtocolVersion:   version,
+		PreferredProtocolVersion: agentProtocolVersion,
+		UpdateAvailable:          true,
+		UpdateRequired:           true,
+	})
+	return true
+}
+
 type staleAgentProtocolVersionError struct {
 	expected string
 	actual   string

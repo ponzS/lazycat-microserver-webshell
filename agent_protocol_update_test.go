@@ -9,6 +9,46 @@ import (
 	"testing"
 )
 
+func TestAgentProtocolMismatchResponsePreservesUpgradeOrDowngradeVersion(t *testing.T) {
+	for _, version := range []string{"lcmd-webshell-agent-v1", "lcmd-webshell-agent-v20"} {
+		recorder := httptest.NewRecorder()
+		if !writeAgentProtocolMismatch(recorder, &unsupportedAgentProtocolError{version: version}) {
+			t.Fatalf("writeAgentProtocolMismatch(%s) = false", version)
+		}
+		if recorder.Code != http.StatusConflict {
+			t.Fatalf("writeAgentProtocolMismatch(%s) status = %d, want %d", version, recorder.Code, http.StatusConflict)
+		}
+		var payload agentProtocolMismatchResponse
+		if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("Unmarshal(%s) error = %v", version, err)
+		}
+		if payload.CurrentProtocolVersion != version || payload.PreferredProtocolVersion != agentProtocolVersion {
+			t.Fatalf("mismatch payload = %+v", payload)
+		}
+		if !payload.UpdateAvailable || !payload.UpdateRequired {
+			t.Fatalf("mismatch payload flags = %+v", payload)
+		}
+	}
+}
+
+func TestAgentProtocolMismatchStopsBeforeInstallingPackagedBinary(t *testing.T) {
+	source, err := os.ReadFile("agent_runtime.go")
+	if err != nil {
+		t.Fatalf("ReadFile(agent_runtime.go) error = %v", err)
+	}
+	ensureStart := strings.Index(string(source), "func ensurePersistentAgentOnce(ctx context.Context, scope agentScope)")
+	ensureEnd := strings.Index(string(source), "func cachedInstanceUsername(ctx context.Context, selector string)")
+	if ensureStart < 0 || ensureEnd <= ensureStart {
+		t.Fatal("ensurePersistentAgentOnce source block not found")
+	}
+	block := string(source)[ensureStart:ensureEnd]
+	mismatchGuard := strings.Index(block, "if isUnsupportedAgentProtocolError(preInstallPingErr)")
+	install := strings.Index(block, "ensureAgentBinaryInstalled(ctx, scope, trace)")
+	if mismatchGuard < 0 || install < 0 || mismatchGuard > install {
+		t.Fatal("protocol mismatch must stop before the packaged agent binary is installed")
+	}
+}
+
 func TestAgentProtocolUpdateHandlerRejectsInvalidRequests(t *testing.T) {
 	server := &pluginServer{}
 
@@ -59,18 +99,20 @@ func TestTerminalQueueReadyAdvertisesAgentProtocolUpdate(t *testing.T) {
 	payload, err := json.Marshal(terminalQueueServerMessage{
 		Type:                          "queue-ready",
 		ProtocolVersion:               terminalQueueProtocolVersion,
-		AgentProtocolVersion:          agentProtocolV8,
+		AgentProtocolVersion:          "lcmd-webshell-agent-v20",
 		PreferredAgentProtocolVersion: agentProtocolVersion,
 		AgentProtocolUpdateAvailable:  true,
+		AgentProtocolUpdateRequired:   true,
 	})
 	if err != nil {
 		t.Fatalf("Marshal(queue-ready) error = %v", err)
 	}
 	text := string(payload)
 	for _, want := range []string{
-		`"agent_protocol_version":"lcmd-webshell-agent-v8"`,
+		`"agent_protocol_version":"lcmd-webshell-agent-v20"`,
 		`"preferred_agent_protocol_version":"lcmd-webshell-agent-v9"`,
 		`"agent_protocol_update_available":true`,
+		`"agent_protocol_update_required":true`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("queue-ready payload %s missing %s", text, want)

@@ -29,11 +29,12 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		os.Exit(0)
-	case "legacy-daemon":
+	case "legacy-daemon", "opaque-daemon":
 		if len(os.Args) < 4 {
 			os.Exit(2)
 		}
-		if err := runLegacyAgentReconcileHelper(os.Args[3:]); err != nil {
+		opaqueProtocol := os.Getenv("LCMD_AGENT_RECONCILE_HELPER") == "opaque-daemon"
+		if err := runLegacyAgentReconcileHelper(os.Args[3:], opaqueProtocol); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -97,6 +98,31 @@ func TestReconcileAgentDaemonsPreservesCompatibleOwnerDuringReplacementRace(t *t
 		t.Fatalf("compatible socket owner was terminated: %v", err)
 	}
 	assertAgentPing(t, socketPath, selector, accountID)
+}
+
+func TestReconcileAgentDaemonsRequiresExplicitForceForOpaqueProtocol(t *testing.T) {
+	root := t.TempDir()
+	socketPath := filepath.Join(root, "agent.sock")
+	readyFile := filepath.Join(root, "agent.ready")
+	const selector = "demo@owner"
+	const accountID = "account-a"
+
+	active := startAgentReconcileHelper(t, "opaque-daemon", socketPath, readyFile, selector, accountID)
+	waitForAgentReadyFile(t, readyFile)
+	if _, err := reconcileAgentDaemons(socketPath, selector, accountID, true); err == nil {
+		t.Fatal("ordinary replacement accepted an undecodable active protocol")
+	}
+	if err := syscall.Kill(active.Process.Pid, 0); err != nil {
+		t.Fatalf("ordinary replacement terminated opaque daemon: %v", err)
+	}
+	count, err := reconcileAgentDaemonsWithOptions(socketPath, selector, accountID, true, true)
+	if err != nil {
+		t.Fatalf("confirmed forced replacement error = %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("confirmed forced replacement count = %d, want 1", count)
+	}
+	waitForProcessExit(t, active)
 }
 
 func TestReconcileAgentDaemonsStopsAllOrphansWhenSocketIsMissing(t *testing.T) {
@@ -227,6 +253,20 @@ func TestAgentDaemonArgsMatchRequiresExactScope(t *testing.T) {
 	if agentDaemonArgsMatch(args, "/tmp/agent.sock", "demo@owner", "account-b") {
 		t.Fatal("different account matched")
 	}
+	futureArgs := append(append([]string{}, args...), "--future-capability", "mux-v20")
+	if !agentDaemonArgsMatch(futureArgs, "/tmp/agent.sock", "demo@owner", "account-a") {
+		t.Fatal("future daemon arguments must not hide an otherwise exact stable scope")
+	}
+	equalsArgs := []string{
+		"/usr/local/bin/lcmd-webshell-agent", "agent", "daemon",
+		"--future-capability=mux-v20",
+		"--socket=/tmp/agent.sock",
+		"--selector=demo@owner",
+		"--account=account-a",
+	}
+	if !agentDaemonArgsMatch(equalsArgs, "/tmp/agent.sock", "demo@owner", "account-a") {
+		t.Fatal("equals-style stable daemon arguments did not match")
+	}
 }
 
 func startAgentReconcileHelper(t *testing.T, mode, socketPath, readyFile, selector, accountID string) *exec.Cmd {
@@ -264,7 +304,7 @@ func startAgentReconcileHelper(t *testing.T, mode, socketPath, readyFile, select
 	return command
 }
 
-func runLegacyAgentReconcileHelper(args []string) error {
+func runLegacyAgentReconcileHelper(args []string, opaqueProtocol bool) error {
 	fs := flag.NewFlagSet("legacy agent daemon", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	socketPath := fs.String("socket", "", "")
@@ -295,6 +335,10 @@ func runLegacyAgentReconcileHelper(args []string) error {
 			defer conn.Close()
 			var request agentRequest
 			if err := json.NewDecoder(conn).Decode(&request); err != nil {
+				return
+			}
+			if opaqueProtocol {
+				_, _ = io.WriteString(conn, "future-wire-protocol\n")
 				return
 			}
 			response := agentResponse{OK: true, Version: "lcmd-webshell-agent-v6"}

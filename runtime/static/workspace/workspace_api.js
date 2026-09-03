@@ -18,6 +18,7 @@ export function createWorkspaceAPI({
   getTerminalSize = () => ({ cols: 120, rows: 32 }),
   isCurrentRequest = () => true,
   observeServerRevision = () => {},
+  observeAgentProtocolUpdate = () => {},
   applyWorkspaceState = () => {},
 } = {}) {
   let disposed = false;
@@ -46,9 +47,28 @@ export function createWorkspaceAPI({
     return url;
   };
 
-  const responseError = async (response, fallback) => {
-    const message = await response.text();
-    return new Error(message || fallback);
+  const responseError = async (response, fallback, requestName = "") => {
+    const text = await response.text();
+    if (response.status === 409 && text) {
+      try {
+        const payload = JSON.parse(text);
+        if (payload?.agent_protocol_update_required === true) {
+          observeAgentProtocolUpdate({
+            targetName: String(requestName || "").trim(),
+            agentProtocolVersion: String(payload.current_protocol_version || "").trim(),
+            preferredAgentProtocolVersion: String(payload.preferred_protocol_version || "").trim(),
+            agentProtocolUpdateAvailable: payload.agent_protocol_update_available === true,
+            agentProtocolUpdateRequired: true,
+          });
+          const error = new Error(String(payload.error || "终端服务协议版本不一致，需要确认更新。"));
+          error.agentProtocolUpdateRequired = true;
+          return error;
+        }
+      } catch {
+        // Non-JSON 409 responses retain the ordinary workspace error path.
+      }
+    }
+    return new Error(text || fallback);
   };
 
   const fetchState = async (name = getActiveName()) => {
@@ -61,7 +81,7 @@ export function createWorkspaceAPI({
     }
     const response = await fetchImpl(workspaceURL(requestName), { cache: "no-store" });
     if (!response.ok) {
-      throw await responseError(response, `Workspace request failed (${response.status})`);
+      throw await responseError(response, `Workspace request failed (${response.status})`, requestName);
     }
     return response.json();
   };
@@ -86,7 +106,7 @@ export function createWorkspaceAPI({
       body: JSON.stringify({ action, cols: size.cols, rows: size.rows, ...payload }),
     });
     if (!response.ok) {
-      throw await responseError(response, `Workspace action failed (${response.status})`);
+      throw await responseError(response, `Workspace action failed (${response.status})`, requestName);
     }
     const state = await response.json();
     if (disposed || !isCurrentRequest(requestName, generation)) {

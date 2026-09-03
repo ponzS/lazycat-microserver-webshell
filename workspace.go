@@ -361,6 +361,9 @@ func (s *pluginServer) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		state, err := requestAgentWorkspaceState(r.Context(), scope, cols, rows, s.currentTerminalScrollback())
 		if err != nil {
+			if writeAgentProtocolMismatch(w, err) {
+				return
+			}
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
@@ -375,6 +378,9 @@ func (s *pluginServer) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		}
 		state, err := requestAgentWorkspaceAction(r.Context(), scope, cols, rows, s.currentTerminalScrollback(), request)
 		if err != nil {
+			if writeAgentProtocolMismatch(w, err) {
+				return
+			}
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -414,6 +420,9 @@ func (s *pluginServer) handleWorkspaceActivity(w http.ResponseWriter, r *http.Re
 	cols, rows := parseTerminalSize(r.URL.Query().Get("cols"), r.URL.Query().Get("rows"))
 	state, err := requestAgentWorkspaceActivity(r.Context(), scope, cols, rows, s.currentTerminalScrollback())
 	if err != nil {
+		if writeAgentProtocolMismatch(w, err) {
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}

@@ -6,9 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -19,6 +17,10 @@ import (
 )
 
 func reconcileAgentDaemons(socketPath, selector, accountID string, replaceActive bool) (int, error) {
+	return reconcileAgentDaemonsWithOptions(socketPath, selector, accountID, replaceActive, false)
+}
+
+func reconcileAgentDaemonsWithOptions(socketPath, selector, accountID string, replaceActive, forceProtocolReplacement bool) (int, error) {
 	socketPath = strings.TrimSpace(socketPath)
 	selector = strings.TrimSpace(selector)
 	accountID = strings.TrimSpace(accountID)
@@ -44,12 +46,12 @@ func reconcileAgentDaemons(socketPath, selector, accountID string, replaceActive
 		return 0, fmt.Errorf("active agent socket owner pid %d does not match selector/account scope", activePID)
 	}
 	if replaceActive && activePID != 0 {
-		version, err := activeAgentSocketProtocolVersion(socketPath, selector, accountID)
-		if err != nil {
-			return 0, err
-		}
-		if version == agentProtocolVersion {
+		version, protocolErr := activeAgentSocketProtocolVersion(socketPath, selector, accountID)
+		if protocolErr == nil && version == agentProtocolVersion {
 			return 0, nil
+		}
+		if protocolErr != nil && !forceProtocolReplacement {
+			return 0, protocolErr
 		}
 	}
 	victims := make([]int, 0, len(pids))
@@ -195,19 +197,29 @@ func agentDaemonArgsMatch(args []string, socketPath, selector, accountID string)
 	if len(args) < 3 || args[1] != "agent" || args[2] != "daemon" {
 		return false
 	}
-	fs := flag.NewFlagSet("agent daemon reconciliation", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	processSocket := fs.String("socket", defaultAgentSocketPath, "")
-	processSelector := fs.String("selector", "", "")
-	processAccountID := fs.String("account", "", "")
-	_ = fs.String("username", "", "")
-	_ = fs.String("ready-file", "", "")
-	if err := fs.Parse(args[3:]); err != nil {
-		return false
+	processSocket, socketFound := agentDaemonArgValue(args[3:], "--socket")
+	processSelector, selectorFound := agentDaemonArgValue(args[3:], "--selector")
+	processAccountID, accountFound := agentDaemonArgValue(args[3:], "--account")
+	return socketFound && selectorFound && accountFound &&
+		strings.TrimSpace(processSocket) == socketPath &&
+		strings.TrimSpace(processSelector) == selector &&
+		strings.TrimSpace(processAccountID) == accountID
+}
+
+func agentDaemonArgValue(args []string, name string) (string, bool) {
+	prefix := name + "="
+	for index, arg := range args {
+		if arg == name {
+			if index+1 >= len(args) {
+				return "", false
+			}
+			return args[index+1], true
+		}
+		if strings.HasPrefix(arg, prefix) {
+			return strings.TrimPrefix(arg, prefix), true
+		}
 	}
-	return strings.TrimSpace(*processSocket) == socketPath &&
-		strings.TrimSpace(*processSelector) == selector &&
-		strings.TrimSpace(*processAccountID) == accountID
+	return "", false
 }
 
 func waitForAgentDaemonExit(pids []int, socketPath, selector, accountID string, timeout time.Duration) error {

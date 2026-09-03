@@ -2,7 +2,7 @@
 
 ## 职责与边界
 
-当前目录维护 workspace API、恢复与活动 tab 持久化、refresh/retry、权威 state apply、布局、tab registry、标签标题/inline rename、页面与移动端标题、通知状态、tab 导航、tab/pane CRUD、tab DOM、activity、tab 激活编排和 pane 激活编排。workspace API 负责 Provider 边界；persistence 负责 URL/storage；refresh 负责 request/apply 请求阶段与退避；state apply controller 负责把已确认的权威 tab/pane snapshot 映射到现有 registry；presentation controller 负责 tab 自动标题、通知、空状态和 cursor blink；tab controller 负责本地权威 apply 与用户远端命令之间的 CRUD 边界；tab activation controller 负责保帧、视觉提交、active pane、当前设备尺寸接管、membership 与持久化的分阶段顺序；pane activation controller 负责单个 pane 的 active DOM、明确用户交互 claim、连接优先级、focus 和远端持久化顺序。它们只通过注入命令调用 session/resize/transport，不直接实现终端连接、历史或渲染算法。
+当前目录维护 workspace API、恢复与活动 tab 持久化、refresh/retry、权威 state apply、布局、tab registry、标签标题/inline rename、页面与移动端标题、通知状态、tab 导航、tab/pane CRUD、tab DOM、activity、tab 激活编排和 pane 激活编排。workspace API 负责 Provider 边界，并把 workspace 在 Queue 建立前返回的结构化协议 mismatch 交给全局 Agent 更新 controller；该状态必须暂停 refresh retry 和 activity，等待用户显式确认更新。persistence 负责 URL/storage；refresh 负责 request/apply 请求阶段与退避；state apply controller 负责把已确认的权威 tab/pane snapshot 映射到现有 registry；presentation controller 负责 tab 自动标题、通知、空状态和 cursor blink；tab controller 负责本地权威 apply 与用户远端命令之间的 CRUD 边界；tab activation controller 负责保帧、视觉提交、active pane、当前设备尺寸接管、membership 与持久化的分阶段顺序；pane activation controller 负责单个 pane 的 active DOM、明确用户交互 claim、连接优先级、focus 和远端持久化顺序。它们只通过注入命令调用 session/resize/transport，不直接实现终端连接、历史或渲染算法。
 
 目标 controller 负责当前实例 selector、generation 及实例切换事务；它不拥有实例列表或终端资源。
 

@@ -135,6 +135,27 @@ test("workspace refresh controller separates request metrics from current-state 
   await assert.rejects(controller.request(), /disposed/);
 });
 
+test("workspace refresh does not retry while protocol update confirmation is required", async () => {
+  const windowObject = createTimerWindow();
+  const mismatch = new Error("protocol mismatch");
+  mismatch.agentProtocolUpdateRequired = true;
+  const controller = createWorkspaceRefreshController({
+    getActiveName: () => "demo",
+    getActiveGeneration: () => 1,
+    isCurrentRequest: () => true,
+    fetchWorkspaceState: async () => { throw mismatch; },
+    lifecycleOptions: {
+      windowObject,
+      navigatorObject: { onLine: true },
+      random: () => 0.5,
+    },
+  });
+
+  await assert.rejects(controller.refreshWithRetry({ focus: true }), /protocol mismatch/);
+  assert.equal(controller.getRetryContext(), null);
+  assert.equal(windowObject.size(), 0);
+});
+
 test("workspace refresh controller schedules retry after a failed direct refresh", async () => {
   const windowObject = createTimerWindow();
   const controller = createWorkspaceRefreshController({

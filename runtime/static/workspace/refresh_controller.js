@@ -90,7 +90,9 @@ export function createWorkspaceRefreshController({
     try {
       return await refresh(options);
     } catch (error) {
-      lifecycle.schedule(options);
+      if (error?.agentProtocolUpdateRequired !== true) {
+        lifecycle.schedule(options);
+      }
       throw error;
     }
   };

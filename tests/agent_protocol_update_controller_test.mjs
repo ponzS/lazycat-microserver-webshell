@@ -22,11 +22,40 @@ const createView = () => {
 
 const updateState = {
   targetName: "demo@owner",
-  agentProtocolVersion: "lcmd-webshell-agent-v8",
+  agentProtocolVersion: "lcmd-webshell-agent-v20",
   preferredAgentProtocolVersion: "lcmd-webshell-agent-v9",
   agentProtocolUpdateAvailable: true,
   agentProtocolUpdateRequired: false,
 };
+
+const requiredDowngradeState = {
+  ...updateState,
+  agentProtocolVersion: "lcmd-webshell-agent-v20",
+  agentProtocolUpdateRequired: true,
+};
+
+test("required protocol mismatch opens one confirmation instead of leaving a black terminal", async () => {
+  const view = createView();
+  let dialogCalls = 0;
+  const controller = createAgentProtocolUpdateController({
+    view,
+    api: { async update() {} },
+    getActiveName: () => "demo@owner",
+    openDialog: async () => {
+      dialogCalls += 1;
+      return false;
+    },
+  });
+
+  assert.equal(controller.observe(requiredDowngradeState), true);
+  assert.equal(controller.observe(requiredDowngradeState), true);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(dialogCalls, 1);
+  assert.equal(controller.snapshot().currentProtocolVersion, "lcmd-webshell-agent-v20");
+  assert.equal(controller.snapshot().updateRequired, true);
+  assert.deepEqual(view.renders.at(-1), { visible: true, updating: false });
+});
 
 test("protocol update notice stays visible when confirmation is canceled", async () => {
   const view = createView();
@@ -91,7 +120,7 @@ test("confirmed protocol update locks input, updates once, and reloads", async (
   assert.equal(await controller.showUpdateDialog(), true);
   assert.deepEqual(requests, [{
     name: "demo@owner",
-    currentProtocolVersion: "lcmd-webshell-agent-v8",
+    currentProtocolVersion: "lcmd-webshell-agent-v20",
   }]);
   assert.deepEqual(locks, [true]);
   assert.equal(discarded, 1);
@@ -161,13 +190,13 @@ test("protocol update API sends one scoped POST request", async () => {
 
   assert.deepEqual(await api.update({
     name: "demo@owner",
-    currentProtocolVersion: "lcmd-webshell-agent-v8",
+    currentProtocolVersion: "lcmd-webshell-agent-v20",
   }), { status: "updated" });
   assert.equal(requests.length, 1);
   assert.equal(new URL(requests[0].url).pathname, "/app/api/agent/protocol-update");
   assert.equal(new URL(requests[0].url).searchParams.get("name"), "demo@owner");
   assert.equal(requests[0].options.method, "POST");
   assert.deepEqual(JSON.parse(requests[0].options.body), {
-    current_protocol_version: "lcmd-webshell-agent-v8",
+    current_protocol_version: "lcmd-webshell-agent-v20",
   });
 });
