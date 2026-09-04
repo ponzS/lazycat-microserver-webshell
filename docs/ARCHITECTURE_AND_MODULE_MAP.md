@@ -1,7 +1,7 @@
 # WebShell 当前架构与模块文档路径导航
 
 状态：当前代码架构导航
-最后更新：2026-09-02
+最后更新：2026-09-03
 维护范围：`lazycat-microserver-webshell`
 
 本文是项目架构地图，不是 Bug 历史记录，也不是每个任务都必须全文阅读的执行计划。它回答三个问题：
@@ -116,7 +116,7 @@ Browser global-runtime
 - 每个 pane 是独立 logical stream，但不拥有独立的页面级 physical connection。
 - persistent agent、PTY、history 和绝对 byte cursor 是权威来源。
 - 浏览器保存的是渲染副本、连接状态、cursor 进度和当前 generation，不是普通容器的历史权威。
-- replay、snapshot、resize 和恢复过程中的中间画面不得提交给用户；有效旧画面应作为 last-known-good frame 保留。
+- replay、snapshot、重连和原子 resize/恢复过程中的中间画面不得提交给用户；有效旧画面应作为 last-known-good frame 保留。桌面分屏/窗口 live geometry 是明确例外，只提交当前 session 的真实 Canvas，不展示 replay 中间态。
 - output ACK 表示有序字节已经进入当前 Ghostty 状态，不等同于 Canvas 已提交。
 - `receivedCursor`、`appliedCursor` 和 `presentedCursor` 是不同阶段的进度，不能混用。
 
@@ -146,7 +146,7 @@ Browser
 | --- | --- | --- | --- |
 | 应用生命周期和页面命令 | `runtime/static/app/index.js` | [`app/README.md`](../runtime/static/app/README.md) | 页面 listener、bootstrap、恢复、对话框、快捷键、反馈、应用命令 |
 | 全局 runtime | `runtime/static/global-runtime.js` | [`runtime/static/README.md`](../runtime/static/README.md) | 全局状态、controller 接线、启动/恢复/销毁顺序 |
-| workspace、tab、pane、布局 | `runtime/static/workspace/index.js` | [`workspace/README.md`](../runtime/static/workspace/README.md) | workspace API、权威 state apply、tab/pane CRUD、激活、布局、持久化 |
+| workspace、tab、pane、布局 | `runtime/static/workspace/index.js` | [`workspace/README.md`](../runtime/static/workspace/README.md) | workspace API、权威 state apply、tab/pane CRUD、激活、布局、持久化；分割条拖动只拥有比例和交互生命周期 |
 | 实例发现和切换 | `runtime/static/instances/index.js` | [`instances/README.md`](../runtime/static/instances/README.md) | 实例列表、默认目标、切换器和实例导航 |
 | 设备在线状态 | `runtime/static/devices/index.js` | [`devices/README.md`](../runtime/static/devices/README.md) | 设备心跳、在线列表、离线 beacon |
 | 设置和字体 | `runtime/static/settings/index.js` | [`settings/README.md`](../runtime/static/settings/README.md) | settings snapshot、字段 PATCH、字体、字号、scrollback、快捷键 |
@@ -167,7 +167,7 @@ Browser
 | output queue | `terminal/output/index.js` | [`terminal/output/README.md`](../runtime/static/terminal/output/README.md) | live/replay/suppressed output、有界 drain、ACK 和过载处理 |
 | transport | `terminal/transport/index.js` | [`terminal/transport/README.md`](../runtime/static/terminal/transport/README.md) | Unified/direct socket、协议、health、membership、主题和控制消息 |
 | rendering/presentation | `terminal/rendering/index.js` | [`terminal/rendering/README.md`](../runtime/static/terminal/rendering/README.md) | Ghostty renderer、Canvas、presentation、Kitty graphics、frame hold |
-| resize | `terminal/resize/index.js` | [`terminal/resize/README.md`](../runtime/static/terminal/resize/README.md) | geometry、DPR、resize owner、latest target 和 ACK fence |
+| resize | `terminal/resize/index.js` | [`terminal/resize/README.md`](../runtime/static/terminal/resize/README.md) | geometry、DPR、resize owner、单 in-flight/latest target、ACK fence 和桌面 live geometry |
 | viewport | `terminal/viewport/index.js` | [`terminal/viewport/README.md`](../runtime/static/terminal/viewport/README.md) | 移动 visualViewport、软键盘、安全偏移和方向恢复 |
 | session | `terminal/session/index.js` | [`terminal/session/README.md`](../runtime/static/terminal/session/README.md) | pane identity、初始状态、resource factory、安装和销毁 |
 | input | `terminal/input/index.js` | [`terminal/input/README.md`](../runtime/static/terminal/input/README.md) | textarea、输入队列、IME、generated response、focus、移动快捷键 |
@@ -191,6 +191,8 @@ global-runtime
 ```
 
 实际 controller 之间只能通过显式依赖、公开 API、事件或只读快照交互。不要因为某个功能同时涉及多个终端域，就把状态重新放回 `global-runtime.js` 或创建新的共享大对象。
+
+分屏条拖拽的跨模块契约是：workspace layout controller 只按 RAF latest-only 更新 flex 比例，并通过公开命令通知 resize controller begin/update/end；resize controller 独占 live session、节流/trailing timer、单 in-flight/latest target 和最终 claim。拖动中本地 Ghostty 网格/Canvas 可有界实时重排，observer 与普通 resize 不得竞争，也不得为 pointermove 创建网络 epoch；释放时 resize controller 强制最终本地 fit 并以 `claim:true` 提交稳定尺寸。presentation 在 live geometry 中不使用 hold，replay/reconnect 等恢复仍保持原子提交；overview preview 暂停编码并在稳定后补帧。`global-runtime.js` 只负责命令和只读门禁接线，不复制事务状态。
 
 ## 3.3 诊断模块
 
@@ -255,6 +257,7 @@ global-runtime
 | [`tests-auto/10-terminal-geometry-jitter/`](../tests-auto/10-terminal-geometry-jitter/) | 几何事件、RAF 采样、backing store 和稳定尺寸 |
 | [`tests-auto/11-service-worker-retirement/`](../tests-auto/11-service-worker-retirement/) | 旧 Worker 退役、缓存清理和干净页面导航 |
 | [`tests-auto/12-overview-preview-persistence/`](../tests-auto/12-overview-preview-persistence/) | tab 总览缩略图、live/hold/persisted preview 和 reload |
+| [`tests-auto/13-split-divider-render-isolation/`](../tests-auto/13-split-divider-render-isolation/) | 双 pane 持续输出下高频拖动、live Canvas 顶部锚定/隔离、单 in-flight 最终 resize 和页面响应性 |
 
 ### 5.3 与当前终端初始化问题相关的诊断指标
 

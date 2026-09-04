@@ -27,7 +27,7 @@ IndexedDB 数据库 `lcmd-webshell-overview-previews-v1` 最多保留 64 项并�
 
 ## 生命周期与清理
 
-`start()` 幂等注册 listener 并启动过期记录清理；稳定 presentation 以 320ms 有界节流捕获最新缩略图，持续输出不会无限推迟落盘，页面隐藏时可做一次尽力而为的即时捕获。pane 被真实删除时删除对应记录；应用整体 dispose 只关闭数据库连接，不清空仍有效记录。
+`start()` 幂等注册 listener 并启动过期记录清理；稳定 presentation 以 320ms 有界节流捕获最新缩略图，持续输出不会无限推迟落盘，页面隐藏时可做一次尽力而为的即时捕获。全局 runtime 在 terminal live geometry 期间拒绝 capture 授权，避免为每个拖拽帧编码 Canvas；最终几何提交后由稳定 presentation 补一次最新预览。pane 被真实删除时删除对应记录；应用整体 dispose 只关闭数据库连接，不清空仍有效记录。
 
 `dispose()` 取消所有 RAF/timer、结束拖拽、关闭已解码图片、使 capture/load generation 失效、移除 listener 并关闭总览。迟到的 encode、IndexedDB request 或 image decode 不得修改 UI 或覆盖新 identity。history generation 变更后的旧图片只是不再展示，不通过无条件 key 删除，避免迟到清理误删同 pane 的新 generation 图片；后续 capture 或 TTL/容量清理负责回收。
 
@@ -46,4 +46,4 @@ IndexedDB 数据库 `lcmd-webshell-overview-previews-v1` 最多保留 64 项并�
 
 相关测试为 `terminal_overview_controller_test.mjs`、`terminal_overview_preview_test.mjs`、`TestRuntimeTerminalOverviewModuleBoundary` 和 `tests-auto/12-overview-preview-persistence`。最小回归包括 live/hold/persisted 来源优先级、跨 reload 后台 tab 预览、identity/history generation 隔离、迟到 encode/decode、切换/关闭/新建标签、桌面拖拽、触摸长按拖拽、双侧边缘打开、浏览器返回键和 dispose 资源清理。
 
-任何路径都不得显示历史 replay、snapshot、resize 或重连中间过程。
+任何路径都不得显示历史 replay、snapshot、原子 resize 或重连中间过程，也不能把它们保存为缩略图；live geometry 期间同样不做中间帧编码。

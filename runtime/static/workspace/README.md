@@ -23,7 +23,7 @@ target lifecycle 唯一持有 active selector、generation 和 disposed 状态�
 - `state_apply_controller.js`：权威 state 的 tab/pane reconciliation、活动 tab 选择、cache preload 与后续命令编排。
 - `state_apply_lifecycle.js`：state apply 后 resize/connect RAF 的唯一 owner 与销毁清理。
 - `layout_controller.js`：纯布局树拆分、删除、遍历和方向选择算法。
-- `layout_view_controller.js`：布局 DOM 渲染、分割线拖拽和布局持久化命令适配。
+- `layout_view_controller.js`：布局 DOM 渲染、分割线拖拽和布局持久化命令适配；拖动比例按 RAF latest-only 合并，并通过注入命令 begin/update/end terminal live geometry。workspace 不修改 terminal 状态或发送 resize 帧，释放时只结束事务并持久化最终布局。
 - `tab_registry.js`：tab Map、ID 序列、活动 tab 和最近 tab 快照的唯一状态 owner。
 - `activity_controller.js`：workspace activity 轮询、pane busy 状态同步和关闭确认 guard。
 - `tab_label_controller.js`：tab 标题展示、desktop inline rename、optimistic 提交与失败回滚。
@@ -41,4 +41,4 @@ target lifecycle 唯一持有 active selector、generation 和 disposed 状态�
 
 ## 依赖与验证
 
-模块只依赖注入的 DOM、fetch、storage、session/cache/resize 命令和 frame/timer API。行为测试为 `workspace_api_controller_test.mjs`、`workspace_persistence_controller_test.mjs`、`workspace_refresh_controller_test.mjs`、`workspace_state_apply_controller_test.mjs`、`workspace_tab_controller_test.mjs`、`workspace_tab_activation_controller_test.mjs`、`workspace_target_controller_test.mjs`、`tab_activation_scheduler_test.mjs` 及其余 workspace controller 测试；跨模块 guard 位于 `runtime_shortcuts_test.go` 和对应 `tests-auto` 场景 README。最小回归是切换实例并检查旧目标请求失效、新目标 workspace 应用、快速切换 tab、新建/分屏/关闭/重命名/移动 tab 与 pane、断网恢复、刷新页面和服务端增删 pane，确认切换前保帧、视觉提交先于 resize/membership、权威 state apply 顺序稳定、retry 单飞、selector 不串目标、旧帧不被清空，历史回放中间过程不可见。
+模块只依赖注入的 DOM、fetch、storage、session/cache/resize 命令和 frame/timer API。行为测试为 `workspace_api_controller_test.mjs`、`workspace_persistence_controller_test.mjs`、`workspace_refresh_controller_test.mjs`、`workspace_state_apply_controller_test.mjs`、`workspace_tab_controller_test.mjs`、`workspace_tab_activation_controller_test.mjs`、`workspace_target_controller_test.mjs`、`workspace_layout_view_controller_test.mjs`、`tab_activation_scheduler_test.mjs` 及其余 workspace controller 测试；跨模块 guard 位于 `runtime_shortcuts_test.go` 和对应 `tests-auto` 场景 README。最小回归是切换实例并检查旧目标请求失效、新目标 workspace 应用、快速切换 tab、新建/分屏/关闭/重命名/移动 tab 与 pane、断网恢复、刷新页面和服务端增删 pane，确认切换前保帧、视觉提交先于 resize/membership、权威 state apply 顺序稳定、retry 单飞、selector 不串目标、旧帧不被清空，历史回放中间过程不可见；分割条高频拖动期间 flex 比例按 RAF 合并、每个 pane 的 live Canvas 顶部稳定并随宽度重排、pointermove 不持续创建网络 resize，释放时必须持久化并提交最终比例。

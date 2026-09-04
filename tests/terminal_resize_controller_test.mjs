@@ -127,6 +127,7 @@ const createRuntimeHarness = () => {
     requestFullRender() { effects.requestFullRender += 1; },
     commitNow() { effects.commitNow += 1; },
     renderFullNow() { effects.renderFullNow += 1; },
+    renderLiveGeometryNow() { effects.renderFullNow += 1; return true; },
     scheduleValidation() {},
     stateIsCurrent: () => false,
     isCurrent: () => false,
@@ -206,6 +207,7 @@ const createRuntimeHarness = () => {
     syncTabMobilePixelScroll() {},
     connectPendingSession() {},
     registerSessionCleanup() {},
+    consoleObject: { warn() {} },
     lifecycleFactory,
   });
   const canvas = { width: 800, height: 480, style: { width: "800px", height: "480px" } };
@@ -471,6 +473,123 @@ test("forced refresh on stable geometry renders live without entering a hold", (
   assert.equal(harness.sent.length, 0);
 });
 
+test("interactive tab resize renders live geometry and commits only the final server target", () => {
+  const harness = createRuntimeHarness();
+  const tab = { panes: new Map([[harness.session.id, harness.session]]) };
+
+  assert.equal(harness.controller.beginTabInteractiveResize(tab), true);
+  assert.equal(harness.effects.beginHold, 0);
+  assert.equal(harness.controller.isLiveGeometryActive(harness.session), true);
+  assert.equal(harness.controller.beginTabInteractiveResize(tab), false);
+  assert.equal(harness.controller.updateTabInteractiveResize(tab), true);
+  assert.equal(harness.effects.termResize, 1);
+  assert.equal(harness.effects.renderFullNow, 1);
+  assert.equal(harness.session.renderReady, true);
+  assert.equal(harness.sent.length, 0);
+  assert.equal(harness.controller.schedulePane(harness.session, {
+    forceFullRender: true,
+    hideUntilRender: true,
+  }, { immediate: true }), false);
+  assert.equal(harness.sent.length, 0);
+
+  assert.equal(harness.controller.endTabInteractiveResize(tab), true);
+  assert.equal(harness.controller.endTabInteractiveResize(tab), false);
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.sent[0].claim, true);
+  assert.equal(harness.controller.isLiveGeometryActive(harness.session), true);
+  harness.controller.handleApplied(harness.session, {
+    type: "resize-applied",
+    resize_epoch: harness.sent[0].resize_epoch,
+    cols: 100,
+    rows: 30,
+    pixel_width: 1000,
+    pixel_height: 600,
+  });
+  assert.equal(harness.controller.isLiveGeometryActive(harness.session), false);
+});
+
+test("throttled live geometry schedules a trailing local reflow", () => {
+  const harness = createRuntimeHarness();
+  const tab = { panes: new Map([[harness.session.id, harness.session]]) };
+
+  harness.controller.beginTabInteractiveResize(tab);
+  harness.controller.updateTabInteractiveResize(tab);
+  assert.equal(harness.effects.termResize, 1);
+
+  harness.session.fitAddon.proposeDimensions = () => ({ cols: 120, rows: 30 });
+  harness.controller.updateTabInteractiveResize(tab);
+  assert.equal(harness.effects.termResize, 1);
+  assert.equal(harness.windowHarness.timers.size, 1);
+
+  harness.windowHarness.runTimers();
+  assert.equal(harness.effects.termResize, 2);
+  assert.equal(harness.session.term.cols, 120);
+  assert.equal(harness.windowHarness.timers.size, 0);
+
+  harness.controller.endTabInteractiveResize(tab);
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.sent[0].cols, 120);
+});
+
+test("desktop window resize uses live geometry and one trailing server commit", () => {
+  const harness = createRuntimeHarness();
+  const tab = { panes: new Map([[harness.session.id, harness.session]]) };
+
+  assert.equal(harness.controller.scheduleTabLiveGeometry(tab), true);
+  assert.equal(harness.controller.isLiveGeometryActive(harness.session), true);
+  assert.equal(harness.effects.termResize, 1);
+  assert.equal(harness.sent.length, 0);
+  assert.equal(harness.controller.scheduleTabLiveGeometry(tab), true);
+  // One timer guarantees a trailing local Canvas reflow; the other commits the
+  // stable terminal size to the server after the window stops moving.
+  assert.equal(harness.windowHarness.timers.size, 2);
+
+  harness.windowHarness.runTimers();
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.sent[0].claim, true);
+});
+
+test("a newer resize target waits behind the current epoch and retry reuses that epoch", () => {
+  const harness = createRuntimeHarness();
+  const tab = { panes: new Map([[harness.session.id, harness.session]]) };
+  const first = { cols: 100, rows: 30, pixelWidth: 1000, pixelHeight: 600 };
+
+  assert.equal(harness.controller.sendSize(harness.session, { force: true, dimensions: first }), true);
+  const firstEpoch = harness.sent[0].resize_epoch;
+  assert.equal(harness.controller.beginTabInteractiveResize(tab), true);
+  harness.session.fitAddon.proposeDimensions = () => ({ cols: 120, rows: 40 });
+  assert.equal(harness.controller.updateTabInteractiveResize(tab), true);
+  assert.equal(harness.controller.endTabInteractiveResize(tab), true);
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.session.requestedResizeEpoch, firstEpoch);
+  assert.deepEqual(
+    {
+      cols: harness.session.pendingResizeTarget.cols,
+      rows: harness.session.pendingResizeTarget.rows,
+      claim: harness.session.pendingResizeTarget.claim,
+    },
+    { cols: 120, rows: 40, claim: true },
+  );
+
+  assert.equal(harness.controller.resendPendingSize(harness.session), true);
+  assert.equal(harness.sent.length, 2);
+  assert.equal(harness.sent[1].resize_epoch, firstEpoch);
+
+  harness.controller.handleApplied(harness.session, {
+    type: "resize-applied",
+    resize_epoch: firstEpoch,
+    cols: 100,
+    rows: 30,
+    pixel_width: 1000,
+    pixel_height: 600,
+  });
+  assert.equal(harness.sent.length, 3);
+  assert.equal(harness.sent[2].cols, 120);
+  assert.equal(harness.sent[2].rows, 40);
+  assert.equal(harness.sent[2].claim, true);
+  assert.notEqual(harness.sent[2].resize_epoch, firstEpoch);
+});
+
 test("force size sync does not resend an already applied target", () => {
   const harness = createRuntimeHarness();
   const dimensions = { cols: 100, rows: 30, pixelWidth: 1000, pixelHeight: 600 };
@@ -585,6 +704,27 @@ test("owner rejection keeps the last frame and retries the queued explicit claim
     { cols: harness.sent[1].cols, rows: harness.sent[1].rows },
     { cols: 100, rows: 30 },
   );
+});
+
+test("a rejected final live resize releases live geometry state without hiding the canvas", () => {
+  const harness = createRuntimeHarness();
+  const tab = { panes: new Map([[harness.session.id, harness.session]]) };
+
+  harness.controller.beginTabInteractiveResize(tab);
+  harness.controller.updateTabInteractiveResize(tab);
+  harness.controller.endTabInteractiveResize(tab);
+  const epoch = harness.sent[0].resize_epoch;
+
+  harness.controller.handleError(harness.session, {
+    type: "resize-error",
+    resize_epoch: epoch,
+    reason: "resize_failed",
+  });
+
+  assert.equal(harness.controller.isLiveGeometryActive(harness.session), false);
+  assert.equal(harness.session.renderReady, true);
+  assert.equal(harness.session.resizePresentationHold, false);
+  assert.ok(harness.ensures.some(({ options }) => options.reason === "resize_error"));
 });
 
 test("resize lifecycle disconnects observers, terminal callbacks, timers, and RAF work", () => {

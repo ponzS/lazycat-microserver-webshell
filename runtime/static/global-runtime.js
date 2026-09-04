@@ -798,12 +798,13 @@ export function startGlobalRuntime() {
     isReplayCommitPending: (session) => terminalReplay.commitIsPending(session),
     isPaneVisible: (session) => terminalResize?.isVisible(session) === true,
     isPaneMeasurable: (session) => terminalResize?.isMeasurable(session) === true,
+    isLiveGeometryActive: (session) => terminalResize?.isLiveGeometryActive(session) === true,
     isCurrentDeviceClaimRequired: (session) => terminalResize?.isCurrentDeviceClaimRequired(session) === true,
     isViewportGeometryClaimPending: () => terminalViewport?.isGeometryClaimPending() === true,
     canvasMatchesExpectedSize: (session) => terminalResize?.canvasMatchesExpectedSize(session) === true,
     normalizeResizeEpoch: (value) => terminalResize?.normalizeEpoch(value) || "",
     scheduleResize: (session, options, scheduleOptions) => terminalResize?.schedulePresentationResize(session, options, scheduleOptions) === true,
-    sendResize: (session, options) => terminalResize?.sendSize(session, options) === true,
+    retryResize: (session) => terminalResize?.resendPendingSize(session) === true,
     recordEvent: (session, event, details) => recordTerminalSessionEvent(session, event, details),
     onReady: (session, details) => terminalSessionInstallation?.handlePresentationReady(session, details),
     onRenderObserved: (session) => {
@@ -1241,6 +1242,7 @@ export function startGlobalRuntime() {
       && session.renderReady
       && session.hasPresentedFrame
       && terminalReplay?.isCommitted(session) === true
+      && terminalResize?.isLiveGeometryActive(session) !== true
       && terminalPresentation?.isCurrent(session) === true
     ),
     onPreviewError: (session, error) => appendDebugWarning(
@@ -1719,11 +1721,12 @@ export function startGlobalRuntime() {
   workspaceLayoutView = createWorkspaceLayoutViewController({
     documentObject: document,
     windowObject: window,
-    getCurrentTab: () => currentTab(),
     isApplyingWorkspaceState,
     setActivePane: (tab, paneId, options) => setActivePane(tab, paneId, options),
     resizeTab: (tab) => terminalResize?.resizeTab(tab),
-    scheduleTabResize: (tab, options, scheduleOptions) => terminalResize?.scheduleTab(tab, options, scheduleOptions),
+    beginTabInteractiveResize: (tab) => terminalResize?.beginTabInteractiveResize(tab),
+    updateTabInteractiveResize: (tab) => terminalResize?.updateTabInteractiveResize(tab),
+    endTabInteractiveResize: (tab) => terminalResize?.endTabInteractiveResize(tab),
     postWorkspaceAction: (action, payload) => postWorkspaceAction(action, payload),
     showToast: (message) => showToast(message),
   });
@@ -2227,6 +2230,7 @@ export function startGlobalRuntime() {
         syncMobileCustomSelectPosition();
         if (!isMobileLayout()) {
           closeMobileCloseConfirm(false);
+          terminalResize?.scheduleTabLiveGeometry(currentTab());
         }
         appearance.handleResize();
         updateMobileActiveTabTitle();

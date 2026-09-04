@@ -13,12 +13,13 @@ export function createTerminalPresentationController({
   isReplayCommitPending = () => false,
   isPaneVisible = () => false,
   isPaneMeasurable = () => false,
+  isLiveGeometryActive = () => false,
   isCurrentDeviceClaimRequired = () => false,
   isViewportGeometryClaimPending = () => false,
   canvasMatchesExpectedSize = () => false,
   normalizeResizeEpoch = (value) => String(value || ""),
   scheduleResize = () => false,
-  sendResize = () => false,
+  retryResize = () => false,
   commitResize = (session) => session?.resizeController?.commit?.(),
   recordEvent = noop,
   onReady = noop,
@@ -71,13 +72,16 @@ export function createTerminalPresentationController({
   const isUsable = (session) => Boolean(session && !session.closed && !disposed);
   const isActiveTarget = (session) => String(session?.name || "") === String(getActiveName() || "");
 
-  const renderAllowed = (session) => Boolean(
-    isUsable(session)
-    && isReplayCommitted(session)
-    && !session.resizeFenceActive
-    && !session.resizeAckPending
-    && !session.resizeOutputSettleActive
-  );
+  const renderAllowed = (session) => {
+    const liveGeometry = isLiveGeometryActive(session);
+    return Boolean(
+      isUsable(session)
+      && isReplayCommitted(session)
+      && (liveGeometry || !session.resizeFenceActive)
+      && (liveGeometry || !session.resizeAckPending)
+      && (liveGeometry || !session.resizeOutputSettleActive)
+    );
+  };
 
   const cancelPendingRender = (term) => {
     if (!term) {
@@ -425,7 +429,12 @@ export function createTerminalPresentationController({
   };
 
   const stateIsCurrent = (session) => {
-    if (!isUsable(session) || !session.renderSnapshot || !session.renderReady || session.resizeAckPending) {
+    if (
+      !isUsable(session)
+      || !session.renderSnapshot
+      || !session.renderReady
+      || (session.resizeAckPending && !isLiveGeometryActive(session))
+    ) {
       return false;
     }
     const current = createRenderSnapshot(session);
@@ -493,6 +502,9 @@ export function createTerminalPresentationController({
 
   const presentationRequiresHold = (session) => {
     if (!session?.hasPresentedFrame) {
+      return false;
+    }
+    if (isLiveGeometryActive(session)) {
       return false;
     }
     // terminalFrameHeld remains true for the two-paint release grace period
@@ -595,7 +607,7 @@ export function createTerminalPresentationController({
     ) {
       return false;
     }
-    if (session.resizeEpochSupported === true) {
+    if (session.resizeEpochSupported === true && !isLiveGeometryActive(session)) {
       const requestedResizeEpoch = normalizeResizeEpoch(session.requestedResizeEpoch);
       const appliedResizeEpoch = normalizeResizeEpoch(session.appliedResizeEpoch);
       if (requestedResizeEpoch && requestedResizeEpoch !== appliedResizeEpoch) {
@@ -633,7 +645,10 @@ export function createTerminalPresentationController({
     session.presentationRetryExhausted = false;
     clearValidation(session);
     clearRetry(session);
-    recordEvent(session, "full_render_complete", canvasDetails(session));
+    const liveGeometry = isLiveGeometryActive(session);
+    if (!liveGeometry) {
+      recordEvent(session, "full_render_complete", canvasDetails(session));
+    }
     if (session.presentationCommitPending && session.resizePresentationHold) {
       session.presentationCommitPending = false;
       session.resizePresentationHold = false;
@@ -649,10 +664,12 @@ export function createTerminalPresentationController({
     if (session.renderReady && session.terminalFrameHeld && !session.resizePresentationHold) {
       scheduleFrameRelease(session);
     }
-    recordEvent(session, "presentation_commit_complete", {
-      renderGeneration: session.renderGeneration,
-      ...canvasDetails(session),
-    });
+    if (!liveGeometry) {
+      recordEvent(session, "presentation_commit_complete", {
+        renderGeneration: session.renderGeneration,
+        ...canvasDetails(session),
+      });
+    }
     trace(session, "commit_if_ready_success", { renderGeneration: session.renderGeneration });
     return true;
   };
@@ -722,6 +739,23 @@ export function createTerminalPresentationController({
     return rendered;
   };
 
+  const renderLiveGeometryNow = (session) => {
+    const term = session?.term;
+    if (
+      !isUsable(session)
+      || !isLiveGeometryActive(session)
+      || !term
+      || typeof term.renderNow !== "function"
+      || !renderAllowed(session)
+    ) {
+      return false;
+    }
+    cancelPendingRender(term);
+    setPendingRender(session);
+    term.renderFullNextFrame = false;
+    return term.renderNow(true) !== false;
+  };
+
   const commitNow = (session) => {
     if (!isUsable(session) || !session.term || !session.resizePresentationHold || !session.hasPresentedFrame) {
       return false;
@@ -777,7 +811,7 @@ export function createTerminalPresentationController({
     if (Number(target.cols || 0) <= 0 || Number(target.rows || 0) <= 0) {
       return false;
     }
-    const sent = sendResize(session, { force: true, dimensions: target });
+    const sent = retryResize(session, { dimensions: target });
     if (sent) {
       recordEvent(session, "resize_fence_retry", { reason });
     }
@@ -798,6 +832,9 @@ export function createTerminalPresentationController({
       scheduleRetry(session, { reason: `${reason}:hidden`, forceHistory });
       return false;
     }
+    if (isLiveGeometryActive(session) && session.resizeAckPending) {
+      retryPendingResize(session, reason);
+    }
     const needsHold = presentationRequiresHold(session);
     if (needsHold) {
       if (!session.resizePresentationHold) {
@@ -808,7 +845,10 @@ export function createTerminalPresentationController({
       setReady(session, false, { preserveFrame: false, reason: "presentation_first_frame" });
     }
     session.presentationDeferredReason = "";
-    if (session.resizeFenceActive || session.resizeAckPending || session.resizeOutputSettleActive) {
+    if (
+      !isLiveGeometryActive(session)
+      && (session.resizeFenceActive || session.resizeAckPending || session.resizeOutputSettleActive)
+    ) {
       retryPendingResize(session, reason);
       recordEvent(session, "presentation_wait_resize", {
         reason,
@@ -890,6 +930,8 @@ export function createTerminalPresentationController({
     if (
       !isUsable(session)
       || !isReplayCommitted(session)
+      || isLiveGeometryActive(session)
+      || !isPaneVisible(session)
       || (!forceHistory && isCurrent(session))
     ) {
       return false;
@@ -941,6 +983,8 @@ export function createTerminalPresentationController({
       !isUsable(session)
       || !isReplayCommitted(session)
       || !isActiveTarget(session)
+      || isLiveGeometryActive(session)
+      || !isPaneVisible(session)
       || isCurrent(session)
     ) {
       return false;
@@ -989,7 +1033,7 @@ export function createTerminalPresentationController({
         ...presentationGateDetails(session),
       });
       scheduleFrame(session, `retry:${session.presentationRetryReason || reason}`);
-      if (!isCurrent(session)) {
+      if (isPaneVisible(session) && isPaneMeasurable(session) && !isCurrent(session)) {
         scheduleValidation(session, { forceHistory });
       }
     });
@@ -1009,7 +1053,8 @@ export function createTerminalPresentationController({
       }
       return false;
     }
-    if (isCurrent(session)) {
+    const liveGeometryAckPending = isLiveGeometryActive(session) && session.resizeAckPending;
+    if (isCurrent(session) && !liveGeometryAckPending) {
       session.presentationStallStartedAt = 0;
       session.presentationStallLastAttemptAt = 0;
       session.presentationStallReconnectAttempts = 0;
@@ -1060,6 +1105,13 @@ export function createTerminalPresentationController({
       }
     },
     onRender: () => {
+      // Ghostty output renders are already complete live frames. During an
+      // optimistic geometry transaction, accept that frame into the current
+      // presentation snapshot instead of scheduling a second full render for
+      // the same content generation.
+      if (isLiveGeometryActive(session) && !session.fullRenderPending) {
+        setPendingRender(session);
+      }
       const completed = markRendered(session);
       if (
         !completed
@@ -1107,6 +1159,7 @@ export function createTerminalPresentationController({
     recoverStalled,
     releaseHold,
     renderFullNow,
+    renderLiveGeometryNow,
     requestFullRender,
     scheduleFrame,
     scheduleRetry,

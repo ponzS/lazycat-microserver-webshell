@@ -6,15 +6,17 @@
 export function createWorkspaceLayoutViewController({
   documentObject = globalThis.document,
   windowObject = globalThis.window,
-  getCurrentTab = () => null,
   isApplyingWorkspaceState = () => false,
   setActivePane = () => {},
   resizeTab = () => {},
-  scheduleTabResize = () => {},
+  beginTabInteractiveResize = () => {},
+  updateTabInteractiveResize = () => {},
+  endTabInteractiveResize = () => {},
   postWorkspaceAction = () => Promise.resolve(),
   showToast = () => {},
 } = {}) {
   let disposed = false;
+  let activeDragFinish = null;
 
   const renderLeaf = (tab, node) => {
     const pane = tab?.panes?.get?.(node?.paneId);
@@ -33,7 +35,7 @@ export function createWorkspaceLayoutViewController({
     return pane.shellEl;
   };
 
-  const installSplitResizeHandle = (divider, node, childIndex, direction) => {
+  const installSplitResizeHandle = (divider, tab, node, childIndex, direction) => {
     divider.addEventListener("pointerdown", (event) => {
       if (disposed) {
         return;
@@ -57,50 +59,104 @@ export function createWorkspaceLayoutViewController({
       const firstBasis = (first.getBoundingClientRect()[direction === "vertical" ? "width" : "height"] / total) * 100;
       const secondBasis = (second.getBoundingClientRect()[direction === "vertical" ? "width" : "height"] / total) * 100;
       const combined = firstBasis + secondBasis;
+      activeDragFinish?.({ persist: false });
       divider.classList.add("is-dragging");
       container.classList.add("is-resizing");
       documentObject?.body?.classList.add("split-resize-active");
       divider.setPointerCapture?.(event.pointerId);
+      beginTabInteractiveResize(tab);
 
-      const onMove = (moveEvent) => {
-        if (disposed) {
-          return;
+      let finished = false;
+      let layoutFrame = 0;
+      let pendingCurrent = null;
+
+      const applyPendingLayout = () => {
+        if (pendingCurrent === null) {
+          return false;
         }
-        const current = direction === "vertical" ? moveEvent.clientX : moveEvent.clientY;
-        const delta = ((current - start) / total) * 100;
+        const delta = ((pendingCurrent - start) / total) * 100;
+        pendingCurrent = null;
         const nextFirst = Math.max(12, Math.min(combined - 12, firstBasis + delta));
         const nextSecond = Math.max(12, combined - nextFirst);
         node.children[childIndex].size = nextFirst;
         node.children[childIndex + 1].size = nextSecond;
         first.style.flexBasis = `${nextFirst}%`;
         second.style.flexBasis = `${nextSecond}%`;
-        scheduleTabResize(getCurrentTab(), {
-          forceFullRender: true,
-          hideUntilRender: true,
-        });
+        updateTabInteractiveResize(tab);
+        return true;
       };
 
-      const onUp = () => {
+      const onMove = (moveEvent) => {
+        if (
+          disposed
+          || (
+            moveEvent.pointerId !== undefined
+            && event.pointerId !== undefined
+            && moveEvent.pointerId !== event.pointerId
+          )
+        ) {
+          return;
+        }
+        pendingCurrent = direction === "vertical" ? moveEvent.clientX : moveEvent.clientY;
+        if (layoutFrame) {
+          return;
+        }
+        layoutFrame = windowObject?.requestAnimationFrame?.(() => {
+          layoutFrame = 0;
+          if (!disposed && !finished) {
+            applyPendingLayout();
+          }
+        }) || 0;
+      };
+
+      const finish = ({ persist = true } = {}) => {
+        if (finished) {
+          return false;
+        }
+        finished = true;
+        if (layoutFrame) {
+          windowObject?.cancelAnimationFrame?.(layoutFrame);
+          layoutFrame = 0;
+        }
+        applyPendingLayout();
         divider.classList.remove("is-dragging");
         container.classList.remove("is-resizing");
         documentObject?.body?.classList.remove("split-resize-active");
         divider.removeEventListener("pointermove", onMove);
         divider.removeEventListener("pointerup", onUp);
         divider.removeEventListener("pointercancel", onUp);
-        scheduleTabResize(getCurrentTab(), {
-          forceFullRender: true,
-          hideUntilRender: true,
-        }, { immediate: true });
-        const tab = getCurrentTab();
-        if (tab && !isApplyingWorkspaceState()) {
+        if (
+          event.pointerId !== undefined
+          && divider.hasPointerCapture?.(event.pointerId)
+        ) {
+          divider.releasePointerCapture?.(event.pointerId);
+        }
+        endTabInteractiveResize(tab);
+        if (activeDragFinish === finish) {
+          activeDragFinish = null;
+        }
+        if (persist && tab && !disposed && !isApplyingWorkspaceState()) {
           Promise.resolve(postWorkspaceAction("update_layout", {
             tab_id: tab.id,
             layout: tab.layout,
             active_pane_id: tab.activePaneId,
           })).catch((error) => showToast(error.message));
         }
+        return true;
       };
 
+      const onUp = (upEvent) => {
+        if (
+          upEvent?.pointerId !== undefined
+          && event.pointerId !== undefined
+          && upEvent.pointerId !== event.pointerId
+        ) {
+          return;
+        }
+        finish();
+      };
+
+      activeDragFinish = finish;
       divider.addEventListener("pointermove", onMove);
       divider.addEventListener("pointerup", onUp);
       divider.addEventListener("pointercancel", onUp);
@@ -131,7 +187,7 @@ export function createWorkspaceLayoutViewController({
         divider.className = "split-divider";
         divider.setAttribute("role", "separator");
         divider.setAttribute("aria-orientation", node.direction === "vertical" ? "vertical" : "horizontal");
-        installSplitResizeHandle(divider, node, index, node.direction);
+        installSplitResizeHandle(divider, tab, node, index, node.direction);
         wrapper.appendChild(divider);
       }
     });
@@ -142,6 +198,7 @@ export function createWorkspaceLayoutViewController({
     if (disposed || !tab?.layoutHost) {
       return false;
     }
+    activeDragFinish?.({ persist: false });
     tab.layoutHost.textContent = "";
     if (tab.layout && tab.panes?.size > 0) {
       const layout = renderLayoutNode(tab, tab.layout);
@@ -163,6 +220,8 @@ export function createWorkspaceLayoutViewController({
       return false;
     }
     disposed = true;
+    activeDragFinish?.({ persist: false });
+    activeDragFinish = null;
     return true;
   };
 

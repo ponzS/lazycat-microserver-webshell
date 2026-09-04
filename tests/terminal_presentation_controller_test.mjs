@@ -199,6 +199,7 @@ const createHarness = ({ renderResult = true, presentationRetryLimit = 8 } = {})
   let now = 100;
   let currentDeviceClaimRequired = false;
   let viewportGeometryClaimPending = false;
+  let liveGeometryActive = false;
   const controller = createTerminalPresentationController({
     windowObject: clock.windowObject,
     getActiveName: () => "target-1",
@@ -209,6 +210,7 @@ const createHarness = ({ renderResult = true, presentationRetryLimit = 8 } = {})
     isReplayCommitPending: () => false,
     isPaneVisible: (candidate) => candidate.visible === true,
     isPaneMeasurable: (candidate) => candidate.measurable === true,
+    isLiveGeometryActive: () => liveGeometryActive,
     isCurrentDeviceClaimRequired: () => currentDeviceClaimRequired,
     isViewportGeometryClaimPending: () => viewportGeometryClaimPending,
     canvasMatchesExpectedSize: (candidate) => candidate.canvasMatches === true,
@@ -217,7 +219,7 @@ const createHarness = ({ renderResult = true, presentationRetryLimit = 8 } = {})
       resizeSchedules.push({ candidate, options, scheduleOptions });
       return true;
     },
-    sendResize: (candidate, options) => {
+    retryResize: (candidate, options) => {
       resizeRequests.push({ candidate, options });
       return true;
     },
@@ -252,6 +254,9 @@ const createHarness = ({ renderResult = true, presentationRetryLimit = 8 } = {})
     session,
     setCurrentDeviceClaimRequired: (value) => {
       currentDeviceClaimRequired = value === true;
+    },
+    setLiveGeometryActive: (value) => {
+      liveGeometryActive = value === true;
     },
     setViewportGeometryClaimPending: (value) => {
       viewportGeometryClaimPending = value === true;
@@ -352,6 +357,42 @@ test("presentation controller never renders replay, resize, or invalid geometry 
   assert.equal(controller.ensure(session, { reason: "geometry_ready" }), true);
   assert.equal(session.term.renderNowCalls, 1);
   assert.equal(session.renderReady, true);
+});
+
+test("live geometry renders the current canvas without entering a resize hold", () => {
+  const { controller, session, setLiveGeometryActive } = createHarness();
+  controller.installSession(session);
+  session.hasPresentedFrame = true;
+  session.renderReady = true;
+  session.resizeAckPending = true;
+  session.resizeFenceActive = true;
+  session.resizeOutputSettleActive = true;
+  session.requestedResizeEpoch = "resize-next";
+  session.appliedResizeEpoch = "resize-current";
+  setLiveGeometryActive(true);
+
+  assert.equal(controller.ensure(session, { reason: "live_geometry" }), true);
+  assert.equal(session.term.renderNowCalls, 1);
+  assert.equal(session.resizePresentationHold, false);
+  assert.equal(session.terminalFrameHeld, false);
+  assert.equal(session.renderReady, true);
+  assert.equal(controller.isCurrent(session), true);
+});
+
+test("live geometry accepts an observed Ghostty output frame without a second render", () => {
+  const { clock, controller, session, setLiveGeometryActive } = createHarness();
+  controller.installSession(session);
+  session.hasPresentedFrame = true;
+  session.renderReady = true;
+  session.terminalContentGeneration = 5;
+  session.pendingRenderContentGeneration = 5;
+  setLiveGeometryActive(true);
+
+  assert.equal(session.term.renderNow(true), true);
+  assert.equal(session.term.renderNowCalls, 1);
+  assert.equal(session.presentedContentGeneration, 5);
+  assert.equal(session.fullRenderPending, false);
+  assert.equal(clock.frameCount(), 0);
 });
 
 test("stable presentation validation renders on the live canvas without showing the hold overlay", () => {
@@ -507,6 +548,21 @@ test("presentation retry reaches an explicit exhausted state", () => {
   assert.equal(controller.scheduleRetry(session, { reason: "test_retry" }), false);
   assert.equal(session.presentationRetryExhausted, true);
   assert.equal(events.filter(({ event }) => event === "presentation_retry_exhausted").length, 1);
+});
+
+test("hidden panes do not spin presentation retry or validation timers", () => {
+  const { clock, controller, events, session } = createHarness();
+  controller.installSession(session);
+  session.visible = false;
+  session.hasPresentedFrame = true;
+  session.renderReady = false;
+
+  assert.equal(controller.scheduleRetry(session, { reason: "hidden" }), false);
+  assert.equal(controller.scheduleValidation(session, { forceHistory: true }), false);
+  clock.flushTimers();
+  clock.flushFrames();
+  assert.equal(events.some(({ event }) => event === "presentation_retry_exhausted"), false);
+  assert.equal(session.term.renderNowCalls, 0);
 });
 
 test("presentation stall recovery resyncs only a committed active pane after bounded retries", () => {

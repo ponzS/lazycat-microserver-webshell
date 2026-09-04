@@ -2,7 +2,7 @@
 
 ## 职责
 
-本模块是终端几何事务的唯一 owner，维护 requested、applied、presented 三阶段中的 requested/applied 状态、resize epoch、跨设备 owner observation、ACK fence、输出 settle、DOM fit、ResizeObserver、Ghostty `onResize` 和 tab RAF 调度。
+本模块是终端几何事务的唯一 owner，维护 requested、applied、presented 三阶段中的 requested/applied 状态、resize epoch、跨设备 owner observation、ACK fence、输出 settle、DOM fit、ResizeObserver、Ghostty `onResize`、tab RAF 调度和桌面交互式 live geometry 状态。
 
 模块不拥有 WebSocket 建立、关闭或重连，不决定历史 replay/snapshot，不维护 Unified membership，也不直接管理输入队列。它只通过注入的 transport 命令发送 resize 控制帧，通过 rendering 公开命令提交 presentation hold 和最终 full render。
 
@@ -10,17 +10,26 @@
 
 当前设备接管必须使用 `claimForCurrentDevice()`、`claimTabForCurrentDevice()` 或 `claimActiveTabForCurrentDevice()`。如果显式 claim 到达时已有普通 resize 等待 ACK，controller 必须记录 latest-only pending claim，并在 ACK 或 `resize_owner_active` 后使用最新可测 DOM 几何升级为新的 claim；不得被同 target 去重吞掉，也不得先显示远端 owner 的过渡尺寸。`resizePane()` 统一拒绝在已有可见帧且观察到远端 owner 后发送被动 geometry/force-sync 帧；本设备已成功 claim 后，后续迟到几何修正必须继承 `claim:true`，不能降级为普通 resize。`isCurrentDeviceClaimRequired()` 只向 presentation 暴露远端 owner observation 的只读门禁；`schedulePresentationResize()` 在本设备已经 claim 后会为字体/行高等迟到 geometry 修正保留 claim 语义。tab、pane、页面恢复和 viewport 只发布使用意图，不能自行修改 claim/epoch 字段。
 
-ACK 前不得切换本地 Ghostty 网格。matching ACK 到达时必须重新冻结当前 output queue 的完整 entry 数量，把 ACK 前已经收到的全部字节先按旧网格排空；ACK handler 返回后收到的字节才属于新网格。不得沿用发送请求时的旧队列计数，否则 F11、切 tab 或折叠等场景中 ACK 前迟到字节会被新 cols/rows 解析，产生临时旧行、乱码或疑似串会话内容。
+普通原子 resize 在 ACK 前不得切换本地 Ghostty 网格。matching ACK 到达时必须重新冻结当前 output queue 的完整 entry 数量，把 ACK 前已经收到的全部字节先按旧网格排空；ACK handler 返回后收到的字节才属于新网格。不得沿用发送请求时的旧队列计数，否则 F11、切 tab 或折叠等场景中 ACK 前迟到字节会被新 cols/rows 解析，产生临时旧行、乱码或疑似串会话内容。
 
-远端尺寸只作为 observation，本设备只有在明确的 pointer、focus、viewport 或 owner release 边界才重新 claim。resize、snapshot、重连和历史恢复的任何中间过程都不得显示，也不得通过重新 replay 历史掩盖几何问题。
+桌面分屏拖拽和普通桌面窗口 resize 是明确的 live geometry 例外：本地 Ghostty 网格/Canvas 可在服务端 ACK 前按当前 DOM 尺寸乐观重排，live Canvas 始终可见且顶部锚定。该例外只改变交互期间的本地呈现，不改变服务端 owner、resize epoch 或最终尺寸权威；replay、重连、首次恢复、tab 激活修复及非交互式几何校正仍走上述 ACK fence 与原子呈现。
 
-resize/字号事务期间显示的 last-known-good hold frame 不能降低清晰度：hold canvas 的 backing dimensions 已按 CSS 尺寸乘当前 renderer DPR 分配，并通过真实 DPR=3 回归验证。当前仍需验证 hold 的可见 CSS 尺寸与当前 host/live presentation 尺寸在 resize settle 期间始终一致。
+远端尺寸只作为 observation，本设备只有在明确的 pointer、focus、viewport 或 owner release 边界才重新 claim。snapshot、重连、历史恢复和非 live 的 resize 中间过程都不得显示，也不得通过重新 replay 历史掩盖几何问题。
+
+replay、重连、字号和其他原子恢复事务期间显示的 last-known-good hold frame 不能降低清晰度：hold canvas 的 backing dimensions 已按 CSS 尺寸乘当前 renderer DPR 分配，并通过真实 DPR=3 回归验证。live geometry 不捕获、不显示也不缩放 hold Canvas。
+
+分屏条交互式拖拽必须通过 `beginTabInteractiveResize()` / `updateTabInteractiveResize()` / `endTabInteractiveResize()` 建立显式事务。开始时取消旧 scheduler 和可能残留的 hold；拖动中由 workspace 每个布局 RAF 通知 update，本模块以 80ms 上限节流本地 fit/full render，并用 trailing timer 保证最后一次被节流的 DOM 尺寸不会长期落后。此时 `resizePane()`、`schedulePane()` 和 ResizeObserver 的迟到工作必须被 live geometry fence 拒绝，但 live output 仍可提交到当前 Canvas。结束时强制一次最终本地 fit，并以 `claim:true` 提交最终尺寸。不得为每个 pointermove 创建 resize epoch、ACK、output fence 或原子 presentation hold。
+
+网络 resize 每个 pane 同时只能有一个本地 epoch 在途。新尺寸只覆盖 `pendingResizeTarget`，当前 ACK 后再发送最新目标；超时重试必须复用当前 `requestedResizeEpoch`，不能分配新 epoch 让迟到 ACK 变成 stale。桌面 window resize 复用同一 live geometry 状态，以 settle timer 结束并提交最终尺寸。
 
 ## 公开入口与契约
 
 外部只能从 `terminal/resize/index.js` 导入。
 
 - `createTerminalResizeController()`：模块单一编排入口。公开尺寸读取、可测量判断、resize/claim/reassert、当前 pane/tab 设备接管、协议 ACK/error/owner 处理、输出 settle、tab 调度、session 安装和幂等销毁。
+- `beginTabInteractiveResize()` / `updateTabInteractiveResize()` / `endTabInteractiveResize()`：幂等管理 tab 内各 session 的 live geometry；只做本地网格/Canvas 重排与最终尺寸提交，不拥有布局比例，也不自行持久化 workspace。
+- `scheduleTabLiveGeometry()`：桌面 window resize 的 live geometry + trailing commit 入口。
+- `resendPendingSize()`：只重发当前在途 epoch 与 target，不创建新事务。
 - `TerminalResizeController`：单个 resize 请求的 epoch/ACK/settle 纯状态机，由高层 controller 持有。
 - `createTerminalResizeScheduler()`：latest-only 的 throttle/settle 调度器。
 - `shouldSendTerminalSize()`、`terminalSizeDiffersFromServer()`：无状态尺寸判断。
@@ -30,13 +39,13 @@ resize/字号事务期间显示的 last-known-good hold frame 不能降低清晰
 
 ## 状态所有权
 
-`resize_controller.js` 是以下状态的唯一修改者：`requestedResizeEpoch`、`appliedResizeEpoch`、requested/server geometry、`resizeAckPending`、`resizeFence*`、`resizeOutputSettle*`、`measuredFitGeneration`、`sizeClaimRequired`、`sizeClaimed`、`requestedResizeClaim`、`pendingSizeClaim*` 和 observer 记录尺寸。presentation 只读取这些门禁并在最终 render 成功后推进 `presentedResizeEpoch`。
+`resize_controller.js` 是以下状态的唯一修改者：`requestedResizeEpoch`、`appliedResizeEpoch`、requested/server geometry、`pendingResizeTarget`、`resizeAckPending`、`resizeFence*`、`resizeOutputSettle*`、`measuredFitGeneration`、`sizeClaimRequired`、`sizeClaimed`、`requestedResizeClaim`、`pendingSizeClaim*` 和 observer 记录尺寸。presentation 只读取这些门禁并在 render 成功后推进 `presentedResizeEpoch`。
 
-`resize_lifecycle.js` 独占 scheduler timer/RAF、ResizeObserver、Ghostty `onResize` disposable、owner/pending-target RAF 和 tab RAF。`geometry_state.js` 与 `viewport_controller.js` 不保存业务状态。
+`resize_controller.js` 还独占 interactive/live session 集合、本地重排节流时间、trailing fit timer 和桌面 window settle timer；workspace 只能通过公开命令开始/update/结束事务，不能修改这些状态。`resize_lifecycle.js` 独占普通 scheduler timer/RAF、ResizeObserver、Ghostty `onResize` disposable、owner/pending-target RAF 和 tab RAF。`geometry_state.js` 与 `viewport_controller.js` 不保存业务状态。
 
 ## 生命周期与清理
 
-`installSession()` 为 pane 安装 ResizeObserver 和 Ghostty `onResize`，两者都注册到 session cleanup。`cancelPane()` 取消 scheduler、session RAF、output settle 和 presentation hold；`cancelTab()` 取消 tab RAF；`dispose()` 拒绝迟到 observer/timer/RAF 并清理全部模块资源。
+`installSession()` 为 pane 安装 ResizeObserver 和 Ghostty `onResize`，两者都注册到 session cleanup。`cancelPane()` 取消 scheduler、session RAF、live geometry/trailing fit、output settle 和 presentation hold；`cancelTab()` 取消 tab RAF 与 window settle timer；`dispose()` 拒绝迟到 observer/timer/RAF 并清理全部模块资源。
 
 移动键盘 viewport suppression 仍由输入/页面层拥有，只通过注入 getter 阻止 resize 事务。模块销毁或 pane 关闭后，任何 ACK、timer、observer、RAF 或 terminal resize callback 都不得修改 session 或 Canvas。
 
@@ -55,6 +64,6 @@ resize/字号事务期间显示的 last-known-good hold frame 不能降低清晰
 
 模块依赖 Ghostty terminal/fit adapter 的机械 API、rendering 公开命令、output 的队列计数/queued bytes/有界 flush 命令和 transport resize 发送命令；不得读取 `session.outputQueue*`，也不得导入 history/cache/output/transport 内部实现。
 
-自动化测试：`terminal_resize_controller_test.mjs`（含默认控制帧 serializer、普通 resize 的 claim 升级、owner 拒绝保帧重试、matching ACK 前全部 output entry 使用旧网格排空）、`terminal_resize_scheduler_test.mjs`、`terminal_size_sync_test.go`、`TestRuntimeResizeEpochAckGuard`、`TestRuntimeCrossClientResizeDoesNotAutoReclaim`、`TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs` 和 resize 模块边界 guard。
+自动化测试：`terminal_resize_controller_test.mjs`（含默认控制帧 serializer、普通 resize 的 claim 升级、owner 拒绝保帧重试、matching ACK 前全部 output entry 使用旧网格排空、live geometry/trailing fit、window settle、单 in-flight/latest target 和同 epoch 重试）、`terminal_resize_scheduler_test.mjs`、`terminal_size_sync_test.go`、`TestRuntimeResizeEpochAckGuard`、`TestRuntimeCrossClientResizeDoesNotAutoReclaim`、`TestRuntimeTabResizeDoesNotTemporarilyActivateAllTabs` 和 resize 模块边界 guard。
 
-最小真实回归：在 `debug123` 同一 pane 持续输出时改变窗口尺寸、分屏比例、tab、字体和主题，确认 backing store 变化前 hold 已可见、ACK 前本地 cols/rows 不变、最终画面非空且没有 replay 中间帧；手机与桌面交替 claim 同一 pane 时远端 observation 不自动反抢；连续同设备点击不得新增 resize frame、改变 Canvas 几何或短暂隐藏已呈现画面（`tests-auto/08-terminal-click-jitter/test.mjs`）；全程普通容器页面只有一条 Unified 物理 WebSocket，console/pageerror/API error 为零。
+最小真实回归：在 `debug123` 同一 pane 持续输出时改变窗口尺寸、分屏比例、tab、字体和主题；桌面分屏/窗口 resize 要确认 live Canvas 顶部不变、宽度有界跟随 host、hold 始终隐藏且最终只提交最新尺寸，其他原子 resize 要确认 backing store 变化前 hold 已可见、ACK 前本地 cols/rows 不变、最终画面非空且没有 replay 中间帧。高频拖动分屏条时两个 pane 画面不串、持续输出推进、pointermove 不持续发送 resize、释放后最终比例收敛（`tests-auto/13-split-divider-render-isolation/test.mjs`）；手机与桌面交替 claim 同一 pane 时远端 observation 不自动反抢；连续同设备点击不得新增 resize frame、改变 Canvas 几何或短暂隐藏已呈现画面（`tests-auto/08-terminal-click-jitter/test.mjs`）；全程普通容器页面只有一条 Unified 物理 WebSocket，console/pageerror/API error 为零。

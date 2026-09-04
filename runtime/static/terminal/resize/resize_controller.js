@@ -71,6 +71,11 @@ export function createTerminalResizeController({
 } = {}) {
   let disposed = false;
   const ownedSessions = new Set();
+  const interactiveResizeSessions = new Set();
+  const liveGeometrySessions = new Set();
+  const windowLiveResizeTimers = new Map();
+  const liveGeometryResizeTimers = new Map();
+  const liveGeometryLastResizeAt = new WeakMap();
   const presentation = () => getPresentation?.();
   const trace = (session, phase, details = {}) => {
     const sink = windowObject?.__testsAutoResizeTrace;
@@ -485,15 +490,42 @@ export function createTerminalResizeController({
       pixelWidth: session.requestedPixelWidth,
       pixelHeight: session.requestedPixelHeight,
     } : null;
-    // A second force/claim call for the same in-flight target cannot change
-    // the server-side result.  Suppress it before allocating another epoch.
-    if (pendingTarget && terminalResizeTargetsMatch(pendingTarget, {
-      cols,
-      rows,
-      pixelWidth,
-      pixelHeight,
-    })) {
-      trace(session, "send_size_skip", { reason: "pending_target_same", pendingTarget, cols, rows, pixelWidth, pixelHeight });
+    // One pane may have only one local request in flight. A newer geometry is
+    // retained as the latest target and sent after the current ACK instead of
+    // replacing requestedResizeEpoch and turning every late ACK into a stale
+    // acknowledgement.
+    if (pendingTarget) {
+      const targetMatches = terminalResizeTargetsMatch(pendingTarget, {
+        cols,
+        rows,
+        pixelWidth,
+        pixelHeight,
+      });
+      const pendingClaim = session.pendingResizeTarget?.claim === true || claim;
+      if (!targetMatches || (pendingClaim && session.requestedResizeClaim !== true)) {
+        session.pendingResizeTarget = {
+          cols,
+          rows,
+          pixelWidth,
+          pixelHeight,
+          claim: pendingClaim,
+          liveGeometry: liveGeometrySessions.has(session),
+        };
+        recordEvent(session, "resize_target_queued", {
+          cols,
+          rows,
+          claim: pendingClaim,
+          inFlightEpoch: String(session.requestedResizeEpoch || ""),
+        });
+      }
+      trace(session, "send_size_skip", {
+        reason: targetMatches ? "pending_target_same" : "pending_target_queued",
+        pendingTarget,
+        cols,
+        rows,
+        pixelWidth,
+        pixelHeight,
+      });
       return false;
     }
     const target = { cols, rows, pixelWidth, pixelHeight };
@@ -624,6 +656,44 @@ export function createTerminalResizeController({
       pixelHeight,
       resizeEpoch,
       resizeAckPending: session.resizeAckPending,
+    });
+    return true;
+  };
+
+  const resendPendingSize = (session) => {
+    if (disposed || !session || session.closed || !isSocketOpen(session) || !session.resizeAckPending) {
+      return false;
+    }
+    const resizeEpoch = normalizeTerminalResizeEpoch(session.requestedResizeEpoch);
+    const cols = Math.max(0, Math.floor(Number(session.requestedCols) || 0));
+    const rows = Math.max(0, Math.floor(Number(session.requestedRows) || 0));
+    const pixelWidth = Math.max(0, Math.floor(Number(session.requestedPixelWidth) || 0));
+    const pixelHeight = Math.max(0, Math.floor(Number(session.requestedPixelHeight) || 0));
+    if (!resizeEpoch || cols <= 0 || rows <= 0) {
+      return false;
+    }
+    try {
+      const sent = sendControl(session, {
+        type: "resize",
+        cols,
+        rows,
+        pixel_width: pixelWidth,
+        pixel_height: pixelHeight,
+        ...(session.requestedResizeClaim === true ? { claim: true } : {}),
+        resize_epoch: resizeEpoch,
+      });
+      if (sent === false) {
+        return false;
+      }
+    } catch (error) {
+      return false;
+    }
+    session.lastResizeRequestAt = now();
+    recordEvent(session, "resize_request_retry", {
+      requestedResizeEpoch: resizeEpoch,
+      cols,
+      rows,
+      claim: session.requestedResizeClaim === true,
     });
     return true;
   };
@@ -796,6 +866,18 @@ export function createTerminalResizeController({
       session.sizeClaimRequired = true;
       session.sizeClaimed = false;
       session.requestedResizeClaim = false;
+      if (liveGeometrySessions.has(session)) {
+        clearOutputSettle(session);
+        clearFence(session);
+        endRenderSuppression(session, { render: false, reason: "resize" });
+        presentation()?.setReady(session, true, { reason: "live_geometry_remote_resize" });
+        if (!interactiveResizeSessions.has(session)) {
+          lifecycle.scheduleSessionFrame(session, "live-geometry-remote-claim", () => {
+            commitLiveGeometryTarget(session);
+          });
+        }
+        return true;
+      }
       if (session.pendingSizeClaim) {
         clearOutputSettle(session);
         clearFence(session);
@@ -834,23 +916,41 @@ export function createTerminalResizeController({
       });
       if (session.pendingSizeClaim) {
         schedulePendingSizeClaim(session);
-      } else if (pendingResizeTarget && !terminalResizeTargetsMatch({
-        cols: session.serverCols,
-        rows: session.serverRows,
-        pixelWidth: session.serverPixelWidth,
-        pixelHeight: session.serverPixelHeight,
-      }, pendingResizeTarget)) {
+      } else if (pendingResizeTarget && (
+        (pendingResizeTarget.claim === true && !requestWasClaim)
+        || !terminalResizeTargetsMatch({
+          cols: session.serverCols,
+          rows: session.serverRows,
+          pixelWidth: session.serverPixelWidth,
+          pixelHeight: session.serverPixelHeight,
+        }, pendingResizeTarget)
+      )) {
         lifecycle.scheduleSessionFrame(session, "pending-target", () => {
           if (session.resizeAckPending) {
+            return;
+          }
+          if (liveGeometrySessions.has(session)) {
+            const sent = sendSize(session, {
+              force: true,
+              dimensions: pendingResizeTarget,
+              claim: pendingResizeTarget.claim === true || requestWasClaim,
+            });
+            if (!sent && !session.resizeAckPending) {
+              finishLiveGeometry(session, "interactive_resize_pending_applied");
+            }
             return;
           }
           schedulePane(session, {
             forceFullRender: true,
             hideUntilRender: true,
             forceSizeSync: true,
-            claimSize: requestWasClaim || (session.sizeClaimed === true && !session.sizeClaimRequired),
+            claimSize: pendingResizeTarget.claim === true
+              || requestWasClaim
+              || (session.sizeClaimed === true && !session.sizeClaimRequired),
           }, { immediate: true });
         });
+      } else if (liveGeometrySessions.has(session) && !interactiveResizeSessions.has(session)) {
+        finishLiveGeometry(session);
       }
     }
     return true;
@@ -896,6 +996,18 @@ export function createTerminalResizeController({
       session.requestedRows = session.serverRows;
       session.requestedPixelWidth = session.serverPixelWidth;
       session.requestedPixelHeight = session.serverPixelHeight;
+      if (liveGeometrySessions.has(session)) {
+        clearOutputSettle(session);
+        clearFence(session);
+        endRenderSuppression(session, { render: false, reason: "resize" });
+        presentation()?.setReady(session, true, { reason: "live_geometry_owner_retry" });
+        if (!interactiveResizeSessions.has(session)) {
+          lifecycle.scheduleSessionFrame(session, "live-geometry-owner-claim", () => {
+            commitLiveGeometryTarget(session);
+          });
+        }
+        return true;
+      }
       if (session.pendingSizeClaim) {
         clearOutputSettle(session);
         clearFence(session);
@@ -921,6 +1033,20 @@ export function createTerminalResizeController({
       resizeErrorEpoch: epoch,
       reason: String(message?.reason || ""),
     });
+    if (liveGeometrySessions.has(session)) {
+      endRenderSuppression(session, { render: false, reason: "resize" });
+      presentation()?.setReady(session, true, { reason: "live_geometry_resize_error" });
+      consoleObject?.warn?.("[terminal-resize] live geometry resize rejected", {
+        name: session.name,
+        pane: session.id,
+        epoch,
+        reason: message?.reason || "",
+      });
+      if (!interactiveResizeSessions.has(session)) {
+        finishLiveGeometry(session, "resize_error");
+      }
+      return true;
+    }
     if (session.resizePresentationHold) {
       presentation()?.cancelHold(session);
       if (session.hasPresentedFrame) {
@@ -948,6 +1074,9 @@ export function createTerminalResizeController({
     claimSize: shouldClaimSize = false,
     settlePresentation,
   } = {}) => {
+    if (liveGeometrySessions.has(session)) {
+      return failedTerminalFit(isMeasurable(session));
+    }
     trace(session, "resize_pane_enter", {
       forceFullRender,
       hideUntilRender,
@@ -1145,7 +1274,11 @@ export function createTerminalResizeController({
         };
       }
       if (resizeRequestInFlight) {
-        session.pendingResizeTarget = { ...targetDimensions };
+        session.pendingResizeTarget = {
+          ...targetDimensions,
+          claim: claimSizeForTransaction,
+          liveGeometry: liveGeometrySessions.has(session),
+        };
         recordEvent(session, "resize_fence_wait", {
           cols: targetDimensions.cols,
           rows: targetDimensions.rows,
@@ -1353,7 +1486,14 @@ export function createTerminalResizeController({
   });
 
   const schedulePane = (session, options = {}, scheduleOptions = {}) => {
-    if (disposed || !session || session.closed || isMobileKeyboardResizeSuppressed()) {
+    if (
+      disposed
+      || !session
+      || session.closed
+      || interactiveResizeSessions.has(session)
+      || liveGeometrySessions.has(session)
+      || isMobileKeyboardResizeSuppressed()
+    ) {
       return false;
     }
     return lifecycle.schedule(session, options, scheduleOptions);
@@ -1370,6 +1510,14 @@ export function createTerminalResizeController({
   const cancelPane = (session) => {
     lifecycle.cancel(session);
     if (session) {
+      interactiveResizeSessions.delete(session);
+      liveGeometrySessions.delete(session);
+      liveGeometryLastResizeAt.delete(session);
+      const resizeTimer = liveGeometryResizeTimers.get(session);
+      if (resizeTimer) {
+        windowObject.clearTimeout(resizeTimer);
+        liveGeometryResizeTimers.delete(session);
+      }
       clearPendingSizeClaim(session);
       clearOutputSettle(session);
       clearFence(session);
@@ -1391,6 +1539,244 @@ export function createTerminalResizeController({
   };
 
   const resizeActiveTab = (options = {}) => resizeTab(getCurrentTab(), options);
+
+  const finishLiveGeometry = (session, reason = "interactive_resize_complete") => {
+    if (!liveGeometrySessions.delete(session)) {
+      return false;
+    }
+    const resizeTimer = liveGeometryResizeTimers.get(session);
+    if (resizeTimer) {
+      windowObject.clearTimeout(resizeTimer);
+      liveGeometryResizeTimers.delete(session);
+    }
+    interactiveResizeSessions.delete(session);
+    liveGeometryLastResizeAt.delete(session);
+    lifecycle.cancel(session);
+    if (session.resizePresentationHold || session.terminalFrameHeld) {
+      presentation()?.cancelHold(session, { restoreReady: true, releaseFrame: true });
+    }
+    presentation()?.ensure(session, { reason, forceHistory: false });
+    recordEvent(session, "live_geometry_complete", visualDetails(session));
+    return true;
+  };
+
+  const resizePaneLiveGeometry = (session, { force = false } = {}) => {
+    if (
+      disposed
+      || !session
+      || session.closed
+      || !liveGeometrySessions.has(session)
+      || !isReplayCommitted(session)
+      || !isVisible(session)
+    ) {
+      return failedTerminalFit(isMeasurable(session));
+    }
+    const currentTime = now();
+    const lastResizeAt = liveGeometryLastResizeAt.get(session) ?? Number.NEGATIVE_INFINITY;
+    if (!force && currentTime - lastResizeAt < throttleMs) {
+      if (!liveGeometryResizeTimers.has(session)) {
+        const delay = Math.max(0, throttleMs - (currentTime - lastResizeAt));
+        const timer = windowObject.setTimeout(() => {
+          if (liveGeometryResizeTimers.get(session) !== timer) {
+            return;
+          }
+          liveGeometryResizeTimers.delete(session);
+          if (!disposed && liveGeometrySessions.has(session)) {
+            resizePaneLiveGeometry(session, { force: true });
+          }
+        }, delay);
+        liveGeometryResizeTimers.set(session, timer);
+      }
+      return {
+        ok: true,
+        measurable: true,
+        throttled: true,
+        cols: Number(session.term?.cols || 0),
+        rows: Number(session.term?.rows || 0),
+        sizeChanged: false,
+        canvasChanged: false,
+      };
+    }
+    const resizeTimer = liveGeometryResizeTimers.get(session);
+    if (resizeTimer) {
+      windowObject.clearTimeout(resizeTimer);
+      liveGeometryResizeTimers.delete(session);
+    }
+    liveGeometryLastResizeAt.set(session, currentTime);
+    return measureTask("resize/live-fit", () => {
+      const dimensions = session.fitAddon?.proposeDimensions?.();
+      if (!dimensions || dimensions.cols <= 0 || dimensions.rows <= 0) {
+        return failedTerminalFit(isMeasurable(session));
+      }
+      const fittedDimensions = {
+        cols: Math.max(1, Math.floor(Number(dimensions.cols) || 0)),
+        rows: Math.max(1, Math.floor(Number(dimensions.rows) || 0)),
+      };
+      const sizeBefore = size(session);
+      const canvasBefore = terminalCanvasSize(session);
+      const canvasNeedsResize = !canvasMatchesExpectedSize(session, fittedDimensions);
+      const dimensionsWillChange = !dimensionsEqual(session, fittedDimensions) || canvasNeedsResize;
+      if (!dimensionsWillChange) {
+        return {
+          ok: true,
+          measurable: true,
+          cols: sizeBefore.cols,
+          rows: sizeBefore.rows,
+          sizeChanged: false,
+          canvasChanged: false,
+        };
+      }
+      const capturedViewport = viewport.capture(session.term);
+      const previousSuppressTerminalResizeSend = session.suppressTerminalResizeSend === true;
+      try {
+        session.suppressTerminalResizeSend = true;
+        session.term.resize(fittedDimensions.cols, fittedDimensions.rows);
+      } catch (error) {
+        return failedTerminalFit(true);
+      } finally {
+        session.suppressTerminalResizeSend = previousSuppressTerminalResizeSend;
+      }
+      viewport.restore(session.term, capturedViewport);
+      const sizeAfter = size(session);
+      const canvasAfter = terminalCanvasSize(session);
+      const sizeChanged = sizeBefore.cols !== sizeAfter.cols || sizeBefore.rows !== sizeAfter.rows;
+      const canvasChanged = canvasBefore.width !== canvasAfter.width || canvasBefore.height !== canvasAfter.height;
+      session.measuredFitGeneration = Number(session.measuredFitGeneration || 0) + 1;
+      session.activationFitPending = false;
+      resetHostViewport(session, { clean: true });
+      positionInput(session);
+      syncViewportPan(session);
+      updateSelectionHandles(session);
+      presentation()?.setReady(session, true, { reason: "live_geometry_resize" });
+      const rendered = presentation()?.renderLiveGeometryNow(session) === true;
+      return {
+        ok: true,
+        measurable: true,
+        cols: sizeAfter.cols,
+        rows: sizeAfter.rows,
+        sizeChanged,
+        canvasChanged,
+        rendered,
+      };
+    });
+  };
+
+  const commitLiveGeometryTarget = (session) => {
+    if (!liveGeometrySessions.has(session) || session.closed) {
+      return false;
+    }
+    const target = size(session);
+    if (target.cols <= 0 || target.rows <= 0) {
+      return false;
+    }
+    const sent = sendSize(session, {
+      force: true,
+      dimensions: target,
+      claim: true,
+    });
+    if (!sent && !session.resizeAckPending) {
+      finishLiveGeometry(session, "interactive_resize_already_applied");
+    }
+    return sent || session.resizeAckPending || Boolean(session.pendingResizeTarget);
+  };
+
+  const beginTabInteractiveResize = (tab) => {
+    if (disposed || !tab?.panes) {
+      return false;
+    }
+    let started = false;
+    for (const session of tab.panes.values()) {
+      if (
+        !session
+        || session.closed
+        || interactiveResizeSessions.has(session)
+        || !isReplayCommitted(session)
+      ) {
+        continue;
+      }
+      lifecycle.cancel(session);
+      interactiveResizeSessions.add(session);
+      if (!liveGeometrySessions.has(session)) {
+        liveGeometrySessions.add(session);
+        liveGeometryLastResizeAt.delete(session);
+        clearPendingSizeClaim(session);
+        clearOutputSettle(session);
+        clearFence(session);
+        endRenderSuppression(session, { render: false, reason: "resize" });
+        if (session.resizePresentationHold || session.terminalFrameHeld) {
+          presentation()?.cancelHold(session, { restoreReady: true, releaseFrame: true });
+        } else {
+          presentation()?.setReady(session, true, { reason: "live_geometry_begin" });
+        }
+      }
+      recordEvent(session, "interactive_resize_begin", visualDetails(session));
+      started = true;
+    }
+    return started;
+  };
+
+  const updateTabInteractiveResize = (tab) => {
+    if (disposed || !tab?.panes) {
+      return false;
+    }
+    let updated = false;
+    for (const session of tab.panes.values()) {
+      if (!interactiveResizeSessions.has(session)) {
+        continue;
+      }
+      const result = resizePaneLiveGeometry(session);
+      updated = result.ok || updated;
+    }
+    return updated;
+  };
+
+  const endTabInteractiveResize = (tab) => {
+    if (!tab?.panes) {
+      return false;
+    }
+    let ended = false;
+    for (const session of tab.panes.values()) {
+      if (!interactiveResizeSessions.delete(session)) {
+        continue;
+      }
+      lifecycle.cancel(session);
+      resizePaneLiveGeometry(session, { force: true });
+      recordEvent(session, "interactive_resize_end", visualDetails(session));
+      commitLiveGeometryTarget(session);
+      ended = true;
+    }
+    return ended;
+  };
+
+  const scheduleTabLiveGeometry = (tab) => {
+    if (disposed || !tab?.panes) {
+      return false;
+    }
+    beginTabInteractiveResize(tab);
+    updateTabInteractiveResize(tab);
+    const currentTimer = windowLiveResizeTimers.get(tab);
+    if (currentTimer) {
+      windowObject.clearTimeout(currentTimer);
+    }
+    const timer = windowObject.setTimeout(() => {
+      if (windowLiveResizeTimers.get(tab) !== timer) {
+        return;
+      }
+      windowLiveResizeTimers.delete(tab);
+      endTabInteractiveResize(tab);
+    }, settleMs);
+    windowLiveResizeTimers.set(tab, timer);
+    return true;
+  };
+
+  const cancelTab = (tab) => {
+    const timer = windowLiveResizeTimers.get(tab);
+    if (timer) {
+      windowObject.clearTimeout(timer);
+      windowLiveResizeTimers.delete(tab);
+    }
+    return lifecycle.cancelTab(tab);
+  };
 
   const scheduleTab = (tab, options = {}, scheduleOptions = {}) => {
     if (disposed || !tab) {
@@ -1542,6 +1928,9 @@ export function createTerminalResizeController({
         || height !== Number(session.lastObservedHostHeight || 0);
       session.lastObservedHostWidth = width;
       session.lastObservedHostHeight = height;
+      if (liveGeometrySessions.has(session)) {
+        return;
+      }
       const presentationCurrent = presentation()?.isCurrent(session) === true;
       schedulePane(session, {
         forceFullRender: !presentationCurrent || !session.hasPresentedFrame,
@@ -1619,9 +2008,11 @@ export function createTerminalResizeController({
     size,
     isMeasurable,
     isVisible,
+    isLiveGeometryActive: (session) => liveGeometrySessions.has(session),
     isCurrentDeviceClaimRequired: (session) => session?.sizeClaimRequired === true,
     canvasMatchesExpectedSize,
     sendSize,
+    resendPendingSize,
     claimSize,
     claimForCurrentDevice,
     claimTabForCurrentDevice,
@@ -1634,6 +2025,10 @@ export function createTerminalResizeController({
     cancelPane,
     resizeTab,
     resizeActiveTab,
+    beginTabInteractiveResize,
+    endTabInteractiveResize,
+    updateTabInteractiveResize,
+    scheduleTabLiveGeometry,
     scheduleTab,
     scheduleVisibleTab,
     scheduleActiveTabWindowResize,
@@ -1661,8 +2056,16 @@ export function createTerminalResizeController({
         ? scheduleOutputSettle(session, { reason: "output_received" })
         : false;
     },
-    cancelTab: (tab) => lifecycle.cancelTab(tab),
+    cancelTab,
     disposeSession(session) {
+      interactiveResizeSessions.delete(session);
+      liveGeometrySessions.delete(session);
+      liveGeometryLastResizeAt.delete(session);
+      const resizeTimer = liveGeometryResizeTimers.get(session);
+      if (resizeTimer) {
+        windowObject.clearTimeout(resizeTimer);
+        liveGeometryResizeTimers.delete(session);
+      }
       clearPendingSizeClaim(session);
       lifecycle.disposeSession(session);
     },
@@ -1677,6 +2080,16 @@ export function createTerminalResizeController({
         clearFence(session);
       }
       ownedSessions.clear();
+      interactiveResizeSessions.clear();
+      liveGeometrySessions.clear();
+      for (const timer of windowLiveResizeTimers.values()) {
+        windowObject.clearTimeout(timer);
+      }
+      windowLiveResizeTimers.clear();
+      for (const timer of liveGeometryResizeTimers.values()) {
+        windowObject.clearTimeout(timer);
+      }
+      liveGeometryResizeTimers.clear();
       lifecycle.dispose();
     },
   });
