@@ -279,6 +279,49 @@ test("settings sends field-only PATCH payloads and overlays a newer pending fiel
   assert.equal(controller.getDesktopShortcutsBarEnabled(), true);
 });
 
+test("line-height save does not reload an unchanged font family", async () => {
+  const { state: viewState, view } = createViewHarness();
+  const lifecycle = createLifecycleHarness();
+  let fontRegistrations = 0;
+  let fontRefreshes = 0;
+  const lineHeightChanges = [];
+  const controller = createSettingsController({
+    api: {
+      load: async () => baseServerState(),
+      patch: async (patch) => baseServerState({
+        terminal_line_height_percent: patch.terminal_line_height_percent,
+      }),
+    },
+    fontRegistry: {
+      dispose() {},
+      async registerAll() {
+        fontRegistrations += 1;
+        return { fontFailures: [], symbolFailed: false };
+      },
+    },
+    lifecycleFactory: lifecycle.factory,
+    onTerminalFontFamilyChange: () => { fontRefreshes += 1; },
+    onTerminalLineHeightChange: (next, previous) => lineHeightChanges.push([next, previous]),
+    storage: createStorage(),
+    view,
+    windowObject: createFakeWindow(),
+  });
+  controller.start();
+  await controller.load();
+  assert.equal(fontRegistrations, 1);
+  const fontRefreshesAtLoad = fontRefreshes;
+  assert.ok(fontRefreshesAtLoad >= 1);
+
+  viewState.lineHeight = 120;
+  lifecycle.handlers.onLineHeightChange();
+  await settle();
+
+  assert.equal(controller.getTerminalLineHeightPercent(), 120);
+  assert.equal(fontRegistrations, 1);
+  assert.equal(fontRefreshes, fontRefreshesAtLoad);
+  assert.ok(lineHeightChanges.some(([next, previous]) => next === 120 && previous === 100));
+});
+
 test("mobile shortcut text PATCH keeps leading spaces and newlines while reset uses null", async () => {
   const { state: viewState, view } = createViewHarness();
   const lifecycle = createLifecycleHarness();

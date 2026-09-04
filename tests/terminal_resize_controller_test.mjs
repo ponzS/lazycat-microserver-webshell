@@ -531,6 +531,24 @@ test("throttled live geometry schedules a trailing local reflow", () => {
   assert.equal(harness.sent[0].cols, 120);
 });
 
+test("font metrics and divider resize share live geometry without ending each other", () => {
+  const harness = createRuntimeHarness();
+  const tab = { panes: new Map([[harness.session.id, harness.session]]) };
+
+  assert.equal(harness.controller.beginTabInteractiveResize(tab), true);
+  assert.equal(harness.controller.beginMetricsLiveGeometry(harness.session), true);
+  harness.session.fitAddon.proposeDimensions = () => ({ cols: 110, rows: 30 });
+  assert.equal(harness.controller.updateMetricsLiveGeometry(harness.session, { force: true }).ok, true);
+  assert.equal(harness.controller.endMetricsLiveGeometry(harness.session), true);
+  assert.equal(harness.controller.isLiveGeometryActive(harness.session), true);
+  assert.equal(harness.sent.length, 0);
+
+  assert.equal(harness.controller.endTabInteractiveResize(tab), true);
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.sent[0].claim, true);
+  assert.equal(harness.sent[0].cols, 110);
+});
+
 test("desktop window resize uses live geometry and one trailing server commit", () => {
   const harness = createRuntimeHarness();
   const tab = { panes: new Map([[harness.session.id, harness.session]]) };

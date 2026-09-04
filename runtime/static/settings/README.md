@@ -36,6 +36,7 @@ controller 对外提供只读快照/getter、`start()`、`load()`、`open()`、`
 - `[[], []]` 和 `[]` 分别表示显式空手机/PC 快捷键配置。
 - 手机快捷键 `text` 原样保留空格、换行和制表符，不得 `trim()`。
 - 并发修改通过 pending overlay 防止较早 PATCH 响应覆盖尚未完成的较新字段。
+- 行高 PATCH 响应不重复注册或刷新未变化的字体族，避免在行高 live geometry 结束后额外开启 presentation hold；字体选择、上传、删除和初始 load 仍执行字体注册。
 
 ## 生命周期
 

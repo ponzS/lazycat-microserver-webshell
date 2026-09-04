@@ -634,7 +634,7 @@ export function startGlobalRuntime() {
     onTerminalScrollbackChange: (previousScrollback, nextScrollback) => (
       terminalMetrics?.applyScrollbackChange(previousScrollback, nextScrollback)
     ),
-    onTerminalLineHeightChange: () => terminalResize?.resizeActiveTabForCurrentDevice(),
+    onTerminalLineHeightChange: (value, previousValue) => terminalMetrics?.applyLineHeight(value, previousValue),
     onDesktopShortcutsBarChange: () => terminalResize?.resizeActiveTabForCurrentDevice(),
     onMobilePixelScrollChange: (enabled) => terminalMetrics?.applyMobilePixelScroll(enabled),
     onMobileDoubleTapReminderChange: () => updateMobileActiveTabTitle(),
