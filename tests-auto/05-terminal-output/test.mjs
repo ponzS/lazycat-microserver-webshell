@@ -238,10 +238,10 @@ const localOutputResources = (state) => state.page.evaluate(() => {
     "/terminal/output/output_model.js",
   ];
   const names = performance.getEntriesByType("resource").map((entry) => entry.name);
-  return Object.fromEntries(suffixes.map((suffix) => [
-    suffix,
-    names.some((name) => name.includes("/assets/") && name.endsWith(suffix)),
-  ]));
+  return {
+    bundleLoaded: names.some((name) => /\/assets\/[^/]+\/assets\/index-[^/]+\.js$/.test(new URL(name).pathname)),
+    sourceModulesLoaded: suffixes.filter((suffix) => names.some((name) => name.endsWith(suffix))),
+  };
 });
 
 const startAtomicPresentationObserver = (state) => state.page.evaluate(() => {
@@ -379,9 +379,8 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   mobile.page.on("console", captureConsoleError("mobile"));
 
   const resources = await localOutputResources(desktop);
-  const missingResources = Object.entries(resources).filter(([, loaded]) => !loaded).map(([name]) => name);
-  if (missingResources.length > 0) {
-    throw new Error(`output resources were not loaded from versioned assets: ${missingResources.join(", ")}`);
+  if (!resources.bundleLoaded || resources.sourceModulesLoaded.length > 0) {
+    throw new Error(`output code did not use the Vite bundle boundary: ${JSON.stringify(resources)}`);
   }
 
   const socketsBefore = {

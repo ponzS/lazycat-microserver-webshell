@@ -73,12 +73,61 @@ func TestBuildWritesPackageVersionForRuntimeAssets(t *testing.T) {
 		`LPK_VERSION="$(awk '/^version:[[:space:]]*/ { print $2; exit }' package.yml)"`,
 		`printf '%s\n' "$LPK_VERSION" > "$CONTENT_DIR/.lpk-version"`,
 		`./tools/sync-ghostty-web-assets.sh --rebuild-wasm-only`,
+		`npm ci --ignore-scripts --no-audit --no-fund`,
+		`npm run build`,
+		`if [ ! -f ./build/runtime/static/.vite/manifest.json ]`,
+		`cp -R ./build/runtime/. "$CONTENT_DIR/runtime/"`,
+		`cp -R ./runtime/fonts "$CONTENT_DIR/runtime/fonts"`,
 		`hash_content_file "$CONTENT_DIR/lcmd-webshell"`,
 		`find "$CONTENT_DIR/runtime" -type f -print | LC_ALL=C sort`,
 		`printf '%s\n' "$CONTENT_REVISION" > "$CONTENT_DIR/.lpk-content-revision"`,
 	} {
 		if !strings.Contains(source, want) {
 			t.Fatalf("LPK asset version build guard missing %q", want)
+		}
+	}
+	if strings.Contains(source, `cp -R ./runtime/. "$CONTENT_DIR/runtime/"`) {
+		t.Fatal("LPK buildscript must not publish the unbundled runtime/static source tree")
+	}
+}
+
+func TestViteBuildKeepsSourceModulesAndPublishesBoundedRuntime(t *testing.T) {
+	for _, file := range []string{"package.json", "package-lock.json", "vite.config.js", "tools/verify-vite-build.mjs"} {
+		if _, err := os.Stat(file); err != nil {
+			t.Fatalf("Vite build input %s is unavailable: %v", file, err)
+		}
+	}
+
+	configData, err := os.ReadFile("vite.config.js")
+	if err != nil {
+		t.Fatalf("ReadFile(vite.config.js) error = %v", err)
+	}
+	config := string(configData)
+	for _, want := range []string{
+		`./runtime/static/`,
+		`./build/runtime/static/`,
+		`__LCMD_ASSET_BASE__`,
+		`manifest: true`,
+		`assetsInlineLimit: 0`,
+		`legacy_service_worker_retirement.js`,
+	} {
+		if !strings.Contains(config, want) {
+			t.Fatalf("Vite build configuration missing %q", want)
+		}
+	}
+
+	verifierData, err := os.ReadFile("tools/verify-vite-build.mjs")
+	if err != nil {
+		t.Fatalf("ReadFile(verify-vite-build.mjs) error = %v", err)
+	}
+	verifier := string(verifierData)
+	for _, want := range []string{
+		`Vite runtime contains ${javascriptFiles.length} JavaScript files, budget is 8`,
+		`Vite runtime contains unbundled WebShell source modules`,
+		`Vite index is missing the runtime asset base placeholder`,
+	} {
+		if !strings.Contains(verifier, want) {
+			t.Fatalf("Vite runtime verifier missing %q", want)
 		}
 	}
 }

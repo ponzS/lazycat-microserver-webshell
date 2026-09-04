@@ -4477,7 +4477,7 @@ func TestRuntimeIOSHostAlwaysHidesCloseButton(t *testing.T) {
 		t.Fatalf("ReadFile(runtime/static/index.html) error = %v", err)
 	}
 	index := string(indexData)
-	hostScript := `<script src="__LCMD_ASSET_BASE__terminal/input/ime/ios_terminal_host.js"></script>`
+	hostScript := `<script type="module" src="__LCMD_ASSET_BASE__terminal/input/ime/ios_terminal_host.js"></script>`
 	if !strings.Contains(index, hostScript) {
 		t.Fatalf("runtime index missing iOS terminal host script")
 	}
@@ -7807,7 +7807,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 		`.pane-shell[data-render-ready="false"][data-has-presented-frame="false"] .terminal-host > canvas:not(.terminal-frame-hold) {`,
 		"visibility: hidden;",
 		".terminal-frame-hold",
-		"object-fit: none;",
+		"object-fit: contain;",
 		"object-position: left top;",
 	}
 	for _, want := range styleSnippets {
@@ -8135,7 +8135,8 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	if !strings.Contains(string(wasmData), "ghostty_terminal_get_scrollback_generation") {
 		t.Fatal("vendored Ghostty WASM must export scrollback generation")
 	}
-	if !strings.Contains(mainSource, `const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm"))`) {
+	if !strings.Contains(mainSource, `const ghosttyWASMURL = new URL("./ghostty-vt.wasm", import.meta.url).toString();`) ||
+		!strings.Contains(mainSource, `const ghosttyInitPromise = initGhostty(ghosttyWASMURL)`) {
 		t.Fatal("runtime must explicitly initialize ghostty-web with the vendored WASM resource")
 	}
 	if !strings.Contains(string(serverRevisionData), `const revisionChanged = Boolean(currentRevision && currentRevision !== nextRevision);`) {

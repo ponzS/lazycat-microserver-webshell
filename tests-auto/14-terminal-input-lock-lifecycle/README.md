@@ -59,8 +59,9 @@
 ## 运行命令和环境变量
 
 ```sh
+npm run build
 HEADLESS=1 \
-WEBSHELL_LOCAL_STATIC_DIR="$PWD/runtime/static" \
+WEBSHELL_LOCAL_STATIC_DIR="$PWD/build/runtime/static" \
 node tests-auto/run-playwright.mjs tests-auto/14-terminal-input-lock-lifecycle/test.mjs
 ```
 

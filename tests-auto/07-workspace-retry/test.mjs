@@ -22,10 +22,10 @@ const runtimeSnapshot = (state) => state.page.evaluate(() => {
   const unified = Array.from(window.__testsAutoSockets || [])
     .filter((socket) => String(socket.url || "").includes("mode=unified"));
   return {
-    resources: Object.fromEntries(suffixes.map((suffix) => [
-      suffix,
-      names.some((name) => name.includes("/assets/") && name.endsWith(suffix)),
-    ])),
+    resources: {
+      bundleLoaded: names.some((name) => /\/assets\/[^/]+\/assets\/index-[^/]+\.js$/.test(new URL(name).pathname)),
+      sourceModulesLoaded: suffixes.filter((suffix) => names.some((name) => name.endsWith(suffix))),
+    },
     sockets: {
       created: unified.length,
       active: unified.filter((socket) => (
@@ -87,9 +87,8 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     throw new Error(`terminal canvas is blank after workspace retry: ${JSON.stringify(canvas)}`);
   }
   const runtime = await runtimeSnapshot(desktop);
-  const missingResources = Object.entries(runtime.resources).filter(([, loaded]) => !loaded).map(([name]) => name);
-  if (missingResources.length > 0) {
-    throw new Error(`workspace refresh resources were not loaded from versioned assets: ${missingResources.join(", ")}`);
+  if (!runtime.resources.bundleLoaded || runtime.resources.sourceModulesLoaded.length > 0) {
+    throw new Error(`workspace refresh did not use the Vite bundle boundary: ${JSON.stringify(runtime.resources)}`);
   }
   if (runtime.sockets.active !== 1) {
     throw new Error(`expected one active Unified socket after workspace retry: ${JSON.stringify(runtime.sockets)}`);

@@ -38,10 +38,10 @@ const localViewportResources = (state) => state.page.evaluate(() => {
     "/terminal/viewport/viewport_model.js",
   ];
   const names = performance.getEntriesByType("resource").map((entry) => entry.name);
-  return Object.fromEntries(suffixes.map((suffix) => [
-    suffix,
-    names.some((name) => name.includes("/assets/") && name.endsWith(suffix)),
-  ]));
+  return {
+    bundleLoaded: names.some((name) => /\/assets\/[^/]+\/assets\/index-[^/]+\.js$/.test(new URL(name).pathname)),
+    sourceModulesLoaded: suffixes.filter((suffix) => names.some((name) => name.endsWith(suffix))),
+  };
 });
 
 const startAtomicPresentationObserver = (state) => state.page.evaluate(() => {
@@ -168,9 +168,8 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   await Promise.all([waitForOutput(desktop, marker), waitForOutput(mobile, marker)]);
 
   const resources = await localViewportResources(mobile);
-  const missingResources = Object.entries(resources).filter(([, loaded]) => !loaded).map(([name]) => name);
-  if (missingResources.length > 0) {
-    throw new Error(`viewport resources were not loaded from versioned assets: ${missingResources.join(", ")}`);
+  if (!resources.bundleLoaded || resources.sourceModulesLoaded.length > 0) {
+    throw new Error(`viewport code did not use the Vite bundle boundary: ${JSON.stringify(resources)}`);
   }
 
   const socketsBefore = await unifiedSocketSnapshot(mobile);

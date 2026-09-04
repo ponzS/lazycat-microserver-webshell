@@ -31,10 +31,10 @@ const localWorkspaceResources = (state) => state.page.evaluate(() => {
     "/workspace/tab_label_lifecycle.js",
   ];
   const names = performance.getEntriesByType("resource").map((entry) => entry.name);
-  return Object.fromEntries(suffixes.map((suffix) => [
-    suffix,
-    names.some((name) => name.includes("/assets/") && name.endsWith(suffix)),
-  ]));
+  return {
+    bundleLoaded: names.some((name) => /\/assets\/[^/]+\/assets\/index-[^/]+\.js$/.test(new URL(name).pathname)),
+    sourceModulesLoaded: suffixes.filter((suffix) => names.some((name) => name.endsWith(suffix))),
+  };
 });
 
 const createTemporaryTab = async (state) => {
@@ -150,9 +150,8 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     throw new Error(`terminal canvas is blank after tab rename reload: ${JSON.stringify(canvas)}`);
   }
   const resources = await localWorkspaceResources(desktop);
-  const missingResources = Object.entries(resources).filter(([, loaded]) => !loaded).map(([name]) => name);
-  if (missingResources.length > 0) {
-    throw new Error(`workspace tab label resources were not loaded from versioned assets: ${missingResources.join(", ")}`);
+  if (!resources.bundleLoaded || resources.sourceModulesLoaded.length > 0) {
+    throw new Error(`workspace code did not use the Vite bundle boundary: ${JSON.stringify(resources)}`);
   }
   const sockets = {
     desktop: await unifiedSocketSnapshot(desktop),
