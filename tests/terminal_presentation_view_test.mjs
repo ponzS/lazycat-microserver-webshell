@@ -88,3 +88,16 @@ test("presentation hold uses the renderer DPR for its backing store", () => {
     ["restore"],
   ]);
 });
+
+test("releasing a hold drops its full-size backing store", () => {
+  const hold = new FakeCanvas(2400, 1520, { left: 0, top: 0, width: 1200, height: 760 });
+  hold.hidden = false;
+  const view = createTerminalPresentationView({
+    windowObject: { HTMLCanvasElement: FakeCanvas, devicePixelRatio: 2 },
+  });
+
+  assert.equal(view.releaseFrame({ terminalFrameHold: hold }), true);
+  assert.equal(hold.hidden, true);
+  assert.equal(hold.width, 1);
+  assert.equal(hold.height, 1);
+});

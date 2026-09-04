@@ -116,7 +116,7 @@ Browser global-runtime
 - 每个 pane 是独立 logical stream，但不拥有独立的页面级 physical connection。
 - persistent agent、PTY、history 和绝对 byte cursor 是权威来源。
 - 浏览器保存的是渲染副本、连接状态、cursor 进度和当前 generation，不是普通容器的历史权威。
-- replay、snapshot、重连和原子 resize/恢复过程中的中间画面不得提交给用户；有效旧画面应作为 last-known-good frame 保留。桌面分屏/窗口及已提交终端字号/行高的 live geometry 是明确例外，只提交当前 session 的真实 Canvas，不展示 replay 中间态。
+- replay、snapshot、重连和原子 resize/恢复过程中的中间画面不得提交给用户；有效旧画面应作为 last-known-good frame 保留。主题、常规布局、稳定 viewport 和已提交终端字体 metrics 的 live 更新是明确例外，只提交当前 session 的真实 Canvas，不展示 replay 中间态。
 - output ACK 表示有序字节已经进入当前 Ghostty 状态，不等同于 Canvas 已提交。
 - `receivedCursor`、`appliedCursor` 和 `presentedCursor` 是不同阶段的进度，不能混用。
 
@@ -195,6 +195,8 @@ global-runtime
 分屏条拖拽的跨模块契约是：workspace layout controller 只按 RAF latest-only 更新 flex 比例，并通过公开命令通知 resize controller begin/update/end；resize controller 独占 live session、节流/trailing timer、单 in-flight/latest target 和最终 claim。拖动中本地 Ghostty 网格/Canvas 可有界实时重排，observer 与普通 resize 不得竞争，也不得为 pointermove 创建网络 epoch；释放时 resize controller 强制最终本地 fit 并以 `claim:true` 提交稳定尺寸。presentation 在 live geometry 中不使用 hold，replay/reconnect 等恢复仍保持原子提交；overview preview 暂停编码并在稳定后补帧。`global-runtime.js` 只负责命令和只读门禁接线，不复制事务状态。
 
 字号/行高的跨模块契约是：settings 只发布新值；metrics 在 option setter/字体度量前后持有 metrics live source；resize owner 与 interactive source 合并管理本地 fit、最终 target 和 ACK；presentation 只读取 live 门禁。行高字段 PATCH 不得因为响应中字体族未变化而额外触发字体注册/hold。任何 source 结束都不能提前终止仍活跃的另一个 source，且这条例外不能进入 replay、重连或 identity 恢复路径。
+
+主题 runtime 只更新 mapper、renderer theme 和 live full render，不触发 hold、metrics 或 resize。桌面/移动快捷栏及 Force-PC 只发布 layout live 意图。移动 viewport 从结构变化开始到稳定 generation 结束持有 structural source，键盘非结构变化仍 suppression。tab 激活只为 stale pane 捕获 hold；current outgoing live Canvas 留在隐藏 pane，避免每次切换复制整帧。原子 hold 释放后 backing 必须缩为 `1×1`。
 
 ## 3.3 诊断模块
 

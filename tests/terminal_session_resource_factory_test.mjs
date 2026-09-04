@@ -83,6 +83,8 @@ test("resource factory creates isolated pane DOM and Ghostty resources", () => {
   assert.equal(Object.hasOwn(first, "terminalPreview"), false);
   assert.equal(first.terminalFrameHold.className, "terminal-frame-hold");
   assert.equal(first.terminalFrameHold.hidden, true);
+  assert.equal(first.terminalFrameHold.width, 1);
+  assert.equal(first.terminalFrameHold.height, 1);
   assert.equal(first.compositionPreview.className, "terminal-composition-preview");
   assert.equal(first.compositionPreview.hidden, true);
   assert.deepEqual(optionsCalls, [{ cols: 80, rows: 24 }, {}]);

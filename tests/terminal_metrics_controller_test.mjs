@@ -130,7 +130,7 @@ test("metrics controller owns live terminal option adaptation", () => {
   assert.equal(first.term.options.fontSize, 18);
 });
 
-test("font size uses live geometry while font family keeps an atomic hold", () => {
+test("font size and loaded font family use live geometry", () => {
   const windowObject = makeWindow();
   const events = [];
   const options = new Proxy({}, {
@@ -168,8 +168,12 @@ test("font size uses live geometry while font family keeps an atomic hold", () =
 
   events.length = 0;
   assert.equal(controller.applyFontFamily("Fira Code"), true);
-  assert.ok(events.indexOf("hold") >= 0);
-  assert.ok(events.indexOf("hold") < events.indexOf("set:fontFamily"));
+  assert.ok(events.indexOf("live-begin") >= 0);
+  assert.ok(events.indexOf("live-begin") < events.indexOf("set:fontFamily"));
+  assert.equal(events.includes("hold"), false);
+  assert.ok(events.includes("live-update"));
+  windowObject.runAll();
+  assert.ok(events.includes("live-end"));
 });
 
 test("line height refresh uses and completes live geometry", () => {
@@ -204,4 +208,39 @@ test("line height refresh uses and completes live geometry", () => {
   assert.ok(events.includes("live-update"));
   windowObject.runAll();
   assert.ok(events.includes("live-end"));
+});
+
+test("font changes do not allocate hold frames for hidden tabs", () => {
+  const windowObject = makeWindow();
+  const holds = [];
+  const active = {
+    id: "active-pane",
+    tabId: "active-tab",
+    term: { options: { fontFamily: "old" }, renderer: { measureFont: () => ({ width: 8, height: 16 }) } },
+  };
+  const hidden = {
+    id: "hidden-pane",
+    tabId: "hidden-tab",
+    term: { options: { fontFamily: "old" }, renderer: { measureFont: () => ({ width: 8, height: 16 }) } },
+  };
+  const activeTab = { id: "active-tab", panes: new Map([[active.id, active]]) };
+  const hiddenTab = { id: "hidden-tab", panes: new Map([[hidden.id, hidden]]) };
+  const controller = createTerminalMetricsController({
+    windowObject,
+    getTabs: () => [activeTab, hiddenTab],
+    getCurrentTab: () => activeTab,
+    getPresentation: () => ({ beginHold: (session) => holds.push(session.id), isCurrent: () => true }),
+    getRenderer: () => ({ installBaseline() {} }),
+    getResize: () => ({
+      beginMetricsLiveGeometry: (session) => session === active,
+      updateMetricsLiveGeometry: () => ({ ok: true, pending: false }),
+      endMetricsLiveGeometry: () => true,
+      resizePane: () => ({ ok: false, pending: false }),
+    }),
+  });
+
+  assert.equal(controller.applyFontFamily("new"), true);
+  assert.deepEqual(holds, []);
+  assert.equal(active.term.options.fontFamily, "new");
+  assert.equal(hidden.term.options.fontFamily, "new");
 });

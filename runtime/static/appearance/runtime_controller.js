@@ -62,12 +62,9 @@ export function createAppearanceRuntimeController({
   getActiveTheme = () => null,
   getTerminalTheme = () => ({}),
   getSessions = () => [],
-  beginPresentationHold = () => {},
   isRenderAllowed = () => false,
   installThemeMapper = () => {},
   installCellSeam = () => {},
-  refreshTerminalMetrics = () => {},
-  resizeActiveTab = () => {},
   scheduleOverviewRender = () => {},
   sendTerminalTheme = () => {},
   syncCursorBlinkState = () => {},
@@ -123,7 +120,6 @@ export function createAppearanceRuntimeController({
     if (isInactive() || !session?.term || !theme) {
       return false;
     }
-    beginPresentationHold(session);
     const nextTheme = getTerminalTheme();
     installThemeMapper(session);
     installCellSeam(session);
@@ -140,7 +136,6 @@ export function createAppearanceRuntimeController({
         session.term.requestRender?.({ full: true });
       }
     }
-    refreshTerminalMetrics(session);
     return true;
   };
 
@@ -152,7 +147,6 @@ export function createAppearanceRuntimeController({
       applyThemeToSession(session, theme);
       sendTerminalTheme(session);
     }
-    resizeActiveTab();
     scheduleOverviewRender();
     return true;
   };

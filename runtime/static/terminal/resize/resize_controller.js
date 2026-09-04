@@ -73,12 +73,15 @@ export function createTerminalResizeController({
   const ownedSessions = new Set();
   const interactiveResizeSessions = new Set();
   const metricsLiveGeometrySessions = new Set();
+  const structuralLiveGeometrySessions = new Set();
   const liveGeometrySessions = new Set();
   const windowLiveResizeTimers = new Map();
   const liveGeometryResizeTimers = new Map();
   const liveGeometryLastResizeAt = new WeakMap();
   const hasActiveLiveGeometrySource = (session) => (
-    interactiveResizeSessions.has(session) || metricsLiveGeometrySessions.has(session)
+    interactiveResizeSessions.has(session)
+    || metricsLiveGeometrySessions.has(session)
+    || structuralLiveGeometrySessions.has(session)
   );
   const presentation = () => getPresentation?.();
   const trace = (session, phase, details = {}) => {
@@ -1516,6 +1519,7 @@ export function createTerminalResizeController({
     if (session) {
       interactiveResizeSessions.delete(session);
       metricsLiveGeometrySessions.delete(session);
+      structuralLiveGeometrySessions.delete(session);
       liveGeometrySessions.delete(session);
       liveGeometryLastResizeAt.delete(session);
       const resizeTimer = liveGeometryResizeTimers.get(session);
@@ -1556,6 +1560,7 @@ export function createTerminalResizeController({
     }
     interactiveResizeSessions.delete(session);
     metricsLiveGeometrySessions.delete(session);
+    structuralLiveGeometrySessions.delete(session);
     liveGeometryLastResizeAt.delete(session);
     lifecycle.cancel(session);
     if (session.resizePresentationHold || session.terminalFrameHeld) {
@@ -1694,6 +1699,7 @@ export function createTerminalResizeController({
       || sourceSessions.has(session)
       || !isReplayCommitted(session)
       || !isVisible(session)
+      || isMobileKeyboardResizeSuppressed()
     ) {
       return false;
     }
@@ -1748,6 +1754,50 @@ export function createTerminalResizeController({
     "metrics_live_geometry_end",
   );
 
+  const beginTabStructuralLiveGeometry = (tab) => {
+    if (disposed || !tab?.panes || isMobileKeyboardResizeSuppressed()) {
+      return false;
+    }
+    let started = false;
+    for (const session of tab.panes.values()) {
+      started = beginLiveGeometryForSource(
+        session,
+        structuralLiveGeometrySessions,
+        "structural_live_geometry_begin",
+      ) || started;
+    }
+    return started;
+  };
+
+  const updateTabStructuralLiveGeometry = (tab) => {
+    if (disposed || !tab?.panes || isMobileKeyboardResizeSuppressed()) {
+      return false;
+    }
+    let updated = false;
+    for (const session of tab.panes.values()) {
+      if (!structuralLiveGeometrySessions.has(session)) {
+        continue;
+      }
+      updated = resizePaneLiveGeometry(session).ok || updated;
+    }
+    return updated;
+  };
+
+  const endTabStructuralLiveGeometry = (tab) => {
+    if (!tab?.panes) {
+      return false;
+    }
+    let ended = false;
+    for (const session of tab.panes.values()) {
+      ended = endLiveGeometryForSource(
+        session,
+        structuralLiveGeometrySessions,
+        "structural_live_geometry_end",
+      ) || ended;
+    }
+    return ended;
+  };
+
   const beginTabInteractiveResize = (tab) => {
     if (disposed || !tab?.panes) {
       return false;
@@ -1794,11 +1844,14 @@ export function createTerminalResizeController({
   };
 
   const scheduleTabLiveGeometry = (tab) => {
-    if (disposed || !tab?.panes) {
+    if (disposed || !tab?.panes || isMobileKeyboardResizeSuppressed()) {
       return false;
     }
-    beginTabInteractiveResize(tab);
-    updateTabInteractiveResize(tab);
+    const started = beginTabInteractiveResize(tab);
+    const updated = updateTabInteractiveResize(tab);
+    if (!started && !updated) {
+      return false;
+    }
     const currentTimer = windowLiveResizeTimers.get(tab);
     if (currentTimer) {
       windowObject.clearTimeout(currentTimer);
@@ -2071,10 +2124,13 @@ export function createTerminalResizeController({
     resizeTab,
     resizeActiveTab,
     beginTabInteractiveResize,
+    beginTabStructuralLiveGeometry,
     beginMetricsLiveGeometry,
     endTabInteractiveResize,
+    endTabStructuralLiveGeometry,
     endMetricsLiveGeometry,
     updateTabInteractiveResize,
+    updateTabStructuralLiveGeometry,
     updateMetricsLiveGeometry,
     scheduleTabLiveGeometry,
     scheduleTab,
@@ -2108,6 +2164,7 @@ export function createTerminalResizeController({
     disposeSession(session) {
       interactiveResizeSessions.delete(session);
       metricsLiveGeometrySessions.delete(session);
+      structuralLiveGeometrySessions.delete(session);
       liveGeometrySessions.delete(session);
       liveGeometryLastResizeAt.delete(session);
       const resizeTimer = liveGeometryResizeTimers.get(session);
@@ -2131,6 +2188,7 @@ export function createTerminalResizeController({
       ownedSessions.clear();
       interactiveResizeSessions.clear();
       metricsLiveGeometrySessions.clear();
+      structuralLiveGeometrySessions.clear();
       liveGeometrySessions.clear();
       for (const timer of windowLiveResizeTimers.values()) {
         windowObject.clearTimeout(timer);

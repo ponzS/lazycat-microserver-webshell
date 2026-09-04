@@ -635,10 +635,13 @@ export function startGlobalRuntime() {
       terminalMetrics?.applyScrollbackChange(previousScrollback, nextScrollback)
     ),
     onTerminalLineHeightChange: (value, previousValue) => terminalMetrics?.applyLineHeight(value, previousValue),
-    onDesktopShortcutsBarChange: () => terminalResize?.resizeActiveTabForCurrentDevice(),
+    onDesktopShortcutsBarChange: () => terminalResize?.scheduleTabLiveGeometry(currentTab()),
     onMobilePixelScrollChange: (enabled) => terminalMetrics?.applyMobilePixelScroll(enabled),
     onMobileDoubleTapReminderChange: () => updateMobileActiveTabTitle(),
-    onMobileShortcutsChange: () => mobileShortcutsController?.render(),
+    onMobileShortcutsChange: () => {
+      mobileShortcutsController?.render();
+      terminalResize?.scheduleTabLiveGeometry(currentTab());
+    },
     onForcePCModeChange: () => syncForcePCModeState(),
     isIndependentClient: () => isIndependentClient(),
     openClientSettings: () => {
@@ -917,6 +920,9 @@ export function startGlobalRuntime() {
     getSessions: () => getAllSessions(),
     hasActivePanes: () => Boolean(currentTab()?.panes.size),
     claimActiveTabForCurrentDevice: (options) => terminalResize?.claimActiveTabForCurrentDevice(options),
+    beginStructuralLiveGeometry: () => terminalResize?.beginTabStructuralLiveGeometry(currentTab()),
+    updateStructuralLiveGeometry: () => terminalResize?.updateTabStructuralLiveGeometry(currentTab()),
+    endStructuralLiveGeometry: () => terminalResize?.endTabStructuralLiveGeometry(currentTab()),
     resetHostViewport: (session, options) => terminalIME?.resetHostViewport(session, options),
     positionInput: (session) => terminalIME?.positionInput(session),
     updateSelectionHandles: (session) => terminalSelection?.updateHandles(session),
@@ -1201,7 +1207,7 @@ export function startGlobalRuntime() {
     closeMobileCustomSelect: () => closeMobileCustomSelect(),
     hideSelection: () => terminalSelection?.hide(),
     handleViewportLayoutChange: () => terminalViewport?.handleLayoutChange(),
-    resizeActiveTabForCurrentDevice: () => terminalResize?.resizeActiveTabForCurrentDevice(),
+    scheduleActiveTabLiveGeometry: () => terminalResize?.scheduleTabLiveGeometry(currentTab()),
     handleHostLayoutChange: () => settings?.handleHostLayoutChange(),
     updateMobileActiveTabTitle: () => updateMobileActiveTabTitle(),
     updateSelection: () => terminalSelection?.update(),
@@ -2049,12 +2055,9 @@ export function startGlobalRuntime() {
     getActiveTheme: () => appearance.getActiveTheme(),
     getTerminalTheme: () => appearance.getTerminalTheme(),
     getSessions: () => getAllSessions(),
-    beginPresentationHold: (session) => terminalPresentation?.beginHold(session),
     isRenderAllowed: (session) => terminalPresentation?.isRenderAllowed(session) === true,
     installThemeMapper: (session) => terminalRenderer?.installThemeMapper(session),
     installCellSeam: (session) => terminalRenderer?.installCellSeam(session),
-    refreshTerminalMetrics: (session) => refreshTerminalMetrics(session),
-    resizeActiveTab: () => terminalResize?.resizeActiveTab(),
     scheduleOverviewRender: () => terminalOverview?.scheduleRender(),
     sendTerminalTheme: (session) => sendTerminalTheme(session),
     syncCursorBlinkState: () => syncCursorBlinkState(),
@@ -2240,8 +2243,11 @@ export function startGlobalRuntime() {
       },
       onVisualViewportChange: syncMobileCustomSelectPosition,
       onFontsReady: () => {
+        if (terminalViewport?.isResizeSuppressed() === true) {
+          return;
+        }
         for (const pane of getAllSessions()) {
-          refreshTerminalMetrics(pane);
+          refreshTerminalMetrics(pane, { liveGeometry: true });
         }
       },
       onOnline: () => runtimeRecovery?.handleOnline(),

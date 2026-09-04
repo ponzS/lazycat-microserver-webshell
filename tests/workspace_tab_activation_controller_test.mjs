@@ -107,7 +107,7 @@ test("tab activation preserves frames before visual commit and defers runtime st
   assert.equal(harness.registry.getActiveTabId(), "tab-2");
   assert.equal(harness.second.panes.get("pane-2").lastUserInteractionAt, 123);
   assert.equal(harness.second.panes.get("pane-2").activationFitPending, true);
-  assert.ok(harness.calls.indexOf("hold:pane-1") < harness.calls.indexOf("visual:tab-2"));
+  assert.equal(harness.calls.includes("hold:pane-1"), false);
   assert.ok(harness.calls.indexOf("hold:pane-2") < harness.calls.indexOf("visual:tab-2"));
   assert.deepEqual(harness.calls.filter((value) => Array.isArray(value)), []);
 

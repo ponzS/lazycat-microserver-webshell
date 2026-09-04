@@ -13,7 +13,7 @@
 
 ## 用户可见问题
 
-历史回放或持续输出期间可能出现首次显示慢、Canvas 中间帧暴露、resize 后黑屏、输出丢失或 Unified physical WebSocket 被重复创建。移动端已确认另一类表现：`history_replay_complete` 和 `replay_output_drained` 均已完成，但初始 presentation 在 `resize_applied` 后没有及时提交；用户聚焦或下一次 resize 触发 full render 后，之前已应用的历史内容才显示。字体族等原子事务还可能出现 hold 模糊；字号/行高和桌面窗口 resize 已迁移到 live Canvas，由场景 10/13 验证。`queue_turn_complete` 还可能触发重复 full render，放大持续输出期间的主线程调度压力。
+历史回放或持续输出期间可能出现首次显示慢、Canvas 中间帧暴露、resize 后黑屏、输出丢失或 Unified physical WebSocket 被重复创建。移动端已确认另一类表现：`history_replay_complete` 和 `replay_output_drained` 均已完成，但初始 presentation 在 `resize_applied` 后没有及时提交；用户聚焦或下一次 resize 触发 full render 后，之前已应用的历史内容才显示。replay/identity 等原子事务的 hold 还可能占用大块显存；字体 metrics、主题和常规布局已迁移到 live Canvas，由场景 04/10/13 验证。`queue_turn_complete` 还可能触发重复 full render，放大持续输出期间的主线程调度压力。
 
 ## 预防的回归
 
@@ -22,12 +22,14 @@
 - output queue 不发生 overload 或 stale output drop。
 - 输出压力前后每个页面仍只有一条 Unified physical WebSocket。
 - `queue_turn_complete` 不直接启动新的 presentation full render。
+- hold Canvas 释放后 backing store 必须缩到 `1×1`，不能让隐藏 pane 长期占用完整帧显存。
 
 ## 修复前基线
 
 - 2026-09-02 真实 `05-terminal-output` 基线通过，但观察到移动端 `rejected stale resize ACK` warning。该 warning 表示旧 resize ACK 被 generation fence 拒绝，符合旧 ACK 不得覆盖新 geometry 的安全语义，不应作为测试失败。
 - 基线测试覆盖约 1.5 MiB 实时输出，不覆盖初始打开时的 350KB 历史 replay，也不直接统计 `queue_turn_complete` 与 full render 的关联。
 - 基线的 presentation observer 在终端已经打开后启动，不能证明首次 replay 阶段的用户可见 Canvas commit 次数为零。
+- 2026-09-04 新增 hold backing 回收断言后的基线为 `artifacts/2026-09-04T05-16-27-447Z/`：真实桌面 hold 已隐藏但仍保留 `1440×862` backing，按预期失败。Node 基线同样显示 DPR=2 hold 释放后仍为 `2400×1520`。
 
 ## 已确认根因
 
@@ -40,6 +42,8 @@
 P0-1 的本地 Go 实现将相邻 history chunk 合并到有界的 `historyReplayChunk` 后再发送，保留 replay control frame、绝对 cursor、fast integrity sequence 和 replay/live 顺序。该实现需要部署到真实 Provider 后，才能通过 `tests-auto` 验证浏览器实际收到的 frame 数变化。
 
 P0-4 的 hold 修复已将 hold canvas backing 尺寸改为 CSS 尺寸乘当前 renderer DPR，并使用对应 transform 绘制；该修复只处理画质，不改变 presentation 唤醒、resize epoch 或 replay 顺序。
+
+2026-09-04 的显存回收补充把 resource factory 中未使用的 hold 初始化为 `1×1`，并在原子帧完成双 RAF 释放后通过重设 width/height 回收整张 backing store；下次确需原子 hold 时再按 host×DPR 分配。它不改变 hold identity、capture、commit 或 replay 门禁。
 
 ## 验证结果
 
@@ -57,6 +61,9 @@ P0-4 的 hold 修复已将 hold canvas backing 尺寸改为 CSS 尺寸乘当前 
 - 高 DPR 诊断：`WEBSHELL_MOBILE_DEVICE_SCALE_FACTOR=3` 下 live backing ratio 约为 3、可见 hold backing ratio 为 1；完整场景在临时 tab 激活等待处失败，不能作为功能通过，但 probe 已保存。
 - `WEBSHELL_ENABLE_INITIALIZATION_PERFORMANCE=1` 可用于真机回归；若测试机 HTML 已部署初始化性能面板，场景会断言两个窗口均在首次渲染后显示已完成和总耗时，并确认持续输出/resize 后总耗时不变。若测试机仍返回旧版 HTML，产物中的 `initializationPerformance.available` 会为 `false`，该项只记录兼容性边界，不会误判当前静态 JS。
 - 当前测试机仍返回旧版 HTML，因此本轮真实场景只验证了新 JS 未破坏连接、输出和渲染流程；面板 DOM 的真实设备验收需在新版 `index.html` 部署后重跑。
+- 2026-09-04 最终回归 `artifacts/2026-09-04T05-48-28-867Z/` 通过：约 1.575MiB 输出、隐藏 tab 和 viewport resize 共观察到 19 个安全原子 hold、`unsafe=0`、overload/stale drop 均为 0；desktop/mobile 最终隐藏 hold 均为 `1×1`，两端 Unified socket 始终各 1 条。这证明原子 replay/恢复仍保留，而闲置整帧 backing 已释放。
+- DPR=3 复跑 `artifacts/2026-09-04T06-04-46-247Z/` 通过：移动端可见原子 hold 的 backing/CSS 比例始终为 3，`unsafe=0`；释放后 desktop/mobile hold 都降为 `1×1`，两端 Unified socket 仍各 1 条。
+- `terminal_presentation_view_test.mjs` 覆盖 DPR backing 捕获和释放为 `1×1`；完整 Node 行为测试 425/425 通过，相关 rendering/session/resize Go guard 通过。
 
 
 ```sh
@@ -78,9 +85,9 @@ node tests-auto/run-playwright.mjs tests-auto/05-terminal-output/test.mjs
 - 已有可选的高 DPR 诊断参数 `WEBSHELL_MOBILE_DEVICE_SCALE_FACTOR`，默认值为 `1`；使用 `3` 时只用于采集 live/hold backing ratio，不代表产品运行时 DPR 配置。
 - P0-4/P1-3 的移动端初始 presentation 问题尚未修复：已记录 replay drain、`resize_applied` 到最终 `presentation_commit_complete` 的长间隔，以及 focus/字体变化触发 full render 后恢复的现象。
 - 灰点显示条件现在分为三类：尚未产生稳定 presentation 帧、session 明确处于 offline/error/closed，或存在实际 `connectionRetrying`/presentation retry。健康 socket 在已有稳定帧后，即使内部短暂 `renderReady=false`，也不会显示灰点；普通 output、queue turn、resize 和字体事务不会重新显示。
-- 字体族及其他原子事务的 hold canvas backing store 已按 renderer DPR 修复并通过 DPR=3 真实场景验证。字号/行高现在直接显示 live Canvas，其 setter/metrics 中间几何和最终收敛由 `tests-auto/10-terminal-geometry-jitter` 验证，不再依赖 hold 遮挡。
+- replay、identity 和其他原子事务的 hold canvas backing store 仍按 renderer DPR 捕获，但释放后立即降为 `1×1`。字号、行高和已加载字体族现在直接显示 live Canvas，其 setter/metrics 中间几何和最终收敛由 `tests-auto/10-terminal-geometry-jitter` 验证。
 - 当前测试没有在初始历史 replay 之前安装 observer，不能单独证明 replay 期间用户可见 Canvas commit 为零。
 - 当前测试使用实时 1.5 MiB 输出，不等价于重新 attach 时的 350KB 历史 replay。
 - 当前测试允许并记录 stale resize ACK warning；后续应继续确认 warning 对应旧 ACK 且不会改变当前 geometry，而不是简单删除 warning 或放宽断言。
-- 当前 `tests-auto/10-terminal-geometry-jitter` 已包含桌面字号、真实行高修改/恢复、移动端 `Zoom+`/`Zoom-` 和逐帧 CSS/backing/DPR 日志；字号/行高断言 live Canvas 持续可见，tab/replay 等原子路径仍检查 hold 安全。
+- 当前 `tests-auto/10-terminal-geometry-jitter` 已包含桌面字号/行高/字体族、主题、快捷栏、窗口和稳定 tab 快路径；移动 Zoom 与 structural viewport 由 `tests-auto/04-terminal-viewport` 隔离验证。replay/hidden output 等原子路径仍由本场景检查 hold 安全。
 - P0-5 当前已有 Node 协议回归断言和真实 output 安全回归，但仍需要采集并减少真实 full render 次数，才能完成端到端验收。

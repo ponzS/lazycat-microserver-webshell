@@ -68,7 +68,10 @@ export function createWorkspaceTabActivationController({
       const previousTab = tabRegistry.get(previousTabId);
       const wasActive = previousTabId === tab.id;
       if (!wasActive) {
-        preserveTabFrames(previousTab);
+        // A current outgoing Canvas is already a committed last-known-good
+        // frame. Keep it in place while hidden and avoid a full-size copy;
+        // stale panes still capture before either tab becomes visible.
+        preserveTabFrames(previousTab, { onlyIfStale: true });
         preserveTabFrames(tab, { onlyIfStale: true });
       }
       tabRegistry.setActiveTabId(tab.id);

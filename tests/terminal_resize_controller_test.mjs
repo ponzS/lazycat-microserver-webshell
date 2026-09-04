@@ -549,6 +549,20 @@ test("font metrics and divider resize share live geometry without ending each ot
   assert.equal(harness.sent[0].cols, 110);
 });
 
+test("stable structural viewport claims through one live geometry transaction", () => {
+  const harness = createRuntimeHarness();
+  const tab = { panes: new Map([[harness.session.id, harness.session]]) };
+
+  assert.equal(harness.controller.beginTabStructuralLiveGeometry(tab), true);
+  assert.equal(harness.controller.updateTabStructuralLiveGeometry(tab), true);
+  assert.equal(harness.controller.endTabStructuralLiveGeometry(tab), true);
+  assert.equal(harness.effects.beginHold, 0);
+  assert.equal(harness.effects.termResize, 1);
+  assert.equal(harness.sent.length, 1);
+  assert.equal(harness.sent[0].claim, true);
+  assert.equal(harness.controller.isLiveGeometryActive(harness.session), true);
+});
+
 test("desktop window resize uses live geometry and one trailing server commit", () => {
   const harness = createRuntimeHarness();
   const tab = { panes: new Map([[harness.session.id, harness.session]]) };

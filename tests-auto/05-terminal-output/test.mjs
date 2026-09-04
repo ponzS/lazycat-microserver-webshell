@@ -6,6 +6,14 @@ const waitForOutput = async (state, marker, timeout = 30_000) => {
   ), marker, { timeout });
 };
 
+const waitForReadyPresentation = (state) => state.page.waitForFunction(() => {
+  const shell = document.querySelector(".terminal-pane.active .pane-shell");
+  const connection = shell?.dataset?.connection || "";
+  return shell?.dataset?.renderReady === "true"
+    && shell?.dataset?.hasPresentedFrame === "true"
+    && !["offline", "network-error", "error", "closed"].includes(connection);
+}, null, { timeout: 60_000 });
+
 const canvasSummary = (state) => state.page.evaluate(() => {
   const canvas = document.querySelector(".terminal-pane.active .terminal-host canvas:not(.terminal-frame-hold)");
   if (!(canvas instanceof HTMLCanvasElement) || canvas.width <= 0 || canvas.height <= 0) {
@@ -266,8 +274,8 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     throw new Error("WEBSHELL_LOCAL_STATIC_DIR is required so the real environment loads the current workspace frontend");
   }
   const { desktop, mobile } = states;
-  await desktop.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
-  await mobile.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
+  await waitForReadyPresentation(desktop);
+  await waitForReadyPresentation(mobile);
 
   const initialPresentation = {
     desktop: initialPresentationSummary(desktop),
@@ -343,7 +351,7 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     await desktop.page.waitForTimeout(500);
     await setOutputStage(desktop, "reactivate-output-tab");
     await desktop.page.locator(`#tabs .tab[data-tab-id="${desktop.testTabID}"]`).click();
-    await desktop.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 30_000 });
+    await waitForReadyPresentation(desktop);
     await waitForOutput(desktop, hiddenDone, 30_000);
 
     await setOutputStage(desktop, "resize-output");
@@ -411,6 +419,17 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     }
   }
 
+  const presentationProbe = {
+    desktop: await presentationProbeSummary(desktop),
+    mobile: await presentationProbeSummary(mobile),
+  };
+  for (const name of ["desktop", "mobile"]) {
+    const hold = presentationProbe[name].holdCanvas.last;
+    if (hold?.hidden === true && (Number(hold.width || 0) > 1 || Number(hold.height || 0) > 1)) {
+      throw new Error(`${name} released hold retained a full-size backing store: ${JSON.stringify(hold)}`);
+    }
+  }
+
   assertNoFatalErrors();
   await eventLog({
     status: "pass",
@@ -425,10 +444,7 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     resources,
     presentation,
     canvas: { before: canvasBefore, after: canvasAfter },
-    presentationProbe: {
-      desktop: await presentationProbeSummary(desktop),
-      mobile: await presentationProbeSummary(mobile),
-    },
+    presentationProbe,
     presentationRenders: {
       desktop: await presentationRenderSummary(desktop),
       mobile: await presentationRenderSummary(mobile),

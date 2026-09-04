@@ -6,7 +6,7 @@
 
 模块负责在软键盘打开期间平移当前 Ghostty Canvas、helper textarea 与 composition preview，使光标保持在可见区域；负责移动快捷键栏跟随 iOS 键盘或客户端底部控件；负责阻止触摸布局中的多指缩放；负责窗口、跨屏 DPR、旋转以及 portrait-to-portrait 折叠/展开后的 latest-only 尺寸接管。单次探测经过两帧稳定检查并以 180ms fallback 收口；折叠 WebView 事件早于最终几何时，再以 `0/80/180/360/720ms` latest-only recovery probe 捕获迟到尺寸。
 
-模块不拥有终端 resize epoch、Ghostty 网格、历史 replay、Cache API、WebSocket、Unified membership、输入队列、selection range 或 overview 状态。viewport 变化只调用现有 resize/presentation 命令并复用当前内存终端状态，禁止重新回放历史或显示任何历史、snapshot、resize 和重连中间帧。
+模块不拥有终端 resize epoch、Ghostty 网格、历史 replay、Cache API、WebSocket、Unified membership、输入队列、selection range 或 overview 状态。结构 viewport 变化在首次事件时开启 structural live source，稳定探测期间更新当前 Canvas，最终结束 source 并由 resize owner claim；软键盘非结构变化继续 suppression。禁止重新回放历史或显示任何历史、snapshot、原子 resize 和重连中间帧。
 
 ## 公开入口与契约
 
@@ -27,7 +27,7 @@
 
 `viewport_controller.js` 是 geometry signature/generation、viewport 高度、参考高度、inset、安全偏移、键盘 active、resize suppression、方向和当前 input lock session 的唯一修改者。`session.inputViewportLock` 只能由本 controller 通过公开 capture/release 命令修改；IME 只能请求命令，不能自行构造或推进锁状态。
 
-resize 只能调用 `isResizeSuppressed()`，不能写 viewport 状态。presentation 只能读取 `isGeometryClaimPending()` 并延迟自己的被动 geometry 修复，不能推进 generation 或发起 claim。IME 只能读取 `isKeyboardActive()` 并调用锁与 dismiss recovery。selection、overview、移动菜单和标题只接收同步通知，不得反向推进 viewport generation。
+resize 只能调用 `isResizeSuppressed()`，并通过注入的 begin/update/end 命令接收 structural live 意图，不能写 viewport 状态。presentation 只能读取 `isGeometryClaimPending()` 并延迟自己的被动 geometry 修复，不能推进 generation 或发起 claim。IME 只能读取 `isKeyboardActive()` 并调用锁与 dismiss recovery。selection、overview、移动菜单和标题只接收同步通知，不得反向推进 viewport generation。
 
 ## 生命周期
 
@@ -47,6 +47,6 @@ geometry、recovery probe 和键盘恢复使用 generation 检查；旧 sequence
 
 模块通过显式注入依赖 resize、IME DOM 命令、selection、overview、移动菜单和工作区只读查询；不得导入这些模块的内部实现，不得访问 transport/history/cache。
 
-自动化测试：`terminal_viewport_controller_test.mjs` 覆盖 portrait-to-portrait 折叠、分阶段尺寸只提交最终 generation、键盘不 claim 和 dispose fence；`TestRuntimeTerminalViewportModuleBoundary` 固定单一公开入口、版本化静态资源、global runtime 接线和旧 viewport 状态/实现不得回流入口文件。真实回归由 `tests-auto/01-multi-device-resize-sync` 和 `tests-auto/04-terminal-viewport` 覆盖跨设备 owner、折叠/展开及原子保帧。
+自动化测试：`terminal_viewport_controller_test.mjs` 覆盖 portrait-to-portrait 折叠、structural source 只提交最终 generation、键盘不 claim 和 dispose fence；`TestRuntimeTerminalViewportModuleBoundary` 固定单一公开入口、版本化静态资源、global runtime 接线和旧 viewport 状态/实现不得回流入口文件。真实回归由 `tests-auto/01-multi-device-resize-sync` 和 `tests-auto/04-terminal-viewport` 覆盖跨设备 owner、移动 Zoom、键盘 suppression、折叠/展开 live Canvas。
 
 最小真实回归：在 `debug123` 的桌面与移动页面加载当前工作区资源；移动端打开/收起软键盘并旋转视口，确认快捷键栏和光标可见、终端最终 Canvas 非空、没有 replay 中间帧或 `pageerror`；桌面 resize 保持正常；每个页面始终只有 1 条 Unified 物理 WebSocket。

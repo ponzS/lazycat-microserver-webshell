@@ -48,6 +48,8 @@ export function createTerminalSessionResourceFactory({
 
     const terminalFrameHold = documentObject.createElement("canvas");
     terminalFrameHold.className = "terminal-frame-hold";
+    terminalFrameHold.width = 1;
+    terminalFrameHold.height = 1;
     terminalFrameHold.hidden = true;
     terminalHost.appendChild(terminalFrameHold);
 

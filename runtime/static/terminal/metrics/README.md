@@ -10,7 +10,7 @@
 
 ## 状态所有权与生命周期
 
-controller 唯一持有 metrics retry 的 RAF/timer 集合，并以 session generation 拒绝迟到回调；session cleanup 会取消该 session 的 timer。已有稳定画面的字号和行高变化在 option/metrics 更新前向 resize owner 申请 metrics live geometry，在 RAF/timeout 稳定化期间直接更新当前 Canvas，最后由 resize owner 提交一次最终尺寸。字体族资源加载仍使用 presentation hold；若它与已有 live geometry 重叠，则加入 metrics source，不能隐藏正在显示的 Canvas。scrollback 变化通过显式 history callback 只通知 `client:` IndexedDB 兼容 owner，普通容器不创建浏览器历史任务。`dispose()` 取消所有资源，之后不再修改 session。
+controller 唯一持有 metrics retry 的 RAF/timer 集合，并以 session generation 拒绝迟到回调；session cleanup 会取消该 session 的 timer。已有稳定画面的字号、行高和已加载字体族变化在 option/metrics 更新前向 resize owner 申请 metrics live geometry，在 RAF/timeout 稳定化期间直接更新当前 Canvas，最后由 resize owner 提交一次最终尺寸；字体尚未加载或当前 pane 尚未 replay commit 时自动回退原子路径。隐藏 tab 只更新 option/renderer metrics，不预先复制 hold，等真正激活且 presentation stale 时再由 workspace/presentation 决定是否需要原子帧。scrollback 变化通过显式 history callback 只通知 `client:` IndexedDB 兼容 owner，普通容器不创建浏览器历史任务。`dispose()` 取消所有资源，之后不再修改 session。
 
 ## 文件清单
 
@@ -19,4 +19,4 @@ controller 唯一持有 metrics retry 的 RAF/timer 集合，并以 session gene
 
 ## 依赖、边界与验证
 
-依赖方向为 app -> metrics -> renderer/presentation/resize/history 注入 API；模块不建立 WebSocket，不执行 history replay，不清空 Canvas，不实现 transport、session 或设置持久化。行为测试为 `terminal_metrics_controller_test.mjs`，静态/资源 guard 位于 `runtime_shortcuts_test.go`；真实字号/行高回归为 `tests-auto/10-terminal-geometry-jitter`。最小回归需覆盖字号/行高 live geometry、字体族原子刷新、scrollback/mobile option 适配、尺寸 fallback、session cleanup 和 dispose。
+依赖方向为 app -> metrics -> renderer/presentation/resize/history 注入 API；模块不建立 WebSocket，不执行 history replay，不清空 Canvas，不实现 transport、session 或设置持久化。行为测试为 `terminal_metrics_controller_test.mjs`，静态/资源 guard 位于 `runtime_shortcuts_test.go`；真实字体 metrics 回归为 `tests-auto/04-terminal-viewport` 和 `tests-auto/10-terminal-geometry-jitter`。最小回归需覆盖字号/行高/已加载字体族 live geometry、未加载字体的原子回退、scrollback/mobile option 适配、尺寸 fallback、session cleanup 和 dispose。

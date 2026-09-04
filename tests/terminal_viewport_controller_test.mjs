@@ -214,6 +214,9 @@ const createHarness = ({ ios = true, android = false, initialViewportHeight = 84
     getSessions: () => [session],
     hasActivePanes: () => true,
     claimActiveTabForCurrentDevice: (options) => calls.push(["claim", options || null]),
+    beginStructuralLiveGeometry: () => { calls.push(["structural-begin"]); return true; },
+    updateStructuralLiveGeometry: () => { calls.push(["structural-update"]); return true; },
+    endStructuralLiveGeometry: () => { calls.push(["structural-end"]); return true; },
     resetHostViewport: () => calls.push(["reset-host"]),
     positionInput: () => calls.push(["position-input"]),
     updateSelectionHandles: () => calls.push(["selection-handles"]),
@@ -321,7 +324,7 @@ test("iOS keyboard viewport rebases the IME lock, pans the cursor, and restores 
   assert.equal(harness.mobileShortcuts.style.transform, "translate3d(0, -300px, 0)");
   assert.equal(harness.controller.syncPan(harness.session), 140);
   assert.equal(harness.session.term.canvas.style.transform, "translate3d(0, -140px, 0)");
-  assert.equal(harness.calls.some(([name]) => name === "claim"), false);
+  assert.equal(harness.calls.some(([name]) => name === "structural-end"), false);
 
   harness.documentObject.activeElement = harness.documentObject.body;
   harness.controller.releaseInputLock(harness.session, { resync: false });
@@ -334,9 +337,7 @@ test("iOS keyboard viewport rebases the IME lock, pans the cursor, and restores 
   harness.clock.runFrames();
   harness.clock.runFrames();
   harness.clock.runFrames();
-  assert.ok(harness.calls.some(([name, options]) => (
-    name === "claim" && options?.forceFullRender === true && options?.hideUntilRender === true
-  )));
+  assert.ok(harness.calls.some(([name]) => name === "structural-end"));
   assert.equal(harness.session.term.canvas.style.transform, "");
 });
 
@@ -375,9 +376,9 @@ test("portrait-to-portrait fold geometry claims only the latest stable viewport"
 
   harness.clock.runFrames();
   harness.clock.runFrames();
-  const claims = harness.calls.filter(([name]) => name === "claim");
-  assert.equal(claims.length, 1);
-  assert.equal(claims[0][1].forceFullRender, true);
+  const commits = harness.calls.filter(([name]) => name === "structural-end");
+  assert.equal(commits.length, 1);
+  assert.equal(harness.calls.some(([name]) => name === "claim"), false);
   assert.equal(harness.controller.snapshot().geometry.layoutWidth, 700);
   assert.equal(harness.controller.snapshot().orientation, "portrait");
   assert.equal(harness.controller.isGeometryClaimPending(), false);
@@ -404,7 +405,7 @@ test("fold geometry overrides a focused textarea and stale keyboard inset", () =
   harness.clock.runFrames();
   harness.clock.runFrames();
   harness.clock.runFrames();
-  assert.equal(harness.calls.filter(([name]) => name === "claim").length, 1);
+  assert.equal(harness.calls.filter(([name]) => name === "structural-end").length, 1);
   assert.equal(harness.controller.snapshot().geometry.layoutWidth, 700);
 });
 
@@ -419,7 +420,7 @@ test("visual viewport events are observed on an unclassified foldable WebView", 
   harness.visualViewport.emit("resize");
   harness.clock.runFrames();
   harness.clock.runFrames();
-  assert.equal(harness.calls.filter(([name]) => name === "claim").length, 1);
+  assert.equal(harness.calls.filter(([name]) => name === "structural-end").length, 1);
 });
 
 test("viewport recovery observes geometry that changes after the resize event", () => {
@@ -427,7 +428,7 @@ test("viewport recovery observes geometry that changes after the resize event", 
   harness.controller.start();
   harness.calls.length = 0;
   harness.windowObject.emit("resize");
-  assert.equal(harness.calls.some(([name]) => name === "claim"), false);
+  assert.equal(harness.calls.some(([name]) => name === "structural-end"), false);
 
   harness.windowObject.innerWidth = 680;
   harness.documentObject.documentElement.clientWidth = 680;
@@ -438,7 +439,7 @@ test("viewport recovery observes geometry that changes after the resize event", 
   harness.clock.runFrames();
   harness.clock.runFrames();
 
-  assert.equal(harness.calls.filter(([name]) => name === "claim").length, 1);
+  assert.equal(harness.calls.filter(([name]) => name === "structural-end").length, 1);
   assert.equal(harness.controller.snapshot().geometry.layoutWidth, 680);
 });
 
@@ -463,7 +464,7 @@ test("rapid fold events cancel stale probes and commit only the final geometry",
   harness.clock.runFrames();
   harness.clock.runFrames();
   harness.clock.runFrames();
-  assert.equal(harness.calls.filter(([name]) => name === "claim").length, 1);
+  assert.equal(harness.calls.filter(([name]) => name === "structural-end").length, 1);
   assert.equal(harness.controller.snapshot().geometry.layoutWidth, 390);
   assert.equal(harness.controller.isGeometryClaimPending(), false);
 });
@@ -487,7 +488,7 @@ test("orientation recovery uses current terminal state and dispose rejects delay
   harness.windowObject.emit("orientationchange");
   assert.ok(harness.clock.timers.size > 0);
   harness.clock.runTimers();
-  assert.ok(harness.calls.some(([name]) => name === "claim"));
+  assert.ok(harness.calls.some(([name]) => name === "structural-end"));
 
   harness.controller.scheduleKeyboardDismissRecovery();
   const callsBeforeDispose = harness.calls.length;

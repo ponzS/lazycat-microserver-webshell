@@ -24,7 +24,7 @@ test("layout policy honors force-PC and media queries", () => {
     closeMobileCustomSelect: () => calls.push("select"),
     hideSelection: () => calls.push("selection"),
     handleViewportLayoutChange: () => calls.push("viewport"),
-    resizeActiveTabForCurrentDevice: () => calls.push("resize"),
+    scheduleActiveTabLiveGeometry: () => calls.push("live-geometry"),
     handleHostLayoutChange: () => calls.push("host"),
     updateMobileActiveTabTitle: () => calls.push("title"),
     updateSelection: () => calls.push("update-selection"),
@@ -37,6 +37,7 @@ test("layout policy honors force-PC and media queries", () => {
   assert.equal(controller.syncForcePCModeState(), true);
   assert.equal(documentObject.documentElement.dataset.forcePcMode, "true");
   assert.deepEqual(calls.slice(0, 4), ["menu", ["confirm", false], "select", "selection"]);
+  assert.ok(calls.includes("live-geometry"));
   debug = false;
   assert.equal(controller.isForcePCModeActive(), false);
 });

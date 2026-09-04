@@ -16,7 +16,7 @@
 
 业务和责任域必须位于对应目录，并由目录根 `README.md` 说明职责、状态 owner、公开入口、生命周期和验证方式。主要目录包括 `app/`、`workspace/`、`terminal/`、`appearance/`、`settings/`、`diagnostics/`、`instances/`、`devices/`、`attachments/`、`service_forwarding/` 和 `ui/`。
 
-模块外部只能通过各目录的 `index.js` 使用公开 API。不得从 `main.js` 或其他模块深度导入内部实现，不得复制全局状态，也不得显示 history replay、snapshot、原子 resize 或重连中间过程。桌面分屏/窗口及已提交终端字号/行高的 live geometry 只允许呈现当前 session 的真实 Canvas，不改变 replay 与恢复的原子提交边界。
+模块外部只能通过各目录的 `index.js` 使用公开 API。不得从 `main.js` 或其他模块深度导入内部实现，不得复制全局状态，也不得显示 history replay、snapshot、原子 resize 或重连中间过程。主题、常规布局、稳定 viewport 和已提交终端字体 metrics 的 live 更新只允许呈现当前 session 的真实 Canvas，不改变 replay 与恢复的原子提交边界。
 
 ## 最小验证
 

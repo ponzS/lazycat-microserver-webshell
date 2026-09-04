@@ -4,6 +4,14 @@ const waitForOutput = async (state, marker, timeout = 15_000) => {
   ), marker, { timeout });
 };
 
+const waitForReadyPresentation = (state) => state.page.waitForFunction(() => {
+  const shell = document.querySelector(".terminal-pane.active .pane-shell");
+  const connection = shell?.dataset?.connection || "";
+  return shell?.dataset?.renderReady === "true"
+    && shell?.dataset?.hasPresentedFrame === "true"
+    && !["offline", "network-error", "error", "closed"].includes(connection);
+}, null, { timeout: 60_000 });
+
 const canvasSummary = (state) => state.page.evaluate(() => {
   const canvas = document.querySelector(".terminal-pane.active .terminal-host canvas:not(.terminal-frame-hold)");
   if (!(canvas instanceof HTMLCanvasElement) || canvas.width <= 0 || canvas.height <= 0) {
@@ -141,18 +149,51 @@ const viewportDOMSnapshot = (state) => state.page.evaluate(() => {
   };
 });
 
+const triggerMobileZoom = async (state, action) => {
+  const button = state.page.locator(`[data-mobile-action="${action}"]`).first();
+  if (await button.count() === 0) {
+    throw new Error(`mobile shortcut is unavailable: ${action}`);
+  }
+  await button.click();
+};
+
+const closeTabByAPI = (state, tabID) => state.page.evaluate(async (id) => {
+  const name = new URLSearchParams(location.search).get("name");
+  const response = await fetch(`./api/workspace?name=${encodeURIComponent(name || "")}&cols=120&rows=32`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "close_tab", tab_id: id, cols: 120, rows: 32 }),
+  });
+  if (!response.ok) throw new Error(`workspace close_tab ${response.status}: ${await response.text()}`);
+}, tabID);
+
 export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   if (!config.localStaticDir) {
     throw new Error("WEBSHELL_LOCAL_STATIC_DIR is required so the real environment loads the current workspace frontend");
   }
   const { desktop, mobile } = states;
-  await desktop.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
-  await mobile.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
+  await waitForReadyPresentation(desktop);
+  await waitForReadyPresentation(mobile);
 
   const marker = `AUTO_VIEWPORT_${Date.now()}`;
   await desktop.page.locator(".terminal-pane.active .terminal-host").first().click();
   await desktop.page.keyboard.insertText(`printf '%s\\n' '${marker}'\n`);
   await Promise.all([waitForOutput(desktop, marker), waitForOutput(mobile, marker)]);
+  const desktopCanvasBeforeClose = await canvasSummary(desktop);
+  await desktop.context.close();
+  await desktop.browser.close();
+  await eventLog({ status: "pass", window: "desktop", action: "close-for-mobile-viewport" });
+
+  try {
+  await startAtomicPresentationObserver(mobile);
+  await triggerMobileZoom(mobile, "zoom_in");
+  await mobile.page.waitForTimeout(250);
+  await triggerMobileZoom(mobile, "zoom_out");
+  await mobile.page.waitForTimeout(1_000);
+  const fontPresentation = await stopAtomicPresentationObserver(mobile);
+  if (fontPresentation.count < 10 || fontPresentation.hold > 0 || fontPresentation.pending > 0) {
+    throw new Error(`mobile font resize did not stay on the live canvas: ${JSON.stringify(fontPresentation)}`);
+  }
 
   const resources = await localViewportResources(mobile);
   const missingResources = Object.entries(resources).filter(([, loaded]) => !loaded).map(([name]) => name);
@@ -236,8 +277,13 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   await mobile.page.setViewportSize({ width: 390, height: 844 });
   await mobile.page.waitForTimeout(650);
   const presentation = await stopAtomicPresentationObserver(mobile);
-  if (presentation.count < 10 || presentation.unsafe > 0) {
-    throw new Error(`viewport resize exposed an unsafe intermediate frame: ${JSON.stringify(presentation)}`);
+  if (
+    presentation.count < 10
+    || presentation.unsafe > 0
+    || presentation.hold > 0
+    || presentation.pending > 0
+  ) {
+    throw new Error(`stable structural viewport resize did not stay on the live canvas: ${JSON.stringify(presentation)}`);
   }
   const resizeFramesAfterViewport = await mobile.page.evaluate(() => [...(window.__testsAutoResizeFrames || [])]);
   const resizeFramesAfterOrientation = resizeFramesAfterViewport.length;
@@ -252,7 +298,7 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   }
 
   const canvas = {
-    desktop: await canvasSummary(desktop),
+    desktop: desktopCanvasBeforeClose,
     mobile: await canvasSummary(mobile),
   };
   if (canvas.desktop.nonTransparent <= 0 || canvas.mobile.nonTransparent <= 0) {
@@ -275,6 +321,7 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     synthetic,
     keyboardOpen,
     keyboardClosed,
+    fontPresentation,
     presentation,
     resizeFramesBeforeKeyboard: resizeFramesBeforeKeyboard.length,
     resizeFramesDuringKeyboard: resizeFramesDuringKeyboard.length,
@@ -287,4 +334,7 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     socketsBefore,
     socketsAfter,
   });
+  } finally {
+    await closeTabByAPI(mobile, desktop.testTabID).catch(() => {});
+  }
 }

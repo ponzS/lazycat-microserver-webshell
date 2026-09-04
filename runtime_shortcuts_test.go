@@ -2624,13 +2624,15 @@ func TestRuntimeAppearanceModuleBoundary(t *testing.T) {
 	applyBlock := sourceBetween(t, runtimeSource,
 		"const applyThemeToSession = (session, theme = getActiveTheme()) => {",
 		"const applyWorkspaceTheme = (theme = getActiveTheme()) => {")
-	holdIndex := strings.Index(applyBlock, "terminalPresentation.beginHold(session);")
 	updateIndex := strings.Index(applyBlock, "session.term.options.theme = nextTheme;")
-	if holdIndex < 0 {
-		holdIndex = strings.Index(applyBlock, "beginPresentationHold(session);")
+	renderIndex := strings.Index(applyBlock, "session.term.requestRender?.({ full: true });")
+	if updateIndex < 0 || renderIndex < updateIndex {
+		t.Fatal("appearance terminal adapter must update the live renderer before requesting its full frame")
 	}
-	if holdIndex < 0 || updateIndex < 0 || holdIndex > updateIndex {
-		t.Fatal("appearance terminal adapter must hold the current frame before changing renderer theme")
+	for _, forbidden := range []string{"beginPresentationHold", "refreshTerminalMetrics", "resizeActiveTab"} {
+		if strings.Contains(applyBlock, forbidden) {
+			t.Fatalf("appearance terminal adapter must not start hold/metrics/resize work via %q", forbidden)
+		}
 	}
 	for _, forbidden := range []string{"replay", "history", "resetTerminal"} {
 		if strings.Contains(applyBlock, forbidden) {
@@ -2822,8 +2824,10 @@ func TestRuntimeSettingsModuleBoundary(t *testing.T) {
 		"terminalMetrics?.applyScrollbackChange(previousScrollback, nextScrollback)",
 		"onMobilePixelScrollChange: (enabled) => terminalMetrics?.applyMobilePixelScroll(enabled),",
 		"onTerminalLineHeightChange: (value, previousValue) => terminalMetrics?.applyLineHeight(value, previousValue),",
-		"onDesktopShortcutsBarChange: () => terminalResize?.resizeActiveTabForCurrentDevice(),",
-		"onMobileShortcutsChange: () => mobileShortcutsController?.render(),",
+		"onDesktopShortcutsBarChange: () => terminalResize?.scheduleTabLiveGeometry(currentTab()),",
+		"onMobileShortcutsChange: () => {",
+		"mobileShortcutsController?.render();",
+		"terminalResize?.scheduleTabLiveGeometry(currentTab());",
 		"onForcePCModeChange: () => syncForcePCModeState(),",
 		"settings,",
 		"loadSettings: () => settings.load({ deferFontLoad: true }),",
@@ -2983,7 +2987,7 @@ func TestRuntimeSettingsModuleBoundary(t *testing.T) {
 		`  const applyScrollbackChange = (previousValue, nextValue) => {`)
 	lineHeightAdapter := sourceBetween(t, mainSource,
 		`    onTerminalLineHeightChange: (value, previousValue) => terminalMetrics?.applyLineHeight(value, previousValue),`,
-		`    onDesktopShortcutsBarChange: () => terminalResize?.resizeActiveTabForCurrentDevice(),`)
+		`    onDesktopShortcutsBarChange: () => terminalResize?.scheduleTabLiveGeometry(currentTab()),`)
 	for name, adapter := range map[string]string{
 		"font family": fontFamilyAdapter,
 		"font size":   fontSizeAdapter,
@@ -3224,6 +3228,8 @@ func TestRuntimeTerminalSessionModuleBoundary(t *testing.T) {
 		"shellEl.dataset.renderReady = \"false\";",
 		"term.open(terminalHost);",
 		"terminalFrameHold.className = \"terminal-frame-hold\";",
+		"terminalFrameHold.width = 1;",
+		"terminalFrameHold.height = 1;",
 		"compositionPreview.className = \"terminal-composition-preview\";",
 		"return Object.freeze({ create });",
 	} {
@@ -3340,7 +3346,7 @@ func TestRuntimeTerminalSessionModuleBoundary(t *testing.T) {
 	for _, want := range []string{
 		"普通容器页面只能有一条 Unified 物理 WebSocket",
 		"replay、snapshot、原子 resize 和重连的中间过程不得显示",
-		"字号/行高 live geometry 可乐观重排当前真实 Canvas",
+		"字体 metrics 可以直接更新当前真实 Canvas",
 		"session/",
 	} {
 		if !strings.Contains(terminalReadmeSource, want) {
@@ -3927,6 +3933,9 @@ func TestRuntimeTerminalViewportModuleBoundary(t *testing.T) {
 		`terminalViewport = createTerminalMobileViewportController({`,
 		`getActiveSession: () => activeSession(),`,
 		`claimActiveTabForCurrentDevice: (options) => terminalResize?.claimActiveTabForCurrentDevice(options),`,
+		`beginStructuralLiveGeometry: () => terminalResize?.beginTabStructuralLiveGeometry(currentTab()),`,
+		`updateStructuralLiveGeometry: () => terminalResize?.updateTabStructuralLiveGeometry(currentTab()),`,
+		`endStructuralLiveGeometry: () => terminalResize?.endTabStructuralLiveGeometry(currentTab()),`,
 		`isViewportGeometryClaimPending: () => terminalViewport?.isGeometryClaimPending() === true,`,
 		`resetHostViewport: (session, options) => terminalIME?.resetHostViewport(session, options),`,
 		`updateSelectionHandles: (session) => terminalSelection?.updateHandles(session),`,
@@ -5594,7 +5603,7 @@ func TestRuntimeDesktopShortcutsBarSetting(t *testing.T) {
 		`desktopShortcutsBarEnabled: raw?.desktop_shortcuts_bar_enabled === true,`,
 		`documentObject?.body?.classList.toggle("desktop-shortcuts-bar-enabled", snapshot.desktopShortcutsBarEnabled);`,
 		`"desktopShortcutsBarEnabled", "desktop_shortcuts_bar_enabled"`,
-		`onDesktopShortcutsBarChange: () => terminalResize?.resizeActiveTabForCurrentDevice(),`,
+		`onDesktopShortcutsBarChange: () => terminalResize?.scheduleTabLiveGeometry(currentTab()),`,
 		`listen(elements.desktopShortcutsBarToggle, "change", handlers.onDesktopShortcutsBarChange);`,
 	} {
 		if !strings.Contains(mainSource, want) {
@@ -6356,6 +6365,8 @@ func TestRuntimeTerminalPresentationModuleBoundary(t *testing.T) {
 		`ctx.drawImage(`,
 		`sourceCssWidth,`,
 		`sourceCssHeight,`,
+		`hold.width = 1;`,
+		`hold.height = 1;`,
 		`session.shellEl.dataset.renderReady = session.renderReady ? "true" : "false";`,
 	} {
 		if !strings.Contains(viewSource, want) {
@@ -7961,7 +7972,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	tabSwitchBlock := sourceBetween(t, tabActivationSource,
 		"const activate = (tabId, {",
 		"const clear = () => {")
-	preserveIndex := strings.Index(tabSwitchBlock, "preserveTabFrames(previousTab);")
+	preserveIndex := strings.Index(tabSwitchBlock, "preserveTabFrames(previousTab, { onlyIfStale: true });")
 	preserveTargetIndex := strings.Index(tabSwitchBlock, "preserveTabFrames(tab, { onlyIfStale: true });")
 	activateIndex := strings.Index(tabSwitchBlock, "tabRegistry.setActiveTabId(tab.id);")
 	visualIndex := strings.Index(tabSwitchBlock, "tabView.setActiveTabVisuals([previousTab, tab], tab.id);")
@@ -7969,7 +7980,7 @@ func TestRuntimeTerminalCanvasResidueGuard(t *testing.T) {
 	if preserveIndex < 0 || preserveTargetIndex < 0 || activateIndex < 0 || visualIndex < 0 || deferredIndex < 0 ||
 		preserveIndex > preserveTargetIndex || preserveTargetIndex > activateIndex || activateIndex > visualIndex || visualIndex > deferredIndex ||
 		!strings.Contains(tabSwitchBlock, "pane.terminalFrameHeld") {
-		t.Fatal("tab switching must preserve both outgoing and incoming frames before visual selection, then defer terminal activation")
+		t.Fatal("tab switching must preserve only stale outgoing/incoming frames before visual selection, then defer terminal activation")
 	}
 	if !strings.Contains(tabSwitchBlock, "const presentationCurrent = presentationStateIsCurrent(pane);") {
 		t.Fatal("tab activation must use hidden-safe presentation state instead of measurable visibility")
@@ -9881,6 +9892,9 @@ func TestRuntimeMobileOrientationKeepsTerminalStateAfterViewportSettle(t *testin
 		"const isGeometryClaimPending = () => {",
 		"terminalViewportGeometryRequiresClaim(previous, current, {",
 		"claimActiveTabForCurrentDevice({",
+		"beginStructuralLiveGeometry();",
+		"updateStructuralLiveGeometry();",
+		"endStructuralLiveGeometry()",
 		"pendingViewportGeometry = measureTerminalViewportGeometry({ windowObject, documentObject });",
 		`listen(windowObject, "orientationchange", handlers.onOrientationChange || noop);`,
 		`listen(windowObject?.screen?.orientation, "change", handlers.onOrientationChange || noop);`,
@@ -11071,6 +11085,7 @@ func TestRuntimeAppLayoutModuleBoundary(t *testing.T) {
 		`createAppLayoutController,`,
 		`from "./app/index.js";`,
 		`layoutController = createAppLayoutController({`,
+		`scheduleActiveTabLiveGeometry: () => terminalResize?.scheduleTabLiveGeometry(currentTab()),`,
 		`const isMobileLayout = () => layoutController?.isMobileLayout() === true;`,
 		`const syncTabMobilePixelScroll = (tab) => layoutController?.syncTabMobilePixelScroll(tab) === true;`,
 		`layoutController?.dispose();`,
@@ -11100,6 +11115,7 @@ func TestRuntimeAppLayoutModuleBoundary(t *testing.T) {
 		`export function createAppLayoutController({`,
 		`const isForcePCModeActive = () => Boolean(`,
 		`const syncForcePCModeState = () => {`,
+		`scheduleActiveTabLiveGeometry();`,
 		`documentObject.documentElement.dataset.forcePcMode`,
 		`const syncTerminalMobilePixelScroll = (session) => {`,
 		`let disposed = false;`,
@@ -11222,6 +11238,8 @@ func TestRuntimeTerminalMetricsModuleBoundary(t *testing.T) {
 		`terminalMetrics?.applyMobilePixelScroll(enabled)`,
 		`terminalMetrics?.sizeQuery()`,
 		`terminalMetrics?.refresh(session, options)`,
+		`if (terminalViewport?.isResizeSuppressed() === true) {`,
+		`refreshTerminalMetrics(pane, { liveGeometry: true });`,
 		`terminalMetrics?.dispose();`,
 	} {
 		if !strings.Contains(appSource, want) {

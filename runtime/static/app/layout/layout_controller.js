@@ -18,7 +18,7 @@ export function createAppLayoutController({
   closeMobileCustomSelect = noop,
   hideSelection = noop,
   handleViewportLayoutChange = noop,
-  resizeActiveTabForCurrentDevice = noop,
+  scheduleActiveTabLiveGeometry = noop,
   handleHostLayoutChange = noop,
   updateMobileActiveTabTitle = noop,
   updateSelection = noop,
@@ -49,7 +49,7 @@ export function createAppLayoutController({
       hideSelection();
     }
     handleViewportLayoutChange();
-    resizeActiveTabForCurrentDevice();
+    scheduleActiveTabLiveGeometry();
     handleHostLayoutChange();
     updateMobileActiveTabTitle();
     updateSelection();

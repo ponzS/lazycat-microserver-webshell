@@ -6,7 +6,7 @@
 
 本模块当前只接管主题责任域。字体文件、字体选择、字号、行高和 scrollback 由 `settings/` 与终端 metrics/resize 模块维护，通过公开契约接入，不能重新把实现放回 `global-runtime.js`。
 
-本模块不负责 tab/pane、终端 session、Ghostty renderer、WebSocket、历史、缓存、resize、输入或 Canvas presentation。主题变化只通过 `onThemeChange(theme, previousTheme)` 发布；外部 rendering 适配层负责使用既有 presentation hold 更新终端。主题变化不得触发历史 replay，更不得显示历史回放过程。
+本模块不负责 tab/pane、终端 session、Ghostty renderer、WebSocket、历史、缓存、resize、输入或 Canvas presentation。主题变化只通过 `onThemeChange(theme, previousTheme)` 发布；外部 runtime adapter 直接更新已提交 live Canvas，隐藏 pane 只更新 renderer 状态，不触发 presentation hold、字体 metrics refresh 或终端 resize。主题变化不得触发历史 replay，更不得显示历史回放过程。
 
 ## 公开入口与契约
 
@@ -62,7 +62,7 @@ Controller 的主要公开 API：
 - `theme_catalog.js`：内置 fallback catalog、版本化 `themes.json` URL 和可取消 loader。
 - `theme_model.js`：主题复制、选择、归一化和终端颜色纯函数。
 - `theme_preview.js`：主题卡片测量与 Canvas 绘制。
-- `runtime_controller.js`：主题变更到 live terminal 的 presentation hold、颜色映射、光标保持和广播；不执行历史回放或连接管理。
+- `runtime_controller.js`：主题变更到 live terminal 的直接 full render、颜色映射、光标保持和广播；不执行 hold、metrics/resize、历史回放或连接管理。
 - `themes.json`：随版本发布的主题 catalog 数据。
 
 ## 依赖方向与回归
@@ -75,4 +75,4 @@ Controller 的主要公开 API：
 - `TestRuntimeAppearanceModuleBoundary` 固定公开入口、README、controller/lifecycle 状态边界、版本化 catalog URL、`global-runtime.js` 公开集成和旧实现删除。
 - 现有终端 presentation、OSC 颜色、IME composition preview 和设置测试继续保护外部适配行为。
 
-最小回归：桌面设置页切换主题；移动主题 picker 点击、左边缘右滑关闭和自定义滚动条拖动；刷新后确认选择持久化；切换主题时确认全部 pane 保留旧帧直至当前内存状态完成 full render，且网络、断线或主题变化期间都不出现历史回放过程。
+最小回归：桌面设置页切换主题；移动主题 picker 点击、左边缘右滑关闭和自定义滚动条拖动；刷新后确认选择持久化；稳定终端切换主题时确认 live Canvas 持续可见且不触发 hold/metrics/resize，处于 replay/重连门禁的 pane 不越过既有原子边界。

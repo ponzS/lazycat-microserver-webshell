@@ -32,7 +32,7 @@ target lifecycle 唯一持有 active selector、generation 和 disposed 状态�
 - `tab_controller.js`：tab/pane 创建、分屏、关闭、重命名、移动、实例 reset，以及远端 action 与权威 apply 的分流编排。
 - `tab_view.js`：tab button、tab pane host、DOM 事件、上下文菜单绑定和 DOM 排序。
 - `tab_lifecycle.js`：tab context cleanup、延迟 rename RAF、单 tab 与模块级幂等销毁。
-- `tab_activation_controller.js`：tab 激活同步保帧/视觉提交和异步 active pane、用户切换时的可见 pane claim、membership、持久化编排；权威 state apply 必须显式关闭 claim。
+- `tab_activation_controller.js`：tab 激活视觉提交和异步 active pane、用户切换时的可见 pane claim、membership、持久化编排；current outgoing Canvas 直接留在隐藏 pane，不复制 hold，只有 stale incoming/outgoing pane 才在视觉切换前捕获原子帧；权威 state apply 必须显式关闭 claim。
 - `tab_activation_scheduler.js`：tab 激活的分阶段调度和生命周期。
 - `pane_activation_controller.js`：pane 激活、点击定位、用户 pane 切换/指针交互的 claim、被动 resize/连接命令和 `activate_pane` 持久化编排。
 - `pane_activation_lifecycle.js`：pane focus RAF 的唯一 owner，销毁时取消迟到 focus。
@@ -41,4 +41,4 @@ target lifecycle 唯一持有 active selector、generation 和 disposed 状态�
 
 ## 依赖与验证
 
-模块只依赖注入的 DOM、fetch、storage、session/cache/resize 命令和 frame/timer API。行为测试为 `workspace_api_controller_test.mjs`、`workspace_persistence_controller_test.mjs`、`workspace_refresh_controller_test.mjs`、`workspace_state_apply_controller_test.mjs`、`workspace_tab_controller_test.mjs`、`workspace_tab_activation_controller_test.mjs`、`workspace_target_controller_test.mjs`、`workspace_layout_view_controller_test.mjs`、`tab_activation_scheduler_test.mjs` 及其余 workspace controller 测试；跨模块 guard 位于 `runtime_shortcuts_test.go` 和对应 `tests-auto` 场景 README。最小回归是切换实例并检查旧目标请求失效、新目标 workspace 应用、快速切换 tab、新建/分屏/关闭/重命名/移动 tab 与 pane、断网恢复、刷新页面和服务端增删 pane，确认切换前保帧、视觉提交先于 resize/membership、权威 state apply 顺序稳定、retry 单飞、selector 不串目标、旧帧不被清空，历史回放中间过程不可见；分割条高频拖动期间 flex 比例按 RAF 合并、每个 pane 的 live Canvas 顶部稳定并随宽度重排、pointermove 不持续创建网络 resize，释放时必须持久化并提交最终比例。
+模块只依赖注入的 DOM、fetch、storage、session/cache/resize 命令和 frame/timer API。行为测试为 `workspace_api_controller_test.mjs`、`workspace_persistence_controller_test.mjs`、`workspace_refresh_controller_test.mjs`、`workspace_state_apply_controller_test.mjs`、`workspace_tab_controller_test.mjs`、`workspace_tab_activation_controller_test.mjs`、`workspace_target_controller_test.mjs`、`workspace_layout_view_controller_test.mjs`、`tab_activation_scheduler_test.mjs` 及其余 workspace controller 测试；跨模块 guard 位于 `runtime_shortcuts_test.go` 和对应 `tests-auto` 场景 README。最小回归是切换实例并检查旧目标请求失效、新目标 workspace 应用、快速切换 tab、新建/分屏/关闭/重命名/移动 tab 与 pane、断网恢复、刷新页面和服务端增删 pane，确认 current tab 切换不复制 hold、stale tab 切换前保帧、视觉提交先于 resize/membership、权威 state apply 顺序稳定、retry 单飞、selector 不串目标、旧帧不被清空，历史回放中间过程不可见；分割条高频拖动期间 flex 比例按 RAF 合并、每个 pane 的 live Canvas 顶部稳定并随宽度重排、pointermove 不持续创建网络 resize，释放时必须持久化并提交最终比例。

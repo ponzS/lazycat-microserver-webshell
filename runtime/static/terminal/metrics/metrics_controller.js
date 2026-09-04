@@ -87,6 +87,14 @@ export function createTerminalMetricsController({
     }
   };
 
+  const shouldHoldForSession = (session) => {
+    const tab = getCurrentTab();
+    if (!tab?.panes) {
+      return true;
+    }
+    return tab.id === session?.tabId && tab.panes.get?.(session?.id) === session;
+  };
+
   const applyScrollback = (value = getScrollback()) => {
     if (disposed) {
       return false;
@@ -113,20 +121,21 @@ export function createTerminalMetricsController({
       if (!session?.term?.options) {
         return;
       }
-      const inheritedLiveGeometry = Boolean(
-        getResize()?.isLiveGeometryActive?.(session)
-        && getResize()?.beginMetricsLiveGeometry?.(session),
-      );
+      const liveGeometry = getResize()?.beginMetricsLiveGeometry?.(session) === true;
       // Ghostty rebuilds the live backing store synchronously when the font
       // option changes. Capture the last known-good frame before that setter
       // runs so the presentation hold never contains the new, partial grid.
-      if (session.term.options.fontFamily !== fontFamily && !inheritedLiveGeometry) {
+      if (
+        session.term.options.fontFamily !== fontFamily
+        && !liveGeometry
+        && shouldHoldForSession(session)
+      ) {
         getPresentation()?.beginHold?.(session);
       }
       session.term.options.fontFamily = fontFamily;
       refresh(session, {
         deferFitRetry: true,
-        liveGeometry: inheritedLiveGeometry,
+        liveGeometry,
       });
     });
     return true;
@@ -219,7 +228,7 @@ export function createTerminalMetricsController({
           previousFontSize,
           ...visualDetails(session),
         });
-        if (!liveGeometry) {
+        if (!liveGeometry && shouldHoldForSession(session)) {
           getPresentation()?.beginHold?.(session, { recapture: true });
         }
       }
@@ -309,16 +318,17 @@ export function createTerminalMetricsController({
       return false;
     }
     const resize = getResize();
-    const useLiveGeometry = liveGeometry || Boolean(
-      resize?.isLiveGeometryActive?.(session)
+    const liveGeometryRequested = liveGeometry || resize?.isLiveGeometryActive?.(session) === true;
+    const useLiveGeometry = Boolean(
+      liveGeometryRequested
       && resize?.beginMetricsLiveGeometry?.(session),
     );
     registerCleanup(session);
     clearSessionTimers(session);
-    // Font-family loading and appearance refreshes stay atomic. Explicit
-    // font-size/line-height changes instead keep the current live Canvas
-    // visible and delegate geometry ownership to the resize controller.
-    if (!useLiveGeometry) {
+    // Visible, replay-committed font work uses an explicit live source.
+    // Current sessions that cannot obtain one retain the atomic fallback;
+    // hidden tabs update metrics without allocating a hold frame up front.
+    if (!useLiveGeometry && shouldHoldForSession(session)) {
       getPresentation()?.beginHold?.(session);
     }
     const metricsGeneration = Number(session.fontMetricsGeneration || 0) + 1;

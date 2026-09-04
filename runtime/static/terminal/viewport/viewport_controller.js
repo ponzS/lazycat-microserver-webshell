@@ -26,6 +26,9 @@ export function createTerminalMobileViewportController({
   getSessions = () => [],
   hasActivePanes = () => Boolean(getActiveSession()),
   claimActiveTabForCurrentDevice = noop,
+  beginStructuralLiveGeometry = noop,
+  updateStructuralLiveGeometry = noop,
+  endStructuralLiveGeometry = noop,
   resetHostViewport = noop,
   positionInput = noop,
   updateSelectionHandles = noop,
@@ -256,11 +259,14 @@ export function createTerminalMobileViewportController({
     pendingViewportStructuralChange = false;
     viewportGeometryStableFrames = 0;
     viewportClaimDeferred = false;
-    claimActiveTabForCurrentDevice({
-      forceFullRender: true,
-      hideUntilRender: true,
-      reason,
-    });
+    updateStructuralLiveGeometry();
+    if (!endStructuralLiveGeometry()) {
+      claimActiveTabForCurrentDevice({
+        forceFullRender: true,
+        hideUntilRender: true,
+        reason,
+      });
+    }
     updateActiveTabTitle();
     updateSelection();
     return true;
@@ -319,6 +325,8 @@ export function createTerminalMobileViewportController({
       return true;
     }
     viewportClaimDeferred = false;
+    beginStructuralLiveGeometry();
+    updateStructuralLiveGeometry();
     scheduleViewportGeometryValidation(generation);
     lifecycle.timeout("viewport-geometry-final", () => {
       if (generation !== viewportGeometryGeneration) {

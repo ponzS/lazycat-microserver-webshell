@@ -54,7 +54,7 @@ controller 公开：
 ## 文件清单
 
 - `index.js`：唯一公开入口。
-- `resource_factory.js`：创建 pane DOM、Ghostty Terminal/FitAddon、保帧 Canvas 和 IME 节点；不拥有 session 状态或资源清理。
+- `resource_factory.js`：创建 pane DOM、Ghostty Terminal/FitAddon、初始 `1×1` 的按需保帧 Canvas 和 IME 节点；不拥有 session 状态或资源清理。
 - `session_controller.js`：ID、初始尺寸、资源 factory、state 和 lifecycle 的组合控制器，并提供单个/批量销毁入口。
 - `session_installation_controller.js`：presentation、output、IME、renderer、selection、TUI、mouse、clipboard、resize、input、context menu 和 transport 的显式安装编排；维护 presentation-ready 到 input/diagnostics/transport 的局部接线。
 - `session_installation_lifecycle.js`：pane 激活、focus 和原生 paste listener 的注册、迟到回调 guard 与清理。

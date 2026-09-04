@@ -4,9 +4,9 @@
 
 本目录负责 Ghostty renderer adapter、runtime reset/suppression controller、Canvas presentation controller、Kitty graphics 适配、RenderSnapshot 和 frame release scheduler。它负责字体/行高度量、主题颜色映射、底部 viewport 归一化、cell seam/Powerline/块光标 patch、Ghostty 运行时安全 reset/清屏与 render suppression、render generation、full-render validation、last-known-good frame hold/release、Canvas context 恢复和 Kitty graphics 响应/像素适配，不负责历史、连接、工作区或 resize 权威。
 
-完整画面只能在当前 identity、generation、viewport 和 presentation 条件都有效时提交；失败、重连、snapshot 等待或 replay/原子 resize 事务期间必须保留旧帧，禁止显示历史回放中间过程。桌面分屏、普通窗口 resize，以及已提交终端的字号/行高变化属于显式 live geometry：只要 replay 已提交且 pane 可见，当前 Ghostty Canvas 可以在服务端 ACK 前连续提交，不进入 hold。
+完整画面只能在当前 identity、generation、viewport 和 presentation 条件都有效时提交；失败、重连、snapshot 等待或 replay/原子 resize 事务期间必须保留旧帧，禁止显示历史回放中间过程。主题、常规 layout、稳定 structural viewport，以及已提交终端的字体 metrics 变化属于显式 live 更新：只要 replay 已提交且 pane 可见，当前 Ghostty Canvas 可以在服务端 ACK 前连续提交，不进入 hold。
 
-字体族加载或其他原子几何变化期间，presentation hold 必须保持与 live renderer 相同的 DPR：hold canvas 的 backing width/height 按 CSS 尺寸乘以 renderer DPR 分配，并在绘制时保持正确的坐标变换。字号 setter 可能先让 live canvas 产生超出当前 host 的临时 CSS/backing 尺寸；现在由 metrics/resize live geometry 在同一任务内重新测量并 fit，保持 Canvas 可见。此前 `holdFrame()` 使用 CSS 宽高创建 hold canvas，且 CSS 使用 `image-rendering: auto`，高 DPR 设备会出现被平滑放大的模糊旧帧；该原子路径问题已通过 DPR=3 真实 `tests-auto/05-terminal-output` 验证修复。
+已加载字体族、字号和行高变化由 metrics/resize live geometry 在同一任务内重新测量并 fit，保持 Canvas 可见；字体尚未加载或 pane 尚未 replay commit 时才回退原子路径。其他原子恢复期间，hold backing 按 CSS 尺寸乘 renderer DPR 分配并正确变换；释放时立即缩为 `1×1`，避免隐藏 pane 长期保留整帧显存。此前高 DPR 模糊问题已通过 DPR=3 真实 `tests-auto/05-terminal-output` 验证修复。
 
 ## 公开入口与状态
 

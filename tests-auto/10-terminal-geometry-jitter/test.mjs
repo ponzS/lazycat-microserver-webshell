@@ -1,5 +1,13 @@
 const activeHost = (page) => page.locator(".terminal-pane.active .terminal-host").first();
 
+const waitForReadyPresentation = (page) => page.waitForFunction(() => {
+  const shell = document.querySelector(".terminal-pane.active .pane-shell");
+  const connection = shell?.dataset?.connection || "";
+  return shell?.dataset?.renderReady === "true"
+    && shell?.dataset?.hasPresentedFrame === "true"
+    && !["offline", "network-error", "error", "closed"].includes(connection);
+}, null, { timeout: 60_000 });
+
 const installGeometrySampler = async (page) => page.evaluate(() => {
   const startedAt = performance.now();
   const samples = [];
@@ -42,6 +50,7 @@ const installGeometrySampler = async (page) => page.evaluate(() => {
       renderRecovery: shell?.dataset?.renderRecovery || "",
       terminalFrameHeld: shell?.dataset?.terminalFrameHeld || "",
       hasPresentedFrame: shell?.dataset?.hasPresentedFrame || "",
+      theme: document.body?.dataset?.theme || "",
     });
   };
   const onEvent = (event) => {
@@ -172,6 +181,31 @@ const assertLiveFontGeometry = (label, result) => {
   }
 };
 
+const assertLiveVisualUpdate = (label, result, { requireThemeChange = false } = {}) => {
+  const usable = result.samples.filter((sample) => (
+    sample.host.width > 0
+      && sample.host.height > 0
+      && sample.live.width > 0
+      && sample.live.height > 0
+      && sample.hasPresentedFrame === "true"
+  ));
+  const unsafe = usable.filter((sample) => (
+    sample.holdHidden === false
+      || sample.liveVisibility !== "visible"
+      || sample.renderReady !== "true"
+      || Math.abs(sample.live.top - sample.host.top) > 1
+      || Math.abs(sample.live.left - sample.host.left) > 1
+  ));
+  const themes = new Set(usable.map((sample) => sample.theme).filter(Boolean));
+  if (usable.length < 3 || unsafe.length > 0 || (requireThemeChange && themes.size < 2)) {
+    throw new Error(`${label}: visual update did not stay on the live canvas ${JSON.stringify({
+      usable: usable.length,
+      unsafe: unsafe.slice(0, 12),
+      themes: [...themes],
+    })}`);
+  }
+};
+
 const triggerFontSize = (page, key = "=") => page.evaluate((value) => {
   document.dispatchEvent(new KeyboardEvent("keydown", {
     key: value,
@@ -181,14 +215,6 @@ const triggerFontSize = (page, key = "=") => page.evaluate((value) => {
     cancelable: true,
   }));
 }, key);
-
-const triggerMobileZoom = async (page, action) => {
-  const button = page.locator(`[data-mobile-action="${action}"]`).first();
-  if (await button.count() === 0) {
-    throw new Error(`mobile shortcut is unavailable: ${action}`);
-  }
-  await button.click();
-};
 
 const setLineHeight = (page, requestedValue = null) => page.evaluate((requested) => {
   const input = document.getElementById("settingsLineHeightInput");
@@ -206,18 +232,121 @@ const setLineHeight = (page, requestedValue = null) => page.evaluate((requested)
   return { previous, next };
 }, requestedValue);
 
+const switchThemeRoundTrip = async (page) => {
+  await activeHost(page).click({ button: "right" });
+  const action = page.locator('#contextMenu [data-action="theme"]');
+  await action.waitFor({ state: "visible" });
+  await action.click();
+  const options = page.locator("#settingsThemeList .theme-picker-option");
+  await options.first().waitFor({ state: "visible" });
+  const themes = await options.evaluateAll((items) => items.map((item) => ({
+    id: item.dataset.theme || "",
+    selected: item.getAttribute("aria-selected") === "true",
+  })));
+  const current = themes.find((item) => item.selected)?.id || "";
+  const alternate = themes.find((item) => item.id && item.id !== current)?.id || "";
+  if (!current || !alternate) {
+    throw new Error(`theme round-trip requires two themes: ${JSON.stringify(themes)}`);
+  }
+  await page.locator(`#settingsThemeList .theme-picker-option[data-theme="${alternate}"]`).click();
+  await page.waitForFunction((id) => document.body?.dataset?.theme === id, alternate);
+  await page.waitForTimeout(450);
+  await page.locator(`#settingsThemeList .theme-picker-option[data-theme="${current}"]`).click();
+  await page.waitForFunction((id) => document.body?.dataset?.theme === id, current);
+  await page.waitForTimeout(750);
+  await page.locator("#settingsClose").click();
+  return { current, alternate };
+};
+
+const toggleSettingRoundTrip = async (page, id) => {
+  const initial = await page.evaluate((elementID) => {
+    const input = document.getElementById(elementID);
+    if (!(input instanceof HTMLInputElement)) throw new Error(`${elementID} is unavailable`);
+    const previous = input.checked;
+    input.checked = !previous;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    return previous;
+  }, id);
+  await page.waitForTimeout(600);
+  await page.evaluate(({ elementID, value }) => {
+    const input = document.getElementById(elementID);
+    if (!(input instanceof HTMLInputElement)) throw new Error(`${elementID} is unavailable`);
+    input.checked = value;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }, { elementID: id, value: initial });
+  await page.waitForTimeout(900);
+  return initial;
+};
+
+const switchFontFamilyRoundTrip = async (page) => {
+  await page.locator("#instanceSwitcherButton").click();
+  await page.locator("#instanceSwitcherPanel").waitFor({ state: "visible" });
+  await page.locator("#settingsMenuButton").click();
+  await page.locator("#settingsBackdrop").waitFor({ state: "visible" });
+  await page.locator("#settingsTabTerminal").click();
+  const cards = page.locator("#settingsFontCards .settings-font-card");
+  await cards.first().waitFor({ state: "visible" });
+  const fonts = await cards.evaluateAll((items) => items.map((item) => ({
+    id: item.dataset.fontId || "",
+    selected: item.getAttribute("aria-selected") === "true",
+  })));
+  const current = fonts.find((item) => item.selected)?.id ?? "";
+  const alternate = fonts.find((item) => item.id !== current)?.id;
+  if (alternate === undefined) {
+    throw new Error(`font round-trip requires two font choices: ${JSON.stringify(fonts)}`);
+  }
+  await page.locator(`#settingsFontCards .settings-font-card[data-font-id="${alternate}"]`).click();
+  await page.waitForFunction((id) => document.querySelector(
+    `#settingsFontCards .settings-font-card[data-font-id="${CSS.escape(id)}"]`,
+  )?.getAttribute("aria-selected") === "true", alternate);
+  await page.waitForTimeout(700);
+  await page.locator(`#settingsFontCards .settings-font-card[data-font-id="${current}"]`).click();
+  await page.waitForFunction((id) => document.querySelector(
+    `#settingsFontCards .settings-font-card[data-font-id="${CSS.escape(id)}"]`,
+  )?.getAttribute("aria-selected") === "true", current);
+  await page.waitForTimeout(900);
+  await page.locator("#settingsClose").click();
+  return { current, alternate };
+};
+
 const tabIDs = (page) => page.locator("#tabs .tab").evaluateAll((buttons) => (
   buttons.map((button) => ({ id: button.dataset.tabId || "", active: button.classList.contains("active") }))
 ));
+
+const createTemporaryTab = async (page) => {
+  const before = await tabIDs(page);
+  await page.locator("#newTab").click();
+  await page.waitForFunction((count) => document.querySelectorAll("#tabs .tab").length > count, before.length);
+  const tabID = await page.locator("#tabs .tab.active").getAttribute("data-tab-id");
+  if (!tabID || before.some((tab) => tab.id === tabID)) {
+    throw new Error(`temporary tab was not created: ${JSON.stringify({ before, tabID })}`);
+  }
+  await waitForReadyPresentation(page);
+  return tabID;
+};
+
+const closeTabByAPI = (page, tabID) => page.evaluate(async (id) => {
+  const name = new URLSearchParams(location.search).get("name");
+  const response = await fetch(`./api/workspace?name=${encodeURIComponent(name || "")}&cols=120&rows=32`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "close_tab", tab_id: id, cols: 120, rows: 32 }),
+  });
+  if (!response.ok) throw new Error(`workspace close_tab ${response.status}: ${await response.text()}`);
+}, tabID);
 
 export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   if (!config.localStaticDir) throw new Error("WEBSHELL_LOCAL_STATIC_DIR is required");
   const { desktop, mobile } = states;
   const page = desktop.page;
   const host = activeHost(page);
-  await page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
+  await waitForReadyPresentation(page);
   await page.waitForFunction(() => document.querySelector(".terminal-pane.active .terminal-host canvas:not(.terminal-frame-hold)")?.width > 0, { timeout: 30_000 });
   await page.waitForTimeout(700);
+  await mobile.context.close();
+  await mobile.browser.close();
+  await eventLog({ status: "pass", window: "mobile", action: "close-for-desktop-geometry" });
+
   await installGeometrySampler(page);
 
   await resetSampler(page, "font-start");
@@ -245,14 +374,23 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   const lineHeightResult = await readSamples(page);
   assertLiveFontGeometry("line-height", lineHeightResult);
 
-  await installGeometrySampler(mobile.page);
-  await resetSampler(mobile.page, "mobile-zoom-start");
-  await triggerMobileZoom(mobile.page, "zoom_in");
-  await mobile.page.waitForTimeout(250);
-  await triggerMobileZoom(mobile.page, "zoom_out");
-  await mobile.page.waitForTimeout(1_000);
-  const mobileZoomResult = await readSamples(mobile.page);
-  assertLiveFontGeometry("mobile-zoom", mobileZoomResult);
+  await installGeometrySampler(page);
+  await resetSampler(page, "theme-start");
+  const themeRoundTrip = await switchThemeRoundTrip(page);
+  const themeResult = await readSamples(page);
+  assertLiveVisualUpdate("theme", themeResult, { requireThemeChange: true });
+
+  await installGeometrySampler(page);
+  await resetSampler(page, "font-family-start");
+  const fontFamilyRoundTrip = await switchFontFamilyRoundTrip(page);
+  const fontFamilyResult = await readSamples(page);
+  assertLiveVisualUpdate("font-family", fontFamilyResult);
+
+  await installGeometrySampler(page);
+  await resetSampler(page, "desktop-shortcuts-start");
+  const desktopShortcutsInitiallyEnabled = await toggleSettingRoundTrip(page, "settingsDesktopShortcutsBarToggle");
+  const desktopShortcutsResult = await readSamples(page);
+  assertLiveFontGeometry("desktop-shortcuts", desktopShortcutsResult);
 
   await installGeometrySampler(page);
   await resetSampler(page, "viewport-start");
@@ -266,17 +404,21 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
 
   const tabs = await tabIDs(page);
   const currentTab = tabs.find((tab) => tab.active)?.id || "";
-  const otherTab = tabs.find((tab) => tab.id && tab.id !== currentTab)?.id || "";
+  const otherTab = await createTemporaryTab(page);
+  await page.locator(`#tabs .tab[data-tab-id="${currentTab}"]`).click();
+  await waitForReadyPresentation(page);
   let tabResult = { samples: [], events: [] };
-  if (otherTab) {
+  try {
     await installGeometrySampler(page);
     await resetSampler(page, "tab-start");
     await page.locator(`#tabs .tab[data-tab-id="${otherTab}"]`).click();
-    await page.waitForTimeout(1_000);
+    await page.waitForTimeout(650);
     await page.locator(`#tabs .tab[data-tab-id="${currentTab}"]`).click();
-    await page.waitForTimeout(1_000);
+    await page.waitForTimeout(750);
     tabResult = await readSamples(page);
-    assertNoUnsafeHold("tab-activation", tabResult);
+    assertLiveVisualUpdate("tab-current-fast-path", tabResult);
+  } finally {
+    await closeTabByAPI(page, otherTab).catch(() => {});
   }
 
   await eventLog({
@@ -287,14 +429,9 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     otherTab,
     font: { visibleHold: visibleHoldSamples(fontResult).length, geometryChanges: geometryChanges(fontResult).length, events: fontResult.events, samples: fontResult.samples, resizeTrace: fontResult.resizeTrace, presentationTrace: fontResult.presentationTrace },
     lineHeight: { visibleHold: visibleHoldSamples(lineHeightResult).length, geometryChanges: geometryChanges(lineHeightResult).length, events: lineHeightResult.events, samples: lineHeightResult.samples, resizeTrace: lineHeightResult.resizeTrace, presentationTrace: lineHeightResult.presentationTrace },
-    mobileZoom: {
-      visibleHold: visibleHoldSamples(mobileZoomResult).length,
-      geometryChanges: geometryChanges(mobileZoomResult).length,
-      events: mobileZoomResult.events,
-      samples: mobileZoomResult.samples,
-      resizeTrace: mobileZoomResult.resizeTrace,
-      presentationTrace: mobileZoomResult.presentationTrace,
-    },
+    theme: { roundTrip: themeRoundTrip, visibleHold: visibleHoldSamples(themeResult).length, events: themeResult.events, samples: themeResult.samples, resizeTrace: themeResult.resizeTrace, presentationTrace: themeResult.presentationTrace },
+    fontFamily: { roundTrip: fontFamilyRoundTrip, visibleHold: visibleHoldSamples(fontFamilyResult).length, events: fontFamilyResult.events, samples: fontFamilyResult.samples, resizeTrace: fontFamilyResult.resizeTrace, presentationTrace: fontFamilyResult.presentationTrace },
+    desktopShortcuts: { initiallyEnabled: desktopShortcutsInitiallyEnabled, visibleHold: visibleHoldSamples(desktopShortcutsResult).length, geometryChanges: geometryChanges(desktopShortcutsResult).length, events: desktopShortcutsResult.events, samples: desktopShortcutsResult.samples, resizeTrace: desktopShortcutsResult.resizeTrace, presentationTrace: desktopShortcutsResult.presentationTrace },
     viewport: { visibleHold: visibleHoldSamples(viewportResult).length, geometryChanges: geometryChanges(viewportResult).length, events: viewportResult.events, samples: viewportResult.samples, resizeTrace: viewportResult.resizeTrace, presentationTrace: viewportResult.presentationTrace },
     tab: { visibleHold: visibleHoldSamples(tabResult).length, geometryChanges: geometryChanges(tabResult).length, events: tabResult.events, samples: tabResult.samples, resizeTrace: tabResult.resizeTrace, presentationTrace: tabResult.presentationTrace },
   });

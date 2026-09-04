@@ -125,7 +125,10 @@ export function createTerminalPresentationView({
       return false;
     }
     hold.hidden = true;
-    hold.getContext?.("2d")?.clearRect(0, 0, hold.width, hold.height);
+    // Assigning the backing dimensions clears the bitmap and lets the browser
+    // release the potentially large GPU/CPU surface retained by clearRect().
+    hold.width = 1;
+    hold.height = 1;
     return true;
   };
 

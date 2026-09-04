@@ -25,7 +25,7 @@ test("appearance runtime builds an xterm color map without mutating themes", () 
   assert.deepEqual(from.xterm.foreground, "#010203");
 });
 
-test("appearance runtime holds presentation before applying a theme to every session", () => {
+test("appearance runtime updates every live terminal without hold or resize", () => {
   const events = [];
   const sessions = [
     {
@@ -50,21 +50,17 @@ test("appearance runtime holds presentation before applying a theme to every ses
   const controller = createAppearanceRuntimeController({
     getTerminalTheme: () => ({ background: "#fff" }),
     getSessions: () => sessions,
-    beginPresentationHold: (session) => events.push(["hold", session.id]),
     isRenderAllowed: () => true,
     installThemeMapper: (session) => events.push(["mapper", session.id]),
     installCellSeam: (session) => events.push(["seam", session.id]),
-    refreshTerminalMetrics: (session) => events.push(["metrics", session.id]),
-    resizeActiveTab: () => events.push(["resize"]),
     scheduleOverviewRender: () => events.push(["overview"]),
     sendTerminalTheme: (session) => events.push(["send", session.id]),
   });
 
   assert.equal(controller.applyWorkspaceTheme(theme("#010203", "#040506")), true);
-  assert.deepEqual(events.slice(0, 5).map(([kind]) => kind), ["hold", "mapper", "seam", "set-theme", "render"]);
-  assert.deepEqual(events.filter(([kind]) => kind === "hold").map(([, id]) => id), ["one", "two"]);
+  assert.deepEqual(events.slice(0, 4).map(([kind]) => kind), ["mapper", "seam", "set-theme", "render"]);
+  assert.equal(events.some(([kind]) => kind === "hold" || kind === "metrics" || kind === "resize"), false);
   assert.equal(sessions[0].term.renderer.webshellColorMap.get("1,2,3"), "rgb(1, 2, 3)");
-  assert.ok(events.some(([kind]) => kind === "resize"));
   assert.ok(events.some(([kind]) => kind === "overview"));
   assert.equal(controller.dispose(), true);
 });
