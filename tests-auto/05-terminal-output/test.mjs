@@ -151,14 +151,80 @@ const presentationRenderSummary = (state) => state.page.evaluate((targetPaneID) 
 
 const initializationPerformancePanel = (state) => state.page.evaluate(() => {
   const panel = document.getElementById("initializationPerformancePanel");
+  const rows = Array.from(document.querySelectorAll("#initializationPerformanceList .initialization-performance-row"));
+  const last = rows.at(-1);
   return {
     available: Boolean(panel),
     hidden: panel?.hidden !== false,
     status: document.getElementById("initializationPerformanceStatus")?.textContent || "",
     total: document.getElementById("initializationPerformanceTotal")?.textContent || "",
-    rows: document.querySelectorAll("#initializationPerformanceList .initialization-performance-row").length,
+    rows: rows.length,
+    lastName: last?.querySelector?.(".initialization-performance-name")?.textContent || "",
+    lastDuration: last?.querySelector?.(".initialization-performance-duration")?.textContent || "",
+    lastPending: last?.classList?.contains("is-pending") === true,
+    samples: [...(window.__testsAutoInitializationPerformanceProbe?.samples || [])],
   };
 });
+
+const installInitializationPerformanceProbe = (state) => state.page.addInitScript(() => {
+  const probe = { samples: [] };
+  window.__testsAutoInitializationPerformanceProbe = probe;
+  let previous = "";
+  let timer = 0;
+  let observer = null;
+  const capture = () => {
+    const panel = document.getElementById("initializationPerformancePanel");
+    const rows = Array.from(document.querySelectorAll("#initializationPerformanceList .initialization-performance-row"));
+    const last = rows.at(-1);
+    const sample = {
+      at: performance.now(),
+      available: Boolean(panel),
+      hidden: panel?.hidden !== false,
+      status: document.getElementById("initializationPerformanceStatus")?.textContent || "",
+      total: document.getElementById("initializationPerformanceTotal")?.textContent || "",
+      rows: rows.length,
+      lastName: last?.querySelector?.(".initialization-performance-name")?.textContent || "",
+      lastDuration: last?.querySelector?.(".initialization-performance-duration")?.textContent || "",
+      lastPending: last?.classList?.contains("is-pending") === true,
+    };
+    const signature = JSON.stringify(sample, (key, value) => key === "at" ? undefined : value);
+    if (signature !== previous) {
+      previous = signature;
+      probe.samples.push(sample);
+    }
+    if (sample.status === "已完成") {
+      if (timer) clearInterval(timer);
+      timer = 0;
+      observer?.disconnect();
+    }
+  };
+  observer = new MutationObserver(capture);
+  observer.observe(document, { attributes: true, characterData: true, childList: true, subtree: true });
+  timer = setInterval(capture, 50);
+  capture();
+});
+
+const initializationMs = (text) => {
+  const match = String(text || "").match(/^([0-9]+(?:\.[0-9]+)?)ms$/);
+  return match ? Number(match[1]) : null;
+};
+
+const assertProgressiveInitialization = (snapshot, name) => {
+  const samples = snapshot.samples.filter((sample) => sample.available && !sample.hidden);
+  const collecting = samples.filter((sample) => sample.status === "采集中");
+  const progressive = collecting.filter((sample) => sample.rows > 0 && sample.lastPending);
+  if (progressive.length === 0) {
+    throw new Error(`${name} initialization performance never rendered progressive pending rows: ${JSON.stringify(samples)}`);
+  }
+  const totals = collecting.map((sample) => initializationMs(sample.total)).filter((value) => value !== null);
+  if (new Set(totals).size < 2 || Math.max(...totals) <= Math.min(...totals)) {
+    throw new Error(`${name} initialization total did not advance while collecting: ${JSON.stringify(samples)}`);
+  }
+  const completed = samples.find((sample) => sample.status === "已完成" && sample.rows > 0 && !sample.lastPending);
+  if (!completed) {
+    throw new Error(`${name} initialization performance did not freeze a completed timeline: ${JSON.stringify(samples)}`);
+  }
+};
 
 const metricDelta = (before, after, name) => (
   Number(after?.[name] || 0) - Number(before?.[name] || 0)
@@ -266,6 +332,12 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     throw new Error("WEBSHELL_LOCAL_STATIC_DIR is required so the real environment loads the current workspace frontend");
   }
   const { desktop, mobile } = states;
+  if (config.enableInitializationPerformance) {
+    await Promise.all([desktop, mobile].map(installInitializationPerformanceProbe));
+    await Promise.all([desktop, mobile].map((state) => (
+      state.page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 })
+    )));
+  }
   await desktop.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
   await mobile.page.waitForSelector('.terminal-pane.active .pane-shell[data-connection="open"]', { timeout: 60_000 });
 
@@ -294,6 +366,10 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     desktop: await initializationPerformancePanel(desktop),
     mobile: await initializationPerformancePanel(mobile),
   };
+  if (config.enableInitializationPerformance && Object.values(initializationPerformanceAvailable).every(Boolean)) {
+    assertProgressiveInitialization(initializationPerformanceAtOpen.desktop, "desktop");
+    assertProgressiveInitialization(initializationPerformanceAtOpen.mobile, "mobile");
+  }
 
   const consoleErrors = [];
   const captureConsoleError = (windowName) => (message) => {

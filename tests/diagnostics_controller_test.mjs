@@ -192,12 +192,14 @@ test("diagnostics owns debug resources and rejects a late network monitor load a
   initializationToggle.dispatch("change");
   assert.equal(harness.storageValues.get("webshell.initializationPerformance"), "true");
   assert.equal(harness.elements.get("initializationPerformancePanel")?.hidden, false);
+  assert.equal(harness.intervals.size, 1);
   controller.recordTerminalSessionEvent({ id: "pane-init" }, "presentation_commit_complete", {
     reason: "render_commit",
     renderReady: true,
     resizeAckPending: false,
     liveCanvas: { width: 390, height: 713 },
   });
+  assert.equal(harness.intervals.size, 0);
   harness.elements.get("initializationPerformanceCopy").dispatch("click");
   await Promise.resolve();
   assert.equal(copiedInitializationData.length, 1);

@@ -206,7 +206,7 @@ global-runtime
 | --- | --- | --- | --- |
 | 页面与终端诊断 | `runtime/static/diagnostics/index.js` | [`diagnostics/README.md`](../runtime/static/diagnostics/README.md) | 调试开关、启动追踪、一次性初始化性能、运行时性能/网络采样和终端诊断时间线 |
 
-初始化性能由 diagnostics controller 持有开关和生命周期，只观察 `startupDiagnostics` 与候选终端 session 的公开事件，以第一个完成 `presentation_commit_complete` 的 session 作为结果；完成后冻结，不参与终端连接、replay、resize 或渲染调度。
+初始化性能由 diagnostics controller 持有开关和生命周期，只观察 `startupDiagnostics` 与候选终端 session 的公开事件。采集中由 collector 选择里程碑进度最领先的候选 session，渐进生成已完成 rows、当前 pending step、实时阶段计时和总耗时；diagnostics lifecycle 以 250ms ticker 刷新纯展示。第一个 `presentation_commit_complete` 冻结最终 session 和时间线并停止 ticker；整个过程不参与终端连接、replay、resize 或渲染调度。
 
 | 文件 | 状态/责任 |
 | --- | --- |

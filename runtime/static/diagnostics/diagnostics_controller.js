@@ -1,6 +1,7 @@
 import { createDebugLog } from "./debug_log.js";
 import {
   createDiagnosticsLifecycle,
+  createInitializationPerformanceLifecycle,
   createNetworkMonitorLifecycle,
 } from "./diagnostics_lifecycle.js";
 import { createDiagnosticsView } from "./diagnostics_view.js";
@@ -69,12 +70,21 @@ export function createDiagnosticsController({
   let resumeGeneration = 0;
   const view = createDiagnosticsView({ documentObject });
 
-  const initializationPerformance = createInitializationPerformance({
+  let initializationPerformance = null;
+  const initializationPerformanceLifecycle = createInitializationPerformanceLifecycle({
+    windowObject,
+    onTick: () => initializationPerformance?.refresh?.(),
+  });
+  initializationPerformance = createInitializationPerformance({
     startupDiagnostics,
     now,
-    onChange: (snapshot) => view.renderInitializationPerformance(snapshot, {
-      visible: state.debugMode && state.initializationPerformance && !disposed,
-    }),
+    onChange: (snapshot) => {
+      const visible = state.debugMode && state.initializationPerformance && !disposed;
+      view.renderInitializationPerformance(snapshot, { visible });
+      initializationPerformanceLifecycle.setActive(
+        started && visible && snapshot.status === "collecting",
+      );
+    },
   });
   initializationPerformance.setEnabled(state.debugMode && state.initializationPerformance);
   const debugLog = createDebugLog({
@@ -233,6 +243,7 @@ export function createDiagnosticsController({
       lifecycle.dispose();
       networkMonitorLifecycle.dispose();
       performanceTaskMonitor.setEnabled(false);
+      initializationPerformanceLifecycle.dispose();
       initializationPerformance.dispose();
       performanceMeter.dispose();
       debugLog.dispose();

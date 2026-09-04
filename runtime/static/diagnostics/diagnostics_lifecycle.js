@@ -39,6 +39,56 @@ export function createDiagnosticsLifecycle({ elements = {}, handlers = {} } = {}
   };
 }
 
+export function createInitializationPerformanceLifecycle({
+  windowObject = globalThis.window,
+  intervalMs = 250,
+  onTick = () => {},
+} = {}) {
+  let active = false;
+  let disposed = false;
+  let timer = 0;
+  const stop = () => {
+    if (timer) {
+      windowObject?.clearInterval?.(timer);
+      timer = 0;
+    }
+  };
+  const start = () => {
+    if (!active || disposed || timer || typeof windowObject?.setInterval !== "function") {
+      return false;
+    }
+    timer = windowObject.setInterval(() => {
+      if (!active || disposed) {
+        stop();
+        return;
+      }
+      onTick();
+    }, Math.max(50, Number(intervalMs) || 250)) || 0;
+    return Boolean(timer);
+  };
+  return Object.freeze({
+    dispose() {
+      if (disposed) {
+        return false;
+      }
+      disposed = true;
+      active = false;
+      stop();
+      return true;
+    },
+    setActive(nextActive) {
+      active = nextActive === true && !disposed;
+      if (active) {
+        start();
+      } else {
+        stop();
+      }
+      return active;
+    },
+    snapshot: () => Object.freeze({ active, running: Boolean(timer) }),
+  });
+}
+
 const defaultModuleLoader = () => import("./network_monitor.js");
 
 export function createNetworkMonitorLifecycle({

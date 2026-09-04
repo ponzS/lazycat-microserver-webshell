@@ -993,6 +993,23 @@ body.split-resize-active * {
   white-space: nowrap;
 }
 
+.initialization-performance-row.is-pending {
+  color: color-mix(in srgb, var(--terminal-fg) 78%, transparent);
+}
+
+.initialization-performance-row.is-pending .initialization-performance-name::before {
+  content: "●";
+  display: inline-block;
+  margin-right: 5px;
+  animation: initialization-performance-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes initialization-performance-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
 .performance-task-meter {
   position: static;
   width: min(360px, calc(100% - 10px));

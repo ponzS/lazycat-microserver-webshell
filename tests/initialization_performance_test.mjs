@@ -11,6 +11,7 @@ test("initialization performance panel keeps its event target and scroll list", 
   const style = fs.readFileSync(new URL("../runtime/static/style.css", import.meta.url), "utf8");
   assert.match(style, /\.initialization-performance-panel \{[\s\S]*?pointer-events: auto;[\s\S]*?user-select: text;[\s\S]*?touch-action: pan-y;/);
   assert.match(style, /\.initialization-performance-list \{[\s\S]*?overflow: auto;/);
+  assert.match(style, /\.initialization-performance-row\.is-pending/);
 });
 
 
@@ -34,6 +35,17 @@ test("initialization performance is disabled by default and freezes after first 
     serverAgentEnsureDurationMs: 30,
     cookie: "must-not-be-retained",
   });
+  let collecting = performance.snapshot();
+  assert.equal(collecting.status, "collecting");
+  assert.ok(collecting.rows.some((row) => row.name === "物理通道服务端已就绪"));
+  assert.equal(collecting.rows.at(-1)?.pending, true);
+  assert.equal(collecting.totalMs, 0);
+  clock = 130;
+  assert.equal(performance.refresh(), true);
+  collecting = performance.snapshot();
+  assert.equal(collecting.totalMs, 30);
+  assert.equal(collecting.rows.at(-1)?.durationMs, 30);
+  assert.equal(changes.at(-1)?.totalMs, 30);
   clock = 150;
   startup.mark("ghosttyReadyAt");
   performance.recordStartupEvent("Ghostty WASM 已就绪");
@@ -50,6 +62,11 @@ test("initialization performance is disabled by default and freezes after first 
     agentHistorySnapshotDurationMs: 50,
     selector: "must-not-be-retained",
   });
+  collecting = performance.snapshot();
+  assert.equal(collecting.sessionID, "pane-1");
+  assert.ok(collecting.rows.some((row) => row.name === "agent_attach_ready"));
+  assert.equal(collecting.rows.at(-1)?.pending, true);
+  assert.match(collecting.rows.at(-1)?.label || "", /Agent attach 准备完成/);
   clock = 220;
   performance.recordTerminalEvent(session, "history_replay_start");
   clock = 420;
@@ -72,6 +89,7 @@ test("initialization performance is disabled by default and freezes after first 
     },
   });
   assert.ok(result.rows.some((row) => row.label === "终端渲染完成"));
+  assert.equal(result.rows.some((row) => row.pending), false);
   assert.deepEqual(result.rows.find((row) => row.name === "connect_session_start")?.details, {
     reason: "test_connect",
     renderReady: false,
@@ -84,6 +102,7 @@ test("initialization performance is disabled by default and freezes after first 
   const rowCount = result.rows.length;
 
   clock = 900;
+  assert.equal(performance.refresh(), false);
   performance.recordTerminalEvent({ id: "pane-1" }, "socket_open");
   assert.equal(performance.snapshot().rows.length, rowCount);
   assert.equal(performance.snapshot().totalMs, 320);
