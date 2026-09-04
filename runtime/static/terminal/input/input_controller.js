@@ -13,7 +13,6 @@ export function createTerminalInputController({
   getSessions = () => [],
   isKittyGraphicsResponse = () => false,
   isReplayCommitted = () => false,
-  isInputBlocked = () => false,
   isSocketOpen = (session) => session?.socket?.readyState === globalThis.WebSocket?.OPEN,
   getCurrentLease = () => null,
   isClientTarget = () => false,
@@ -168,10 +167,6 @@ export function createTerminalInputController({
     if (!session || disposed) {
       return;
     }
-    if (isInputBlocked()) {
-      discardSession(session);
-      return;
-    }
     lifecycle.clearFlushTimer(session);
     if (!session.inputBuffer || !isReady(session) || !checkConnectionHealth(session, { connect: true })) {
       return;
@@ -228,10 +223,6 @@ export function createTerminalInputController({
     if (!session || session.inputPumpActive || disposed) {
       return;
     }
-    if (isInputBlocked()) {
-      discardSession(session);
-      return;
-    }
     session.inputPumpActive = true;
     try {
       if (session.inputBuffer) {
@@ -271,10 +262,6 @@ export function createTerminalInputController({
 
   const send = (session, data, { immediate = false, generated = false } = {}) => {
     if (disposed) {
-      return false;
-    }
-    if (isInputBlocked()) {
-      discardSession(session);
       return false;
     }
     if (!data || !(generated ? isGeneratedReady(session) : isReady(session)) || !checkConnectionHealth(session, { connect: true })) {
@@ -399,10 +386,6 @@ export function createTerminalInputController({
     if (!session || disposed) {
       return false;
     }
-    if (isInputBlocked()) {
-      discardSession(session);
-      return false;
-    }
     if (!isReady(session) || !checkConnectionHealth(session, { connect: true })) {
       return false;
     }
@@ -419,10 +402,6 @@ export function createTerminalInputController({
 
   const sendOrQueue = (session, data, { userInput = true } = {}) => {
     if (!session || disposed) {
-      return false;
-    }
-    if (isInputBlocked()) {
-      discardSession(session);
       return false;
     }
     if (shouldSuppressGenerated(session, data)) {
@@ -481,13 +460,6 @@ export function createTerminalInputController({
   const handleData = (session, data) => {
     const response = generatedResponse(data);
     const responseTail = generatedResponseTail(data);
-    if (isInputBlocked()) {
-      if (response || responseTail) {
-        armGeneratedSuppression(session, 1000);
-      }
-      discardSession(session);
-      return false;
-    }
     if (shouldSuppressGenerated(session, data)) {
       return false;
     }
@@ -513,22 +485,6 @@ export function createTerminalInputController({
       reassertSize(session);
     }
     return sendOrQueue(session, data, { userInput: !generatedResponse(data) });
-  };
-
-  const setSessionLocked = (session, blocked) => {
-    if (!session || disposed) {
-      return false;
-    }
-    session.inputLocked = blocked === true;
-    if (!isSocketOpen(session)) {
-      return true;
-    }
-    try {
-      sendPayload(session, { type: "input_lock", blocked: session.inputLocked });
-      return true;
-    } catch (error) {
-      return false;
-    }
   };
 
   const drainGeneratedResponses = (session) => {
@@ -592,12 +548,6 @@ export function createTerminalInputController({
     discardAll() {
       for (const session of sessions()) {
         discardSession(session);
-      }
-    },
-    setSessionLocked,
-    setAllLocked(blocked) {
-      for (const session of sessions()) {
-        setSessionLocked(session, blocked);
       }
     },
     clearInputFlushTimer: (session) => lifecycle.clearFlushTimer(session),

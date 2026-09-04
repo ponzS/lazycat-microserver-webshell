@@ -22,7 +22,7 @@
 - `interaction/`、`mouse/`、`selection/`：菜单、搜索、剪贴板、链接、mouse 协议和选区。
 - `overview/`：标签总览、live/hold/IndexedDB 派生图片缩略图、拖拽和移动端手势；持久图片不保存或恢复 PTY 历史。
 - `screenshot/`：终端长截图。
-- `input/`：输入队列、generated response、helper textarea、IME、焦点和移动快捷键。
+- `input/`：输入队列、generated response、helper textarea、IME、焦点和移动快捷键；不维护跨页面、Provider 或 agent 输入锁。
 - `policy/`、`tui_adapters/`：工具识别策略和隔离的 TUI 适配器。
 - `metrics/`：字体 metrics、live options 和尺寸估算。
 - `session/`：pane 身份、初始状态、资源工厂、安装编排和幂等销毁。

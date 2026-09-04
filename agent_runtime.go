@@ -80,6 +80,23 @@ func isCurrentAgentProtocolVersion(version string) bool {
 	return strings.TrimSpace(version) == agentProtocolVersion
 }
 
+func isAttachCompatibleAgentProtocolVersion(version string) bool {
+	switch strings.TrimSpace(version) {
+	case agentProtocolVersion, "lcmd-webshell-agent-v9":
+		return true
+	default:
+		return false
+	}
+}
+
+func agentProtocolUpdateState(version string) (available bool, required bool) {
+	version = strings.TrimSpace(version)
+	if version == "" || isCurrentAgentProtocolVersion(version) {
+		return false, false
+	}
+	return true, !isAttachCompatibleAgentProtocolVersion(version)
+}
+
 func isContainerUnavailableError(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "container does not exist")
 }
@@ -454,7 +471,7 @@ func parsePersistentAgentResponse(output []byte) (agentResponse, error) {
 	if version == "" {
 		version = unknownAgentProtocolVersion
 	}
-	if !isCurrentAgentProtocolVersion(version) {
+	if !isAttachCompatibleAgentProtocolVersion(version) {
 		return agentResponse{}, &unsupportedAgentProtocolError{version: version}
 	}
 	if !response.OK {
@@ -503,10 +520,16 @@ func ensurePersistentAgentOnce(ctx context.Context, scope agentScope) (string, e
 		return username, nil
 	}
 
-	preInstallPingErr := pingPersistentAgentError(ctx, scope)
+	preInstallResponse, preInstallPingErr := pingPersistentAgentResponse(ctx, scope)
 	preInstallRunning := preInstallPingErr == nil
 	if preInstallRunning {
 		trace.add("pre-install ping succeeded")
+		if !isCurrentAgentProtocolVersion(preInstallResponse.Version) {
+			trace.add("compatible agent protocol %s remains active until explicit update to %s", preInstallResponse.Version, agentProtocolVersion)
+			markPersistentAgentRunning(scope)
+			clearPersistentAgentStartupError(scope)
+			return username, nil
+		}
 	} else {
 		trace.add("pre-install ping failed: %v", preInstallPingErr)
 		rememberIncompatiblePersistentAgentNotice(scope, preInstallPingErr)
@@ -1051,11 +1074,6 @@ func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, s
 			return nil
 		}
 	}
-	clientID := strings.TrimSpace(r.URL.Query().Get("client_id"))
-	if clientID == "" {
-		clientID = strings.TrimSpace(r.URL.Query().Get("client"))
-	}
-
 	attachCtx, cancelAttach := context.WithCancel(context.Background())
 	defer cancelAttach()
 	command := exec.CommandContext(attachCtx, lightosctlPath, persistentAgentAttachCommandArgs(scope, paneID, cols, rows, terminalScrollback, syncRequest)...)
@@ -1144,7 +1162,6 @@ func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, s
 	}()
 
 	_ = conn.SetReadDeadline(time.Now().Add(websocketReadTimeout))
-	localInputBlocked := false
 	for {
 		messageType, payload, err := conn.ReadMessage()
 		if err != nil {
@@ -1153,14 +1170,13 @@ func (s *pluginServer) attachAgentPane(w http.ResponseWriter, r *http.Request, s
 			return nil
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(websocketReadTimeout))
-		inputBlocked := localInputBlocked || s.terminalInputBlocked(scope, clientID)
 		switch messageType {
 		case websocket.BinaryMessage:
-			if len(payload) > 0 && !inputBlocked {
+			if len(payload) > 0 {
 				_ = writeAgentFrame(stdin, agentFrameInput, payload)
 			}
 		case websocket.TextMessage:
-			keepOpen := handleAgentAttachControlMessage(conn, &writeMu, stdin, payload, inputBlocked, &localInputBlocked)
+			keepOpen := handleAgentAttachControlMessage(conn, &writeMu, stdin, payload)
 			if !keepOpen {
 				stopAttach()
 				<-writerDone
@@ -1239,19 +1255,17 @@ func isRetryableAgentAttachError(message string) bool {
 	return false
 }
 
-func handleAgentAttachControlMessage(conn *websocket.Conn, writeMu *sync.Mutex, stdin io.Writer, payload []byte, inputBlocked bool, localInputBlocked *bool) bool {
+func handleAgentAttachControlMessage(conn *websocket.Conn, writeMu *sync.Mutex, stdin io.Writer, payload []byte) bool {
 	var message terminalControlMessage
 	if err := json.Unmarshal(payload, &message); err != nil {
 		if data, ok := strings.CutPrefix(string(payload), "input:"); ok {
-			if !inputBlocked {
-				_ = writeAgentFrame(stdin, agentFrameInput, []byte(data))
-			}
+			_ = writeAgentFrame(stdin, agentFrameInput, []byte(data))
 		}
 		return true
 	}
 	switch message.Type {
 	case "input":
-		if message.Data != "" && (!inputBlocked || message.Generated) {
+		if message.Data != "" {
 			if message.Foreground != "" || message.Background != "" || message.Cursor != "" {
 				themeMessage := terminalControlMessage{Type: "theme", Foreground: message.Foreground, Background: message.Background, Cursor: message.Cursor}
 				if payload, err := json.Marshal(themeMessage); err == nil {
@@ -1285,9 +1299,7 @@ func handleAgentAttachControlMessage(conn *websocket.Conn, writeMu *sync.Mutex, 
 		data, _ := json.Marshal(message)
 		_ = writeAgentFrame(stdin, agentFrameResize, data)
 	case "input_lock":
-		if localInputBlocked != nil {
-			*localInputBlocked = message.Blocked
-		}
+		// Compatibility no-op for older pages during rolling upgrades.
 	case "ping":
 		_ = writeWebSocketJSONLocked(conn, writeMu, map[string]any{"type": "pong"})
 	case "detach":

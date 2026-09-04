@@ -152,7 +152,6 @@ type terminalQueueBroker struct {
 	ctx                context.Context
 	cancel             context.CancelFunc
 	scope              agentScope
-	clientID           string
 	transportRole      string
 	maxSubscriptions   int
 	allowOrdinaryInput bool
@@ -285,13 +284,10 @@ func (s *pluginServer) attachPersistentPaneQueue(w http.ResponseWriter, r *http.
 	if agentProtocolCurrent == "" {
 		agentProtocolCurrent = agentProtocolVersion
 	}
-	agentProtocolUpdateAvailable := agentProtocolCurrent != agentProtocolVersion
+	agentProtocolUpdateAvailable, versionRequiresUpdate := agentProtocolUpdateState(agentProtocolCurrent)
+	agentProtocolUpdateRequired = agentProtocolUpdateRequired || versionRequiresUpdate
 
-	clientID := strings.TrimSpace(r.URL.Query().Get("client_id"))
-	if clientID == "" {
-		clientID = strings.TrimSpace(r.URL.Query().Get("client"))
-	}
-	broker := newTerminalQueueBroker(context.Background(), scope, clientID, transportRole, writeMessage)
+	broker := newTerminalQueueBroker(context.Background(), scope, transportRole, writeMessage)
 	defer broker.close()
 	go broker.runWriter()
 
@@ -397,7 +393,7 @@ func holdTerminalQueueForProtocolUpdate(conn *websocket.Conn, writeJSON func(any
 	}
 }
 
-func newTerminalQueueBroker(ctx context.Context, scope agentScope, clientID, transportRole string, writer func(int, []byte) error) *terminalQueueBroker {
+func newTerminalQueueBroker(ctx context.Context, scope agentScope, transportRole string, writer func(int, []byte) error) *terminalQueueBroker {
 	brokerCtx, cancel := context.WithCancel(ctx)
 	role := strings.TrimSpace(transportRole)
 	if role != "fast" && role != "unified" {
@@ -411,7 +407,6 @@ func newTerminalQueueBroker(ctx context.Context, scope agentScope, clientID, tra
 		ctx:                brokerCtx,
 		cancel:             cancel,
 		scope:              normalizeAgentScope(scope.Selector, scope.AccountID),
-		clientID:           strings.TrimSpace(clientID),
 		transportRole:      role,
 		maxSubscriptions:   maxSubscriptions,
 		allowOrdinaryInput: role == "fast" || role == "unified",
@@ -858,7 +853,8 @@ func (b *terminalQueueBroker) handlePaneControl(message terminalQueueClientMessa
 	case "resize", "theme":
 		return stream.writeAgentFrame(agentFrameResize, message.Control)
 	case "input_lock":
-		return stream.writeAgentFrame(agentFrameLock, message.Control)
+		// Compatibility no-op for older pages during rolling upgrades.
+		return nil
 	case "queue-turn-ack":
 		return stream.acknowledgeTurn(control.Data)
 	default:

@@ -118,7 +118,6 @@ type terminalPane struct {
 	generatedEchoPending       []terminalGeneratedEcho
 	generatedEchoOutputPending []byte
 	hasAttached                bool
-	inputBlockers              map[string]struct{}
 	exited                     bool
 	exitCode                   int
 	exitText                   string
@@ -237,7 +236,6 @@ type terminalControlMessage struct {
 	ResizeEpoch string `json:"resize_epoch,omitempty"`
 	Claim       bool   `json:"claim,omitempty"`
 	Data        string `json:"data"`
-	Blocked     bool   `json:"blocked,omitempty"`
 	Generated   bool   `json:"generated,omitempty"`
 	Foreground  string `json:"foreground,omitempty"`
 	Background  string `json:"background,omitempty"`
@@ -554,7 +552,7 @@ func handleTerminalControlMessage(pane *terminalPane, payload []byte, client *pa
 	case "theme":
 		pane.updateTerminalThemeColors(message.Foreground, message.Background, message.Cursor)
 	case "input_lock":
-		pane.setInputBlocked(message.Blocked)
+		// Compatibility no-op for older direct clients during rolling upgrades.
 	case "ping":
 		data, err := json.Marshal(map[string]any{"type": "pong"})
 		if err == nil {
@@ -2400,25 +2398,13 @@ func (p *terminalPane) updateTerminalThemeColors(foreground, background, cursor 
 }
 
 func (p *terminalPane) writePTYInput(data []byte) error {
-	return p.writePTYInputWithOptions(data, false)
-}
-
-func (p *terminalPane) writeGeneratedPTYInput(data []byte) error {
-	return p.writePTYInputWithOptions(data, true)
-}
-
-func (p *terminalPane) writePTYInputWithOptions(data []byte, ignoreInputBlockers bool) error {
 	if len(data) == 0 {
 		return nil
 	}
 	p.mu.Lock()
 	ptyFile := p.ptyFile
-	inputBlocked := len(p.inputBlockers) > 0
 	exited := p.exited
 	p.mu.Unlock()
-	if inputBlocked && !ignoreInputBlockers {
-		return nil
-	}
 	if exited || ptyFile == nil {
 		return errors.New("pane is not running")
 	}
@@ -2443,6 +2429,10 @@ func (p *terminalPane) writePTYInputWithOptions(data []byte, ignoreInputBlockers
 	return nil
 }
 
+func (p *terminalPane) writeGeneratedPTYInput(data []byte) error {
+	return p.writePTYInput(data)
+}
+
 func (p *terminalPane) writeGeneratedInput(data []byte) error {
 	if len(data) == 0 {
 		return nil
@@ -2452,30 +2442,6 @@ func (p *terminalPane) writeGeneratedInput(data []byte) error {
 	}
 	p.addGeneratedEchoFilter(data)
 	return p.writeGeneratedPTYInput(data)
-}
-
-func (p *terminalPane) setInputBlocked(blocked bool) {
-	p.setInputBlockedBy("global", blocked)
-}
-
-func (p *terminalPane) setInputBlockedBy(owner string, blocked bool) {
-	owner = strings.TrimSpace(owner)
-	if owner == "" {
-		owner = "global"
-	}
-	p.mu.Lock()
-	if blocked {
-		if p.inputBlockers == nil {
-			p.inputBlockers = make(map[string]struct{})
-		}
-		p.inputBlockers[owner] = struct{}{}
-	} else if p.inputBlockers != nil {
-		delete(p.inputBlockers, owner)
-		if len(p.inputBlockers) == 0 {
-			p.inputBlockers = nil
-		}
-	}
-	p.mu.Unlock()
 }
 
 func (p *terminalPane) resize(cols, rows int) error {

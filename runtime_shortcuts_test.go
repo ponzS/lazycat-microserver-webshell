@@ -1662,8 +1662,6 @@ func TestRuntimeAppServerRevisionModuleBoundary(t *testing.T) {
 		`serverRevision = createServerRevisionController({`,
 		`clientID: serverRevision.getClientID(),`,
 		`observeServerRevision: (state) => serverRevision.observe(state),`,
-		`isInputBlocked: () => serverRevision.isDialogOpen(),`,
-		`serverRevision.clearStartupInputLock()`,
 		`serverRevision?.dispose();`,
 		`serverRevision.scheduleInitialCheck();`,
 	} {
@@ -1704,7 +1702,6 @@ func TestRuntimeAppServerRevisionModuleBoundary(t *testing.T) {
 	for _, want := range []string{
 		`new URL("./api/server-revision", windowObject.location.href);`,
 		`requestURL.searchParams.set("client_id"`,
-		`requestURL.searchParams.set("terminal_input_blocked"`,
 		`fetchImpl(url(options), { cache: "no-store" })`,
 	} {
 		if !strings.Contains(apiSource, want) {
@@ -1726,6 +1723,11 @@ func TestRuntimeAppServerRevisionModuleBoundary(t *testing.T) {
 			t.Fatalf("server revision module crosses terminal boundary %q", forbidden)
 		}
 	}
+	for _, forbidden := range []string{"setInputBlocked", "clearStartupInputLock", "setAllLocked", "terminal_input_blocked"} {
+		if strings.Contains(controllerSource+"\n"+apiSource, forbidden) {
+			t.Fatalf("server revision module must not retain terminal input lock behavior %q", forbidden)
+		}
+	}
 	for _, want := range []string{
 		"## 职责",
 		"## 公开入口与状态所有权",
@@ -1738,6 +1740,52 @@ func TestRuntimeAppServerRevisionModuleBoundary(t *testing.T) {
 		}
 	}
 
+}
+
+func TestTerminalInputLockRemovalContract(t *testing.T) {
+	source := readRuntimeSources(t,
+		"main.go",
+		"agent.go",
+		"agent_runtime.go",
+		"terminal_queue.go",
+		"workspace.go",
+		"runtime/static/global-runtime.js",
+		"runtime/static/app/bootstrap/bootstrap_controller.js",
+		"runtime/static/app/server_revision/server_revision_controller.js",
+		"runtime/static/app/server_revision/server_revision_api.js",
+		"runtime/static/app/agent_protocol_update/agent_protocol_update_controller.js",
+		"runtime/static/terminal/input/input_controller.js",
+		"runtime/static/terminal/session/session_state.js",
+		"runtime/static/terminal/transport/session_protocol_controller.js",
+	)
+	for _, forbidden := range []string{
+		"agentFrameLock",
+		"inputBlockers",
+		"terminalInputBlocked(",
+		"setTerminalInputBlocked(",
+		"setSessionLocked",
+		"setAllLocked",
+		"clearStartupInputLock",
+		"isInputBlocked:",
+		"session.inputLocked",
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("terminal input lock removal contract found active state or behavior %q", forbidden)
+		}
+	}
+	for _, want := range []string{
+		`agentProtocolVersion = "lcmd-webshell-agent-v10"`,
+		`case agentProtocolVersion, "lcmd-webshell-agent-v9":`,
+		`agentProtocolUpdateAvailable, versionRequiresUpdate := agentProtocolUpdateState(agentProtocolCurrent)`,
+		`"--replace-active", "--force-protocol-replacement"`,
+		`r.URL.Query().Get("terminal_input_blocked")`,
+		`case "input_lock":`,
+		"Compatibility no-op for older pages during rolling upgrades.",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("terminal input lock rolling-upgrade compatibility missing %q", want)
+		}
+	}
 }
 
 func TestRuntimeAppDOMRegistryModuleBoundary(t *testing.T) {
@@ -3507,7 +3555,6 @@ func TestRuntimeTerminalInputModuleBoundary(t *testing.T) {
 		`from "./terminal/input/index.js";`,
 		`terminalInput = createTerminalInputController({`,
 		`isReplayCommitted: (session) => terminalReplay.isCommitted(session),`,
-		`isInputBlocked: () => serverRevision.isDialogOpen(),`,
 		`getCurrentLease: (session) => terminalTransportRuntime?.currentLease(session) || null,`,
 		`getResizeSize: (session) => terminalResize.size(session),`,
 		`checkConnectionHealth: (session, options) => terminalSessionConnection.checkHealth(session, options),`,
@@ -3523,6 +3570,11 @@ func TestRuntimeTerminalInputModuleBoundary(t *testing.T) {
 	} {
 		if !strings.Contains(runtimeSource, want) {
 			t.Fatalf("main.js terminal input integration missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"setSessionLocked", "setAllLocked", "session.inputLocked", `type: "input_lock"`} {
+		if strings.Contains(controllerSource, forbidden) {
+			t.Fatalf("terminal input controller must not retain remote input lock behavior %q", forbidden)
 		}
 	}
 
@@ -9692,7 +9744,7 @@ func TestRuntimeUserInputHoldsCursorVisible(t *testing.T) {
 
 	inputBranch := sourceBetween(t, inputSource,
 		`const handleData = (session, data) => {`,
-		`  const setSessionLocked = (session, blocked) => {`,
+		`  const drainGeneratedResponses = (session) => {`,
 	)
 	if !strings.Contains(inputBranch, `holdCursorVisible(session);`) ||
 		!strings.Contains(inputBranch, `return sendOrQueue(session, data`) {
@@ -9737,7 +9789,6 @@ func TestRuntimeGeneratedTerminalResponsesAreMarked(t *testing.T) {
 		"sendTerminalTheme(session);",
 		"input?.installSession?.(session);",
 		"const response = generatedResponse(data);",
-		"if (response || responseTail) {",
 		"return send(session, data, { immediate: true, generated: true });",
 		"if (session.processingGeneratedTerminalResponses || response) {",
 		"if (responseTail) {",
@@ -9986,7 +10037,6 @@ func TestRuntimeMobileDeployRestartUsesBottomSheet(t *testing.T) {
 	wantMainSnippets := []string{
 		`mobileCloseConfirmActions,`,
 		`const requestBootstrapWorkspace = () => {`,
-		`clearStartupInputLock: () => serverRevision.clearStartupInputLock(),`,
 		`ghosttyInitPromise,`,
 		`applyWorkspace: (result, options) => applyWorkspaceRefresh(result, options),`,
 	}
@@ -9996,12 +10046,9 @@ func TestRuntimeMobileDeployRestartUsesBottomSheet(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		`input?.armAllGeneratedSuppression?.(2000);`,
 		`const restart = isMobileLayout()`,
 		`? await confirmMobileSheet({ ...options, actionsLayout: "vertical-ok-first" })`,
 		`: await openDialog(options);`,
-		`input?.discardAll?.();`,
-		`async clearStartupInputLock() {`,
 	} {
 		if !strings.Contains(revisionSource, want) {
 			t.Fatalf("server revision mobile deploy guard missing %q", want)
@@ -10021,17 +10068,10 @@ func TestRuntimeMobileDeployRestartUsesBottomSheet(t *testing.T) {
 	if strings.Contains(mainSource, `ensureInitialInteractiveTab`) {
 		t.Fatal("startup must not create a disposable terminal before authoritative workspace identity arrives")
 	}
-	if strings.Contains(revisionSource, `getTerminalInput()?.setAllLocked?.(false);
-		dialogOpen = false;
-		suppressBeforeUnloadForNavigation();`) {
-		t.Fatal("restart reload path should keep local input blocked until navigation")
-	}
-	if strings.Contains(revisionSource, `await setInputBlocked(false).catch(() => {});
-		getTerminalInput()?.setAllLocked?.(false);
-		input?.discardAll?.();
-		suppressBeforeUnloadForNavigation();
-		windowObject.location.reload();`) {
-		t.Fatal("restart reload path should keep server input blocked until websocket disconnect")
+	for _, forbidden := range []string{"getTerminalInput", "setInputBlocked", "clearStartupInputLock", "setAllLocked", "terminal_input_blocked"} {
+		if strings.Contains(revisionSource, forbidden) {
+			t.Fatalf("restart reload path must not retain input lock behavior %q", forbidden)
+		}
 	}
 	if !strings.Contains(indexSource, `class="mobile-close-confirm-actions" id="mobileCloseConfirmActions"`) {
 		t.Fatal("mobile close confirm actions container should have a stable id")

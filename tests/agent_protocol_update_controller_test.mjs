@@ -22,8 +22,8 @@ const createView = () => {
 
 const updateState = {
   targetName: "demo@owner",
-  agentProtocolVersion: "lcmd-webshell-agent-v20",
-  preferredAgentProtocolVersion: "lcmd-webshell-agent-v9",
+  agentProtocolVersion: "lcmd-webshell-agent-v9",
+  preferredAgentProtocolVersion: "lcmd-webshell-agent-v10",
   agentProtocolUpdateAvailable: true,
   agentProtocolUpdateRequired: false,
 };
@@ -60,11 +60,13 @@ test("required protocol mismatch opens one confirmation instead of leaving a bla
 test("protocol update notice stays visible when confirmation is canceled", async () => {
   const view = createView();
   let updates = 0;
+  let dialogs = 0;
   const controller = createAgentProtocolUpdateController({
     view,
     api: { async update() { updates += 1; } },
     getActiveName: () => "demo@owner",
     openDialog: async (options) => {
+      dialogs += 1;
       assert.equal(options.title, "更新终端服务协议");
       assert.equal(options.message, agentProtocolUpdateConfirmationMessage);
       assert.equal(options.okText, "确认更新");
@@ -77,15 +79,16 @@ test("protocol update notice stays visible when confirmation is canceled", async
 
   assert.equal(controller.observe(updateState), true);
   assert.deepEqual(view.renders.at(-1), { visible: true, updating: false });
+  assert.equal(dialogs, 0);
   assert.equal(await controller.showUpdateDialog(), false);
+  assert.equal(dialogs, 1);
   assert.equal(updates, 0);
   assert.deepEqual(view.renders.at(-1), { visible: true, updating: false });
 });
 
-test("confirmed protocol update locks input, updates once, and reloads", async () => {
+test("confirmed protocol update discards pending input, updates once, and reloads", async () => {
   const view = createView();
   const requests = [];
-  const locks = [];
   let discarded = 0;
   let reloads = 0;
   let navigationSuppressed = 0;
@@ -97,14 +100,13 @@ test("confirmed protocol update locks input, updates once, and reloads", async (
         requests.push(request);
         return {
           status: "updated",
-          current_protocol_version: "lcmd-webshell-agent-v9",
-          preferred_protocol_version: "lcmd-webshell-agent-v9",
+          current_protocol_version: "lcmd-webshell-agent-v10",
+          preferred_protocol_version: "lcmd-webshell-agent-v10",
         };
       },
     },
     getActiveName: () => "demo@owner",
     getTerminalInput: () => ({
-      setAllLocked(value) { locks.push(value); },
       discardAll() { discarded += 1; },
     }),
     openDialog: async () => true,
@@ -120,9 +122,8 @@ test("confirmed protocol update locks input, updates once, and reloads", async (
   assert.equal(await controller.showUpdateDialog(), true);
   assert.deepEqual(requests, [{
     name: "demo@owner",
-    currentProtocolVersion: "lcmd-webshell-agent-v20",
+    currentProtocolVersion: "lcmd-webshell-agent-v9",
   }]);
-  assert.deepEqual(locks, [true]);
   assert.equal(discarded, 1);
   assert.equal(navigationSuppressed, 0);
   assert.equal(reloads, 0);
@@ -137,16 +138,14 @@ test("confirmed protocol update locks input, updates once, and reloads", async (
   assert.equal(reloads, 1);
 });
 
-test("failed protocol update unlocks input and keeps the notice", async () => {
+test("failed protocol update keeps the notice without persistent input state", async () => {
   const view = createView();
-  const locks = [];
   const feedback = [];
   const controller = createAgentProtocolUpdateController({
     view,
     api: { async update() { throw new Error("update failed"); } },
     getActiveName: () => "demo@owner",
     getTerminalInput: () => ({
-      setAllLocked(value) { locks.push(value); },
       discardAll() {},
     }),
     openDialog: async () => true,
@@ -155,7 +154,6 @@ test("failed protocol update unlocks input and keeps the notice", async () => {
 
   controller.observe(updateState);
   assert.equal(await controller.showUpdateDialog(), false);
-  assert.deepEqual(locks, [true, false]);
   assert.deepEqual(feedback, ["update failed"]);
   assert.equal(controller.snapshot().updateAvailable, true);
   assert.deepEqual(view.renders.at(-1), { visible: true, updating: false });

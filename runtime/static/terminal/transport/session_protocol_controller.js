@@ -46,7 +46,6 @@ export function createTerminalSessionProtocolController({
   isCurrentInstanceSession = () => true,
   terminalLocationDescription = () => "",
   isRetryableTerminalTransportError = () => false,
-  isDeployRestartDialogOpen = () => false,
   detachSessionSocket = noop,
   invalidateSessionStartupError = noop,
   showSessionStartupError = noop,
@@ -537,10 +536,6 @@ export function createTerminalSessionProtocolController({
       terminalSessionConnection.clearSocketConnectTimer(session);
       terminalSessionConnection.startSocketHealthMonitor(session, currentSocket);
       terminalSessionConnection.startAttachReadyTimer(session, currentSocket);
-      if (isDeployRestartDialogOpen() || session.inputLocked) {
-        terminalInput?.setSessionLocked(session, true);
-        terminalInput?.discardSession(session);
-      }
       sendTerminalTheme(session);
       terminalResize.resizePane(session, { forceSizeSync: true });
       if (session.tabId === getActiveTabId() && currentTab()?.activePaneId === session.id) {

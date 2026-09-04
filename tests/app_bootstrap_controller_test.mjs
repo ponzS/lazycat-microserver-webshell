@@ -24,7 +24,6 @@ test("app bootstrap starts modules, prepares prerequisites and applies the curre
     loadTheme: async () => calls.push("load:theme"),
     loadSettings: async () => calls.push("load:settings"),
     loadInstances: async () => calls.push("load:instances"),
-    clearStartupInputLock: async () => calls.push("unlock"),
     getActiveName: () => "demo",
     getActiveGeneration: () => 4,
     isCurrentRequest: (name, generation) => name === "demo" && generation === 4,

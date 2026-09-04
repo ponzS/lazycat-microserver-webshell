@@ -125,10 +125,17 @@ func TestParsePersistentAgentResponseRejectsEmptyOutput(t *testing.T) {
 	}
 }
 
-func TestParsePersistentAgentResponseRequiresExactProtocolVersion(t *testing.T) {
-	response, err := parsePersistentAgentResponse([]byte(`{"ok":true,"version":"lcmd-webshell-agent-v9"}`))
+func TestParsePersistentAgentResponseAcceptsCurrentAndAttachCompatibleProtocolVersions(t *testing.T) {
+	response, err := parsePersistentAgentResponse([]byte(`{"ok":true,"version":"lcmd-webshell-agent-v10"}`))
 	if err != nil || response.Version != agentProtocolVersion {
 		t.Fatalf("current protocol response = %+v, err = %v", response, err)
+	}
+	response, err = parsePersistentAgentResponse([]byte(`{"ok":true,"version":"lcmd-webshell-agent-v9"}`))
+	if err != nil || response.Version != "lcmd-webshell-agent-v9" {
+		t.Fatalf("compatible protocol response = %+v, err = %v", response, err)
+	}
+	if isCurrentAgentProtocolVersion(response.Version) || !isAttachCompatibleAgentProtocolVersion(response.Version) {
+		t.Fatalf("v9 compatibility classification is invalid: %+v", response)
 	}
 
 	for _, version := range []string{"lcmd-webshell-agent-v1", "lcmd-webshell-agent-v8", "lcmd-webshell-agent-v20"} {
@@ -237,7 +244,7 @@ func TestEnsurePersistentAgentPingsBeforeInstalling(t *testing.T) {
 		t.Fatal("ensurePersistentAgent source block not found")
 	}
 	block := source[start:end]
-	pingIndex := strings.Index(block, "pingPersistentAgentError(ctx, scope)")
+	pingIndex := strings.Index(block, "pingPersistentAgentResponse(ctx, scope)")
 	installIndex := strings.Index(block, "ensureAgentBinaryInstalled(ctx, scope, trace)")
 	if pingIndex < 0 || installIndex < 0 {
 		t.Fatalf("expected ensurePersistentAgent to contain pre-install ping and install call")
@@ -248,6 +255,8 @@ func TestEnsurePersistentAgentPingsBeforeInstalling(t *testing.T) {
 	for _, want := range []string{
 		"if persistentAgentRunningCached(scope) {",
 		`trace.add("pre-install ping succeeded")`,
+		`compatible agent protocol %s remains active until explicit update to %s`,
+		`if !isCurrentAgentProtocolVersion(preInstallResponse.Version) {`,
 		`trace.add("pre-install ping failed: %v", preInstallPingErr)`,
 		"rememberIncompatiblePersistentAgentNotice(scope, preInstallPingErr)",
 		"if isUnsupportedAgentProtocolError(preStartPingErr) {",
@@ -261,11 +270,13 @@ func TestEnsurePersistentAgentPingsBeforeInstalling(t *testing.T) {
 	if strings.Contains(block, "reconcilePersistentAgentDaemons(ctx, scope, true, trace)") {
 		t.Fatal("initialization must not replace an active agent without explicit confirmation")
 	}
-	pingSuccessBlock := sourceBetween(t, block,
-		"if preInstallRunning {",
-		"persistentAgentCache.Lock()")
-	if strings.Contains(pingSuccessBlock, "return username, nil") {
-		t.Fatal("a compatible daemon must not skip binary SHA verification and legacy daemon reconciliation")
+	compatibleGuard := strings.Index(block, "if !isCurrentAgentProtocolVersion(preInstallResponse.Version)")
+	compatibleReturn := -1
+	if compatibleGuard >= 0 {
+		compatibleReturn = strings.Index(block[compatibleGuard:], "return username, nil")
+	}
+	if compatibleGuard < 0 || compatibleReturn < 0 || compatibleGuard+compatibleReturn > installIndex {
+		t.Fatal("an attach-compatible older daemon must remain active until explicit protocol update")
 	}
 }
 

@@ -11,3 +11,7 @@ node tests-auto/run-playwright.mjs tests-auto/03-terminal-ime/test.mjs
 ```
 
 测试要求 API、console error 和 `pageerror` 为零；任何步骤都不得触发或显示历史回放中间过程。
+
+## 验证结果
+
+- 2026-09-04 输入锁删除后使用当前工作区前端资源连接真实 Provider、persistent agent 和 PTY 通过，产物为 `artifacts/2026-09-04T07-14-05-758Z/`。composition、Backspace、paste 去重、移动端单击 blur、同步双击 focus、Canvas 和单 Unified 连接均符合断言，证明双击展开键盘链路未被删除。

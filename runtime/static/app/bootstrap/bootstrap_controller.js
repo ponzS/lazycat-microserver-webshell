@@ -6,7 +6,6 @@ export function createAppBootstrapController({
   loadTheme = () => Promise.resolve(),
   loadSettings = () => Promise.resolve(),
   loadInstances = () => Promise.resolve(),
-  clearStartupInputLock = () => Promise.resolve(),
   getActiveName = () => "",
   getActiveGeneration = () => 0,
   isCurrentRequest = () => false,
@@ -69,15 +68,11 @@ export function createAppBootstrapController({
       (result) => ({ result, error: null }),
       (error) => ({ result: null, error }),
     );
-    const startupInputUnlockPromise = instancesPromise
-      .then(() => clearStartupInputLock())
-      .catch(() => {});
     await Promise.all([
       ghosttyReady,
       themePromise,
       settingsPromise,
       instancesPromise,
-      startupInputUnlockPromise,
     ]);
     if (!lifecycle.isCurrent(generation) || isAppDisposed()) {
       return false;

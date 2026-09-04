@@ -82,7 +82,6 @@ const createSession = ({ id = "pane-1", replayCommitted = true } = {}) => {
     inputQueueSize: 0,
     inputPumpTimer: 0,
     inputPumpActive: false,
-    inputLocked: false,
     term: {
       onData(callback) {
         dataCallback = callback;
@@ -107,14 +106,12 @@ const createHarness = (options = {}) => {
   const marks = [];
   const cleanups = [];
   const clock = { value: 1000 };
-  let blocked = false;
   const sessions = options.sessions || [];
   const controller = createTerminalInputController({
     windowObject: windowHarness.windowObject,
     getSessions: () => sessions,
     isKittyGraphicsResponse: (data) => data === "kitty-response",
     isReplayCommitted: (session) => session.replayCommitted === true,
-    isInputBlocked: () => blocked,
     isSocketOpen: (session) => session.socketOpen === true,
     getCurrentLease: (session) => session.currentLease || null,
     isClientTarget: (name) => String(name).startsWith("client:"),
@@ -149,9 +146,6 @@ const createHarness = (options = {}) => {
     cleanups,
     clock,
     windowHarness,
-    setBlocked(value) {
-      blocked = value;
-    },
   };
 };
 
@@ -169,7 +163,7 @@ test("input model classifies generated responses and chunks Unicode without spli
   assert.equal(buildTerminalInputQueueItems("a😀b", { maxBytes: 5 }).exceeded, true);
 });
 
-test("controller marks generated payloads and suppresses replay or blocked callbacks", () => {
+test("controller marks generated payloads and suppresses replay callbacks", () => {
   const runtime = createSession();
   const harness = createHarness({ sessions: [runtime.session] });
   harness.controller.installSession(runtime.session);
@@ -201,12 +195,6 @@ test("controller marks generated payloads and suppresses replay or blocked callb
   runtime.emit("\x1b[1;2R");
   assert.equal(harness.sent.length, 2);
 
-  runtime.session.inputBuffer = "queued";
-  runtime.session.inputBufferSize = 6;
-  harness.setBlocked(true);
-  runtime.emit("\x1b[3;4R");
-  assert.equal(runtime.session.inputBuffer, "");
-  assert.ok(runtime.session.suppressGeneratedTerminalInputUntil > harness.clock.value);
 });
 
 test("steady input does not reassert an already presented terminal size", () => {
@@ -265,17 +253,12 @@ test("controller applies bounded backpressure and preserves pending input across
   assert.equal(runtime.session.pendingInputExpiryTimer, 0);
 });
 
-test("input lifecycle clears locks, queues, timers, and Ghostty data listeners", () => {
+test("input lifecycle clears queues, timers, and Ghostty data listeners", () => {
   const first = createSession({ id: "pane-1" });
   const second = createSession({ id: "pane-2" });
   const harness = createHarness({ sessions: [first.session, second.session] });
   harness.controller.installSession(first.session);
   harness.controller.installSession(second.session);
-
-  harness.controller.setAllLocked(true);
-  assert.equal(first.session.inputLocked, true);
-  assert.equal(second.session.inputLocked, true);
-  assert.equal(harness.sent.filter((payload) => payload.type === "input_lock").length, 2);
 
   first.session.pendingInput = ["pending"];
   first.session.pendingInputSize = 7;
