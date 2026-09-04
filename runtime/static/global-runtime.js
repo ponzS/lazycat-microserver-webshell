@@ -144,6 +144,7 @@ import {
   createAppFeedbackController,
   createAppLayoutController,
   createAppLifecycle,
+  createAppPasteController,
   createAgentProtocolUpdateController,
   createAppRuntimeRecoveryController,
   createAppShortcutController,
@@ -335,6 +336,7 @@ export function startGlobalRuntime() {
   let legacyStorageCleanup = null;
   let shortcutController = null;
   let appCommands = null;
+  let appPaste = null;
   let workspaceLayoutView = null;
   let workspaceLayout = null;
   let workspacePaneActivation = null;
@@ -589,7 +591,7 @@ export function startGlobalRuntime() {
       instances.closeSwitcher();
       devices.closePanel({ focus: false });
     },
-    focusTerminal: () => activeSession()?.term?.focus(),
+    focusTerminal: () => terminalIME?.focusForNativePaste(),
     showToast: (message) => showToast(message),
     copyText: (text) => terminalClipboard?.copyText(text) || false,
     isMobileLayout: () => isMobileLayout(),
@@ -945,8 +947,29 @@ export function startGlobalRuntime() {
       }
     },
     reassertSessionSize: (session) => terminalResize?.reassertSize(session, { force: true }),
+    focusForNativePaste: (session) => terminalIME?.focusForNativePaste(session),
     prepareSelectionManager: (session) => terminalSelection?.prepareManager(session),
     dragThresholdPx: desktopSelectionCopyMoveThresholdPx,
+  });
+
+  appPaste = createAppPasteController({
+    uploadFiles: (files, { session } = {}) => attachments.uploadPastedFiles(files, {
+      targetName: session?.name,
+      tabId: session?.tabId,
+    }),
+    pasteText: (session, text) => terminalClipboard.pasteSession(session, text),
+    isSessionValid: (session, result) => {
+      if (disposed || !session || session.closed) {
+        return false;
+      }
+      const tab = tabs.get(session.tabId);
+      return tab?.panes?.get(session.id) === session
+        && (!result?.tabId || result.tabId === session.tabId)
+        && (!result?.instanceName || result.instanceName === session.name)
+        && isCurrentInstanceSession(session);
+    },
+    reassertSize: (session) => terminalResize?.reassertSize(session, { force: true }),
+    showToast: (message) => showToast(message),
   });
 
   terminalInteraction = createTerminalContextMenuController({
@@ -1585,6 +1608,7 @@ export function startGlobalRuntime() {
     scrollToBottom: (session) => scrollTerminalToBottomForUserInput(session),
     sendInput: (session, data) => terminalInput?.sendOrQueue(session, data),
     pasteText: (session, text) => terminalClipboard?.pasteSession(session, text),
+    handleNativePaste: (session, event) => appPaste?.handleNativePaste(session, event),
     showToast: (message) => showToast(message),
     shouldApplyStickyTextInput: (value, inputType) => mobileShortcutsController?.shouldApplyStickyTextInput(value, inputType) === true,
     shouldApplyStickyCompositionInput: (value) => mobileShortcutsController?.shouldApplyStickyCompositionInput(value) === true,
@@ -1824,6 +1848,7 @@ export function startGlobalRuntime() {
     tuiAdapterInstaller: terminalTUIAdapterInstaller,
     mouse: terminalMouse,
     clipboard: terminalClipboard,
+    paste: appPaste,
     resize: terminalResize,
     input: terminalInput,
     interaction: terminalInteraction,
@@ -1834,7 +1859,6 @@ export function startGlobalRuntime() {
     markSessionTitleNotification: (session) => markSessionTitleNotification(session),
     transportRuntime: terminalTransportRuntime,
     isClientTarget: (name) => isClientInstanceName(name),
-    showToast: (message) => showToast(message),
   });
   const createPaneSession = (tab, instanceName, options) => (
     terminalSessionInstallation.createPaneSession(tab, instanceName, options)
@@ -2075,6 +2099,7 @@ export function startGlobalRuntime() {
       serviceForwarding,
       attachments,
       terminalClipboard,
+      appPaste,
       terminalInteraction,
       terminalSearch,
       terminalOverview,
@@ -2162,6 +2187,7 @@ export function startGlobalRuntime() {
     importAttachmentFromClipboard: () => attachments.importFromClipboard(),
     selectAttachmentFiles: () => attachments.selectFiles(),
     pasteTerminal: () => terminalClipboard?.pasteSession(),
+    isTerminalPasteRedirectTarget: (target) => attachments.isFileInputTarget(target),
     closeContextMenu: () => closeContextMenu(),
     showToast: (message) => showToast(message),
   });
@@ -2302,6 +2328,7 @@ export function startGlobalRuntime() {
         workspaceRefresh.dispose();
         diagnostics.dispose();
         serviceForwarding.dispose();
+        appPaste?.dispose();
         attachments.dispose();
         terminalLinks?.dispose();
         terminalMouse?.dispose();

@@ -56,8 +56,8 @@ controller 公开：
 - `index.js`：唯一公开入口。
 - `resource_factory.js`：创建 pane DOM、Ghostty Terminal/FitAddon、保帧 Canvas 和 IME 节点；不拥有 session 状态或资源清理。
 - `session_controller.js`：ID、初始尺寸、资源 factory、state 和 lifecycle 的组合控制器，并提供单个/批量销毁入口。
-- `session_installation_controller.js`：presentation、output、IME、renderer、selection、TUI、mouse、clipboard、resize、input、context menu 和 transport 的显式安装编排；维护 presentation-ready 到 input/diagnostics/transport 的局部接线。
-- `session_installation_lifecycle.js`：pane 激活、focus 和原生 paste listener 的注册、迟到回调 guard 与清理。
+- `session_installation_controller.js`：presentation、output、IME、renderer、selection、TUI、mouse、clipboard、应用 paste、resize、input、context menu 和 transport 的显式安装编排；terminal host 的 paste listener 只把事件转发给注入的应用 paste controller，并维护 presentation-ready 到 input/diagnostics/transport 的局部接线。
+- `session_installation_lifecycle.js`：pane 激活、focus 和 terminal host 原生 paste 转发 listener 的注册、迟到回调 guard 与清理。
 - `startup_error_api.js`：按 target 查询 agent startup error，固定 `no-store`。
 - `startup_error_controller.js`：启动错误分类、重连状态、错误面板/终端输出和 last-known-good frame 保护编排。
 - `startup_error_lifecycle.js`：每个 session 的异步请求 generation 与 dispose fence，拒绝迟到错误覆盖新会话。
@@ -69,7 +69,7 @@ controller 公开：
 
 - 内部通过 `terminal/history/index.js`、`terminal/resize/index.js` 和 `terminal/rendering/index.js` 依赖现有 replay、resize 与 render snapshot API。
 - DOM、Ghostty 和各责任域清理函数由调用方显式注入，模块不反向读取应用全局状态。
-- 行为测试：`terminal_session_controller_test.mjs`、`terminal_session_installation_controller_test.mjs`（含 presentation-ready 副作用及 closed/dispose guard）、`terminal_startup_error_controller_test.mjs`。
+- 行为测试：`terminal_session_controller_test.mjs`、`terminal_session_installation_controller_test.mjs`（含原生 paste 转发、presentation-ready 副作用及 closed/dispose guard）、`terminal_startup_error_controller_test.mjs`、`app_paste_controller_test.mjs`。
 - 静态边界：`TestRuntimeTerminalSessionModuleBoundary`。
 - 历史 guard：对应 `tests-auto` 场景 README、终端 history/transport 测试以及当前模块 README 中记录的 cursor、Unified、历史回放和 last-known-good frame 契约。
 

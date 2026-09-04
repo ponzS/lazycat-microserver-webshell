@@ -147,7 +147,7 @@ Browser
 
 | 责任域 | 公开入口 | 模块文档 | 主要职责 |
 | --- | --- | --- | --- |
-| 应用生命周期和页面命令 | `runtime/static/app/index.js` | [`app/README.md`](../runtime/static/app/README.md) | 页面 listener、bootstrap、恢复、对话框、快捷键、反馈、应用命令 |
+| 应用生命周期、页面命令和原生粘贴 | `runtime/static/app/index.js` | [`app/README.md`](../runtime/static/app/README.md) | 页面 listener、bootstrap、恢复、对话框、快捷键、反馈、应用命令，以及原生 paste 的文件优先/文本降级分流和异步 session fence |
 | 全局 runtime | `runtime/static/global-runtime.js` | [`runtime/static/README.md`](../runtime/static/README.md) | 全局状态、controller 接线、启动/恢复/销毁顺序 |
 | workspace、tab、pane、布局 | `runtime/static/workspace/index.js` | [`workspace/README.md`](../runtime/static/workspace/README.md) | workspace API、权威 state apply、tab/pane CRUD、激活、布局、持久化；分割条拖动只拥有比例和交互生命周期 |
 | 实例发现和切换 | `runtime/static/instances/index.js` | [`instances/README.md`](../runtime/static/instances/README.md) | 实例列表、默认目标、切换器和实例导航 |
@@ -194,6 +194,8 @@ global-runtime
 ```
 
 实际 controller 之间只能通过显式依赖、公开 API、事件或只读快照交互。不要因为某个功能同时涉及多个终端域，就把状态重新放回 `global-runtime.js` 或创建新的共享大对象。
+
+原生粘贴的跨模块契约是：IME textarea 和 session installation 的 terminal host listener 只转发浏览器 `paste` 事件；`app/paste` 是文件/文本判定、事件消费和异步 continuation 的唯一 owner。文件优先交给 attachments 的公开上传命令，文本及上传后的路径交给 terminal clipboard/input 命令；attachments 持有 XHR、进度和创建时实例/tab，app/paste 持有触发 session 与 dispose generation。上传结果只有在原 session 仍由 workspace registry 持有且实例未切换时才能发送，路径不得携带 CR/LF 或自动 Enter。`global-runtime.js` 只注入这些公开命令和只读有效性判断。
 
 终端输入没有应用级、Provider 级或 persistent-agent/pane 级共享锁。服务更新提示只管理弹窗与重载意图，不修改输入状态；普通输入在 replay、连接和 resize ACK 就绪后交给当前 PTY/TUI。滚动升级时旧 `terminal_input_blocked` 请求和 `input_lock` 控制帧仅在 Provider 边界无状态接受并忽略，不能生成 agent frame、阻塞其他 attach 或静默丢弃 PTY 输入。移动端双击展开键盘使用的 `inputViewportLock` 仍归 viewport 几何所有，只抑制 visualViewport 的中间几何同步，不阻止字符输入。
 
@@ -268,6 +270,8 @@ global-runtime
 | [`tests-auto/12-overview-preview-persistence/`](../tests-auto/12-overview-preview-persistence/) | tab 总览缩略图、live/hold/persisted preview 和 reload |
 | [`tests-auto/13-split-divider-render-isolation/`](../tests-auto/13-split-divider-render-isolation/) | 双 pane 持续输出下高频拖动、live Canvas 顶部锚定/隔离、单 in-flight 最终 resize 和页面响应性 |
 | [`tests-auto/14-terminal-input-lock-lifecycle/`](../tests-auto/14-terminal-input-lock-lifecycle/) | 旧页面输入锁 no-op、共享 pane 跨 attach 输入隔离和 Unified 兼容 |
+| [`tests-auto/15-vite-cold-start/`](../tests-auto/15-vite-cold-start/) | Vite 发布 bundle、冷缓存资源预算、真实终端启动和静态资源完整性 |
+| [`tests-auto/16-attachment-native-paste/`](../tests-auto/16-attachment-native-paste/) | PC/mobile 系统文本与图片 paste、DataTransfer 文件上传、手动上传后路径粘贴、原 pane fence 和 Unified 连接数 |
 
 ### 5.3 与当前终端初始化问题相关的诊断指标
 

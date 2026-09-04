@@ -76,6 +76,26 @@ export function createAttachmentsController({
 
   const currentContext = () => normalizeAttachmentTarget(getContext?.());
   const uploadIsCurrent = (upload) => !disposed && uploads.get(upload?.id) === upload;
+  const settleUpload = (upload, status, error = "") => {
+    if (!upload || upload.settled) {
+      return false;
+    }
+    upload.settled = true;
+    const onSettled = upload.onSettled;
+    upload.onSettled = null;
+    try {
+      onSettled?.({
+        error: String(error || ""),
+        id: upload.id,
+        instanceName: upload.instanceName,
+        paths: String(upload.paths || "").split("\n").map((path) => path.trim()).filter(Boolean),
+        status,
+        tabId: upload.tabId,
+      });
+    } catch {
+    }
+    return true;
+  };
   const browserRequestIsCurrent = (generation, targetName) => (
     !disposed
     && browserOpen
@@ -364,6 +384,7 @@ export function createAttachmentsController({
     }
     uploads.delete(id);
     upload.canceled = true;
+    settleUpload(upload, "canceled");
     rejectReservation(upload);
     clearUploadTimer(upload);
     view.removeUpload?.(id);
@@ -420,7 +441,13 @@ export function createAttachmentsController({
     return false;
   };
 
-  const uploadAttachments = (files, { source = "file", clipboardReservation = null } = {}) => {
+  const uploadAttachments = (files, {
+    source = "file",
+    clipboardReservation = null,
+    context: requestedContext = null,
+    copyPaths = true,
+    onSettled = null,
+  } = {}) => {
     const validation = validateAttachmentFiles(files, { FileCtor, BlobCtor });
     if (validation.error === "empty") {
       clipboardReservation?.reject?.();
@@ -437,8 +464,14 @@ export function createAttachmentsController({
       showToast(`文件超过 2GB：${validation.oversized?.name || "附件"}`);
       return "";
     }
-    const context = currentContext();
-    if (!context.tabId || !context.targetName) {
+    const context = normalizeAttachmentTarget(requestedContext || currentContext());
+    const liveContext = currentContext();
+    if (
+      !context.tabId
+      || !context.targetName
+      || !getTabHost(context.tabId)
+      || context.targetName !== liveContext.targetName
+    ) {
       clipboardReservation?.reject?.();
       showToast("没有可用的当前终端。");
       return "";
@@ -456,8 +489,12 @@ export function createAttachmentsController({
       canceled: false,
       paths: "",
       copyFailed: false,
+      copyPaths: copyPaths !== false,
       clipboardReservation,
       autoCloseTimer: 0,
+      source,
+      settled: false,
+      onSettled,
     };
     uploads.set(upload.id, upload);
     renderUpload(upload);
@@ -495,6 +532,7 @@ export function createAttachmentsController({
       upload.error = error?.message || "上传失败";
       rejectReservation(upload);
       renderUpload(upload);
+      settleUpload(upload, "error", upload.error);
       return upload.id;
     }
     Promise.resolve(operation.promise).then(async (payload) => {
@@ -508,7 +546,7 @@ export function createAttachmentsController({
         ? payload.files.map((file) => String(file?.path || "").trim()).filter(Boolean)
         : [];
       upload.paths = paths.join("\n");
-      if (paths.length > 0) {
+      if (paths.length > 0 && upload.copyPaths) {
         upload.copyFailed = !(await copyAttachmentPaths(upload.paths, upload.clipboardReservation));
       } else {
         upload.clipboardReservation?.reject?.();
@@ -519,6 +557,7 @@ export function createAttachmentsController({
       }
       upload.status = "success";
       renderUpload(upload);
+      settleUpload(upload, "success");
       if (!upload.copyFailed) {
         scheduleUploadAutoClose(upload);
       }
@@ -538,6 +577,7 @@ export function createAttachmentsController({
         upload.error = error?.message || "上传失败";
       }
       renderUpload(upload);
+      settleUpload(upload, upload.status, upload.error);
     });
     return upload.id;
   };
@@ -575,6 +615,7 @@ export function createAttachmentsController({
     } catch (error) {
       if (!disposed && generation === clipboardReadGeneration) {
         showToast(error?.message || "剪贴板读取失败。");
+        closeDialog({ focus: true });
       }
       return false;
     }
@@ -589,6 +630,39 @@ export function createAttachmentsController({
     view.openFilePicker?.();
     return true;
   };
+
+  const handleFileInputChange = () => {
+    const uploadID = uploadAttachments(view.consumeInputFiles?.() || [], {
+      source: "file",
+      clipboardReservation: consumeFileClipboard(),
+    });
+    view.blurFileInput?.();
+    scheduleFocus(focusTerminal);
+    return uploadID;
+  };
+
+  const handleFileInputCancel = () => {
+    cancelFileClipboard();
+    view.blurFileInput?.();
+    scheduleFocus(focusTerminal);
+  };
+
+  const uploadPastedFiles = (files, { targetName = "", tabId = "" } = {}) => new Promise((resolve) => {
+    const liveContext = currentContext();
+    const uploadID = uploadAttachments(files, {
+      source: "paste",
+      context: {
+        ...liveContext,
+        targetName: String(targetName || liveContext.targetName || "").trim(),
+        tabId: String(tabId || liveContext.tabId || "").trim(),
+      },
+      copyPaths: false,
+      onSettled: resolve,
+    });
+    if (!uploadID) {
+      resolve(null);
+    }
+  });
 
   const handleTargetChange = () => {
     clipboardReadGeneration += 1;
@@ -669,11 +743,8 @@ export function createAttachmentsController({
         }
       },
       onDownloadSelected: downloadSelected,
-      onFileInputCancel: cancelFileClipboard,
-      onFileInputChange: () => uploadAttachments(view.consumeInputFiles?.() || [], {
-        source: "file",
-        clipboardReservation: consumeFileClipboard(),
-      }),
+      onFileInputCancel: handleFileInputCancel,
+      onFileInputChange: handleFileInputChange,
       onImportClipboard: importFromClipboard,
       onOpenBrowser: openBrowser,
       onOpenDialog: openDialog,
@@ -729,6 +800,7 @@ export function createAttachmentsController({
     handleTabRemoved,
     handleTargetChange,
     importFromClipboard,
+    isFileInputTarget: (target) => view.isFileInputTarget?.(target) === true,
     isAnyOpen: () => Boolean(dialogOpen || browserOpen || view.isDialogOpen?.() || view.isBrowserOpen?.()),
     isBrowserOpen: () => Boolean(browserOpen && view.isBrowserOpen?.()),
     isDialogOpen: () => Boolean(dialogOpen && view.isDialogOpen?.()),
@@ -737,6 +809,7 @@ export function createAttachmentsController({
     openDialog,
     refreshUploadPanels,
     selectFiles,
+    uploadPastedFiles,
     snapshot() {
       return {
         browser: {

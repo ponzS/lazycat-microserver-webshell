@@ -2,9 +2,9 @@
 
 ## 职责与边界
 
-本目录负责 Ghostty helper textarea、IME composition/preedit、Android 连续删除、移动键盘 focus/blur、同步双击手势和终端 host 输入隔离。iOS 经典脚本负责 Lazycat 宿主关闭按钮桥接。
+本目录负责 Ghostty helper textarea、IME composition/preedit、Android 连续删除、移动键盘 focus/blur、同步双击手势、paste/beforeinput 文本去重和终端 host 输入隔离。iOS 经典脚本负责 Lazycat 宿主关闭按钮桥接。
 
-本目录不拥有普通/generated 输入队列、WebSocket、history、resize epoch 或 Canvas presentation。visualViewport、键盘 inset 与方向恢复当前仍由调用方注入，下一批迁入本目录的 viewport controller。
+本目录不拥有普通/generated 输入队列、WebSocket、history、resize epoch、Canvas presentation、附件上传或原生 paste 的文件/文本业务分流。textarea paste 事件通过注入命令同步转交 `app/paste`，本目录只用返回的文本结果维护 `beforeinput` 去重。visualViewport、键盘 inset 与方向恢复由调用方注入。
 
 ## 入口、状态与生命周期
 
@@ -20,4 +20,4 @@
 - `ime_model.js`：平台识别、sentinel、delete input type 与 composition 候选纯函数。
 - `ios_terminal_host.js`：iOS 宿主兼容经典脚本。
 
-相关 guard 位于 `terminal_ime_controller_test.mjs`、`runtime_shortcuts_test.go` 的 iOS host、Android 删除、键盘和 viewport 测试。最小回归是在触摸浏览器双击同步拉起键盘，验证中文/英文 composition、连续 Backspace、paste、单击 blur 与方向变化；确认不抢焦点、不重复提交、不泄漏历史回放画面。
+相关 guard 位于 `terminal_ime_controller_test.mjs`、`app_paste_controller_test.mjs`、`runtime_shortcuts_test.go` 的 iOS host、Android 删除、键盘和 viewport 测试。最小回归是在触摸浏览器双击同步拉起键盘，验证中文/英文 composition、连续 Backspace、系统文本/图片 paste、单击 blur 与方向变化；确认一次 paste 只转发一次、不抢焦点、不重复提交、不泄漏历史回放画面。真实剪贴板链路由 `tests-auto/16-attachment-native-paste/` 覆盖。

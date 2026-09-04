@@ -29,3 +29,9 @@ export {
   createLegacyWebShellStorageCleanupController,
 } from "./bootstrap/index.js";
 export { createAppFeedbackController } from "./feedback/index.js";
+export {
+  createAppPasteController,
+  formatPastedAttachmentPaths,
+  nativePasteFiles,
+  nativePasteText,
+} from "./paste/index.js";

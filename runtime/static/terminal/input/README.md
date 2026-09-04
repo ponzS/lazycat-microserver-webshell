@@ -4,7 +4,7 @@
 
 本模块负责终端用户输入与 generated response 的分类、发送队列、字节预算、WebSocket 背压、pending lease 过期和 `term.onData` 生命周期。输入是否可发送只由 replay commit、logical channel/lease、socket 和 resize ACK 共同决定，不依赖 Canvas `renderReady`。
 
-本模块不拥有 WebSocket 建立、关闭或重连，不决定 history replay、resize 或 presentation，也不实现应用弹窗输入锁、快捷键 UI、selection 或 clipboard。应用更新提示不得向 session、Provider、agent 或 pane 创建输入 blocker；触控弹窗依赖遮罩和焦点隔离。IME/composition、helper textarea 与移动键盘由 `ime/` 子域独立维护；连接健康、尺寸、主题、viewport 和用户活动只通过注入的公开命令或只读 getter 使用。移动端 `inputViewportLock` 仅属于 viewport 几何同步，不阻止字符发送，也不在本次协议删除范围内。
+本模块不拥有 WebSocket 建立、关闭或重连，不决定 history replay、resize 或 presentation，也不实现应用弹窗输入锁、快捷键 UI、selection、Clipboard API 或原生 paste 的文件/文本业务分流。应用更新提示不得向 session、Provider、agent 或 pane 创建输入 blocker；触控弹窗依赖遮罩和焦点隔离。IME/composition、helper textarea 与移动键盘由 `ime/` 子域独立维护；连接健康、尺寸、主题、viewport 和用户活动只通过注入的公开命令或只读 getter 使用。移动端 `inputViewportLock` 仅属于 viewport 几何同步，不阻止字符发送，也不在本次协议删除范围内。
 
 ## 公开入口与契约
 
@@ -13,7 +13,7 @@
 - `createTerminalInputController()`：模块单一编排入口，提供 `installSession()`、`send()`、`sendOrQueue()`、`flushPending()`、generated response/suppression、pending expiry 和幂等销毁。
 - `createTerminalInputLifecycle()`：管理 input flush/pump/pending-expiry timer 和 Ghostty `onData` disposable。
 - `isGeneratedTerminalResponse()`、`isGeneratedTerminalResponseTail()`、`splitTerminalInputChunks()`、`buildTerminalInputQueueItems()`：无状态协议识别和 Unicode/字节预算算法。
-- `createTerminalIMEController()`：管理 helper textarea、composition、Android native delete、paste 去重、focus/blur、同步双击键盘和 host 输入隔离。
+- `createTerminalIMEController()`：管理 helper textarea、composition、Android native delete、paste/beforeinput 去重、focus/blur、同步双击键盘和 host 输入隔离；textarea 原生 paste 只转发给注入的应用级 paste controller。
 - `createTerminalIMELifecycle()` 与 IME model：管理 session listener/timer/RAF，并提供 sentinel、delete 类型、composition 候选和平台识别纯函数。
 - `createMobileShortcutsController()`：管理移动终端快捷键栏、sticky modifier、触感反馈、触摸长按重复和键盘保活；动作通过显式回调交给应用层。
 - `createMobileShortcutsLifecycle()`：管理快捷键按钮 listener、重复 timeout/interval 和销毁。
@@ -47,8 +47,8 @@ pending input 的过期 timer 绑定当前 logical channel generation 或 client
 
 ## 依赖、guard 与最小回归
 
-依赖方向为 app/workspace -> input -> transport/resize/theme/viewport 的注入接口；input 不得深度导入 transport、history、rendering 或 resize 实现。IME 只能通过 `sendInput`、`pasteText`、resize 和 viewport 的注入命令交互。
+依赖方向为 app/workspace -> input -> transport/resize/theme/viewport 的注入接口；input 不得深度导入 app/paste、attachments、transport、history、rendering 或 resize 实现。IME 只能通过 `sendInput`、`pasteText`、`handleNativePaste`、resize 和 viewport 的注入命令交互。
 
-自动化测试：`terminal_input_controller_test.mjs`、`terminal_ime_controller_test.mjs`、`terminal_mobile_shortcuts_controller_test.mjs`、`TestTerminalInputControllerBehavior`、`TestRuntimeTerminalInputModuleBoundary`、移动快捷键行为与边界 guard，以及 large paste、generated response、input readiness、旧 `input_lock` no-op、IME composition、Android delete、同步双击和 session cleanup guard。真实跨 attach 回归由 `tests-auto/14-terminal-input-lock-lifecycle` 覆盖。
+自动化测试：`terminal_input_controller_test.mjs`、`terminal_ime_controller_test.mjs`、`terminal_mobile_shortcuts_controller_test.mjs`、`app_paste_controller_test.mjs`、`TestTerminalInputControllerBehavior`、`TestRuntimeTerminalInputModuleBoundary`、移动快捷键行为与边界 guard，以及 large paste、generated response、input readiness、旧 `input_lock` no-op、IME composition、Android delete、同步双击和 session cleanup guard。真实跨 attach 回归由 `tests-auto/14-terminal-input-lock-lifecycle` 覆盖，真实系统文本/图片和文件 paste 由 `tests-auto/16-attachment-native-paste` 覆盖。
 
 最小真实回归：在 `debug123` 验证普通输入、Enter/Ctrl-C、长文本粘贴、generated DSR/Kitty response、断线或 logical stream 重建期间输入排队及恢复；确认 resize ACK 前不发送携带新网格的用户输入，历史回放中间过程不可见，单页仍只有一条 Unified 物理 WebSocket，console/pageerror/API error 为零。

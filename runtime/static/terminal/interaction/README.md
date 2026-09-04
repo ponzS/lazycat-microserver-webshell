@@ -35,7 +35,7 @@
 
 `search_controller.js` 是 query、match 列表、当前 match index、搜索 session ID 和面板打开状态的唯一 owner。`search_model.js` 与 `terminal_text_model.js` 只执行无状态读取和匹配，不持有 session、DOM 或异步资源。
 
-`clipboard_controller.js` 是复制、粘贴和桌面剪贴板交互的唯一 owner。选择文本和完整缓冲区状态通过 selection controller 的显式读取/清理命令注入；本模块不再直接修改 terminal session 的选择字段。异步读取完成后必须重新校验 dispose 和 session closed 状态。
+`clipboard_controller.js` 是复制、主动读取文本粘贴和桌面剪贴板交互的唯一 owner。选择文本和完整缓冲区状态通过 selection controller 的显式读取/清理命令注入；本模块不再直接修改 terminal session 的选择字段。异步读取完成后必须重新校验 dispose 和 session closed 状态。主动 `clipboard-read` 被拒绝时先显示可操作反馈，再通过注入命令聚焦原生 paste 目标；原生事件的文件/文本分流归 `app/paste`。
 
 `link_controller.js` 是链接打开、复制反馈和迟到复制结果 guard 的唯一 owner。`link_model.js` 只读取终端逻辑行和字符到 cell 映射，不持有 session、DOM、selection、socket 或异步资源。
 
@@ -74,6 +74,6 @@
 
 允许依赖浏览器 DOM、工作区只读视图、选择/链接只读查询和显式业务命令。禁止依赖或修改 transport、history replay、Cache API v2、resize controller、Ghostty presentation 或输入 readiness。
 
-相关测试为 `terminal_context_menu_controller_test.mjs`、`terminal_search_controller_test.mjs`、`terminal_clipboard_controller_test.mjs`、`terminal_link_controller_test.mjs`、Claude fullscreen 右键/桌面选择隔离测试、触摸选择 guard、长截图菜单 guard 和 `TestRuntimeTerminalInteractionModuleBoundary`。最小回归包括：pane/tab 桌面右键、普通及跨物理换行 URL、尾部标点剥离、指针 cell 命中、链接 `_blank/noopener/noreferrer` 打开、链接复制和迟到结果拒绝、搜索、普通/bracketed paste、完整缓冲区复制、Clipboard 权限失败、桌面拖选自动复制、中键粘贴、pane 关闭或 dispose 后迟到读取不发送输入、Claude fullscreen 事件所有权，以及 dispose 后 listener/timer 不再触发。
+相关测试为 `terminal_context_menu_controller_test.mjs`、`terminal_search_controller_test.mjs`、`terminal_clipboard_controller_test.mjs`、`app_paste_controller_test.mjs`、`terminal_link_controller_test.mjs`、Claude fullscreen 右键/桌面选择隔离测试、触摸选择 guard、长截图菜单 guard 和 `TestRuntimeTerminalInteractionModuleBoundary`。最小回归包括：pane/tab 桌面右键、普通及跨物理换行 URL、尾部标点剥离、指针 cell 命中、链接 `_blank/noopener/noreferrer` 打开、链接复制和迟到结果拒绝、搜索、普通/bracketed paste、完整缓冲区复制、Clipboard 权限失败后的反馈与原生焦点、桌面拖选自动复制、中键粘贴、pane 关闭或 dispose 后迟到读取不发送输入、Claude fullscreen 事件所有权，以及 dispose 后 listener/timer 不再触发。真实系统 paste 由 `tests-auto/16-attachment-native-paste/` 覆盖。
 
 菜单和动作不得清空终端、触发历史 replay/reset、改变 resize owner 或展示 replay、snapshot、resize、重连的中间过程。

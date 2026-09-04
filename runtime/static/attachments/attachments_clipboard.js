@@ -27,6 +27,19 @@ export function createAttachmentsClipboard({
   BlobCtor = globalThis.Blob,
   ClipboardItemCtor = globalThis.ClipboardItem,
 } = {}) {
+  const normalizeReadError = (error) => {
+    const name = String(error?.name || "");
+    const message = String(error?.message || "");
+    if (
+      name === "NotAllowedError"
+      || name === "SecurityError"
+      || /permissions[- ]policy|clipboard-read|read permission|not allowed/i.test(message)
+    ) {
+      return new Error("当前页面策略禁止主动读取剪贴板，请使用系统粘贴快捷键。");
+    }
+    return error;
+  };
+
   const createFile = (parts, name, options) => {
     if (typeof FileCtor !== "function") {
       throw new Error("当前浏览器无法创建附件文件。");
@@ -41,16 +54,7 @@ export function createAttachmentsClipboard({
     try {
       return await navigatorObject.clipboard.readText();
     } catch (error) {
-      const name = String(error?.name || "");
-      const message = String(error?.message || "");
-      if (
-        name === "NotAllowedError"
-        || name === "SecurityError"
-        || /permissions[- ]policy|clipboard-read|read permission|not allowed/i.test(message)
-      ) {
-        throw new Error("当前页面策略禁止主动读取剪贴板，请使用系统粘贴快捷键。");
-      }
-      throw error;
+      throw normalizeReadError(error);
     }
   };
 
@@ -87,6 +91,7 @@ export function createAttachmentsClipboard({
     },
     async readFiles() {
       const files = [];
+      let fileReadError = null;
       if (navigatorObject?.clipboard?.read && windowObject?.isSecureContext) {
         try {
           const items = await navigatorObject.clipboard.read();
@@ -101,14 +106,21 @@ export function createAttachmentsClipboard({
               files.push(createFile([blob], `clipboard-${timestamp()}-${files.length + 1}${extension}`, { type: blob.type || type }));
             }
           }
-        } catch {
+        } catch (error) {
+          fileReadError = normalizeReadError(error);
         }
       }
       if (files.length > 0) {
         return files;
       }
-      const text = await readText();
+      let text;
+      try {
+        text = await readText();
+      } catch (error) {
+        throw fileReadError || error;
+      }
       if (!text) {
+        if (fileReadError) throw fileReadError;
         throw new Error("剪贴板没有可导入的内容。");
       }
       return [createFile([text], `clipboard-${timestamp()}.txt`, { type: "text/plain;charset=utf-8" })];

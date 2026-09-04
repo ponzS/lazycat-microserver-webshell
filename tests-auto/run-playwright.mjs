@@ -195,6 +195,8 @@ const createWindow = async (name, viewport, position) => {
     ignoreHTTPSErrors: true,
     serviceWorkers: config.localStaticDir ? "block" : "allow",
   });
+  const targetOrigin = new URL(config.url).origin;
+  await context.grantPermissions(["local-network-access"], { origin: targetOrigin }).catch(() => {});
   await installLocalStaticRoute(context);
   const page = await context.newPage();
   const state = { name, page, browser, context, framesSent: [], output: "", lastResize: null, fatalErrors: [], assetRequestFailures: [], resizeErrors: 0, initialTerminalTimeline: [] };
