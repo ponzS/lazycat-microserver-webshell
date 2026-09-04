@@ -5,15 +5,19 @@
 - 状态：active
 - 类型：PC / mobile / multi-device / lifecycle
 - 真实依赖：真实 Provider、persistent agent、PTY、Unified WebSocket、Chrome 和 Ghostty WASM
-- 相关模块和源码入口：`runtime/static/terminal/transport/session_protocol_controller.js`、`runtime/static/terminal/output/`、`runtime/static/terminal/rendering/`、`runtime/static/terminal/resize/`
+- 相关模块和源码入口：`runtime/static/terminal/transport/session_protocol_controller.js`、`runtime/static/terminal/output/`、`runtime/static/terminal/rendering/`、`runtime/static/terminal/resize/`、`runtime/static/diagnostics/initialization_performance.js`、`runtime/static/diagnostics/diagnostics_lifecycle.js`、`runtime/static/diagnostics/diagnostics_view.js`
 
 ## 触发条件
 
 在真实 WebShell workspace 中，对同一 pane 依次执行普通输出、约 1.5 MiB 大块输出、持续输出期间切换隐藏 tab，以及持续输出期间改变 viewport/resize。测试使用两个独立窗口，并把当前工作区的版本化前端资源映射到页面。
 
+启用 `WEBSHELL_ENABLE_INITIALIZATION_PERFORMANCE=1` 时，测试还会在页面初始化前安装只读 DOM probe 并重新加载两个页面，采集初始化面板从 `collecting` 到 `complete` 的逐帧变化。
+
 ## 用户可见问题
 
 历史回放或持续输出期间可能出现首次显示慢、Canvas 中间帧暴露、resize 后黑屏、输出丢失或 Unified physical WebSocket 被重复创建。移动端已确认另一类表现：`history_replay_complete` 和 `replay_output_drained` 均已完成，但初始 presentation 在 `resize_applied` 后没有及时提交；用户聚焦或下一次 resize 触发 full render 后，之前已应用的历史内容才显示。字体族等原子事务还可能出现 hold 模糊；字号/行高和桌面窗口 resize 已迁移到 live Canvas，由场景 10/13 验证。`queue_turn_complete` 还可能触发重复 full render，放大持续输出期间的主线程调度压力。
+
+初始化性能面板当前虽然持续收到采集事件，但 `collecting` snapshot 固定返回空 rows 和 `totalMs=0`，所以只有首个 `presentation_commit_complete` 到达后才一次性显示完整时间线。初始化卡住时用户看不到最后完成步骤、当前等待时长和实时总耗时。
 
 ## 预防的回归
 
@@ -22,12 +26,17 @@
 - output queue 不发生 overload 或 stale output drop。
 - 输出压力前后每个页面仍只有一条 Unified physical WebSocket。
 - `queue_turn_complete` 不直接启动新的 presentation full render。
+- 初始化未完成时，每个已到达事件必须立即追加到面板；最后一行显示当前等待阶段及动态计时。
+- `collecting` 状态的总耗时必须随时钟增长；完成后 pending 行消失，时间线和总耗时冻结。
+- 渐进刷新 timer 必须在完成、关闭开关、关闭调试模式和 dispose 时清理。
 
 ## 修复前基线
 
 - 2026-09-02 真实 `05-terminal-output` 基线通过，但观察到移动端 `rejected stale resize ACK` warning。该 warning 表示旧 resize ACK 被 generation fence 拒绝，符合旧 ACK 不得覆盖新 geometry 的安全语义，不应作为测试失败。
 - 基线测试覆盖约 1.5 MiB 实时输出，不覆盖初始打开时的 350KB 历史 replay，也不直接统计 `queue_turn_complete` 与 full render 的关联。
 - 基线的 presentation observer 在终端已经打开后启动，不能证明首次 replay 阶段的用户可见 Canvas commit 次数为零。
+- 2026-09-04 初始化性能渐进渲染修复前基线按预期失败，命令为 `HEADLESS=1 WEBSHELL_ENABLE_INITIALIZATION_PERFORMANCE=1 WEBSHELL_LOCAL_STATIC_DIR="$PWD/runtime/static" node tests-auto/run-playwright.mjs tests-auto/05-terminal-output/test.mjs`，产物为 `artifacts/2026-09-04T07-49-30-748Z/`。desktop probe 在约 2249.5ms 捕获到 `采集中 / 0.0ms / 0 行`，下一次可见变化已经是约 4876ms 的 `已完成 / 2651ms / 106 行`；不存在任何 progressive pending row，真实断言失败。截图显示最终面板正常，JSONL/terminal timeline 证明采集期间 Provider、Unified 和 replay 事件持续到达，根因边界锁定在 initialization performance snapshot/render。
+- `node --test tests/initialization_performance_test.mjs` 修复前同样按预期失败：记录第一条 startup event 后 collecting snapshot 仍没有对应 row。
 
 ## 已确认根因
 
@@ -40,6 +49,8 @@
 P0-1 的本地 Go 实现将相邻 history chunk 合并到有界的 `historyReplayChunk` 后再发送，保留 replay control frame、绝对 cursor、fast integrity sequence 和 replay/live 顺序。该实现需要部署到真实 Provider 后，才能通过 `tests-auto` 验证浏览器实际收到的 frame 数变化。
 
 P0-4 的 hold 修复已将 hold canvas backing 尺寸改为 CSS 尺寸乘当前 renderer DPR，并使用对应 transform 绘制；该修复只处理画质，不改变 presentation 唤醒、resize epoch 或 replay 顺序。
+
+初始化性能渐进渲染方案：collector 在未完成时基于当前 startup metrics、startup events 和进度最领先的 terminal session 构建 live snapshot，追加一条带实时等待时长的 pending 行；独立 diagnostics lifecycle 以有界 interval 驱动总耗时刷新，完成后立即停止。最终首个 presentation commit 仍是唯一冻结边界，不改变业务初始化流程。
 
 ## 验证结果
 
@@ -56,7 +67,15 @@ P0-4 的 hold 修复已将 hold canvas backing 尺寸改为 CSS 尺寸乘当前 
 - 默认 DPR=1 的 `05-terminal-output` 重跑通过：`unsafe=0`、`overloads=0`、`staleDrops=0`、desktop/mobile 各 1 条 Unified physical WebSocket。
 - 高 DPR 诊断：`WEBSHELL_MOBILE_DEVICE_SCALE_FACTOR=3` 下 live backing ratio 约为 3、可见 hold backing ratio 为 1；完整场景在临时 tab 激活等待处失败，不能作为功能通过，但 probe 已保存。
 - `WEBSHELL_ENABLE_INITIALIZATION_PERFORMANCE=1` 可用于真机回归；若测试机 HTML 已部署初始化性能面板，场景会断言两个窗口均在首次渲染后显示已完成和总耗时，并确认持续输出/resize 后总耗时不变。若测试机仍返回旧版 HTML，产物中的 `initializationPerformance.available` 会为 `false`，该项只记录兼容性边界，不会误判当前静态 JS。
-- 当前测试机仍返回旧版 HTML，因此本轮真实场景只验证了新 JS 未破坏连接、输出和渲染流程；面板 DOM 的真实设备验收需在新版 `index.html` 部署后重跑。
+- 早期验证时测试机仍返回旧版 HTML，当时只能确认新 JS 未破坏连接、输出和渲染流程，不能验收面板 DOM；该限制已由下方 2026-09-04 最新真实回归解除。
+- 2026-09-04 初始化渐进渲染首次修复后运行在新增断言之前被既有移动 presentation 门槛拦截：`pane-5` 从 socket open 到首帧 commit 为 2942ms，超过 2 秒，产物为 `artifacts/2026-09-04T07-52-12-895Z/`；日志显示 replay/output 正常并伴随已有 stale resize ACK warning，未修改断言或增加等待。
+- 同命令原样重跑通过，产物为 `artifacts/2026-09-04T07-53-08-224Z/`；随后把 view 从全列表重建优化为稳定前缀复用/只更新 pending 尾行，再次通过，最终产物为 `artifacts/2026-09-04T07-55-01-095Z/`。
+- 最新成功运行中 desktop/mobile 分别捕获 63/47 个 `collecting` 变化样本，其中 62/46 个样本带 progressive pending 行；总耗时从首批几十毫秒持续增长到最终 desktop `5394ms`、mobile `2727ms`。完成后 pending 行消失，最终 rows 为 115/106；持续输出和 resize 完成后总耗时仍分别保持 `5394ms`/`2727ms`，证明冻结边界有效。`overloads=0`、`staleDrops=0`。
+- 当前测试机 HTML 已包含初始化性能面板，最新回归同时验证了真实 DOM 的渐进 rows、pending 状态、动态总计时和完成后冻结，不再处于“仅映射 JS、无法验收面板”的旧限制。
+- `node --test tests/*.mjs`：423 项通过；collector 的 Node 回归覆盖首条事件立即出现、`refresh()` 推进 pending/总耗时、候选 session 选择、完成后 pending 消失和冻结，diagnostics controller 回归覆盖 ticker 在完成时清理。
+- `go test ./... -skip '^TestRuntimeTerminalCanvasResidueGuard$'`：通过。跳过项是仓库 HEAD 已存在且与本次无关的 CSS guard（要求 `object-fit: none`，当前产品样式为 `contain`）；未为本功能放宽或删除该断言。
+- `lzc-cli project release`：通过，生成 39 MiB `webshell-progressive-initialization.lpk`。
+- `git diff --check`：通过。
 
 
 ```sh

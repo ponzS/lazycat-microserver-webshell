@@ -36,6 +36,10 @@ const terminalEventLabels = Object.freeze({
   presentation_commit_complete: "终端渲染完成",
 });
 
+const terminalProgressRanks = new Map(
+  Object.keys(terminalEventLabels).map((name, index) => [name, index + 1]),
+);
+
 const initializationDetailKeys = new Set([
   "ready", "reason", "channel", "channelGeneration", "connectionEpoch",
   "physicalConnectionID", "physicalReadyState", "physicalOpenLatencyMs", "logicalStreamID", "logicalCount",
@@ -152,13 +156,14 @@ export function createInitializationPerformance({
   let startupEvents = [];
   let terminalEvents = [];
   let terminalEventsBySession = new Map();
+  let terminalProgressBySession = new Map();
   let result = null;
 
   const emit = () => {
     onChange(snapshot());
   };
 
-  const buildResult = (finishedAt) => {
+  const buildResult = (finishedAt, { status = "complete", includePending = false } = {}) => {
     const metrics = startupDiagnostics?.snapshot?.() || {};
     const metricEvents = Object.entries(startupMetricLabels)
       .map(([name]) => ({
@@ -194,29 +199,73 @@ export function createInitializationPerformance({
       previousAt = event.at;
     }
     const totalAt = Math.max(finishedAt, terminalEvents.at(-1)?.at || finishedAt);
+    if (includePending) {
+      const lastEvent = events.filter((event) => event.at >= navigationStartedAt).at(-1) || null;
+      const waitingSince = lastEvent?.at || navigationStartedAt;
+      rows.push({
+        name: "initialization_pending",
+        label: lastEvent ? `等待下一步 · ${lastEvent.label}` : "等待首个初始化事件",
+        source: lastEvent?.source || "页面初始化",
+        durationMs: Math.max(0, totalAt - waitingSince),
+        elapsedMs: Math.max(0, totalAt - navigationStartedAt),
+        details: {},
+        pending: true,
+      });
+    }
     return {
-      status: "complete",
+      status,
       sessionID,
       rows,
       totalMs: Math.max(0, totalAt - navigationStartedAt),
       startedAt: navigationStartedAt,
-      finishedAt: totalAt,
+      finishedAt: status === "complete" ? totalAt : 0,
     };
   };
 
   const snapshot = () => {
     if (result) {
-      return { enabled, ...result, rows: result.rows.map((row) => ({ ...row })) };
+      return {
+        enabled,
+        ...result,
+        rows: result.rows.map((row) => ({ ...row, details: { ...(row.details || {}) } })),
+      };
     }
+    const observedAt = finiteTime(now())
+      || finiteTime(startupDiagnostics?.getMetric?.("navigationStartedAt"));
     return {
       enabled,
-      status: enabled ? "collecting" : "idle",
-      sessionID,
-      rows: [],
-      totalMs: 0,
-      startedAt: finiteTime(startupDiagnostics?.getMetric?.("navigationStartedAt")),
-      finishedAt: 0,
+      ...buildResult(observedAt, {
+        status: enabled ? "collecting" : "idle",
+        includePending: enabled,
+      }),
     };
+  };
+
+  const selectProgressSession = (id, events, name, at) => {
+    const previous = terminalProgressBySession.get(id) || {
+      rank: 0,
+      startedAt: at,
+      lastAt: 0,
+    };
+    const progress = {
+      rank: Math.max(previous.rank, terminalProgressRanks.get(name) || previous.rank),
+      startedAt: previous.startedAt || at,
+      lastAt: at,
+    };
+    terminalProgressBySession.set(id, progress);
+    const selectedProgress = terminalProgressBySession.get(sessionID);
+    if (
+      !sessionID
+      || id === sessionID
+      || progress.rank > Number(selectedProgress?.rank || 0)
+      || (
+        progress.rank === Number(selectedProgress?.rank || 0)
+        && progress.startedAt < Number(selectedProgress?.startedAt || Infinity)
+      )
+    ) {
+      sessionID = id;
+      terminalEvents = events;
+    }
   };
 
   const recordTerminalEvent = (session, name, details = {}) => {
@@ -240,6 +289,7 @@ export function createInitializationPerformance({
       at,
       details: normalizeInitializationDetails(details),
     });
+    selectProgressSession(id, events, String(name || "terminal_event"), at);
     if (name === "presentation_commit_complete") {
       sessionID = id;
       terminalEvents = events;
@@ -255,6 +305,8 @@ export function createInitializationPerformance({
       enabled = false;
       terminalEvents = [];
       startupEvents = [];
+      terminalEventsBySession = new Map();
+      terminalProgressBySession = new Map();
       sessionID = "";
       result = null;
     },
@@ -279,6 +331,13 @@ export function createInitializationPerformance({
       emit();
     },
     recordTerminalEvent,
+    refresh() {
+      if (!enabled || disposed || completed) {
+        return false;
+      }
+      emit();
+      return true;
+    },
     setEnabled(nextEnabled) {
       if (disposed) {
         return;

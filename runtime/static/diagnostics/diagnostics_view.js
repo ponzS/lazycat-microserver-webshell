@@ -82,6 +82,46 @@ export function createDiagnosticsView({ documentObject = globalThis.document } =
     terminalNetworkMonitorUsage: byID("terminalNetworkMonitorUsage"),
     terminalNetworkMonitorUsageDetail: byID("terminalNetworkMonitorUsageDetail"),
   };
+  let initializationRowKeys = [];
+
+  const initializationRowKey = (row) => row?.pending === true
+    ? `pending:${row.source || ""}:${row.label || row.name || ""}`
+    : `event:${row.source || ""}:${row.name || ""}:${Number(row.elapsedMs || 0)}`;
+
+  const updateInitializationRow = (row, rowData) => {
+    if (!row) {
+      return;
+    }
+    const name = row.querySelector?.(".initialization-performance-name");
+    const duration = row.querySelector?.(".initialization-performance-duration");
+    const elapsed = row.querySelector?.(".initialization-performance-elapsed");
+    if (name) {
+      name.textContent = rowData.label || rowData.name || "初始化事件";
+    }
+    if (duration) {
+      duration.textContent = formatInitializationMs(rowData.durationMs);
+    }
+    if (elapsed) {
+      elapsed.textContent = `累计 ${formatInitializationMs(rowData.elapsedMs)}`;
+    }
+  };
+
+  const createInitializationRow = (rowData) => {
+    const row = documentObject.createElement("div");
+    row.className = "initialization-performance-row";
+    if (rowData.pending === true) {
+      row.classList.add("is-pending");
+    }
+    const name = documentObject.createElement("span");
+    name.className = "initialization-performance-name";
+    const duration = documentObject.createElement("strong");
+    duration.className = "initialization-performance-duration";
+    const elapsed = documentObject.createElement("small");
+    elapsed.className = "initialization-performance-elapsed";
+    row.append(name, duration, elapsed);
+    updateInitializationRow(row, rowData);
+    return row;
+  };
 
   const appendTaskCell = (row, text, className = "performance-task-value", alert = false) => {
     const cell = documentObject.createElement("span");
@@ -264,21 +304,36 @@ export function createDiagnosticsView({ documentObject = globalThis.document } =
       if (!elements.initializationPerformanceList) {
         return;
       }
-      elements.initializationPerformanceList.textContent = "";
-      for (const rowData of state?.rows || []) {
-        const row = documentObject.createElement("div");
-        row.className = "initialization-performance-row";
-        const name = documentObject.createElement("span");
-        name.className = "initialization-performance-name";
-        name.textContent = rowData.label || rowData.name || "初始化事件";
-        const duration = documentObject.createElement("strong");
-        duration.className = "initialization-performance-duration";
-        duration.textContent = formatInitializationMs(rowData.durationMs);
-        const elapsed = documentObject.createElement("small");
-        elapsed.className = "initialization-performance-elapsed";
-        elapsed.textContent = `累计 ${formatInitializationMs(rowData.elapsedMs)}`;
-        row.append(name, duration, elapsed);
-        elements.initializationPerformanceList.appendChild(row);
+      const list = elements.initializationPerformanceList;
+      const rows = Array.from(state?.rows || []);
+      const nextKeys = rows.map(initializationRowKey);
+      const clientHeight = Number(list.clientHeight || 0);
+      const distanceFromEnd = Number(list.scrollHeight || 0) - Number(list.scrollTop || 0) - clientHeight;
+      const followTail = clientHeight <= 0 || distanceFromEnd <= 8;
+      const previousScrollTop = Number(list.scrollTop || 0);
+      let commonPrefix = 0;
+      while (
+        commonPrefix < initializationRowKeys.length
+        && commonPrefix < nextKeys.length
+        && initializationRowKeys[commonPrefix] === nextKeys[commonPrefix]
+      ) {
+        commonPrefix += 1;
+      }
+      const children = Array.from(list.children || []);
+      for (let index = children.length - 1; index >= commonPrefix; index -= 1) {
+        children[index].remove();
+      }
+      for (let index = commonPrefix; index < rows.length; index += 1) {
+        list.appendChild(createInitializationRow(rows[index]));
+      }
+      if (rows.length > 0 && commonPrefix === rows.length) {
+        updateInitializationRow(list.children?.[rows.length - 1], rows.at(-1));
+      }
+      initializationRowKeys = nextKeys;
+      if (followTail) {
+        list.scrollTop = list.scrollHeight;
+      } else {
+        list.scrollTop = previousScrollTop;
       }
     },
     renderPerformanceTasks(rows, { visible = false } = {}) {
