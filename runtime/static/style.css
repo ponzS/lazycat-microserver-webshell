@@ -754,8 +754,7 @@ body.split-resize-active * {
 .pane-shell[data-connection="closed"]::after,
 .pane-shell[data-connection="error"]::after,
 .pane-shell[data-connection="network-error"]::after,
-.pane-shell[data-render-ready="false"][data-has-presented-frame="false"]::after,
-.pane-shell[data-render-recovery="true"]::after {
+.pane-shell[data-render-ready="false"][data-has-presented-frame="false"]::after {
   opacity: 0.85;
 }
 
@@ -767,8 +766,7 @@ body.split-resize-active * {
 .pane-shell[data-connection="reconnecting"][data-connection-retrying="true"]::after,
 .pane-shell[data-connection="closed"]::after,
 .pane-shell[data-connection="error"]::after,
-.pane-shell[data-render-ready="false"][data-has-presented-frame="false"]::after,
-.pane-shell[data-render-recovery="true"]::after {
+.pane-shell[data-render-ready="false"][data-has-presented-frame="false"]::after {
   background: #94a3b8;
 }
 

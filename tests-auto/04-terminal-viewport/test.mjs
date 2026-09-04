@@ -54,11 +54,20 @@ const startAtomicPresentationObserver = (state) => state.page.evaluate(() => {
     const renderReady = shell?.dataset.renderReady === "true";
     const hasPresentedFrame = shell?.dataset.hasPresentedFrame === "true";
     const holdVisible = hold instanceof HTMLCanvasElement && hold.hidden === false && hold.isConnected;
+    const statusStyle = shell ? getComputedStyle(shell, "::after") : null;
+    const statusOpacity = Number.parseFloat(statusStyle?.opacity || "0") || 0;
+    const connection = shell?.dataset.connection || "";
     samples.push({
+      at: performance.now(),
+      connection,
       renderReady,
       hasPresentedFrame,
+      renderRecovery: shell?.dataset.renderRecovery === "true",
       holdVisible,
       unsafe: !renderReady && hasPresentedFrame && !holdVisible,
+      statusOpacity,
+      statusBackgroundColor: statusStyle?.backgroundColor || "",
+      healthyStatusDot: connection === "open" && hasPresentedFrame && statusOpacity > 0.01,
     });
     requestAnimationFrame(sample);
   };
@@ -75,12 +84,16 @@ const stopAtomicPresentationObserver = (state) => state.page.evaluate(() => {
   const observer = window.__testsAutoViewportPresentationObserver;
   observer?.stop?.();
   const samples = observer?.samples || [];
+  const healthyStatusDotSamples = samples.filter((sample) => sample.healthyStatusDot);
   delete window.__testsAutoViewportPresentationObserver;
   return {
     count: samples.length,
     pending: samples.filter((sample) => !sample.renderReady && sample.hasPresentedFrame).length,
     hold: samples.filter((sample) => sample.holdVisible).length,
     unsafe: samples.filter((sample) => sample.unsafe).length,
+    renderRecovery: samples.filter((sample) => sample.renderRecovery).length,
+    healthyStatusDot: healthyStatusDotSamples.length,
+    healthyStatusDotSamples: healthyStatusDotSamples.slice(0, 8),
   };
 });
 
@@ -202,6 +215,7 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     throw new Error(`keyboard viewport changed terminal geometry during input lock: ${JSON.stringify({ baselineKeyboardGeometry, keyboardFrames })}`);
   }
 
+  await startAtomicPresentationObserver(mobile);
   await mobile.page.evaluate(() => {
     const textarea = document.querySelector(".terminal-pane.active .terminal-host textarea");
     textarea?.dispatchEvent(new CompositionEvent("compositionend", {
@@ -213,6 +227,7 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   });
   await setSyntheticVisualViewportHeight(mobile, synthetic.baselineHeight);
   await mobile.page.waitForTimeout(1_450);
+  const keyboardPresentation = await stopAtomicPresentationObserver(mobile);
   const keyboardClosed = await viewportDOMSnapshot(mobile);
   if (
     keyboardClosed.inset !== "0px"
@@ -220,6 +235,9 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     || keyboardClosed.shortcutsTransform !== ""
   ) {
     throw new Error(`keyboard viewport did not recover after blur: ${JSON.stringify(keyboardClosed)}`);
+  }
+  if (keyboardPresentation.count < 10 || keyboardPresentation.healthyStatusDot > 0) {
+    throw new Error(`keyboard dismiss exposed the pane status dot on a healthy presented terminal: ${JSON.stringify(keyboardPresentation)}`);
   }
   await restoreSyntheticVisualViewport(mobile);
 
@@ -275,6 +293,7 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     synthetic,
     keyboardOpen,
     keyboardClosed,
+    keyboardPresentation,
     presentation,
     resizeFramesBeforeKeyboard: resizeFramesBeforeKeyboard.length,
     resizeFramesDuringKeyboard: resizeFramesDuringKeyboard.length,
