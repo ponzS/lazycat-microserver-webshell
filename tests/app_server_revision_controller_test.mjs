@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createServerRevisionController } from "../runtime/static/app/server_revision/index.js";
+import {
+  createServerRevisionAPI,
+  createServerRevisionController,
+} from "../runtime/static/app/server_revision/index.js";
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -13,24 +16,17 @@ const createStorage = (initial = {}) => {
   };
 };
 
-test("server revision controller owns stable client identity and cancel unlocks input", async () => {
+test("server revision controller owns stable client identity without terminal lock state", async () => {
   const events = [];
-  const input = {
-    armAllGeneratedSuppression: (delay) => events.push(`suppress:${delay}`),
-    setAllLocked: (locked) => events.push(`locked:${locked}`),
-    discardAll: () => events.push("discard"),
-  };
   const controller = createServerRevisionController({
     storage: createStorage({ "webshell.clientID": "client-stable" }),
     api: {
       read: async () => ({ server_revision: "rev-a" }),
-      setInputBlocked: async ({ inputBlocked }) => events.push(`server:${inputBlocked}`),
     },
     getActiveName: () => "instance-a",
     getActiveGeneration: () => 3,
     isCurrentRequest: () => true,
     getActiveTabId: () => "tab-a",
-    getTerminalInput: () => input,
     openDialog: async () => false,
     cryptoObject: { randomUUID: () => "unused" },
   });
@@ -40,17 +36,10 @@ test("server revision controller owns stable client identity and cancel unlocks 
   assert.equal(controller.observe({ server_revision: "rev-b" }), true);
   await flush();
   assert.equal(controller.isDialogOpen(), false);
-  assert.deepEqual(events, [
-    "suppress:2000",
-    "locked:true",
-    "server:true",
-    "discard",
-    "server:false",
-    "locked:false",
-  ]);
+  assert.deepEqual(events, []);
 });
 
-test("confirmed mobile restart preserves target tab and keeps input blocked until reload", async () => {
+test("confirmed mobile restart preserves target tab and reloads without terminal lock state", async () => {
   const events = [];
   const windowObject = {
     location: {
@@ -60,21 +49,14 @@ test("confirmed mobile restart preserves target tab and keeps input blocked unti
     setTimeout,
     clearTimeout,
   };
-  const input = {
-    armAllGeneratedSuppression: () => events.push("suppress"),
-    setAllLocked: (locked) => events.push(`locked:${locked}`),
-    discardAll: () => events.push("discard"),
-  };
   const controller = createServerRevisionController({
     windowObject,
     storage: createStorage(),
     api: {
       read: async () => ({}),
-      setInputBlocked: async ({ inputBlocked }) => events.push(`server:${inputBlocked}`),
     },
     getActiveName: () => "instance-a",
     getActiveTabId: () => "tab-a",
-    getTerminalInput: () => input,
     isMobileLayout: () => true,
     confirmMobileSheet: async (options) => {
       events.push(`layout:${options.actionsLayout}`);
@@ -86,13 +68,13 @@ test("confirmed mobile restart preserves target tab and keeps input blocked unti
   });
 
   assert.equal(await controller.showRestartDialog(), true);
-  assert.equal(controller.isDialogOpen(), true);
+  assert.equal(controller.isDialogOpen(), false);
   assert.ok(events.includes("layout:vertical-ok-first"));
   assert.ok(events.includes("remember:instance-a:tab-a"));
   assert.ok(events.includes("beforeunload:suppress"));
   assert.equal(events.at(-1), "reload");
-  assert.equal(events.includes("server:false"), false);
-  assert.equal(events.includes("locked:false"), false);
+  assert.equal(events.some((entry) => entry.startsWith("server:")), false);
+  assert.equal(events.some((entry) => entry.startsWith("locked:")), false);
 });
 
 test("initial check is single-shot and dispose rejects timer and late refresh results", async () => {
@@ -117,7 +99,6 @@ test("initial check is single-shot and dispose rejects timer and late refresh re
     storage: createStorage(),
     api: {
       read: () => new Promise((resolve) => { resolveRead = resolve; }),
-      setInputBlocked: async () => true,
     },
     getActiveName: () => "instance-a",
     getActiveGeneration: () => 1,
@@ -140,4 +121,15 @@ test("initial check is single-shot and dispose rejects timer and late refresh re
   await flush();
   assert.equal(observedDialogs, 0);
   assert.equal(controller.dispose(), false);
+});
+
+test("server revision API never emits the retired terminal input lock parameter", () => {
+  const api = createServerRevisionAPI({
+    windowObject: { location: { href: "https://example.test/webshell/" } },
+    fetchImpl: async () => ({ ok: true, async json() { return {}; } }),
+  });
+  const url = api.url({ name: "instance-a", clientID: "client-a", inputBlocked: true });
+  assert.equal(url.searchParams.get("name"), "instance-a");
+  assert.equal(url.searchParams.get("client_id"), "client-a");
+  assert.equal(url.searchParams.has("terminal_input_blocked"), false);
 });

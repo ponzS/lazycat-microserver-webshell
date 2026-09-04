@@ -6,15 +6,12 @@ export function createServerRevisionAPI({
     throw new TypeError("server revision API requires fetch");
   }
 
-  const url = ({ name = "", clientID = "", inputBlocked } = {}) => {
+  const url = ({ name = "", clientID = "" } = {}) => {
     const requestURL = new URL("./api/server-revision", windowObject.location.href);
     if (name) {
       requestURL.searchParams.set("name", name);
     }
     requestURL.searchParams.set("client_id", String(clientID || ""));
-    if (typeof inputBlocked === "boolean") {
-      requestURL.searchParams.set("terminal_input_blocked", inputBlocked ? "true" : "false");
-    }
     return requestURL;
   };
 
@@ -29,10 +26,6 @@ export function createServerRevisionAPI({
   return Object.freeze({
     async read(options) {
       return (await request(options)).json();
-    },
-    async setInputBlocked(options) {
-      await request(options);
-      return true;
     },
     url,
   });

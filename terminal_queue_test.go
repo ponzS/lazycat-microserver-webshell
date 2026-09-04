@@ -143,7 +143,7 @@ func TestTerminalQueueWriterUsesFixedRoundTargetAndVisitsOtherPanes(t *testing.T
 	var order []string
 	var callbackErr error
 	var first *terminalQueuePaneStream
-	broker := newTerminalQueueBroker(ctx, agentScope{}, "", "queue", func(messageType int, payload []byte) error {
+	broker := newTerminalQueueBroker(ctx, agentScope{}, "queue", func(messageType int, payload []byte) error {
 		if messageType != websocket.TextMessage {
 			orderMu.Lock()
 			callbackErr = fmt.Errorf("message type = %d, want text", messageType)
@@ -211,7 +211,7 @@ func TestTerminalQueueWriterEmitsOneRenderBoundaryAfterBinaryTurn(t *testing.T) 
 	var mu sync.Mutex
 	var messageTypes []int
 	var controlType string
-	broker := newTerminalQueueBroker(ctx, agentScope{}, "", "queue", func(messageType int, payload []byte) error {
+	broker := newTerminalQueueBroker(ctx, agentScope{}, "queue", func(messageType int, payload []byte) error {
 		mu.Lock()
 		defer mu.Unlock()
 		messageTypes = append(messageTypes, messageType)
@@ -267,7 +267,7 @@ func TestTerminalQueueWriterEmitsOneRenderBoundaryAfterBinaryTurn(t *testing.T) 
 }
 
 func TestTerminalQueueTurnAckReleasesWriter(t *testing.T) {
-	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "", "queue", func(int, []byte) error { return nil })
+	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "queue", func(int, []byte) error { return nil })
 	stream := &terminalQueuePaneStream{
 		broker:          broker,
 		subscription:    terminalQueueSubscription{PaneID: "pane-1", StreamID: "s1", ChannelGeneration: 1, FlowControl: "turn-ack-v1"},
@@ -287,7 +287,7 @@ func TestTerminalQueueTurnAckReleasesWriter(t *testing.T) {
 }
 
 func TestTerminalQueueTurnAckRejectsStaleBoundary(t *testing.T) {
-	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "", "queue", func(int, []byte) error { return nil })
+	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "queue", func(int, []byte) error { return nil })
 	stream := &terminalQueuePaneStream{
 		broker:          broker,
 		subscription:    terminalQueueSubscription{PaneID: "pane-1", StreamID: "s1", ChannelGeneration: 1, FlowControl: "turn-ack-v1"},
@@ -399,7 +399,7 @@ func TestTerminalQueueBinarySequenceIgnoresInterleavedControlFrames(t *testing.T
 }
 
 func TestTerminalQueueRejectsOrdinaryInput(t *testing.T) {
-	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "", "queue", func(int, []byte) error { return nil })
+	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "queue", func(int, []byte) error { return nil })
 	stream := &terminalQueuePaneStream{
 		broker:       broker,
 		subscription: terminalQueueSubscription{PaneID: "pane-1", StreamID: "s1", ChannelGeneration: 1},
@@ -420,7 +420,7 @@ func TestTerminalQueueRejectsOrdinaryInput(t *testing.T) {
 }
 
 func TestTerminalUnifiedTransportAllowsOrdinaryInputAcrossMultipleStreams(t *testing.T) {
-	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "", "unified", func(int, []byte) error { return nil })
+	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "unified", func(int, []byte) error { return nil })
 	for _, paneID := range []string{"pane-1", "pane-2", "pane-3"} {
 		var stdin bytes.Buffer
 		stream := &terminalQueuePaneStream{
@@ -450,8 +450,44 @@ func TestTerminalUnifiedTransportAllowsOrdinaryInputAcrossMultipleStreams(t *tes
 	}
 }
 
+func TestTerminalUnifiedInputLockIsCompatibilityNoop(t *testing.T) {
+	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "unified", func(int, []byte) error { return nil })
+	var stdin bytes.Buffer
+	stream := &terminalQueuePaneStream{
+		broker:       broker,
+		subscription: terminalQueueSubscription{PaneID: "pane-1", StreamID: "s1", ChannelGeneration: 1},
+		stdin:        terminalQueueTestWriteCloser{Buffer: &stdin},
+		active:       true,
+	}
+	broker.streams["pane-1"] = stream
+	message := terminalQueueClientMessage{
+		Type:              "pane-control",
+		PaneID:            "pane-1",
+		StreamID:          "s1",
+		ChannelGeneration: 1,
+	}
+	message.Control = json.RawMessage(`{"type":"input_lock","blocked":true}`)
+	if err := broker.handlePaneControl(message); err != nil {
+		t.Fatalf("legacy input_lock should be accepted: %v", err)
+	}
+	if stdin.Len() != 0 {
+		t.Fatalf("legacy input_lock must not reach the agent, got %d bytes", stdin.Len())
+	}
+	message.Control = json.RawMessage(`{"type":"input","data":"pwd\n"}`)
+	if err := broker.handlePaneControl(message); err != nil {
+		t.Fatalf("ordinary input after legacy input_lock rejected: %v", err)
+	}
+	frameType, payload, err := readAgentFrame(&stdin)
+	if err != nil {
+		t.Fatalf("reading ordinary input after compatibility no-op: %v", err)
+	}
+	if frameType != agentFrameInput || string(payload) != "pwd\n" {
+		t.Fatalf("unexpected forwarded input: type=%q payload=%q", frameType, string(payload))
+	}
+}
+
 func TestTerminalUnifiedPriorityOrdersActivePaneWithoutRemovingOthers(t *testing.T) {
-	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "", "unified", func(int, []byte) error { return nil })
+	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "unified", func(int, []byte) error { return nil })
 	for index, paneID := range []string{"pane-1", "pane-2", "pane-3"} {
 		broker.streams[paneID] = &terminalQueuePaneStream{
 			broker:       broker,
@@ -477,7 +513,7 @@ func TestTerminalUnifiedPriorityOrdersActivePaneWithoutRemovingOthers(t *testing
 }
 
 func TestTerminalFastTransportAllowsOneOrdinaryInputStream(t *testing.T) {
-	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "", "fast", func(int, []byte) error { return nil })
+	broker := newTerminalQueueBroker(context.Background(), agentScope{}, "fast", func(int, []byte) error { return nil })
 	var stdin bytes.Buffer
 	stream := &terminalQueuePaneStream{
 		broker:       broker,

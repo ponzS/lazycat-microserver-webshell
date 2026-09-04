@@ -31,6 +31,40 @@ func TestAgentProtocolMismatchResponsePreservesUpgradeOrDowngradeVersion(t *test
 	}
 }
 
+func TestAgentProtocolV9RemainsAttachCompatibleUntilExplicitV10Update(t *testing.T) {
+	if isCurrentAgentProtocolVersion("lcmd-webshell-agent-v9") {
+		t.Fatal("v9 must not be classified as the current agent protocol")
+	}
+	if !isAttachCompatibleAgentProtocolVersion("lcmd-webshell-agent-v9") {
+		t.Fatal("v9 must remain attach-compatible with the v10 Provider")
+	}
+	if writeAgentProtocolMismatch(httptest.NewRecorder(), &unsupportedAgentProtocolError{version: "lcmd-webshell-agent-v9"}) {
+		t.Fatal("v9 must not produce a required protocol mismatch response")
+	}
+	if !isAttachCompatibleAgentProtocolVersion(agentProtocolVersion) {
+		t.Fatal("the current agent protocol must be attach-compatible")
+	}
+	available, required := agentProtocolUpdateState("lcmd-webshell-agent-v9")
+	if !available || required {
+		t.Fatalf("v9 update state = available %v, required %v; want true, false", available, required)
+	}
+	available, required = agentProtocolUpdateState(agentProtocolVersion)
+	if available || required {
+		t.Fatalf("current update state = available %v, required %v; want false, false", available, required)
+	}
+	for _, version := range []string{"", unknownAgentProtocolVersion, "lcmd-webshell-agent-v8", "lcmd-webshell-agent-v20"} {
+		if isAttachCompatibleAgentProtocolVersion(version) {
+			t.Fatalf("protocol %q must require update before attach", version)
+		}
+		if version != "" {
+			available, required = agentProtocolUpdateState(version)
+			if !available || !required {
+				t.Fatalf("protocol %q update state = available %v, required %v; want true, true", version, available, required)
+			}
+		}
+	}
+}
+
 func TestAgentProtocolMismatchStopsBeforeInstallingPackagedBinary(t *testing.T) {
 	source, err := os.ReadFile("agent_runtime.go")
 	if err != nil {
@@ -110,7 +144,7 @@ func TestTerminalQueueReadyAdvertisesAgentProtocolUpdate(t *testing.T) {
 	text := string(payload)
 	for _, want := range []string{
 		`"agent_protocol_version":"lcmd-webshell-agent-v20"`,
-		`"preferred_agent_protocol_version":"lcmd-webshell-agent-v9"`,
+		`"preferred_agent_protocol_version":"lcmd-webshell-agent-v10"`,
 		`"agent_protocol_update_available":true`,
 		`"agent_protocol_update_required":true`,
 	} {

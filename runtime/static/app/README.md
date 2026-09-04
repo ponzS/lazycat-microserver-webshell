@@ -16,8 +16,8 @@
 - `commands/`：移动快捷键和页面外壳按钮的应用命令路由、新建 tab 及 shell listener；只调用注入的公开命令，不拥有业务状态。
 - `dom_registry.js`：一次解析并校验页面外壳 DOM，按 workspace、dialog、mobile、startup 分组返回只读引用；不注册事件、不拥有业务状态。
 - `shortcuts/`：桌面快捷键动作映射、过滤和全屏命令；只通过显式回调调用业务模块，不拥有业务状态。
-- `server_revision/`：稳定 client ID、版本检查、部署重载提示、服务端输入锁及首次检查 timer；对话框、输入队列和工作区恢复均通过显式命令接入。
-- `agent_protocol_update/`：消费 Unified Queue 首次握手中的 Agent 当前/推荐协议版本，在终端右上角显示一次待更新提示；只有用户通过危险确认对话框明确同意后才请求 scoped Agent 更新，失败时保留提示并恢复输入。该模块不轮询、不按 pane 重复检测，也不自行替换 Agent。
+- `server_revision/`：稳定 client ID、版本检查、部署重载提示及首次检查 timer；更新提示不拥有也不修改终端输入状态。
+- `agent_protocol_update/`：消费 Unified Queue 首次握手中的 Agent 当前/推荐协议版本，在终端右上角显示一次待更新提示；只有用户通过危险确认对话框明确同意后才请求 scoped Agent 更新，失败时保留提示。该模块不创建输入锁、不轮询、不按 pane 重复检测，也不自行替换 Agent。
 - `bootstrap/`：应用启动事务、启动失败呈现和旧 PWA/Cache API 一次性迁移清理；同时保存由 Provider 在旧 URL 提供的退役 Worker 源码。`index.html` 只对仍受旧 Worker 控制的页面触发现有 registration 更新，不导入或注册 Worker。模块不申请浏览器持久存储，只接收显式依赖，不实现业务模块。
 - `global-runtime.js`（目录外）：唯一的全局 runtime owner；创建本目录和其他 feature controller，编排启动、恢复、页面生命周期和统一销毁。
 

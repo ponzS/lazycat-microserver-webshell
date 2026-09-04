@@ -60,6 +60,8 @@
 - `node --test tests/terminal_viewport_controller_test.mjs tests/terminal_ime_controller_test.mjs tests/terminal_presentation_controller_test.mjs tests/terminal_presentation_view_test.mjs tests/terminal_resize_controller_test.mjs tests/terminal_resize_scheduler_test.mjs`：60 项通过。
 - `go test ./... -run TestRuntimeConnectionStateDiagnosticsAndOneShotRevisionGuard -count=1`：通过，连接状态点 CSS guard 保持有效。
 - `git diff --check`：通过。
+- 2026-09-04 本次输入锁删除回归首次运行未注入 `WEBSHELL_MOBILE_USER_AGENT`，在进入场景动作前被平台前置断言拒绝，产物为 `artifacts/2026-09-04T07-10-37-430Z/`；这是运行命令缺少 README 必需变量，不是产品失败。
+- 使用下方完整命令重跑通过，产物为 `artifacts/2026-09-04T07-11-27-285Z/`；移动键盘 `inputViewportLock`、键盘展开/收起、最终 Canvas 和 Unified 连接均符合原场景断言。
 
 ## 运行命令和环境变量
 

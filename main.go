@@ -45,12 +45,10 @@ type pluginServer struct {
 	attachmentBackend      attachmentUploadBackend
 	attachmentFilesBackend attachmentFileBackend
 
-	settingsMu   sync.Mutex
-	inputLocksMu sync.Mutex
-	inputLocks   map[string]map[string]time.Time
-	devicesMu    sync.Mutex
-	devices      map[string]webshellDeviceRecord
-	deviceNow    func() time.Time
+	settingsMu sync.Mutex
+	devicesMu  sync.Mutex
+	devices    map[string]webshellDeviceRecord
+	deviceNow  func() time.Time
 }
 
 type instanceSummary struct {
@@ -102,7 +100,6 @@ const lazyCatAppIDEnv = "LAZYCAT_APP_ID"
 const lightOSAdminInternalBaseURLEnv = "LIGHTOS_ADMIN_INTERNAL_BASE_URL"
 const lightOSAdminAppID = "cloud.lazycat.lightos.entry"
 const defaultLightOSAdminInternalBaseURL = "http://127.0.0.1:18081"
-const serverRevisionInputLockTTL = 60 * time.Second
 const webshellDeviceTTL = 1500 * time.Millisecond
 const assetBasePlaceholder = "__LCMD_ASSET_BASE__"
 const contentRevisionFileName = ".lpk-content-revision"
@@ -649,8 +646,9 @@ func (s *pluginServer) handleServerRevision(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		scope := normalizeAgentScope(selector, accountID)
-		if blockedText := strings.TrimSpace(r.URL.Query().Get("terminal_input_blocked")); blockedText != "" {
-			s.setTerminalInputBlocked(scope, serverRevisionInputLockOwner(clientID), parseBoolQuery(blockedText))
+		if strings.TrimSpace(r.URL.Query().Get("terminal_input_blocked")) != "" {
+			// Compatibility with older pages during rolling upgrades. Input locks
+			// no longer have state or affect terminal writes.
 			w.Header().Set("Cache-Control", "no-store")
 			writeJSON(w, info)
 			return
@@ -661,26 +659,9 @@ func (s *pluginServer) handleServerRevision(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		info.ReloadRequired = changed
-		if changed {
-			s.setTerminalInputBlocked(scope, serverRevisionInputLockOwner(clientID), true)
-		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, info)
-}
-
-func serverRevisionInputLockOwner(clientID string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(clientID)))
-	return "server-revision:" + hex.EncodeToString(sum[:])
-}
-
-func parseBoolQuery(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "1", "true", "yes", "on", "blocked", "lock", "locked":
-		return true
-	default:
-		return false
-	}
 }
 
 func currentRequestAccountID(r *http.Request) string {
@@ -802,71 +783,6 @@ func writeAuthorizationError(w http.ResponseWriter, err error) {
 	default:
 		http.Error(w, err.Error(), http.StatusBadGateway)
 	}
-}
-
-func (s *pluginServer) setTerminalInputBlocked(scope agentScope, owner string, blocked bool) {
-	scope = normalizeAgentScope(scope.Selector, scope.AccountID)
-	owner = strings.TrimSpace(owner)
-	if scope.Selector == "" || scope.AccountID == "" || owner == "" {
-		return
-	}
-	key := scope.cacheKey()
-	s.inputLocksMu.Lock()
-	defer s.inputLocksMu.Unlock()
-	if blocked {
-		if s.inputLocks == nil {
-			s.inputLocks = make(map[string]map[string]time.Time)
-		}
-		if s.inputLocks[key] == nil {
-			s.inputLocks[key] = make(map[string]time.Time)
-		}
-		s.inputLocks[key][owner] = time.Now().Add(serverRevisionInputLockTTL)
-		log.Printf("terminal input lock set: scope=%s owner=%s ttl=%s", scope.Selector, owner, serverRevisionInputLockTTL)
-		return
-	}
-	if s.inputLocks == nil || s.inputLocks[key] == nil {
-		return
-	}
-	if _, ok := s.inputLocks[key][owner]; ok {
-		delete(s.inputLocks[key], owner)
-		log.Printf("terminal input lock cleared: scope=%s owner=%s", scope.Selector, owner)
-	}
-	if len(s.inputLocks[key]) == 0 {
-		delete(s.inputLocks, key)
-	}
-}
-
-func (s *pluginServer) expireTerminalInputLocksLocked(scope agentScope, key string, now time.Time) {
-	if s.inputLocks == nil || s.inputLocks[key] == nil {
-		return
-	}
-	for owner, expiresAt := range s.inputLocks[key] {
-		if !expiresAt.IsZero() && !expiresAt.After(now) {
-			delete(s.inputLocks[key], owner)
-			log.Printf("terminal input lock expired: scope=%s owner=%s", scope.Selector, owner)
-		}
-	}
-	if len(s.inputLocks[key]) == 0 {
-		delete(s.inputLocks, key)
-	}
-}
-
-func (s *pluginServer) terminalInputBlocked(scope agentScope, clientID string) bool {
-	scope = normalizeAgentScope(scope.Selector, scope.AccountID)
-	s.inputLocksMu.Lock()
-	defer s.inputLocksMu.Unlock()
-	key := scope.cacheKey()
-	s.expireTerminalInputLocksLocked(scope, key, time.Now())
-	locks := s.inputLocks[key]
-	if len(locks) == 0 {
-		return false
-	}
-	clientID = strings.TrimSpace(clientID)
-	if clientID == "" {
-		return true
-	}
-	_, blocked := locks[serverRevisionInputLockOwner(clientID)]
-	return blocked
 }
 
 func observeServerRevisionState(ctx context.Context, scope agentScope, clientID, revision string) (bool, error) {

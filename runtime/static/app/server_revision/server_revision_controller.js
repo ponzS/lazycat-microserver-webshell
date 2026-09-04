@@ -28,7 +28,6 @@ export function createServerRevisionController({
   getActiveGeneration = () => 0,
   isCurrentRequest = () => true,
   getActiveTabId = () => "",
-  getTerminalInput = () => null,
   isMobileLayout = () => false,
   openDialog = () => Promise.resolve(false),
   confirmMobileSheet = () => Promise.resolve(false),
@@ -53,19 +52,6 @@ export function createServerRevisionController({
   let reloadPrompted = false;
   let dialogOpen = false;
 
-  const setInputBlocked = async (blocked) => {
-    const name = getActiveName();
-    if (!name || disposed) {
-      return false;
-    }
-    await revisionAPI.setInputBlocked({
-      name,
-      clientID,
-      inputBlocked: blocked === true,
-    });
-    return true;
-  };
-
   const showRestartDialog = async () => {
     if (disposed || dialogOpen) {
       return false;
@@ -74,12 +60,6 @@ export function createServerRevisionController({
     const restartTargetName = getActiveName();
     const restartTargetTabId = getActiveTabId();
     dialogOpen = true;
-    const input = getTerminalInput();
-    input?.armAllGeneratedSuppression?.(2000);
-    input?.setAllLocked?.(true);
-    setInputBlocked(true).catch(() => {});
-    input?.discardAll?.();
-    let shouldUnlock = true;
     try {
       const options = {
         title: "WebShell 已更新",
@@ -95,19 +75,14 @@ export function createServerRevisionController({
         return false;
       }
       if (restart === true) {
-        shouldUnlock = false;
         rememberRestartTabForReload(restartTargetName, restartTargetTabId);
-        input?.armAllGeneratedSuppression?.(2000);
-        input?.discardAll?.();
         suppressBeforeUnloadForNavigation();
         windowObject.location.reload();
         return true;
       }
       return false;
     } finally {
-      if (shouldUnlock && !disposed && dialogGeneration === generation) {
-        await setInputBlocked(false).catch(() => {});
-        getTerminalInput()?.setAllLocked?.(false);
+      if (!disposed && dialogGeneration === generation) {
         dialogOpen = false;
       }
     }
@@ -151,10 +126,6 @@ export function createServerRevisionController({
   };
 
   return Object.freeze({
-    async clearStartupInputLock() {
-      await setInputBlocked(false);
-      getTerminalInput()?.setAllLocked?.(false);
-    },
     dispose() {
       if (disposed) {
         return false;
@@ -163,7 +134,6 @@ export function createServerRevisionController({
       generation += 1;
       dialogOpen = false;
       lifecycle.dispose();
-      getTerminalInput()?.setAllLocked?.(false);
       return true;
     },
     getClientID: () => clientID,
@@ -181,7 +151,6 @@ export function createServerRevisionController({
         });
       }, initialCheckDelayMs);
     },
-    setInputBlocked,
     showRestartDialog,
   });
 }

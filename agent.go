@@ -27,14 +27,13 @@ import (
 )
 
 const (
-	agentProtocolVersion = "lcmd-webshell-agent-v9"
+	agentProtocolVersion = "lcmd-webshell-agent-v10"
 
 	agentFrameBinary         = byte('B')
 	agentFrameText           = byte('T')
 	agentFrameInput          = byte('I')
 	agentFrameGeneratedInput = byte('G')
 	agentFrameResize         = byte('R')
-	agentFrameLock           = byte('L')
 	agentFrameDetach         = byte('D')
 
 	agentMaxFramePayload = 32 << 20
@@ -555,9 +554,7 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 		return
 	}
 	historyReadyAt := time.Now()
-	inputLockOwner := fmt.Sprintf("attach:%p", conn)
 	defer func() {
-		pane.setInputBlockedBy(inputLockOwner, false)
 		pane.detachClient(client)
 		client.close()
 	}()
@@ -636,11 +633,6 @@ func (d *agentDaemon) handleAttach(ctx context.Context, conn net.Conn, reader *b
 				case "theme":
 					pane.updateTerminalThemeColors(message.Foreground, message.Background, message.Cursor)
 				}
-			}
-		case agentFrameLock:
-			var message terminalControlMessage
-			if err := json.Unmarshal(payload, &message); err == nil {
-				pane.setInputBlockedBy(inputLockOwner, message.Blocked)
 			}
 		case agentFrameDetach:
 			client.close()

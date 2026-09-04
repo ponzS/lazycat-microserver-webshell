@@ -13,3 +13,7 @@ node tests-auto/run-playwright.mjs tests-auto/02-terminal-input/test.mjs
 ```
 
 测试要求 API、console error 和 `pageerror` 为零；每个页面同时只能存在一条未关闭的 Unified WebSocket。
+
+## 验证结果
+
+- 2026-09-04 输入锁删除后，使用当前工作区前端资源连接真实 Provider、persistent agent 和 PTY 通过，产物为 `artifacts/2026-09-04T07-10-04-402Z/`。普通文本、Enter、Ctrl-C、20 KiB 粘贴、generated response、Canvas 更新和单 Unified 物理连接均符合断言。

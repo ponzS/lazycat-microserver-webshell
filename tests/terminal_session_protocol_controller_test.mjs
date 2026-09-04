@@ -168,8 +168,6 @@ const createController = ({ session, unified = false, client = false, historyRan
     completeQueueTurn: () => ({ status: "accepted" }),
   };
   const terminalInput = {
-    setSessionLocked() {},
-    discardSession() {},
     clearGeneratedSuppression() {},
     pausePendingExpiry() {},
   };

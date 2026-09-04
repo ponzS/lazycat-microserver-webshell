@@ -95,7 +95,7 @@ test("workspace API surfaces protocol mismatch before terminal Queue startup", a
   const payload = {
     error: "终端服务协议版本不一致，需要确认更新。",
     current_protocol_version: "lcmd-webshell-agent-v20",
-    preferred_protocol_version: "lcmd-webshell-agent-v9",
+    preferred_protocol_version: "lcmd-webshell-agent-v10",
     agent_protocol_update_available: true,
     agent_protocol_update_required: true,
   };
@@ -117,7 +117,7 @@ test("workspace API surfaces protocol mismatch before terminal Queue startup", a
   assert.deepEqual(observed, [{
     targetName: "demo@owner",
     agentProtocolVersion: "lcmd-webshell-agent-v20",
-    preferredAgentProtocolVersion: "lcmd-webshell-agent-v9",
+    preferredAgentProtocolVersion: "lcmd-webshell-agent-v10",
     agentProtocolUpdateAvailable: true,
     agentProtocolUpdateRequired: true,
   }]);

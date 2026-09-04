@@ -31,7 +31,7 @@ type agentProtocolMismatchResponse struct {
 
 func writeAgentProtocolMismatch(w http.ResponseWriter, err error) bool {
 	version := unsupportedAgentProtocolVersion(err)
-	if version == "" {
+	if version == "" || isAttachCompatibleAgentProtocolVersion(version) {
 		return false
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

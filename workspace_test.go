@@ -18,7 +18,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
@@ -1955,18 +1954,6 @@ func TestTerminalPaneRespondsToOSCForegroundColor(t *testing.T) {
 	assertTerminalQueryResponse(t, reader, terminalOSCColorResponse("10", defaultTerminalForegroundColor))
 }
 
-func TestTerminalPaneRespondsToOSCColorWhenInputBlocked(t *testing.T) {
-	pane, reader, cleanup := newTerminalQueryTestPane(t)
-	defer cleanup()
-
-	pane.setInputBlocked(true)
-	filtered := pane.filterTerminalQueryOutput([]byte("\x1b]10;?\a"))
-	if len(filtered) != 0 {
-		t.Fatalf("unexpected filtered output: %q", string(filtered))
-	}
-	assertTerminalQueryResponse(t, reader, terminalOSCColorResponse("10", defaultTerminalForegroundColor))
-}
-
 func TestTerminalPaneRespondsToOSCBackgroundColor(t *testing.T) {
 	pane, reader, cleanup := newTerminalQueryTestPane(t)
 	defer cleanup()
@@ -2063,14 +2050,10 @@ func TestTerminalPaneKeepsNonQueryOSC(t *testing.T) {
 	}
 }
 
-func TestTerminalPaneGeneratedInputBypassesInputBlock(t *testing.T) {
+func TestTerminalPaneGeneratedInputIsForwarded(t *testing.T) {
 	pane, reader, cleanup := newTerminalQueryTestPane(t)
 	defer cleanup()
 
-	pane.setInputBlocked(true)
-	if err := pane.writeInput([]byte("user")); err != nil {
-		t.Fatalf("blocked user input returned error: %v", err)
-	}
 	generated := []byte("\x1b]10;rgb:0000/cdcd/0000\a")
 	pane.expectGeneratedInput(generated, 1)
 	if err := pane.writeGeneratedInput(generated); err != nil {
@@ -2389,45 +2372,13 @@ func TestTerminalPaneDropsUnexpectedGeneratedCursorReport(t *testing.T) {
 	assertTerminalQueryResponse(t, reader, "\x1b[39;4R")
 }
 
-func TestTerminalPaneInputLockDropsWrites(t *testing.T) {
-	pane := &terminalPane{}
-	pane.setInputBlocked(true)
-	if err := pane.writeInput([]byte("blocked")); err != nil {
-		t.Fatalf("blocked writeInput returned error: %v", err)
-	}
-	pane.setInputBlocked(false)
-	if err := pane.writeInput([]byte("unblocked")); err == nil {
-		t.Fatal("expected unblocked writeInput without pty to fail")
-	}
-}
-
-func TestTerminalPaneInputLockOwnersAreIndependent(t *testing.T) {
-	pane := &terminalPane{}
-	pane.setInputBlockedBy("one", true)
-	pane.setInputBlockedBy("two", true)
-	pane.setInputBlockedBy("one", false)
-	if err := pane.writeInput([]byte("still blocked")); err != nil {
-		t.Fatalf("writeInput should stay blocked while another owner holds the lock: %v", err)
-	}
-	pane.setInputBlockedBy("two", false)
-	if err := pane.writeInput([]byte("unblocked")); err == nil {
-		t.Fatal("expected writeInput to fail after all input locks are released")
-	}
-}
-
-func TestTerminalControlInputLockTogglesPaneWrites(t *testing.T) {
+func TestTerminalControlInputLockIsCompatibilityNoop(t *testing.T) {
 	pane := &terminalPane{}
 	if !handleTerminalControlMessage(pane, []byte(`{"type":"input_lock","blocked":true}`), nil) {
 		t.Fatal("input_lock control message should keep the connection open")
 	}
-	if err := pane.writeInput([]byte("blocked")); err != nil {
-		t.Fatalf("writeInput should be dropped while locked: %v", err)
-	}
 	if !handleTerminalControlMessage(pane, []byte(`{"type":"input_lock","blocked":false}`), nil) {
 		t.Fatal("input unlock control message should keep the connection open")
-	}
-	if err := pane.writeInput([]byte("unblocked")); err == nil {
-		t.Fatal("expected writeInput to fail after input lock is released")
 	}
 }
 
@@ -2440,72 +2391,6 @@ func TestTerminalPTYInputChunkLimitIsBelowWebSocketReadLimit(t *testing.T) {
 	}
 	if terminalPTYInputChunkBytes >= websocketReadLimit {
 		t.Fatalf("terminalPTYInputChunkBytes = %d must stay below websocketReadLimit = %d", terminalPTYInputChunkBytes, websocketReadLimit)
-	}
-}
-
-func TestPluginServerTerminalInputLockOwnersAreIndependent(t *testing.T) {
-	server := &pluginServer{}
-	scope := normalizeAgentScope("demo@owner", "user-a")
-	server.setTerminalInputBlocked(scope, "one", true)
-	server.setTerminalInputBlocked(scope, "two", true)
-	server.setTerminalInputBlocked(scope, "one", false)
-	if !server.terminalInputBlocked(scope, "") {
-		t.Fatal("expected terminal input to stay blocked while another owner holds the lock")
-	}
-	server.setTerminalInputBlocked(scope, "two", false)
-	if server.terminalInputBlocked(scope, "") {
-		t.Fatal("expected terminal input to be unblocked after all owners release")
-	}
-}
-
-func TestPluginServerTerminalInputLockMatchesClient(t *testing.T) {
-	server := &pluginServer{}
-	scope := normalizeAgentScope("demo@owner", "user-a")
-	server.setTerminalInputBlocked(scope, serverRevisionInputLockOwner("client-one"), true)
-	if !server.terminalInputBlocked(scope, "client-one") {
-		t.Fatal("expected matching client to be blocked")
-	}
-	if server.terminalInputBlocked(scope, "client-two") {
-		t.Fatal("expected different client to remain unblocked")
-	}
-	if !server.terminalInputBlocked(scope, "") {
-		t.Fatal("expected legacy websocket without client id to be blocked by any active lock")
-	}
-}
-
-func TestPluginServerTerminalInputLockClearsExplicitly(t *testing.T) {
-	server := &pluginServer{}
-	scope := normalizeAgentScope("demo@owner", "user-a")
-	clientID := "client-one"
-	server.setTerminalInputBlocked(scope, serverRevisionInputLockOwner(clientID), true)
-	server.setTerminalInputBlocked(scope, serverRevisionInputLockOwner(clientID), false)
-	if server.terminalInputBlocked(scope, clientID) {
-		t.Fatal("expected matching client lock to be cleared explicitly")
-	}
-}
-
-func TestPluginServerTerminalInputLockExpires(t *testing.T) {
-	server := &pluginServer{}
-	scope := normalizeAgentScope("demo@owner", "user-a")
-	clientID := "client-one"
-	owner := serverRevisionInputLockOwner(clientID)
-	server.setTerminalInputBlocked(scope, owner, true)
-	key := scope.cacheKey()
-	server.inputLocksMu.Lock()
-	server.inputLocks[key][owner] = time.Now().Add(-time.Second)
-	server.inputLocksMu.Unlock()
-	if server.terminalInputBlocked(scope, clientID) {
-		t.Fatal("expected expired matching client lock to be ignored")
-	}
-}
-
-func TestPluginServerTerminalInputLockIsAccountScoped(t *testing.T) {
-	server := &pluginServer{}
-	first := normalizeAgentScope("demo@owner", "user-a")
-	second := normalizeAgentScope("demo@owner", "user-b")
-	server.setTerminalInputBlocked(first, serverRevisionInputLockOwner("client-one"), true)
-	if server.terminalInputBlocked(second, "client-one") {
-		t.Fatal("expected input lock to stay scoped to the owning account")
 	}
 }
 
@@ -2662,12 +2547,8 @@ func TestHandleServerRevisionAllowsVisibleSelector(t *testing.T) {
 	}
 }
 
-func TestHandleServerRevisionInputLockOnlyRequestDoesNotProbeRevision(t *testing.T) {
+func TestHandleServerRevisionInputLockCompatibilityRequestIsNoop(t *testing.T) {
 	server := testPluginServerWithInstances()
-	scope := normalizeAgentScope("beta@deploy-b", "login-user-a")
-	clientID := "client-one"
-	server.setTerminalInputBlocked(scope, serverRevisionInputLockOwner(clientID), true)
-
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/server-revision?name=beta@deploy-b&client_id=client-one&terminal_input_blocked=false", nil)
 	request.Header.Set(lightOSUserIDHeader, "login-user-a")
@@ -2676,15 +2557,12 @@ func TestHandleServerRevisionInputLockOnlyRequestDoesNotProbeRevision(t *testing
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("handleServerRevision status = %d, want 200; body=%q", recorder.Code, recorder.Body.String())
 	}
-	if server.terminalInputBlocked(scope, clientID) {
-		t.Fatal("expected explicit startup unlock to clear matching client input lock")
-	}
 	var info serverRevisionInfo
 	if err := json.Unmarshal(recorder.Body.Bytes(), &info); err != nil {
 		t.Fatalf("unmarshal server revision response: %v", err)
 	}
 	if info.ReloadRequired {
-		t.Fatal("input lock only request should not run revision observation or request reload")
+		t.Fatal("compatibility request should not run revision observation or request reload")
 	}
 }
 
@@ -2943,17 +2821,9 @@ func TestAgentHistoryReplayWritesStartAndCompleteForEmptyHistory(t *testing.T) {
 	}
 }
 
-func TestHandleAgentAttachControlMessageDropsInputWhenServerLocked(t *testing.T) {
-	var blocked bytes.Buffer
-	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &blocked, []byte(`{"type":"input","data":"8;36R"}`), true, nil) {
-		t.Fatal("blocked input message should keep the connection open")
-	}
-	if blocked.Len() != 0 {
-		t.Fatalf("expected blocked input to be dropped, got %d framed bytes", blocked.Len())
-	}
-
+func TestHandleAgentAttachControlMessageForwardsInput(t *testing.T) {
 	var allowed bytes.Buffer
-	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &allowed, []byte(`{"type":"input","data":"6;55R"}`), false, nil) {
+	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &allowed, []byte(`{"type":"input","data":"6;55R"}`)) {
 		t.Fatal("allowed input message should keep the connection open")
 	}
 	frameType, payload, err := readAgentFrame(&allowed)
@@ -2965,7 +2835,7 @@ func TestHandleAgentAttachControlMessageDropsInputWhenServerLocked(t *testing.T)
 	}
 
 	var sized bytes.Buffer
-	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &sized, []byte(`{"type":"input","data":"pc","cols":132,"rows":43,"pixel_width":1056,"pixel_height":688}`), false, nil) {
+	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &sized, []byte(`{"type":"input","data":"pc","cols":132,"rows":43,"pixel_width":1056,"pixel_height":688}`)) {
 		t.Fatal("sized input message should keep the connection open")
 	}
 	frameType, payload, err = readAgentFrame(&sized)
@@ -2991,7 +2861,7 @@ func TestHandleAgentAttachControlMessageDropsInputWhenServerLocked(t *testing.T)
 	}
 
 	var themed bytes.Buffer
-	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &themed, []byte(`{"type":"input","data":"light","foreground":"#403513","background":"#fdf6e3","cursor":"#403513"}`), false, nil) {
+	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &themed, []byte(`{"type":"input","data":"light","foreground":"#403513","background":"#fdf6e3","cursor":"#403513"}`)) {
 		t.Fatal("themed input message should keep the connection open")
 	}
 	frameType, payload, err = readAgentFrame(&themed)
@@ -3017,7 +2887,7 @@ func TestHandleAgentAttachControlMessageDropsInputWhenServerLocked(t *testing.T)
 	}
 
 	var themeOnly bytes.Buffer
-	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &themeOnly, []byte(`{"type":"theme","foreground":"#403513","background":"#fdf6e3","cursor":"#403513"}`), false, nil) {
+	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &themeOnly, []byte(`{"type":"theme","foreground":"#403513","background":"#fdf6e3","cursor":"#403513"}`)) {
 		t.Fatal("theme message should keep the connection open")
 	}
 	frameType, payload, err = readAgentFrame(&themeOnly)
@@ -3035,7 +2905,7 @@ func TestHandleAgentAttachControlMessageDropsInputWhenServerLocked(t *testing.T)
 	}
 
 	var generated bytes.Buffer
-	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &generated, []byte(`{"type":"input","data":"\u001b[45;1R","generated":true}`), false, nil) {
+	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &generated, []byte(`{"type":"input","data":"\u001b[45;1R","generated":true}`)) {
 		t.Fatal("generated input message should keep the connection open")
 	}
 	frameType, payload, err = readAgentFrame(&generated)
@@ -3046,39 +2916,32 @@ func TestHandleAgentAttachControlMessageDropsInputWhenServerLocked(t *testing.T)
 		t.Fatalf("unexpected generated frame: type=%q payload=%q", frameType, string(payload))
 	}
 
-	var blockedGenerated bytes.Buffer
-	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &blockedGenerated, []byte(`{"type":"input","data":"\u001b]10;rgb:0000/cdcd/0000\u0007","generated":true}`), true, nil) {
-		t.Fatal("blocked generated input message should keep the connection open")
+	var generatedColor bytes.Buffer
+	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &generatedColor, []byte(`{"type":"input","data":"\u001b]10;rgb:0000/cdcd/0000\u0007","generated":true}`)) {
+		t.Fatal("generated color input message should keep the connection open")
 	}
-	frameType, payload, err = readAgentFrame(&blockedGenerated)
+	frameType, payload, err = readAgentFrame(&generatedColor)
 	if err != nil {
-		t.Fatalf("reading blocked generated input frame returned error: %v", err)
+		t.Fatalf("reading generated color input frame returned error: %v", err)
 	}
 	if frameType != agentFrameGeneratedInput || string(payload) != "\x1b]10;rgb:0000/cdcd/0000\a" {
 		t.Fatalf("unexpected blocked generated frame: type=%q payload=%q", frameType, string(payload))
 	}
 }
 
-func TestHandleAgentAttachControlMessageUsesConnectionLocalInputLock(t *testing.T) {
+func TestHandleAgentAttachControlMessageInputLockIsCompatibilityNoop(t *testing.T) {
 	var out bytes.Buffer
-	localBlocked := false
-	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &out, []byte(`{"type":"input_lock","blocked":true}`), false, &localBlocked) {
+	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &out, []byte(`{"type":"input_lock","blocked":true}`)) {
 		t.Fatal("input_lock control message should keep the connection open")
 	}
-	if !localBlocked {
-		t.Fatal("expected local input lock to be enabled")
-	}
 	if out.Len() != 0 {
-		t.Fatalf("expected input_lock to stay local, got %d framed bytes", out.Len())
+		t.Fatalf("expected input_lock compatibility no-op, got %d framed bytes", out.Len())
 	}
-	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &out, []byte(`{"type":"input_lock","blocked":false}`), true, &localBlocked) {
+	if !handleAgentAttachControlMessage(nil, &sync.Mutex{}, &out, []byte(`{"type":"input_lock","blocked":false}`)) {
 		t.Fatal("input unlock control message should keep the connection open")
 	}
-	if localBlocked {
-		t.Fatal("expected local input lock to be disabled")
-	}
 	if out.Len() != 0 {
-		t.Fatalf("expected input unlock to stay local, got %d framed bytes", out.Len())
+		t.Fatalf("expected input unlock compatibility no-op, got %d framed bytes", out.Len())
 	}
 }
 

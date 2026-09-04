@@ -88,7 +88,6 @@ export function createAgentProtocolUpdateController({
     updating = true;
     render();
     const terminalInput = getTerminalInput();
-    terminalInput?.setAllLocked?.(true);
     terminalInput?.discardAll?.();
     try {
       const result = await updateAPI.update({
@@ -119,9 +118,6 @@ export function createAgentProtocolUpdateController({
     } finally {
       if (!disposed) {
         updating = false;
-        if (!reloadPending) {
-          getTerminalInput()?.setAllLocked?.(false);
-        }
         render();
       }
     }
@@ -167,7 +163,6 @@ export function createAgentProtocolUpdateController({
       }
       updateView.dispose();
       updateView.render({ visible: false, updating: false });
-      getTerminalInput()?.setAllLocked?.(false);
       return true;
     },
     isDialogOpen: () => dialogOpen,

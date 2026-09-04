@@ -192,6 +192,10 @@ global-runtime
 
 实际 controller 之间只能通过显式依赖、公开 API、事件或只读快照交互。不要因为某个功能同时涉及多个终端域，就把状态重新放回 `global-runtime.js` 或创建新的共享大对象。
 
+终端输入没有应用级、Provider 级或 persistent-agent/pane 级共享锁。服务更新提示只管理弹窗与重载意图，不修改输入状态；普通输入在 replay、连接和 resize ACK 就绪后交给当前 PTY/TUI。滚动升级时旧 `terminal_input_blocked` 请求和 `input_lock` 控制帧仅在 Provider 边界无状态接受并忽略，不能生成 agent frame、阻塞其他 attach 或静默丢弃 PTY 输入。移动端双击展开键盘使用的 `inputViewportLock` 仍归 viewport 几何所有，只抑制 visualViewport 的中间几何同步，不阻止字符输入。
+
+删除 `agentFrameLock` 的 agent 协议版本为 `lcmd-webshell-agent-v10`，v9 被明确列为 attach-compatible。Provider 握手发现 v9 时继续 attach 原 pane、保持 PTY/历史/输入/输出，只由 `app/agent_protocol_update` 显示非阻塞更新入口；确认后 scoped 协议更新接口才执行 `replace-active` 并校验 v10 就绪，不要求重启 WebShell 应用服务。只有兼容表之外的版本才暂停 attach 并标记 `updateRequired`。
+
 分屏条拖拽的跨模块契约是：workspace layout controller 只按 RAF latest-only 更新 flex 比例，并通过公开命令通知 resize controller begin/update/end；resize controller 独占 live session、节流/trailing timer、单 in-flight/latest target 和最终 claim。拖动中本地 Ghostty 网格/Canvas 可有界实时重排，observer 与普通 resize 不得竞争，也不得为 pointermove 创建网络 epoch；释放时 resize controller 强制最终本地 fit 并以 `claim:true` 提交稳定尺寸。presentation 在 live geometry 中不使用 hold，replay/reconnect 等恢复仍保持原子提交；overview preview 暂停编码并在稳定后补帧。`global-runtime.js` 只负责命令和只读门禁接线，不复制事务状态。
 
 字号/行高的跨模块契约是：settings 只发布新值；metrics 在 option setter/字体度量前后持有 metrics live source；resize owner 与 interactive source 合并管理本地 fit、最终 target 和 ACK；presentation 只读取 live 门禁。行高字段 PATCH 不得因为响应中字体族未变化而额外触发字体注册/hold。任何 source 结束都不能提前终止仍活跃的另一个 source，且这条例外不能进入 replay、重连或 identity 恢复路径。
@@ -206,7 +210,7 @@ global-runtime
 
 | 文件 | 状态/责任 |
 | --- | --- |
-| [`main.go`](../main.go) | Provider server、HTTP mux、认证边界、静态资源、WebSocket 入口、输入锁和发布代理 |
+| [`main.go`](../main.go) | Provider server、HTTP mux、认证边界、静态资源、WebSocket 入口、旧输入锁请求的无状态兼容和发布代理 |
 | [`workspace.go`](../workspace.go) | `workspaceManager`、`terminalWorkspace`、tab/pane、PTY、history、cursor、resize owner、客户端集合 |
 | [`agent.go`](../agent.go) | agent daemon 命令、Unix socket、workspace state/action/activity、PTY attach、history replay frame |
 | [`agent_runtime.go`](../agent_runtime.go) | agent 安装 manifest、启动/停止、reconcile、ping、ensure single-flight、`lightosctl exec` 请求和直接 attach |
@@ -260,6 +264,7 @@ global-runtime
 | [`tests-auto/11-service-worker-retirement/`](../tests-auto/11-service-worker-retirement/) | 旧 Worker 退役、缓存清理和干净页面导航 |
 | [`tests-auto/12-overview-preview-persistence/`](../tests-auto/12-overview-preview-persistence/) | tab 总览缩略图、live/hold/persisted preview 和 reload |
 | [`tests-auto/13-split-divider-render-isolation/`](../tests-auto/13-split-divider-render-isolation/) | 双 pane 持续输出下高频拖动、live Canvas 顶部锚定/隔离、单 in-flight 最终 resize 和页面响应性 |
+| [`tests-auto/14-terminal-input-lock-lifecycle/`](../tests-auto/14-terminal-input-lock-lifecycle/) | 旧页面输入锁 no-op、共享 pane 跨 attach 输入隔离和 Unified 兼容 |
 
 ### 5.3 与当前终端初始化问题相关的诊断指标
 
