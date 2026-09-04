@@ -72,10 +72,14 @@ export function createTerminalResizeController({
   let disposed = false;
   const ownedSessions = new Set();
   const interactiveResizeSessions = new Set();
+  const metricsLiveGeometrySessions = new Set();
   const liveGeometrySessions = new Set();
   const windowLiveResizeTimers = new Map();
   const liveGeometryResizeTimers = new Map();
   const liveGeometryLastResizeAt = new WeakMap();
+  const hasActiveLiveGeometrySource = (session) => (
+    interactiveResizeSessions.has(session) || metricsLiveGeometrySessions.has(session)
+  );
   const presentation = () => getPresentation?.();
   const trace = (session, phase, details = {}) => {
     const sink = windowObject?.__testsAutoResizeTrace;
@@ -871,7 +875,7 @@ export function createTerminalResizeController({
         clearFence(session);
         endRenderSuppression(session, { render: false, reason: "resize" });
         presentation()?.setReady(session, true, { reason: "live_geometry_remote_resize" });
-        if (!interactiveResizeSessions.has(session)) {
+        if (!hasActiveLiveGeometrySource(session)) {
           lifecycle.scheduleSessionFrame(session, "live-geometry-remote-claim", () => {
             commitLiveGeometryTarget(session);
           });
@@ -949,7 +953,7 @@ export function createTerminalResizeController({
               || (session.sizeClaimed === true && !session.sizeClaimRequired),
           }, { immediate: true });
         });
-      } else if (liveGeometrySessions.has(session) && !interactiveResizeSessions.has(session)) {
+      } else if (liveGeometrySessions.has(session) && !hasActiveLiveGeometrySource(session)) {
         finishLiveGeometry(session);
       }
     }
@@ -1001,7 +1005,7 @@ export function createTerminalResizeController({
         clearFence(session);
         endRenderSuppression(session, { render: false, reason: "resize" });
         presentation()?.setReady(session, true, { reason: "live_geometry_owner_retry" });
-        if (!interactiveResizeSessions.has(session)) {
+        if (!hasActiveLiveGeometrySource(session)) {
           lifecycle.scheduleSessionFrame(session, "live-geometry-owner-claim", () => {
             commitLiveGeometryTarget(session);
           });
@@ -1042,7 +1046,7 @@ export function createTerminalResizeController({
         epoch,
         reason: message?.reason || "",
       });
-      if (!interactiveResizeSessions.has(session)) {
+      if (!hasActiveLiveGeometrySource(session)) {
         finishLiveGeometry(session, "resize_error");
       }
       return true;
@@ -1511,6 +1515,7 @@ export function createTerminalResizeController({
     lifecycle.cancel(session);
     if (session) {
       interactiveResizeSessions.delete(session);
+      metricsLiveGeometrySessions.delete(session);
       liveGeometrySessions.delete(session);
       liveGeometryLastResizeAt.delete(session);
       const resizeTimer = liveGeometryResizeTimers.get(session);
@@ -1550,6 +1555,7 @@ export function createTerminalResizeController({
       liveGeometryResizeTimers.delete(session);
     }
     interactiveResizeSessions.delete(session);
+    metricsLiveGeometrySessions.delete(session);
     liveGeometryLastResizeAt.delete(session);
     lifecycle.cancel(session);
     if (session.resizePresentationHold || session.terminalFrameHeld) {
@@ -1680,37 +1686,79 @@ export function createTerminalResizeController({
     return sent || session.resizeAckPending || Boolean(session.pendingResizeTarget);
   };
 
+  const beginLiveGeometryForSource = (session, sourceSessions, eventType) => {
+    if (
+      disposed
+      || !session
+      || session.closed
+      || sourceSessions.has(session)
+      || !isReplayCommitted(session)
+      || !isVisible(session)
+    ) {
+      return false;
+    }
+    lifecycle.cancel(session);
+    sourceSessions.add(session);
+    if (!liveGeometrySessions.has(session)) {
+      liveGeometrySessions.add(session);
+      liveGeometryLastResizeAt.delete(session);
+      clearPendingSizeClaim(session);
+      clearOutputSettle(session);
+      clearFence(session);
+      endRenderSuppression(session, { render: false, reason: "resize" });
+      if (session.resizePresentationHold || session.terminalFrameHeld) {
+        presentation()?.cancelHold(session, { restoreReady: true, releaseFrame: true });
+      } else {
+        presentation()?.setReady(session, true, { reason: "live_geometry_begin" });
+      }
+    }
+    recordEvent(session, eventType, visualDetails(session));
+    return true;
+  };
+
+  const endLiveGeometryForSource = (session, sourceSessions, eventType) => {
+    if (!session || !sourceSessions.delete(session)) {
+      return false;
+    }
+    lifecycle.cancel(session);
+    resizePaneLiveGeometry(session, { force: true });
+    recordEvent(session, eventType, visualDetails(session));
+    if (!hasActiveLiveGeometrySource(session)) {
+      commitLiveGeometryTarget(session);
+    }
+    return true;
+  };
+
+  const beginMetricsLiveGeometry = (session) => (
+    metricsLiveGeometrySessions.has(session)
+      ? liveGeometrySessions.has(session)
+      : beginLiveGeometryForSource(session, metricsLiveGeometrySessions, "metrics_live_geometry_begin")
+  );
+
+  const updateMetricsLiveGeometry = (session, options = {}) => {
+    if (!metricsLiveGeometrySessions.has(session)) {
+      return failedTerminalFit(isMeasurable(session));
+    }
+    return resizePaneLiveGeometry(session, options);
+  };
+
+  const endMetricsLiveGeometry = (session) => endLiveGeometryForSource(
+    session,
+    metricsLiveGeometrySessions,
+    "metrics_live_geometry_end",
+  );
+
   const beginTabInteractiveResize = (tab) => {
     if (disposed || !tab?.panes) {
       return false;
     }
     let started = false;
     for (const session of tab.panes.values()) {
-      if (
-        !session
-        || session.closed
-        || interactiveResizeSessions.has(session)
-        || !isReplayCommitted(session)
-      ) {
-        continue;
-      }
-      lifecycle.cancel(session);
-      interactiveResizeSessions.add(session);
-      if (!liveGeometrySessions.has(session)) {
-        liveGeometrySessions.add(session);
-        liveGeometryLastResizeAt.delete(session);
-        clearPendingSizeClaim(session);
-        clearOutputSettle(session);
-        clearFence(session);
-        endRenderSuppression(session, { render: false, reason: "resize" });
-        if (session.resizePresentationHold || session.terminalFrameHeld) {
-          presentation()?.cancelHold(session, { restoreReady: true, releaseFrame: true });
-        } else {
-          presentation()?.setReady(session, true, { reason: "live_geometry_begin" });
-        }
-      }
-      recordEvent(session, "interactive_resize_begin", visualDetails(session));
-      started = true;
+      started = beginLiveGeometryForSource(
+        session,
+        interactiveResizeSessions,
+        "interactive_resize_begin",
+      ) || started;
     }
     return started;
   };
@@ -1736,14 +1784,11 @@ export function createTerminalResizeController({
     }
     let ended = false;
     for (const session of tab.panes.values()) {
-      if (!interactiveResizeSessions.delete(session)) {
-        continue;
-      }
-      lifecycle.cancel(session);
-      resizePaneLiveGeometry(session, { force: true });
-      recordEvent(session, "interactive_resize_end", visualDetails(session));
-      commitLiveGeometryTarget(session);
-      ended = true;
+      ended = endLiveGeometryForSource(
+        session,
+        interactiveResizeSessions,
+        "interactive_resize_end",
+      ) || ended;
     }
     return ended;
   };
@@ -1946,7 +1991,7 @@ export function createTerminalResizeController({
       resetHostViewport(session, { clean: true });
       positionInput(session);
       updateSelectionHandles(session);
-      if (!session.suppressTerminalResizeSend) {
+      if (!session.suppressTerminalResizeSend && !liveGeometrySessions.has(session)) {
         sendSize(session);
       }
     });
@@ -2026,8 +2071,11 @@ export function createTerminalResizeController({
     resizeTab,
     resizeActiveTab,
     beginTabInteractiveResize,
+    beginMetricsLiveGeometry,
     endTabInteractiveResize,
+    endMetricsLiveGeometry,
     updateTabInteractiveResize,
+    updateMetricsLiveGeometry,
     scheduleTabLiveGeometry,
     scheduleTab,
     scheduleVisibleTab,
@@ -2059,6 +2107,7 @@ export function createTerminalResizeController({
     cancelTab,
     disposeSession(session) {
       interactiveResizeSessions.delete(session);
+      metricsLiveGeometrySessions.delete(session);
       liveGeometrySessions.delete(session);
       liveGeometryLastResizeAt.delete(session);
       const resizeTimer = liveGeometryResizeTimers.get(session);
@@ -2081,6 +2130,7 @@ export function createTerminalResizeController({
       }
       ownedSessions.clear();
       interactiveResizeSessions.clear();
+      metricsLiveGeometrySessions.clear();
       liveGeometrySessions.clear();
       for (const timer of windowLiveResizeTimers.values()) {
         windowObject.clearTimeout(timer);

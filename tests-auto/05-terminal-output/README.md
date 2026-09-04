@@ -13,7 +13,7 @@
 
 ## 用户可见问题
 
-历史回放或持续输出期间可能出现首次显示慢、Canvas 中间帧暴露、resize 后黑屏、输出丢失或 Unified physical WebSocket 被重复创建。移动端已确认另一类表现：`history_replay_complete` 和 `replay_output_drained` 均已完成，但初始 presentation 在 `resize_applied` 后没有及时提交；用户聚焦、调整字体或下一次 resize 触发 full render 后，之前已应用的历史内容才显示。调整字体或窗口大小期间还可能看到终端内容暂时明显模糊；hold 1x backing 问题已修复，但 hold 与当前 live/host CSS 尺寸短暂不一致仍待处理。`queue_turn_complete` 还可能触发重复 full render，放大持续输出期间的主线程调度压力。
+历史回放或持续输出期间可能出现首次显示慢、Canvas 中间帧暴露、resize 后黑屏、输出丢失或 Unified physical WebSocket 被重复创建。移动端已确认另一类表现：`history_replay_complete` 和 `replay_output_drained` 均已完成，但初始 presentation 在 `resize_applied` 后没有及时提交；用户聚焦或下一次 resize 触发 full render 后，之前已应用的历史内容才显示。字体族等原子事务还可能出现 hold 模糊；字号/行高和桌面窗口 resize 已迁移到 live Canvas，由场景 10/13 验证。`queue_turn_complete` 还可能触发重复 full render，放大持续输出期间的主线程调度压力。
 
 ## 预防的回归
 
@@ -78,9 +78,9 @@ node tests-auto/run-playwright.mjs tests-auto/05-terminal-output/test.mjs
 - 已有可选的高 DPR 诊断参数 `WEBSHELL_MOBILE_DEVICE_SCALE_FACTOR`，默认值为 `1`；使用 `3` 时只用于采集 live/hold backing ratio，不代表产品运行时 DPR 配置。
 - P0-4/P1-3 的移动端初始 presentation 问题尚未修复：已记录 replay drain、`resize_applied` 到最终 `presentation_commit_complete` 的长间隔，以及 focus/字体变化触发 full render 后恢复的现象。
 - 灰点显示条件现在分为三类：尚未产生稳定 presentation 帧、session 明确处于 offline/error/closed，或存在实际 `connectionRetrying`/presentation retry。健康 socket 在已有稳定帧后，即使内部短暂 `renderReady=false`，也不会显示灰点；普通 output、queue turn、resize 和字体事务不会重新显示。
-- 字号/窗口变化期间的模糊问题：hold canvas 的 backing store 已按 renderer DPR 修复并通过 DPR=3 真实场景验证；移动端日志确认 Ghostty 字号 setter 会短暂生成超出 host 的 live canvas，当前通过重新捕获 hold 并在 hold 可见期间隐藏 live canvas 防止错误比例中间帧露出。
+- 字体族及其他原子事务的 hold canvas backing store 已按 renderer DPR 修复并通过 DPR=3 真实场景验证。字号/行高现在直接显示 live Canvas，其 setter/metrics 中间几何和最终收敛由 `tests-auto/10-terminal-geometry-jitter` 验证，不再依赖 hold 遮挡。
 - 当前测试没有在初始历史 replay 之前安装 observer，不能单独证明 replay 期间用户可见 Canvas commit 为零。
 - 当前测试使用实时 1.5 MiB 输出，不等价于重新 attach 时的 350KB 历史 replay。
 - 当前测试允许并记录 stale resize ACK warning；后续应继续确认 warning 对应旧 ACK 且不会改变当前 geometry，而不是简单删除 warning 或放宽断言。
-- 当前 `tests-auto/10-terminal-geometry-jitter` 已包含移动端真实 `Zoom+`/`Zoom-` 操作和逐帧 CSS/backing/DPR 日志；高 DPR=3 场景通过，且断言 hold 可见期间 live canvas 不得保持可见。
+- 当前 `tests-auto/10-terminal-geometry-jitter` 已包含桌面字号、真实行高修改/恢复、移动端 `Zoom+`/`Zoom-` 和逐帧 CSS/backing/DPR 日志；字号/行高断言 live Canvas 持续可见，tab/replay 等原子路径仍检查 hold 安全。
 - P0-5 当前已有 Node 协议回归断言和真实 output 安全回归，但仍需要采集并减少真实 full render 次数，才能完成端到端验收。

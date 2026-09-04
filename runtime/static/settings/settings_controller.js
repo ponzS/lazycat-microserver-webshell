@@ -245,7 +245,10 @@ export function createSettingsController({
     onTerminalFontFamilyChange(snapshot.terminalFontFamily, snapshot.terminalFontFamily);
   };
 
-  const applyServerState = async (raw, { deferFontLoad = false } = {}) => {
+  const applyServerState = async (raw, {
+    deferFontLoad = false,
+    refreshFonts = true,
+  } = {}) => {
     if (disposed) return;
     const normalized = normalizeServerSettings(raw, { defaults: defaultDesktopShortcuts });
     const next = overlayPendingFields({
@@ -256,6 +259,9 @@ export function createSettingsController({
       forcePCModeEnabled: snapshot.forcePCModeEnabled,
     });
     replaceSnapshot(next);
+    if (!refreshFonts) {
+      return;
+    }
     const expectedGeneration = controllerGeneration;
     const promise = registerFonts(expectedGeneration);
     if (deferFontLoad) {
@@ -283,6 +289,7 @@ export function createSettingsController({
     savingKind = "",
     keepalive = false,
     deferFontLoad = false,
+    refreshFonts = true,
   }) => {
     const token = ++mutationSequence;
     const previousValue = cloneSettingsSnapshot(snapshot)[field];
@@ -297,7 +304,7 @@ export function createSettingsController({
       ));
       if (disposed || expectedGeneration !== controllerGeneration) return;
       if (pendingFields.get(field)?.token === token) pendingFields.delete(field);
-      await applyServerState(raw, { deferFontLoad });
+      await applyServerState(raw, { deferFontLoad, refreshFonts });
     });
     persistChain = mutation.catch(() => {});
     return mutation.catch((error) => {
@@ -328,6 +335,7 @@ export function createSettingsController({
       value,
       patch: { terminal_line_height_percent: value },
       savingKind: "lineHeight",
+      refreshFonts: false,
     }).then(() => true).catch((error) => {
       view.setFeedback?.(error.message || "行间距设置保存失败。", "error");
       return false;

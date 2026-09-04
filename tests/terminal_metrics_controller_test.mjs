@@ -130,7 +130,7 @@ test("metrics controller owns live terminal option adaptation", () => {
   assert.equal(first.term.options.fontSize, 18);
 });
 
-test("font option setters capture the presentation frame before Ghostty rebuilds the canvas", () => {
+test("font size uses live geometry while font family keeps an atomic hold", () => {
   const windowObject = makeWindow();
   const events = [];
   const options = new Proxy({}, {
@@ -145,17 +145,63 @@ test("font option setters capture the presentation frame before Ghostty rebuilds
   const controller = createTerminalMetricsController({
     windowObject,
     getTabs: () => [tab],
-    getPresentation: () => ({ beginHold: () => events.push("hold") }),
+    getPresentation: () => ({
+      beginHold: () => events.push("hold"),
+      isCurrent: () => true,
+    }),
     getRenderer: () => ({ installBaseline() {} }),
-    getResize: () => ({ resizePane: () => events.push("resize") }),
+    getResize: () => ({
+      beginMetricsLiveGeometry: () => { events.push("live-begin"); return true; },
+      updateMetricsLiveGeometry: () => { events.push("live-update"); return { ok: true }; },
+      endMetricsLiveGeometry: () => { events.push("live-end"); return true; },
+      resizePane: () => events.push("resize"),
+    }),
   });
 
   assert.equal(controller.applyFontSize(19), true);
-  assert.ok(events.indexOf("hold") >= 0);
-  assert.ok(events.indexOf("hold") < events.indexOf("set:fontSize"));
+  assert.ok(events.indexOf("live-begin") >= 0);
+  assert.ok(events.indexOf("live-begin") < events.indexOf("set:fontSize"));
+  assert.equal(events.includes("hold"), false);
+  assert.ok(events.includes("live-update"));
+  windowObject.runAll();
+  assert.ok(events.includes("live-end"));
 
   events.length = 0;
   assert.equal(controller.applyFontFamily("Fira Code"), true);
   assert.ok(events.indexOf("hold") >= 0);
   assert.ok(events.indexOf("hold") < events.indexOf("set:fontFamily"));
+});
+
+test("line height refresh uses and completes live geometry", () => {
+  const windowObject = makeWindow();
+  const events = [];
+  const session = {
+    term: {
+      options: {},
+      renderer: { measureFont: () => ({ width: 8, height: 18 }) },
+    },
+  };
+  const tab = { panes: new Map([["pane", session]]) };
+  const controller = createTerminalMetricsController({
+    windowObject,
+    getTabs: () => [tab],
+    getPresentation: () => ({
+      beginHold: () => events.push("hold"),
+      cancelPendingRender: () => events.push("cancel"),
+      isCurrent: () => true,
+    }),
+    getRenderer: () => ({ installBaseline: () => events.push("baseline") }),
+    getResize: () => ({
+      beginMetricsLiveGeometry: () => { events.push("live-begin"); return true; },
+      updateMetricsLiveGeometry: () => { events.push("live-update"); return { ok: true, pending: false }; },
+      endMetricsLiveGeometry: () => { events.push("live-end"); return true; },
+    }),
+  });
+
+  assert.equal(controller.applyLineHeight(130, 120), true);
+  assert.equal(events.includes("hold"), false);
+  assert.ok(events.indexOf("live-begin") < events.indexOf("baseline"));
+  assert.ok(events.includes("live-update"));
+  windowObject.runAll();
+  assert.ok(events.includes("live-end"));
 });

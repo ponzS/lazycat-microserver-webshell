@@ -91,6 +91,13 @@ const resetSampler = (page, label) => page.evaluate((value) => window.__testsAut
 
 const visibleHoldSamples = (result) => result.samples.filter((sample) => sample.holdHidden === false);
 
+const liveCanvasSizeChanges = (result) => new Set(result.samples.map((sample) => JSON.stringify([
+  Math.round(sample.live.width),
+  Math.round(sample.live.height),
+  sample.liveBacking.width,
+  sample.liveBacking.height,
+]))).size;
+
 const geometryChanges = (result) => {
   const usable = result.samples.filter((sample) => sample.host.width > 0 && sample.host.height > 0);
   const baseline = usable[0];
@@ -132,6 +139,39 @@ const assertNoUnsafeHold = (label, result) => {
   }
 };
 
+const assertLiveFontGeometry = (label, result) => {
+  const usable = result.samples.filter((sample) => (
+    sample.host.width > 0
+      && sample.host.height > 0
+      && sample.live.width > 0
+      && sample.live.height > 0
+      && sample.hasPresentedFrame === "true"
+  ));
+  const unsafe = usable.filter((sample) => (
+    sample.holdHidden === false
+      || sample.liveVisibility !== "visible"
+      || sample.renderReady !== "true"
+      || Math.abs(sample.live.top - sample.host.top) > 1
+      || Math.abs(sample.live.left - sample.host.left) > 1
+  ));
+  const last = usable.at(-1);
+  if (
+    usable.length < 3
+      || unsafe.length > 0
+      || liveCanvasSizeChanges(result) < 2
+      || !last
+      || Math.abs(last.live.width - last.host.width) > 16
+      || Math.abs(last.live.height - last.host.height) > 16
+  ) {
+    throw new Error(`${label}: font geometry did not stay on the live canvas ${JSON.stringify({
+      usable: usable.length,
+      unsafe: unsafe.slice(0, 12),
+      canvasSizes: liveCanvasSizeChanges(result),
+      last,
+    })}`);
+  }
+};
+
 const triggerFontSize = (page, key = "=") => page.evaluate((value) => {
   document.dispatchEvent(new KeyboardEvent("keydown", {
     key: value,
@@ -149,6 +189,22 @@ const triggerMobileZoom = async (page, action) => {
   }
   await button.click();
 };
+
+const setLineHeight = (page, requestedValue = null) => page.evaluate((requested) => {
+  const input = document.getElementById("settingsLineHeightInput");
+  if (!(input instanceof HTMLInputElement)) {
+    throw new Error("line-height input is unavailable");
+  }
+  const previous = Number(input.value || 0);
+  const minimum = Number(input.min || 100);
+  const maximum = Number(input.max || 200);
+  const next = requested === null
+    ? Math.max(minimum, Math.min(maximum, previous >= maximum - 10 ? previous - 10 : previous + 10))
+    : Number(requested);
+  input.value = String(next);
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  return { previous, next };
+}, requestedValue);
 
 const tabIDs = (page) => page.locator("#tabs .tab").evaluateAll((buttons) => (
   buttons.map((button) => ({ id: button.dataset.tabId || "", active: button.classList.contains("active") }))
@@ -178,7 +234,16 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
       presentationTrace: fontResult.presentationTrace,
     },
   });
-  assertNoUnsafeHold("font-size", fontResult);
+  assertLiveFontGeometry("font-size", fontResult);
+
+  await installGeometrySampler(page);
+  await resetSampler(page, "line-height-start");
+  const lineHeight = await setLineHeight(page);
+  await page.waitForTimeout(650);
+  await setLineHeight(page, lineHeight.previous);
+  await page.waitForTimeout(1_000);
+  const lineHeightResult = await readSamples(page);
+  assertLiveFontGeometry("line-height", lineHeightResult);
 
   await installGeometrySampler(mobile.page);
   await resetSampler(mobile.page, "mobile-zoom-start");
@@ -187,7 +252,7 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   await triggerMobileZoom(mobile.page, "zoom_out");
   await mobile.page.waitForTimeout(1_000);
   const mobileZoomResult = await readSamples(mobile.page);
-  assertNoUnsafeHold("mobile-zoom", mobileZoomResult);
+  assertLiveFontGeometry("mobile-zoom", mobileZoomResult);
 
   await installGeometrySampler(page);
   await resetSampler(page, "viewport-start");
@@ -221,6 +286,7 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     currentTab,
     otherTab,
     font: { visibleHold: visibleHoldSamples(fontResult).length, geometryChanges: geometryChanges(fontResult).length, events: fontResult.events, samples: fontResult.samples, resizeTrace: fontResult.resizeTrace, presentationTrace: fontResult.presentationTrace },
+    lineHeight: { visibleHold: visibleHoldSamples(lineHeightResult).length, geometryChanges: geometryChanges(lineHeightResult).length, events: lineHeightResult.events, samples: lineHeightResult.samples, resizeTrace: lineHeightResult.resizeTrace, presentationTrace: lineHeightResult.presentationTrace },
     mobileZoom: {
       visibleHold: visibleHoldSamples(mobileZoomResult).length,
       geometryChanges: geometryChanges(mobileZoomResult).length,

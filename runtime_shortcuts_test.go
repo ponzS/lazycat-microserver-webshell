@@ -781,6 +781,10 @@ func TestRuntimeResizeEpochAckGuard(t *testing.T) {
 		"resize_ack_stale",
 		"session.appliedResizeEpoch = epoch;",
 		"const pendingResizeTarget = session.pendingResizeTarget;",
+		"const metricsLiveGeometrySessions = new Set();",
+		"const beginMetricsLiveGeometry = (session) => (",
+		"const updateMetricsLiveGeometry = (session, options = {}) => {",
+		"const endMetricsLiveGeometry = (session) => endLiveGeometryForSource(",
 		"const renderAllowed = (session) => {",
 		"const liveGeometry = isLiveGeometryActive(session);",
 		"(liveGeometry || !session.resizeAckPending)",
@@ -2817,7 +2821,7 @@ func TestRuntimeSettingsModuleBoundary(t *testing.T) {
 		"onTerminalFontSizeChange: (fontSize) => terminalMetrics?.applyFontSize(fontSize),",
 		"terminalMetrics?.applyScrollbackChange(previousScrollback, nextScrollback)",
 		"onMobilePixelScrollChange: (enabled) => terminalMetrics?.applyMobilePixelScroll(enabled),",
-		"onTerminalLineHeightChange: () => terminalResize?.resizeActiveTabForCurrentDevice(),",
+		"onTerminalLineHeightChange: (value, previousValue) => terminalMetrics?.applyLineHeight(value, previousValue),",
 		"onDesktopShortcutsBarChange: () => terminalResize?.resizeActiveTabForCurrentDevice(),",
 		"onMobileShortcutsChange: () => mobileShortcutsController?.render(),",
 		"onForcePCModeChange: () => syncForcePCModeState(),",
@@ -2879,6 +2883,7 @@ func TestRuntimeSettingsModuleBoundary(t *testing.T) {
 		"api.patch(patch, { keepalive, signal })",
 		"lifecycle?.dispose?.();",
 		"fontRegistry.dispose?.();",
+		"refreshFonts: false,",
 	} {
 		if !strings.Contains(controllerSource, want) {
 			t.Fatalf("settings controller boundary missing %q", want)
@@ -2977,7 +2982,7 @@ func TestRuntimeSettingsModuleBoundary(t *testing.T) {
 		`  const applyFontSize = (value) => {`,
 		`  const applyScrollbackChange = (previousValue, nextValue) => {`)
 	lineHeightAdapter := sourceBetween(t, mainSource,
-		`    onTerminalLineHeightChange: () => terminalResize?.resizeActiveTabForCurrentDevice(),`,
+		`    onTerminalLineHeightChange: (value, previousValue) => terminalMetrics?.applyLineHeight(value, previousValue),`,
 		`    onDesktopShortcutsBarChange: () => terminalResize?.resizeActiveTabForCurrentDevice(),`)
 	for name, adapter := range map[string]string{
 		"font family": fontFamilyAdapter,
@@ -3334,7 +3339,8 @@ func TestRuntimeTerminalSessionModuleBoundary(t *testing.T) {
 	}
 	for _, want := range []string{
 		"普通容器页面只能有一条 Unified 物理 WebSocket",
-		"replay、snapshot、resize 和重连的中间过程不得显示",
+		"replay、snapshot、原子 resize 和重连的中间过程不得显示",
+		"字号/行高 live geometry 可乐观重排当前真实 Canvas",
 		"session/",
 	} {
 		if !strings.Contains(terminalReadmeSource, want) {
@@ -6479,7 +6485,10 @@ func TestRuntimeTerminalLineHeightSetting(t *testing.T) {
 		`createPaneSession(tab, targetName, {`,
 		`cols: paneState.cols,`,
 		`rows: paneState.rows,`,
-		`onTerminalLineHeightChange: () => terminalResize?.resizeActiveTabForCurrentDevice(),`,
+		`onTerminalLineHeightChange: (value, previousValue) => terminalMetrics?.applyLineHeight(value, previousValue),`,
+		`const applyLineHeight = (value, previousValue) => {`,
+		`resize?.beginMetricsLiveGeometry?.(session)`,
+		`resize?.updateMetricsLiveGeometry?.(session, { force: forceSizeSync })`,
 	} {
 		if !strings.Contains(runtimeSource, want) {
 			t.Fatalf("main line height adapter guard missing %q", want)
@@ -11208,6 +11217,7 @@ func TestRuntimeTerminalMetricsModuleBoundary(t *testing.T) {
 		`terminalMetrics = createTerminalMetricsController({`,
 		`terminalMetrics?.applyFontFamily(fontFamily)`,
 		`terminalMetrics?.applyFontSize(fontSize)`,
+		`terminalMetrics?.applyLineHeight(value, previousValue)`,
 		`terminalMetrics?.applyScrollbackChange(previousScrollback, nextScrollback)`,
 		`terminalMetrics?.applyMobilePixelScroll(enabled)`,
 		`terminalMetrics?.sizeQuery()`,
@@ -11241,10 +11251,14 @@ func TestRuntimeTerminalMetricsModuleBoundary(t *testing.T) {
 		`export function createTerminalMetricsController({`,
 		`const applyFontFamily = (value) => {`,
 		`const applyFontSize = (value) => {`,
+		`const applyLineHeight = (value, previousValue) => {`,
 		`const applyMobilePixelScroll = (enabled) => {`,
 		`const applyScrollback = (value = getScrollback()) => {`,
 		`const applyScrollbackChange = (previousValue, nextValue) => {`,
-		`const refresh = (session, { deferFitRetry = false, claimSize = false } = {}) => {`,
+		`const refresh = (session, {`,
+		`resize?.beginMetricsLiveGeometry?.(session)`,
+		`resize?.updateMetricsLiveGeometry?.(session, { force: forceSizeSync })`,
+		`resize?.endMetricsLiveGeometry?.(session);`,
 		`const estimatedSizeForElement = (element) => {`,
 		`const sizeQuery = () => {`,
 		`clearSessionTimers(session);`,

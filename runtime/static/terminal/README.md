@@ -7,7 +7,7 @@
 - 普通容器页面只能有一条 Unified 物理 WebSocket；每个 pane 是独立 logical stream。
 - 普通容器历史以 persistent agent 的 PTY 原始字节为唯一权威。打开 logical stream 时直接请求服务端 `snapshot + live`，不读取浏览器历史、不发送本地 cursor range、不使用 Cache API。
 - `client:` target 暂时继续使用最多三条独立直连和隔离的 IndexedDB 历史兼容路径，不能套用容器 Unified 假设。
-- Canvas 不是历史权威。history replay、snapshot、原子 resize 和重连的中间过程不得显示；已有同身份画面必须作为 last-known-good frame 保留。桌面分屏/窗口 live geometry 可乐观重排当前真实 Canvas，但不能提交 replay 或跨 identity 内容。
+- Canvas 不是历史权威。history replay、snapshot、原子 resize 和重连的中间过程不得显示；已有同身份画面必须作为 last-known-good frame 保留。桌面分屏/窗口及已提交终端的字号/行高 live geometry 可乐观重排当前真实 Canvas，但不能提交 replay 或跨 identity 内容。
 - session 只组合状态和生命周期，不实现 transport、history、rendering、resize 或 input 算法。
 
 ## 目录
@@ -17,7 +17,7 @@
 - `output/`：live/replay/suppressed 输出队列、有界 drain、过载重同步和 Queue turn ACK。
 - `transport/`：Unified/direct 连接、协议、健康检查、membership 和主题发送。
 - `rendering/`：Ghostty renderer/runtime、presentation、Kitty graphics、RenderSnapshot 和 frame hold/release。
-- `resize/`：resize controller、scheduler、单 in-flight/latest target、尺寸同步和桌面 live geometry。
+- `resize/`：resize controller、scheduler、单 in-flight/latest target、尺寸同步，以及 interactive/metrics 多 source live geometry。
 - `viewport/`：移动 visualViewport、软键盘、安全偏移和方向恢复。
 - `interaction/`、`mouse/`、`selection/`：菜单、搜索、剪贴板、链接、mouse 协议和选区。
 - `overview/`：标签总览、live/hold/IndexedDB 派生图片缩略图、拖拽和移动端手势；持久图片不保存或恢复 PTY 历史。

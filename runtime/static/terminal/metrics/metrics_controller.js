@@ -113,14 +113,21 @@ export function createTerminalMetricsController({
       if (!session?.term?.options) {
         return;
       }
+      const inheritedLiveGeometry = Boolean(
+        getResize()?.isLiveGeometryActive?.(session)
+        && getResize()?.beginMetricsLiveGeometry?.(session),
+      );
       // Ghostty rebuilds the live backing store synchronously when the font
       // option changes. Capture the last known-good frame before that setter
       // runs so the presentation hold never contains the new, partial grid.
-      if (session.term.options.fontFamily !== fontFamily) {
+      if (session.term.options.fontFamily !== fontFamily && !inheritedLiveGeometry) {
         getPresentation()?.beginHold?.(session);
       }
       session.term.options.fontFamily = fontFamily;
-      refresh(session, { deferFitRetry: true });
+      refresh(session, {
+        deferFitRetry: true,
+        liveGeometry: inheritedLiveGeometry,
+      });
     });
     return true;
   };
@@ -203,6 +210,8 @@ export function createTerminalMetricsController({
       }
       const previousFontSize = Number(session.term.options.fontSize || session.term.renderer?.fontSize || 0);
       const changed = previousFontSize !== Number(value);
+      const liveGeometry = changed
+        && getResize()?.beginMetricsLiveGeometry?.(session) === true;
       if (changed) {
         session.fontSizeChangeDebug = { requestedFontSize: Number(value) || 0 };
         recordEvent(session, "font_size_change_start", {
@@ -210,7 +219,9 @@ export function createTerminalMetricsController({
           previousFontSize,
           ...visualDetails(session),
         });
-        getPresentation()?.beginHold?.(session, { recapture: true });
+        if (!liveGeometry) {
+          getPresentation()?.beginHold?.(session, { recapture: true });
+        }
       }
       session.term.options.fontSize = value;
       if (changed) {
@@ -219,7 +230,11 @@ export function createTerminalMetricsController({
           ...visualDetails(session),
         });
       }
-      const refreshed = refresh(session, { deferFitRetry: true, claimSize: true });
+      const refreshed = refresh(session, {
+        deferFitRetry: true,
+        claimSize: true,
+        liveGeometry,
+      });
       if (changed) {
         recordEvent(session, "font_size_change_refresh_scheduled", {
           requestedFontSize: Number(value) || 0,
@@ -227,6 +242,36 @@ export function createTerminalMetricsController({
           ...visualDetails(session),
         });
       }
+    });
+    return true;
+  };
+
+  const applyLineHeight = (value, previousValue) => {
+    if (disposed) {
+      return false;
+    }
+    forEachSession((session) => {
+      if (!session?.term) {
+        return;
+      }
+      const liveGeometry = getResize()?.beginMetricsLiveGeometry?.(session) === true;
+      recordEvent(session, "line_height_change_start", {
+        lineHeightPercent: Number(value) || 0,
+        previousLineHeightPercent: Number(previousValue) || 0,
+        liveGeometry,
+        ...visualDetails(session),
+      });
+      const refreshed = refresh(session, {
+        deferFitRetry: true,
+        claimSize: true,
+        liveGeometry,
+      });
+      recordEvent(session, "line_height_change_refresh_scheduled", {
+        lineHeightPercent: Number(value) || 0,
+        refreshResult: refreshed,
+        liveGeometry,
+        ...visualDetails(session),
+      });
     });
     return true;
   };
@@ -255,16 +300,27 @@ export function createTerminalMetricsController({
     return true;
   };
 
-  const refresh = (session, { deferFitRetry = false, claimSize = false } = {}) => {
+  const refresh = (session, {
+    deferFitRetry = false,
+    claimSize = false,
+    liveGeometry = false,
+  } = {}) => {
     if (disposed || !session?.term) {
       return false;
     }
+    const resize = getResize();
+    const useLiveGeometry = liveGeometry || Boolean(
+      resize?.isLiveGeometryActive?.(session)
+      && resize?.beginMetricsLiveGeometry?.(session),
+    );
     registerCleanup(session);
     clearSessionTimers(session);
-    // Keep direct refresh callers (font loading and appearance updates) on
-    // the same transaction boundary. beginHold is idempotent while a hold is
-    // already active, so font setters above do not recapture the new canvas.
-    getPresentation()?.beginHold?.(session);
+    // Font-family loading and appearance refreshes stay atomic. Explicit
+    // font-size/line-height changes instead keep the current live Canvas
+    // visible and delegate geometry ownership to the resize controller.
+    if (!useLiveGeometry) {
+      getPresentation()?.beginHold?.(session);
+    }
     const metricsGeneration = Number(session.fontMetricsGeneration || 0) + 1;
     session.fontMetricsGeneration = metricsGeneration;
     const refreshNow = (forceSizeSync = false) => {
@@ -282,13 +338,15 @@ export function createTerminalMetricsController({
           session.term.renderer.metrics = session.term.renderer.measureFont();
         }
         getPresentation()?.cancelPendingRender?.(session.term);
-        const fit = getResize()?.resizePane?.(session, {
-          settlePresentation: true,
-          forceFullRender: true,
-          hideUntilRender: true,
-          forceSizeSync,
-          claimSize,
-        });
+        const fit = useLiveGeometry
+          ? resize?.updateMetricsLiveGeometry?.(session, { force: forceSizeSync })
+          : resize?.resizePane?.(session, {
+            settlePresentation: true,
+            forceFullRender: true,
+            hideUntilRender: true,
+            forceSizeSync,
+            claimSize,
+          });
         const presentation = getPresentation?.();
         const presentationCurrent = typeof presentation?.isCurrent === "function"
           ? presentation.isCurrent(session)
@@ -326,6 +384,11 @@ export function createTerminalMetricsController({
       }
     };
 
+    const completeLiveGeometry = () => {
+      if (useLiveGeometry) {
+        resize?.endMetricsLiveGeometry?.(session);
+      }
+    };
     refreshNow(false);
     if (deferFitRetry) {
       const schedule = (kind, delay, forceSizeSync, continuation) => {
@@ -347,6 +410,7 @@ export function createTerminalMetricsController({
       ];
       const scheduleNext = (index, result) => {
         if (result?.settled || index >= retries.length) {
+          completeLiveGeometry();
           return;
         }
         const next = retries[index];
@@ -355,6 +419,8 @@ export function createTerminalMetricsController({
         });
       };
       schedule("raf", 0, true, (result) => scheduleNext(0, result));
+    } else {
+      completeLiveGeometry();
     }
     return true;
   };
@@ -412,6 +478,7 @@ export function createTerminalMetricsController({
   return Object.freeze({
     applyFontFamily,
     applyFontSize,
+    applyLineHeight,
     applyMobilePixelScroll,
     applyScrollback,
     applyScrollbackChange,
