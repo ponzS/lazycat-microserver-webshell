@@ -8,6 +8,7 @@
 - 这是内网专用测试账号，脚本会在页面出现登录页时自动填写并登录；已有登录态时不会重复登录。
 - 示例 URL 中的实例名可能随测试机状态变化。运行器会先读取 `/webshell/api/instances`；指定实例对当前账号不可用时，自动选择第一个 `running` 实例，并把选择结果写入事件日志。
 - 测试使用本机安装的 Google Chrome，并以有界面模式打开两个独立窗口。运行环境需要可用的 X11 `DISPLAY`。
+- 运行器会在打开页面前只向目标测试 origin 授予 Chrome 的 `local-network-access` 权限，避免 Chrome 150+ 把测试站点的真实 Provider WebSocket 误拦截为未授权的本地网络访问；不会全局关闭浏览器安全特性。
 - 默认使用 `lzc-os/onbox-tester/e2e/node_modules` 中已安装的 Playwright；也可通过 `PLAYWRIGHT_NODE_PATH` 指定包含 `@playwright/test` 的 Node 模块目录。
 - 独立使用本项目时可先在 `tests-auto` 执行 `npm install`，运行器会优先使用本目录的依赖。
 

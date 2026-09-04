@@ -146,6 +146,26 @@ test("clipboard controller owns selected text, bracketed paste, feedback, and st
   assert.equal(await controller.copyText("after dispose"), false);
 });
 
+test("clipboard read denial focuses the native paste target after actionable feedback", async () => {
+  const calls = [];
+  const session = { id: "pane-1", term: createTerminal(), closed: false };
+  const controller = createTerminalClipboardController({
+    adapter: {
+      copyText: async () => true,
+      readText: async () => { throw new Error("当前页面策略禁止主动读取剪贴板，请使用系统粘贴快捷键。"); },
+    },
+    getActiveSession: () => session,
+    focusForNativePaste: (target) => calls.push(["focus", target.id]),
+    showToast: (message) => calls.push(["toast", message]),
+  });
+  controller.start();
+  assert.equal(await controller.pasteSession(), false);
+  assert.deepEqual(calls, [
+    ["toast", "当前页面策略禁止主动读取剪贴板，请使用系统粘贴快捷键。"],
+    ["focus", "pane-1"],
+  ]);
+});
+
 test("desktop clipboard binding owns drag copy, middle paste, activation, and cleanup", async () => {
   const documentObject = new FakeEventTarget();
   const shell = new FakeEventTarget();

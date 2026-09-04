@@ -68,6 +68,7 @@ const createFakeView = ({ elements = {} } = {}) => {
     downloads: [],
     feedback: [],
     filePickerClicks: 0,
+    fileInputBlurs: 0,
     focusBrowser: 0,
     focusClipboard: 0,
     inputFiles: [],
@@ -78,6 +79,9 @@ const createFakeView = ({ elements = {} } = {}) => {
     state,
     view: {
       elements,
+      blurFileInput() {
+        state.fileInputBlurs += 1;
+      },
       closeBrowser() {
         state.browserOpen = false;
       },
@@ -104,6 +108,7 @@ const createFakeView = ({ elements = {} } = {}) => {
       isAvailable: () => true,
       isBrowserOpen: () => state.browserOpen,
       isDialogOpen: () => state.dialogOpen,
+      isFileInputTarget: (target) => target === elements.fileInput,
       openBrowser() {
         state.browserOpen = true;
       },
@@ -413,6 +418,58 @@ test("attachment uploads preserve progress, clipboard reservation, limits, and a
   oversized.size = 2 * 1024 * 1024 * 1024 + 1;
   assert.equal(controller.uploadAttachments([oversized]), "");
   assert.deepEqual(toasts.slice(-2), ["一次最多上传 32 个文件。", "文件超过 2GB：large.bin"]);
+});
+
+test("pasted uploads expose completion while file picker completion restores terminal focus", async () => {
+  const firstUpload = deferred();
+  const secondUpload = deferred();
+  const pending = [firstUpload, secondUpload];
+  const api = {
+    downloadURL: () => new URL("https://webshell.example.test/download"),
+    list: async () => ({ path: "/", entries: [] }),
+    upload: () => ({ promise: pending.shift().promise, xhr: { abort() {} } }),
+  };
+  const fileInput = {};
+  const { state, view } = createFakeView({ elements: { fileInput } });
+  const lifecycle = createLifecycleHarness();
+  const fakeWindow = createFakeWindow();
+  let focused = 0;
+  const controller = createAttachmentsController({
+    api,
+    view,
+    lifecycleFactory: lifecycle.factory,
+    getContext: () => ({ targetName: "alpha@deploy-a", tabId: "tab-a", activeTabId: "tab-a" }),
+    getTabHost: () => ({ id: "host-a" }),
+    windowObject: fakeWindow,
+    FileCtor: FakeFile,
+    BlobCtor: FakeBlob,
+    focusTerminal: () => { focused += 1; },
+  });
+  controller.start();
+  const pasted = controller.uploadPastedFiles([new FakeFile(["image"], "screen.png")], {
+    targetName: "alpha@deploy-a",
+    tabId: "tab-a",
+  });
+  firstUpload.resolve({ files: [{ path: "/tmp/screen.png" }] });
+  assert.deepEqual(await pasted, {
+    error: "",
+    id: "attachment-1",
+    instanceName: "alpha@deploy-a",
+    paths: ["/tmp/screen.png"],
+    status: "success",
+    tabId: "tab-a",
+  });
+  assert.equal(controller.isFileInputTarget(fileInput), true);
+  assert.equal(state.uploads.get("attachment-1").source, "paste");
+
+  state.inputFiles = [new FakeFile(["manual"], "manual.txt")];
+  lifecycle.handlers.onFileInputChange();
+  assert.equal(state.fileInputBlurs, 1);
+  assert.equal(fakeWindow.timers.size, 2);
+  fakeWindow.runTimers();
+  assert.equal(focused, 1);
+  secondUpload.resolve({ files: [{ path: "/tmp/manual.txt" }] });
+  await settle();
 });
 
 test("target, tab, and dispose cleanup abort uploads and reject late clipboard work", async () => {

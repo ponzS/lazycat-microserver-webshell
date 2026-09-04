@@ -137,6 +137,28 @@ test("keydown filtering handles shortcuts, paste and interactive targets", async
   assert.equal(harness.controller.dispose(), false);
 });
 
+test("native paste redirects only the attachment file input back to the terminal", () => {
+  const calls = [];
+  const attachmentInput = new FakeInput("input");
+  const regularInput = new FakeInput("input");
+  const controller = createAppShortcutController({
+    KeyboardEventCtor: FakeKeyboardEvent,
+    ElementCtor: FakeElement,
+    HTMLInputElementCtor: FakeInput,
+    HTMLTextAreaElementCtor: FakeTextArea,
+    HTMLSelectElementCtor: FakeSelect,
+    getShortcutKey: () => "",
+    isShiftInsertPaste: () => false,
+    isNativePaste: () => true,
+    isTerminalPasteRedirectTarget: (target) => target === attachmentInput,
+    focusForNativePaste: () => calls.push("focus-paste"),
+    closeContextMenu: () => calls.push("close-menu"),
+  });
+  assert.equal(controller.handleKeydown(new FakeKeyboardEvent({ target: regularInput })), false);
+  assert.equal(controller.handleKeydown(new FakeKeyboardEvent({ target: attachmentInput })), true);
+  assert.deepEqual(calls, ["focus-paste", "close-menu"]);
+});
+
 test("Shift+Insert uses the injected native paste path", async () => {
   const harness = createHarness();
   const pasteController = createAppShortcutController({

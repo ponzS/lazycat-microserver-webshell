@@ -25,6 +25,7 @@ export function createTerminalSessionInstallationController({
   tuiAdapterInstaller = null,
   mouse = null,
   clipboard = null,
+  paste = null,
   resize = null,
   input = null,
   interaction = null,
@@ -35,7 +36,6 @@ export function createTerminalSessionInstallationController({
   markSessionTitleNotification = noop,
   transportRuntime = null,
   isClientTarget = () => false,
-  showToast = noop,
   documentObject = globalThis.document,
 } = {}) {
   if (!sessionController || typeof sessionController.create !== "function") {
@@ -116,16 +116,7 @@ export function createTerminalSessionInstallationController({
         setActivePane(current, session.id, { focus: false, resize: false });
       },
       onPaste: (event) => {
-        const text = event?.clipboardData?.getData?.("text/plain");
-        if (!text) {
-          return;
-        }
-        event.preventDefault?.();
-        resize?.reassertSize?.(session, { force: true });
-        const result = clipboard?.pasteSession?.(session, text);
-        if (result?.catch) {
-          result.catch((error) => showToast(error?.message || String(error)));
-        }
+        paste?.handleNativePaste?.(session, event);
       },
     });
     addCleanup(session, cleanup);

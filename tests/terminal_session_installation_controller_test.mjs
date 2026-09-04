@@ -108,7 +108,13 @@ test("session installation preserves feature order and wires explicit DOM comman
         events.push("clipboard:bind");
         return () => events.push("clipboard:cleanup");
       },
-      pasteSession: () => Promise.resolve(),
+    },
+    paste: {
+      handleNativePaste: (_session, event) => {
+        events.push(`paste:${event.clipboardData?.getData?.("text/plain") || ""}`);
+        event.preventDefault?.();
+        return { handled: true };
+      },
     },
     resize,
     input: feature("input"),
@@ -128,7 +134,6 @@ test("session installation preserves feature order and wires explicit DOM comman
       connectPendingSession: () => events.push("transport:connect"),
     },
     isClientTarget: () => true,
-    showToast: (message) => events.push(`toast:${message}`),
   });
 
   const created = controller.createPaneSession(tab, "instance-a");
@@ -164,7 +169,7 @@ test("session installation preserves feature order and wires explicit DOM comman
   // Current-device claim is handled by the IME capture listener.  The
   // session installation listener must not run a second resize pass.
   assert.equal(events.includes("resize:pointer"), false);
-  assert.ok(events.includes("resize:paste"));
+  assert.ok(events.includes("paste:hello"));
   assert.ok(events.includes("activate:pane-1:true"));
   assert.ok(events.includes("activate:pane-1:false"));
   assert.ok(events.includes("label:refresh"));

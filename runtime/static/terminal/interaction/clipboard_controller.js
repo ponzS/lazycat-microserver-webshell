@@ -19,6 +19,7 @@ export function createTerminalClipboardController({
   isDesktopMouseClipboardEnabled = () => false,
   activateSession = () => {},
   reassertSessionSize = () => {},
+  focusForNativePaste = () => {},
   prepareSelectionManager = () => {},
   dragThresholdPx = defaultDragThresholdPx,
   consoleObject = globalThis.console,
@@ -96,6 +97,7 @@ export function createTerminalClipboardController({
     } catch (error) {
       if (!disposed && !session.closed) {
         showToast(error?.message || "粘贴失败。");
+        focusForNativePaste(session);
       }
       return false;
     }

@@ -192,6 +192,9 @@ export function createAttachmentsView({
         elements.dialogBackdrop.hidden = true;
       }
     },
+    blurFileInput() {
+      elements.fileInput?.blur?.();
+    },
     consumeInputFiles() {
       const files = Array.from(elements.fileInput?.files || []);
       if (elements.fileInput) {
@@ -222,6 +225,9 @@ export function createAttachmentsView({
     },
     isDialogOpen() {
       return Boolean(elements.dialogBackdrop && !elements.dialogBackdrop.hidden);
+    },
+    isFileInputTarget(target) {
+      return Boolean(elements.fileInput && target === elements.fileInput);
     },
     openBrowser() {
       documentObject?.body?.classList?.add?.("attachment-browser-open");

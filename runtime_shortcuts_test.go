@@ -1521,6 +1521,91 @@ func TestRuntimeAppLifecycleModuleBoundary(t *testing.T) {
 	}
 }
 
+func TestRuntimeAppPasteModuleBoundary(t *testing.T) {
+	read := func(path string) string {
+		t.Helper()
+		data, err := readRuntimeSource(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", path, err)
+		}
+		return string(data)
+	}
+
+	mainSource := read("runtime/static/global-runtime.js")
+	indexSource := read("runtime/static/app/index.js")
+	pasteIndexSource := read("runtime/static/app/paste/index.js")
+	controllerSource := read("runtime/static/app/paste/paste_controller.js")
+	modelSource := read("runtime/static/app/paste/paste_model.js")
+	readmeSource := read("runtime/static/app/paste/README.md")
+	imeSource := read("runtime/static/terminal/input/ime/ime_controller.js")
+	installationSource := read("runtime/static/terminal/session/session_installation_controller.js")
+
+	for _, want := range []string{
+		`createAppPasteController,`,
+		`from "./app/index.js";`,
+		`appPaste = createAppPasteController({`,
+		`uploadFiles: (files, { session } = {}) => attachments.uploadPastedFiles(files, {`,
+		`pasteText: (session, text) => terminalClipboard.pasteSession(session, text),`,
+		`isSessionValid: (session, result) => {`,
+		`handleNativePaste: (session, event) => appPaste?.handleNativePaste(session, event),`,
+		`paste: appPaste,`,
+		`appPaste?.dispose();`,
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("global runtime paste boundary missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		`createAppPasteController`,
+		`formatPastedAttachmentPaths`,
+		`nativePasteFiles`,
+		`nativePasteText`,
+	} {
+		if !strings.Contains(indexSource+"\n"+pasteIndexSource, want) {
+			t.Fatalf("app paste public entry missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		`../attachments/`,
+		`../../attachments/`,
+		`../terminal/`,
+		`../../terminal/`,
+		`global-runtime`,
+		`WebSocket`,
+	} {
+		if strings.Contains(controllerSource+"\n"+modelSource, forbidden) {
+			t.Fatalf("app paste module must use injected public commands, found %q", forbidden)
+		}
+	}
+	for _, want := range []string{
+		`handleNativePaste(session, event)`,
+		`nativePasteFiles(event.clipboardData)`,
+		`files.length > 0 ? "" : nativePasteText(event.clipboardData)`,
+		`generation !== operationGeneration`,
+		`formatPastedAttachmentPaths(paths)`,
+	} {
+		if !strings.Contains(controllerSource, want) {
+			t.Fatalf("app paste controller contract missing %q", want)
+		}
+	}
+	if !strings.Contains(imeSource, `const result = handleNativePaste(session, event);`) {
+		t.Fatal("IME textarea must forward native paste through the app paste command")
+	}
+	if !strings.Contains(installationSource, `paste?.handleNativePaste?.(session, event);`) {
+		t.Fatal("terminal host must forward native paste through the app paste command")
+	}
+	for _, want := range []string{
+		"文件优先",
+		"原 pane",
+		"dispose generation",
+		"tests-auto/16-attachment-native-paste/",
+	} {
+		if !strings.Contains(readmeSource, want) {
+			t.Fatalf("app paste README missing %q", want)
+		}
+	}
+}
+
 func TestAppRuntimeRecoveryControllerBehavior(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -1998,7 +2083,10 @@ func TestRuntimeAppShortcutModuleBoundary(t *testing.T) {
 		`export function createAppShortcutController({`,
 		`const runAction = async (action) => {`,
 		`const handleKeydown = (event) => {`,
-		`if (isShiftInsertPaste(event)) {`,
+		`const shiftInsertPaste = isShiftInsertPaste(event);`,
+		`const nativePaste = isNativePaste(event);`,
+		`&& !((shiftInsertPaste || nativePaste) && invoke(isTerminalPasteRedirectTarget, event.target))`,
+		`if (shiftInsertPaste) {`,
 		`if (configuredAction === "paste_terminal") {`,
 		`lifecycleFactory = createAppShortcutLifecycle`,
 	} {
@@ -5084,10 +5172,11 @@ func TestRuntimePasteShortcutUsesNativePasteEvent(t *testing.T) {
 	mainSource := readRuntimeSources(t, "runtime/static/global-runtime.js")
 	installationSource := readRuntimeSources(t, "runtime/static/terminal/session/session_installation_controller.js")
 	shortcutSource := readRuntimeSources(t, "runtime/static/app/shortcuts/shortcut_controller.js")
+	pasteSource := readRuntimeSources(t, "runtime/static/app/paste/paste_controller.js")
 	imeSource := readRuntimeIMESource(t)
 	modelSource := readRuntimeSources(t, "runtime/static/settings/settings_model.js")
 	clipboardSource := readRuntimeSources(t, "runtime/static/terminal/interaction/clipboard_adapter.js")
-	source := strings.Join([]string{mainSource, installationSource, shortcutSource, imeSource, modelSource, clipboardSource}, "\n")
+	source := strings.Join([]string{mainSource, installationSource, shortcutSource, pasteSource, imeSource, modelSource, clipboardSource}, "\n")
 
 	for _, want := range []string{
 		`export function isShiftInsertPasteShortcutEvent(event) {`,
@@ -5099,7 +5188,9 @@ func TestRuntimePasteShortcutUsesNativePasteEvent(t *testing.T) {
 		`if (configuredAction === "paste_terminal") {`,
 		`throw new Error("当前页面策略禁止主动读取剪贴板，请使用系统粘贴快捷键。");`,
 		`lifecycle.listen(session, textarea, "paste", (event) => {`,
-		`Promise.resolve(pasteText(session, text)).catch((error) => showToast(error.message));`,
+		`const result = handleNativePaste(session, event);`,
+		`paste?.handleNativePaste?.(session, event);`,
+		`handleNativePaste(session, event) {`,
 		`pasteText: (session, text) => terminalClipboard?.pasteSession(session, text),`,
 		`onPaste: (event) => {`,
 	} {
@@ -5119,7 +5210,7 @@ func TestRuntimePasteShortcutUsesNativePasteEvent(t *testing.T) {
 	}
 
 	earlyNativePasteBranch := sourceBetween(t, shortcutSource,
-		`if (isNativePaste(event)) {`,
+		`if (nativePaste) {`,
 		`    if (invoke(handleTerminalFontSizeShortcut, event)) {`,
 	)
 	for _, want := range []string{
@@ -5140,8 +5231,8 @@ func TestRuntimePasteShortcutUsesNativePasteEvent(t *testing.T) {
 	}
 
 	shiftInsertPasteBranch := sourceBetween(t, shortcutSource,
-		`if (isShiftInsertPaste(event)) {`,
-		`    if (isNativePaste(event)) {`,
+		`if (shiftInsertPaste) {`,
+		`    if (nativePaste) {`,
 	)
 	for _, want := range []string{
 		`event.preventDefault?.();`,
@@ -10742,7 +10833,7 @@ func TestRuntimeTerminalInteractionModuleBoundary(t *testing.T) {
 		"菜单和动作不得清空终端、触发历史 replay/reset、改变 resize owner",
 		"搜索 `start()` 幂等安装 input、keydown 和三个按钮 listener",
 		"`search_controller.js` 是 query、match 列表、当前 match index",
-		"`clipboard_controller.js` 是复制、粘贴和桌面剪贴板交互的唯一 owner",
+		"`clipboard_controller.js` 是复制、主动读取文本粘贴和桌面剪贴板交互的唯一 owner",
 		"`link_controller.js` 是链接打开、复制反馈和迟到复制结果 guard 的唯一 owner",
 	} {
 		if !strings.Contains(readmeSource, want) {

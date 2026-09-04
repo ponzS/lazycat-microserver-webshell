@@ -327,6 +327,14 @@ const createHarness = ({ android = false, touch = true } = {}) => {
       pasted.push(text);
       return true;
     },
+    handleNativePaste: (_target, event) => {
+      const text = event.clipboardData?.getData("text/plain") || "";
+      if (!text) return { handled: false };
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      pasted.push(text);
+      return { handled: true, kind: "text", text, completion: Promise.resolve(true) };
+    },
     shouldApplyStickyTextInput: (value) => value === "a",
     shouldApplyStickyCompositionInput: (value) => value === "a",
     consumeStickyInput: (value) => `^${value}`,

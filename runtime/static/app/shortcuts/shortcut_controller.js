@@ -59,6 +59,7 @@ export function createAppShortcutController({
   importAttachmentFromClipboard = async () => {},
   selectAttachmentFiles = noop,
   pasteTerminal = async () => {},
+  isTerminalPasteRedirectTarget = () => false,
   closeContextMenu = noop,
   showToast = noop,
   getShortcutKey = (event) => getShortcutKeyFromEvent(event, navigatorObject),
@@ -226,6 +227,8 @@ export function createAppShortcutController({
     }
     const shortcut = getShortcutKey(event);
     const configuredAction = String(invoke(resolveDesktopShortcutAction, shortcut) || "").trim();
+    const shiftInsertPaste = isShiftInsertPaste(event);
+    const nativePaste = isNativePaste(event);
     if (
       (event.isComposing || event.key === "Process" || Number(event.keyCode || 0) === 229)
       && !configuredAction
@@ -242,10 +245,13 @@ export function createAppShortcutController({
     ) {
       return false;
     }
-    if (isInteractiveShortcutTarget(event.target)) {
+    if (
+      isInteractiveShortcutTarget(event.target)
+      && !((shiftInsertPaste || nativePaste) && invoke(isTerminalPasteRedirectTarget, event.target))
+    ) {
       return false;
     }
-    if (isShiftInsertPaste(event)) {
+    if (shiftInsertPaste) {
       event.preventDefault?.();
       event.stopPropagation?.();
       event.stopImmediatePropagation?.();
@@ -254,7 +260,7 @@ export function createAppShortcutController({
       Promise.resolve(pasteTerminal()).catch((error) => showToast(error?.message || String(error)));
       return true;
     }
-    if (isNativePaste(event)) {
+    if (nativePaste) {
       focusForNativePaste();
       closeContextMenu();
       event.stopPropagation?.();

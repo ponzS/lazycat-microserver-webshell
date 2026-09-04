@@ -31,6 +31,7 @@ export function createTerminalIMEController({
   scrollToBottom = noop,
   sendInput = noop,
   pasteText = () => Promise.resolve(false),
+  handleNativePaste = () => ({ handled: false }),
   showToast = noop,
   shouldApplyStickyTextInput = () => false,
   shouldApplyStickyCompositionInput = () => false,
@@ -939,18 +940,14 @@ export function createTerminalIMEController({
       handleTextareaInput(session, event);
     }, { capture: true });
     lifecycle.listen(session, textarea, "paste", (event) => {
-      const text = event.clipboardData?.getData("text/plain") || "";
-      if (!text) {
+      const result = handleNativePaste(session, event);
+      if (!result?.handled) {
         return;
       }
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      if (shouldReassertInputSize(session)) {
-        reassertSize(session);
+      if (result.kind === "text" && result.text) {
+        session.lastPasteText = result.text;
+        session.lastPasteAt = now();
       }
-      session.lastPasteText = text;
-      session.lastPasteAt = now();
-      Promise.resolve(pasteText(session, text)).catch((error) => showToast(error.message));
     }, { capture: true });
     const isTerminalTouchTarget = (target) => isElement(target) && target.closest(".terminal-host") === host;
     const claimCurrentDeviceTerminalSize = (event) => {
