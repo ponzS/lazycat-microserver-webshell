@@ -72,10 +72,28 @@ const documentObject = {
 
 test("layout view renders a split and persists divider movement", () => {
   globalThis.HTMLElement = ElementStub;
-  const frames = [];
+  let nextFrame = 1;
+  const frames = new Map();
+  const windowObject = {
+    requestAnimationFrame(callback) {
+      const handle = nextFrame++;
+      frames.set(handle, callback);
+      return handle;
+    },
+    cancelAnimationFrame(handle) {
+      frames.delete(handle);
+    },
+  };
+  const runFrames = () => {
+    const callbacks = [...frames.values()];
+    frames.clear();
+    callbacks.forEach((callback) => callback());
+  };
   const actions = [];
   const activeCalls = [];
   const resizeCalls = [];
+  const dragLifecycle = [];
+  const dragUpdates = [];
   const firstShell = new ElementStub("section");
   const secondShell = new ElementStub("section");
   firstShell.rect = { left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100 };
@@ -98,11 +116,12 @@ test("layout view renders a split and persists divider movement", () => {
   };
   const controller = createWorkspaceLayoutViewController({
     documentObject,
-    windowObject: { requestAnimationFrame: (callback) => { frames.push(callback); callback(); } },
-    getCurrentTab: () => tab,
+    windowObject,
     setActivePane: (...args) => activeCalls.push(args),
     resizeTab: (value) => resizeCalls.push(value),
-    scheduleTabResize: (...args) => resizeCalls.push(args),
+    beginTabInteractiveResize: (value) => dragLifecycle.push(["begin", value]),
+    updateTabInteractiveResize: (value) => dragUpdates.push(value),
+    endTabInteractiveResize: (value) => dragLifecycle.push(["end", value]),
     postWorkspaceAction: (...args) => { actions.push(args); return Promise.resolve(); },
   });
 
@@ -110,18 +129,41 @@ test("layout view renders a split and persists divider movement", () => {
   assert.equal(tab.layoutHost.children[0].className, "split-node vertical");
   assert.equal(tab.layoutHost.children[0].children.length, 3);
   assert.equal(activeCalls.length, 1);
+  assert.equal(resizeCalls.length, 0);
+  runFrames();
   assert.equal(resizeCalls.length, 1);
 
   const divider = tab.layoutHost.children[0].children[1];
   const container = tab.layoutHost.children[0];
   container.rect = { left: 0, top: 0, right: 200, bottom: 100, width: 200, height: 100 };
   divider.dispatch("pointerdown", { clientX: 100, clientY: 50, pointerId: 1, preventDefault() {} });
+  assert.deepEqual(dragLifecycle, [["begin", tab]]);
+  assert.equal(documentObject.body.classList.values.has("split-resize-active"), true);
+  divider.dispatch("pointermove", { clientX: 110, clientY: 50, pointerId: 1 });
   divider.dispatch("pointermove", { clientX: 120, clientY: 50 });
-  divider.dispatch("pointerup", {});
+  assert.equal(frames.size, 1);
+  assert.equal(tab.layout.children[0].size, 50);
+  runFrames();
   assert.ok(tab.layout.children[0].size > 50);
+  assert.equal(resizeCalls.length, 1);
+  assert.deepEqual(dragUpdates, [tab]);
+  divider.dispatch("pointermove", { clientX: 125, clientY: 50, pointerId: 1 });
+  divider.dispatch("pointermove", { clientX: 130, clientY: 50, pointerId: 1 });
+  assert.equal(frames.size, 1);
+  divider.dispatch("pointerup", { pointerId: 1 });
+  assert.equal(frames.size, 0);
+  assert.equal(tab.layout.children[0].size, 65);
+  assert.deepEqual(dragLifecycle, [["begin", tab], ["end", tab]]);
+  assert.equal(resizeCalls.length, 1);
+  assert.deepEqual(dragUpdates, [tab, tab]);
+  assert.equal(documentObject.body.classList.values.has("split-resize-active"), false);
   assert.equal(actions[0][0], "update_layout");
 
+  divider.dispatch("pointerdown", { clientX: 100, clientY: 50, pointerId: 2, preventDefault() {} });
+  divider.dispatch("pointermove", { clientX: 115, clientY: 50, pointerId: 2 });
   assert.equal(controller.dispose(), true);
+  assert.equal(frames.size, 0);
+  assert.deepEqual(dragLifecycle.at(-1), ["end", tab]);
+  assert.equal(documentObject.body.classList.values.has("split-resize-active"), false);
   assert.equal(controller.renderTabLayout(tab), false);
-  void frames;
 });
