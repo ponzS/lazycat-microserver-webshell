@@ -53,7 +53,10 @@ const localInputResources = (state) => state.page.evaluate(() => {
     "/terminal/input/input_model.js",
   ];
   const names = performance.getEntriesByType("resource").map((entry) => entry.name);
-  return Object.fromEntries(suffixes.map((suffix) => [suffix, names.some((name) => name.includes("/assets/") && name.endsWith(suffix))]));
+  return {
+    bundleLoaded: names.some((name) => /\/assets\/[^/]+\/assets\/index-[^/]+\.js$/.test(new URL(name).pathname)),
+    sourceModulesLoaded: suffixes.filter((suffix) => names.some((name) => name.endsWith(suffix))),
+  };
 });
 
 export async function run({ config, states, eventLog, assertNoFatalErrors }) {
@@ -119,9 +122,8 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
     throw new Error(`generated response payload contract failed: ${JSON.stringify(generated)}`);
   }
   const resources = await localInputResources(desktop);
-  const missingResources = Object.entries(resources).filter(([, loaded]) => !loaded).map(([name]) => name);
-  if (missingResources.length > 0) {
-    throw new Error(`input module resources were not loaded from versioned assets: ${missingResources.join(", ")}`);
+  if (!resources.bundleLoaded || resources.sourceModulesLoaded.length > 0) {
+    throw new Error(`input code did not use the Vite bundle boundary: ${JSON.stringify(resources)}`);
   }
   const sockets = {
     desktop: await unifiedSocketSnapshot(desktop),

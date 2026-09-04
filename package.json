@@ -1,0 +1,11 @@
+{
+  "name": "lcmd-webshell-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build && node tools/verify-vite-build.mjs"
+  },
+  "devDependencies": {
+    "vite": "8.2.2"
+  }
+}

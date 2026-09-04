@@ -5,8 +5,9 @@
 运行：
 
 ```sh
+npm run build
 HEADLESS=1 \
-WEBSHELL_LOCAL_STATIC_DIR="$PWD/runtime/static" \
+WEBSHELL_LOCAL_STATIC_DIR="$PWD/build/runtime/static" \
 node tests-auto/run-playwright.mjs tests-auto/12-overview-preview-persistence/test.mjs
 ```
 

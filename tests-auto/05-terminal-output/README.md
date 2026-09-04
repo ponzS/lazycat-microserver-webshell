@@ -79,8 +79,9 @@ P0-4 的 hold 修复已将 hold canvas backing 尺寸改为 CSS 尺寸乘当前 
 
 
 ```sh
+npm run build
 HEADLESS=1 \
-WEBSHELL_LOCAL_STATIC_DIR="$PWD/runtime/static" \
+WEBSHELL_LOCAL_STATIC_DIR="$PWD/build/runtime/static" \
 node tests-auto/run-playwright.mjs tests-auto/05-terminal-output/test.mjs
 ```
 

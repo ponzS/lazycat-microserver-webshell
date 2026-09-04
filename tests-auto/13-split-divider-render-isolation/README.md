@@ -70,8 +70,9 @@ workspace controller 在同一 RAF 中应用 latest-only flex 比例并请求 te
 ## 运行命令和环境变量
 
 ```sh
+npm run build
 HEADLESS=1 \
-WEBSHELL_LOCAL_STATIC_DIR="$PWD/runtime/static" \
+WEBSHELL_LOCAL_STATIC_DIR="$PWD/build/runtime/static" \
 node tests-auto/run-playwright.mjs tests-auto/13-split-divider-render-isolation/test.mjs
 ```
 

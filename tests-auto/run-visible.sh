@@ -9,7 +9,9 @@ repo_dir="$(cd -- "${script_dir}/.." && pwd)"
 export TEST_FOREGROUND=1
 export HEADLESS=0
 if [[ -z "${WEBSHELL_LOCAL_STATIC_DIR:-}" ]]; then
-  export WEBSHELL_LOCAL_STATIC_DIR="${repo_dir}/runtime/static"
+  echo "[tests-auto] building Vite runtime"
+  (cd "${repo_dir}" && npm run build)
+  export WEBSHELL_LOCAL_STATIC_DIR="${repo_dir}/build/runtime/static"
 fi
 
 if [[ "${1:-}" == "--all" ]]; then

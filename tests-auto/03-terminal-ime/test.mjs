@@ -63,10 +63,10 @@ const localIMEResources = (state) => state.page.evaluate(() => {
     "/terminal/input/ime/ime_model.js",
   ];
   const names = performance.getEntriesByType("resource").map((entry) => entry.name);
-  return Object.fromEntries(suffixes.map((suffix) => [
-    suffix,
-    names.some((name) => name.includes("/assets/") && name.endsWith(suffix)),
-  ]));
+  return {
+    bundleLoaded: names.some((name) => /\/assets\/[^/]+\/assets\/index-[^/]+\.js$/.test(new URL(name).pathname)),
+    sourceModulesLoaded: suffixes.filter((suffix) => names.some((name) => name.endsWith(suffix))),
+  };
 });
 
 const dispatchComposition = (state, committed, { duplicateInput = true } = {}) => state.page.evaluate(({ text, duplicate }) => {
@@ -266,9 +266,8 @@ export async function run({ config, states, eventLog, assertNoFatalErrors }) {
   }
 
   const resources = await localIMEResources(desktop);
-  const missingResources = Object.entries(resources).filter(([, loaded]) => !loaded).map(([name]) => name);
-  if (missingResources.length > 0) {
-    throw new Error(`IME resources were not loaded from versioned assets: ${missingResources.join(", ")}`);
+  if (!resources.bundleLoaded || resources.sourceModulesLoaded.length > 0) {
+    throw new Error(`IME code did not use the Vite bundle boundary: ${JSON.stringify(resources)}`);
   }
   const canvas = {
     desktop: await canvasSummary(desktop),

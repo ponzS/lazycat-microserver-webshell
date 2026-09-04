@@ -57,6 +57,18 @@ export const config = {
 const installLocalStaticRoute = async (context) => {
   if (!config.localStaticDir) return;
   const staticRoot = path.resolve(config.localStaticDir);
+  const localIndex = await fs.readFile(path.join(staticRoot, "index.html"), "utf8");
+  await context.route(/\/webshell\/(?:\?.*)?$/, async (route) => {
+    if (route.request().method() !== "GET" || route.request().resourceType() !== "document") {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "text/html; charset=utf-8",
+      body: localIndex.replaceAll("__LCMD_ASSET_BASE__", "./assets/tests-auto-local/"),
+    });
+  });
   await context.route(/\/assets\/[^/]+\/.+/, async (route) => {
     const requestURL = new URL(route.request().url());
     const match = requestURL.pathname.match(/\/assets\/[^/]+\/(.+)$/);
@@ -185,7 +197,7 @@ const createWindow = async (name, viewport, position) => {
   });
   await installLocalStaticRoute(context);
   const page = await context.newPage();
-  const state = { name, page, browser, context, framesSent: [], output: "", lastResize: null, fatalErrors: [], resizeErrors: 0, initialTerminalTimeline: [] };
+  const state = { name, page, browser, context, framesSent: [], output: "", lastResize: null, fatalErrors: [], assetRequestFailures: [], resizeErrors: 0, initialTerminalTimeline: [] };
   await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
   await page.addInitScript(({ captureTimeline, enableInitializationPerformance }) => {
     if (captureTimeline || enableInitializationPerformance) {
@@ -311,6 +323,7 @@ const createWindow = async (name, viewport, position) => {
     const errorText = request.failure()?.errorText || "";
     const aborted = errorText.includes("ERR_ABORTED");
     const message = `${request.method()} ${request.url()} ${errorText}`;
+    if (!aborted && request.url().includes("/assets/")) state.assetRequestFailures.push(message);
     if (!aborted && request.url().includes("/api/")) state.fatalErrors.push(`requestfailed: ${message}`);
     eventLog({ status: aborted ? "info" : "error", window: name, action: "requestfailed", message });
   });

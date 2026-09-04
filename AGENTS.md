@@ -93,10 +93,11 @@ tests-auto/<两位编号>-<短横线场景名>/
 node tests-auto/run-playwright.mjs tests-auto/<编号>-<场景名>/test.mjs
 ```
 
-需要映射当前前端资源时使用：
+需要映射当前前端资源时，先构建 Vite 产物再使用：
 
 ```sh
-WEBSHELL_LOCAL_STATIC_DIR="$PWD/runtime/static" \
+npm run build
+WEBSHELL_LOCAL_STATIC_DIR="$PWD/build/runtime/static" \
 node tests-auto/run-playwright.mjs tests-auto/<编号>-<场景名>/test.mjs
 ```
 

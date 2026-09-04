@@ -74,6 +74,7 @@ LightOS WebShell 的目标是为懒猫微服提供一个开箱即用的网页终
 前置条件：
 
 - Go 工具链。
+- Node.js 20.19+ 或 22.12+，以及 npm。
 - `lzc-cli`。
 - 可安装 LPK 的懒猫微服环境。
 
@@ -87,6 +88,13 @@ git submodule update --init --recursive
 
 ```sh
 lzc-cli project release
+```
+
+`lzc-build.yml` 会先执行 `npm ci` 和 `npm run build`，使用 Vite 将 `runtime/static/` 源码构建到 `build/runtime/static/`。LPK 只复制 Vite 产物和 `runtime/fonts/`；`tools/verify-vite-build.mjs` 会拒绝超过 8 个 JavaScript 发布文件或夹带源码模块树的产物。本地只构建前端可执行：
+
+```sh
+npm ci --ignore-scripts --no-audit --no-fund
+npm run build
 ```
 
 `ghostty-web/` 是固定到 `ponzS/ghostty-web` fork 的 submodule，也是唯一的 Ghostty WASM 源码来源。WebShell 仓库内的 `runtime/static/ghostty-web.js`、`ghostty-vt.wasm` 和许可证是发布资产。常规构建会校验这些文件，然后从 submodule 当前源码重建 WASM 并比较核心 section；子模块、Bun、Zig 或源码校验任一缺失都会阻止发布：
@@ -128,7 +136,7 @@ node --test tests/*.mjs
 - 后端使用 Go 实现，Web UI 通过 `/=exec://8080` 由 LPK 启动。
 - 终端会话通过实例内 persistent agent 管理，并通过 WebSocket 转发到浏览器。普通容器的单条 Unified transport 复用只发生在 Provider 中转层；persistent agent 不需要修改，仍持续维护所有 PTY、任务、历史和 cursor。所有 logical pane 都允许普通输入，Provider 按 pane identity、stream generation 和 channel generation 校验，并根据活动优先级公平调度。`client:` PC target 仍由最多三条独立直连兼容。
 - 实例端终端历史由 persistent agent 作为可信数据源维护。普通容器只走服务端权威 snapshot/live，Ghostty 不绘制回放中间帧；`client:` PC target 继续使用隔离的 IndexedDB 与原完整历史协议，直到该后端完成 Unified 协议升级。
-- HTML 入口使用 `/assets/<lpk-version>-<content-revision>/` 静态资源路径。即使误用相同 LPK 版本重新发布，只要二进制或 runtime 内容变化，JS/CSS/module/WASM URL 也会变化；内容寻址资源可通过 HTTP immutable 缓存长期复用，旧 `/static/` 仅保留兼容。
+- HTML 入口使用 `/assets/<lpk-version>-<content-revision>/` 静态资源路径。源码模块由 Vite 合并为有界数量的生产 bundle 后再写入 LPK；即使误用相同 LPK 版本重新发布，只要二进制或 runtime 内容变化，JS/CSS/bundle/WASM URL 也会变化。内容寻址资源可通过 HTTP immutable 缓存长期复用，旧 `/static/` 仅保留兼容。
 - 页面不注册 Service Worker、不提供 Web App Manifest，也不维护 PWA app-shell。历史版本遗留的本 WebShell Worker 和已知缓存会在启动后精确清理，不参与终端启动、离线 fallback 或资源调度。
 - 终端渲染使用项目内随包分发的 Ghostty Web 运行时资源。
 - 本项目不使用 `tmux`，也不使用 `xterm.js`。

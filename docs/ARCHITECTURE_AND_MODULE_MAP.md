@@ -38,8 +38,9 @@ Bug 的触发场景、失败证据、已确认根因、实施方案和验证结�
 ```text
 Provider HTTP
   -> /webshell/ 或页面入口
-  -> runtime/static/index.html
-  -> runtime/static/main.js
+  -> build/runtime/static/index.html（Vite 发布产物）
+  -> assets/index-<hash>.js（有界 bundle）
+  -> runtime/static/main.js（源码入口）
   -> runtime/static/global-runtime.js
   -> app/workspace/instances/settings/appearance/diagnostics/terminal controllers
 ```
@@ -47,6 +48,8 @@ Provider HTTP
 - `runtime/static/main.js` 是唯一页面脚本入口，只负责调用启动入口。
 - `runtime/static/global-runtime.js` 是页面级全局 runtime owner，负责声明全局状态、创建 controller、依赖接线、启动/恢复/销毁顺序。
 - `runtime/static/ghostty-web.js` 和 `runtime/static/ghostty-vt.wasm` 是终端运行时资产。
+- Vite 以 `runtime/static/` 为源码根，将生产资源输出到 `build/runtime/static/`；LPK 和 `lightos-admin` 内嵌 Provider 只能发布该构建目录，不能直接发布源码模块树。
+- `.vite/manifest.json` 标识有效构建产物，发布 JavaScript 文件预算不超过 8 个；源码模块职责和测试入口不因打包而改变。
 - 页面使用版本化 `/assets/<asset-version>/` 静态资源；API、WebSocket 和普通容器终端历史不经过浏览器 Cache API。
 - 当前不以 Service Worker、PWA app-shell 或浏览器缓存作为普通容器终端历史来源。旧 `/service-worker.js` 只服务于一次性退役旧 registration 的迁移路径。
 
@@ -244,7 +247,7 @@ global-runtime
 - 运行器：[`tests-auto/run-playwright.mjs`](../tests-auto/run-playwright.mjs)
 - 全部场景：`./tests-auto/test-all.sh`
 - 单个场景：`node tests-auto/run-playwright.mjs tests-auto/<场景目录>/test.mjs`
-- 当前前端资源映射：`WEBSHELL_LOCAL_STATIC_DIR="$PWD/runtime/static"`
+- 当前生产前端资源映射：先执行 `npm run build`，再使用 `WEBSHELL_LOCAL_STATIC_DIR="$PWD/build/runtime/static"`
 - 失败产物：对应场景目录的 `artifacts/`，包含截图、trace、JSONL 事件和错误摘要。
 
 当前场景导航：

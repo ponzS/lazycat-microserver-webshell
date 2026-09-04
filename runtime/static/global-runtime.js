@@ -159,7 +159,7 @@ import {
 
 installKittyGraphicsSupport(Terminal);
 
-const runtimeAssetURL = (path) => new URL(path, import.meta.url).toString();
+const ghosttyWASMURL = new URL("./ghostty-vt.wasm", import.meta.url).toString();
 const params = new URLSearchParams(globalThis.window?.location?.search || "");
 
 export function startGlobalRuntime() {
@@ -169,7 +169,7 @@ export function startGlobalRuntime() {
   const startupDiagnostics = createStartupDiagnostics();
   const markWebShellStartupMetric = startupDiagnostics.mark;
   const serverLogSinceUnixMS = Date.now();
-  const ghosttyInitPromise = initGhostty(runtimeAssetURL("./ghostty-vt.wasm")).then(() => {
+  const ghosttyInitPromise = initGhostty(ghosttyWASMURL).then(() => {
     markWebShellStartupMetric("ghosttyReadyAt");
     startupDiagnostics.trace("Ghostty WASM 已就绪");
   });

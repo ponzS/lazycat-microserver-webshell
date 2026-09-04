@@ -1,6 +1,6 @@
 # 静态运行时入口
 
-`runtime/static/` 是 WebShell 页面静态资源根目录。页面脚本只从 `main.js` 开始加载；`main.js` 仅导入并调用 `global-runtime.js` 的 `startGlobalRuntime()`。
+`runtime/static/` 是 WebShell 页面源码根目录。页面脚本只从 `main.js` 开始加载；`main.js` 仅导入并调用 `global-runtime.js` 的 `startGlobalRuntime()`。发布时 Vite 将该模块树构建到 `build/runtime/static/`，LPK 只打包构建产物，不直接发布源码模块。
 
 ## 根目录职责
 
@@ -12,6 +12,14 @@
 
 当前页面不注册 Service Worker，不提供 Web App Manifest，也不使用 PWA app-shell 缓存。`index.html` 在版本化资源之前仅对仍被旧 Worker 控制的页面调用一次现有 registration 的 `update()`；Provider 在旧 `/service-worker.js` URL 提供一次性退役脚本，使历史 registration 能够删除已知旧缓存、注销自身并重载受控页面。该触发器不注册 Worker、不直接重载页面，退役脚本没有 fetch listener、预缓存或 client claim；干净用户没有 controller，不会请求 Worker 或增加导航。静态资源继续通过 Provider 注入的版本化 `/assets/<asset-version>/` URL 和 HTTP immutable 缓存发布；API、WebSocket 和终端历史不经过浏览器 Cache API。
 
+## 构建和发布边界
+
+- `vite.config.js` 以本目录的 `index.html` 为入口，把源码模块、Ghostty 运行时、WASM、主题和 CSS 构建到 `build/runtime/static/`。
+- 构建后的 `index.html` 保留 `__LCMD_ASSET_BASE__`，由 Provider 在响应入口页面时替换为当前内容版本路径。
+- `.vite/manifest.json` 是 Vite 产物标记。独立 WebShell LPK 和 `lightos-admin` 内嵌 WebShell 都必须包含该文件。
+- `tools/verify-vite-build.mjs` 固定发布 JS 文件不超过 8 个，拒绝把 `global-runtime.js` 或 `workspace/` 等源码模块复制到构建目录。
+- `runtime/fonts/` 不经过 Vite 转换，由 LPK 构建脚本与 Vite 静态产物一起组装为最终 `runtime/`。
+
 ## 模块目录
 
 业务和责任域必须位于对应目录，并由目录根 `README.md` 说明职责、状态 owner、公开入口、生命周期和验证方式。主要目录包括 `app/`、`workspace/`、`terminal/`、`appearance/`、`settings/`、`diagnostics/`、`instances/`、`devices/`、`attachments/`、`service_forwarding/` 和 `ui/`。
@@ -22,6 +30,8 @@
 
 ```sh
 find runtime/static -name '*.js' -print0 | xargs -0 -n1 node --check
+npm ci --ignore-scripts --no-audit --no-fund
+npm run build
 node --test tests/*.mjs
 go test ./... -count=1
 git diff --check

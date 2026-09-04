@@ -58,7 +58,8 @@ resize controller 分别维护 interactive 与 metrics source；二者重叠时�
 ## 运行命令和环境变量
 
 ```bash
-WEBSHELL_LOCAL_STATIC_DIR="$PWD/runtime/static" TEST_FOREGROUND=0 \
+npm run build
+WEBSHELL_LOCAL_STATIC_DIR="$PWD/build/runtime/static" TEST_FOREGROUND=0 \
   node tests-auto/run-playwright.mjs tests-auto/10-terminal-geometry-jitter/test.mjs
 ```
 
