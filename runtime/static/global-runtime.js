@@ -56,10 +56,7 @@ import {
   resolveMobileShortcutInputData,
 } from "./settings/index.js";
 import {
-  ClientTerminalReplayAdapter,
   TerminalReplayController,
-  createClientTerminalHistoryController,
-  createTerminalHistoryCache,
   createTerminalSessionReplayController,
   terminalCheckpointCapabilitiesForTerminal,
 } from "./terminal/history/index.js";
@@ -71,6 +68,13 @@ import {
   createTerminalSearchController,
   terminalFullBufferText,
 } from "./terminal/interaction/index.js";
+import {
+  CLIENT_TERMINAL_CONFIG,
+  createClientTerminalConnectionController,
+  createClientTerminalHistoryController,
+  createClientTerminalProtocolController,
+  createTerminalHistoryCache,
+} from "./terminal-client/index.js";
 import { createTerminalOverviewController } from "./terminal/overview/index.js";
 import {
   createTerminalPresentationController,
@@ -264,8 +268,6 @@ export function startGlobalRuntime() {
     terminalUnifiedPongTimeoutMs,
     terminalUnifiedTransitionTimeoutMs,
     terminalWebSocketConnectTimeoutMs,
-    terminalClientDirectWebSocketCapacity,
-    terminalConnectionInteractionPriorityMs,
     terminalUnifiedPaneRetryBaseDelayMs,
     terminalUnifiedPaneRetryMaxDelayMs,
     terminalWebSocketHealthTimeoutMs,
@@ -283,12 +285,16 @@ export function startGlobalRuntime() {
     terminalResizeOutputMaxHoldMs,
     terminalReplayFailureLimit,
     terminalReplayCheckpointDelayMs,
+    activityPollIntervalMs,
+  } = TERMINAL_RUNTIME_CONFIG;
+  const {
+    terminalClientDirectWebSocketCapacity,
+    terminalConnectionInteractionPriorityMs,
     terminalHistoryCacheFlushBytes,
     terminalHistoryCacheFlushDelayMs,
     terminalHistoryCacheOrphanTTL,
     averageTerminalHistoryBytesPerLine,
-    activityPollIntervalMs,
-  } = TERMINAL_RUNTIME_CONFIG;
+  } = CLIENT_TERMINAL_CONFIG;
   const initialTerminalFontSize = readStoredTerminalFontSize(window.localStorage, storagePrefix);
   const terminalOptionsBase = {
     cursorBlink: false,
@@ -325,6 +331,7 @@ export function startGlobalRuntime() {
   let disposed = false;
   let terminalSessionConnection = null;
   let terminalSessionProtocol = null;
+  let clientTerminalProtocol = null;
   let terminalUnifiedTransport = null;
   let terminalTransportRuntime = null;
   let terminalSessionController = null;
@@ -737,10 +744,9 @@ export function startGlobalRuntime() {
   terminalReplay = createTerminalSessionReplayController({
     windowObject: window,
     getActiveName,
-    isClientTarget: (name) => isClientInstanceName(name),
     hasQueuedOutput: (session) => terminalOutput?.hasQueued(session) === true,
-    flushCache: (session) => clientHistory.flushSession(session),
-    disableCache: (session, error) => clientHistory.disableSession(session, error),
+    flushReplayCache: (session) => clientHistory.flushReplayCache(session),
+    historyRangeForConnect: (session) => clientHistory.rangeForConnect(session),
     endRenderSuppression: (session, options) => endTerminalRenderSuppression(session, options),
     clearOutputOverload: (session) => terminalOutput?.clearOverload(session),
     clearAttachReadyTimer: (session) => terminalSessionConnection?.clearAttachReadyTimer(session),
@@ -757,7 +763,11 @@ export function startGlobalRuntime() {
     setPresentationReady: (session, ready) => terminalPresentation?.setReady(session, ready),
     ensurePresentation: (session, options) => terminalPresentation?.ensure(session, options),
     flushPendingInput: (session) => terminalInput?.flushPending(session),
-    syncConnectionDemands: (options) => terminalTransportRuntime?.syncConnectionDemands(options),
+    onReplayReady: () => {
+      if (isClientInstanceName(getActiveName())) {
+        terminalTransportRuntime?.syncConnectionDemands({ reason: "replay_ready" });
+      }
+    },
     beginPresentationHold: (session) => terminalPresentation?.beginHold(session),
     isMeasurable: (session) => terminalResize?.isMeasurable(session) === true,
     canvasMatchesExpectedSize: (session) => terminalResize?.canvasMatchesExpectedSize(session) === true,
@@ -1678,13 +1688,41 @@ export function startGlobalRuntime() {
     sessionRecovery?.requestSessionHistoryReplay(session) === true
   );
 
-  const connectSession = (...args) => (
-    terminalSessionProtocol
-      ? terminalSessionProtocol.connectSession(...args)
-      : Promise.resolve(false)
-  );
+  const connectSession = (session, options) => {
+    const protocol = isClientInstanceName(session?.name)
+      ? clientTerminalProtocol : terminalSessionProtocol;
+    return protocol ? protocol.connectSession(session, options) : Promise.resolve(false);
+  };
+
+  const clientConnections = createClientTerminalConnectionController({
+    windowObject: window,
+    getDisposed: () => disposed,
+    isOnline: () => navigator.onLine !== false,
+    isClientTarget: (name) => isClientInstanceName(name),
+    getActiveName,
+    getActiveTabID: getActiveTabId,
+    getTabs: () => tabs.values(),
+    connectSession: (session, options) => connectSession(session, options),
+    sessionConnectingState: (session) => sessionConnectingState(session),
+    resumePendingInputExpiry: (session) => terminalInput?.resumePendingExpiry(session),
+    pausePendingInputExpiry: (session) => terminalInput?.pausePendingExpiry(session),
+    clearSessionConnectionTimers: (session) => terminalSessionConnection.clearConnectionTimers(session),
+    retrySessionAfterFailure: (session, error, options) => terminalSessionConnection.retryAfterFailure(session, error, options),
+    syncConnectionDemandsAfterPriorityDecay: (options) => terminalTransportRuntime?.syncConnectionDemands(options),
+    appendDebugLog: (...args) => appendDebugLog(...args),
+    appendDebugWarning: (...args) => appendDebugWarning(...args),
+    appendDebugError: (...args) => appendDebugError(...args),
+    describeSession: (session) => terminalLocationDescription(session),
+    socketClosed: WebSocket.CLOSED,
+    clientCapacity: terminalClientDirectWebSocketCapacity,
+    interactionPriorityMs: terminalConnectionInteractionPriorityMs,
+    reconnectBaseDelayMs: terminalReconnectBaseDelayMs,
+    reconnectMaxDelayMs: terminalReconnectMaxDelayMs,
+    reconnectJitterRatio: terminalReconnectJitterRatio,
+  });
 
   terminalTransportRuntime = createTerminalTransportRuntimeController({
+    clientConnections,
     windowObject: window,
     documentObject: document,
     getDisposed: () => disposed,
@@ -1704,25 +1742,13 @@ export function startGlobalRuntime() {
     detachSessionSocket: (session, socket, options) => detachSessionSocket(session, socket, options),
     connectSession: (session, options) => connectSession(session, options),
     sessionConnectingState: (session) => sessionConnectingState(session),
-    resumePendingInputExpiry: (session) => terminalInput?.resumePendingExpiry(session),
-    pausePendingInputExpiry: (session) => terminalInput?.pausePendingExpiry(session),
-    clearSessionConnectionTimers: (session) => terminalSessionConnection.clearConnectionTimers(session),
-    retrySessionAfterFailure: (session, error, options) => terminalSessionConnection.retryAfterFailure(session, error, options),
-    appendDebugLog: (...args) => appendDebugLog(...args),
-    appendDebugWarning: (...args) => appendDebugWarning(...args),
     appendDebugError: (...args) => appendDebugError(...args),
     recordRuntimeEvent: (event, details) => diagnostics.recordRuntimeEvent(event, details),
     describeSession: (session) => terminalLocationDescription(session),
     socketConnecting: WebSocket.CONNECTING,
     socketOpen: WebSocket.OPEN,
-    socketClosed: WebSocket.CLOSED,
-    clientCapacity: terminalClientDirectWebSocketCapacity,
-    interactionPriorityMs: terminalConnectionInteractionPriorityMs,
     unifiedRetryBaseDelayMs: terminalUnifiedPaneRetryBaseDelayMs,
     unifiedRetryMaxDelayMs: terminalUnifiedPaneRetryMaxDelayMs,
-    reconnectBaseDelayMs: terminalReconnectBaseDelayMs,
-    reconnectMaxDelayMs: terminalReconnectMaxDelayMs,
-    reconnectJitterRatio: terminalReconnectJitterRatio,
   });
 
   terminalKeyOverrides = createTerminalKeyOverridesController({
@@ -1744,7 +1770,7 @@ export function startGlobalRuntime() {
     isReplayCommitted: (session) => terminalReplay.isCommitted(session),
     isSocketOpen: (session) => session?.socket?.readyState === WebSocket.OPEN,
     getCurrentLease: (session) => terminalTransportRuntime?.currentLease(session) || null,
-    isClientTarget: (name) => isClientInstanceName(name),
+    isConnectionParked: (session) => clientConnections.isConnectionParked(session),
     getResizeSize: (session) => terminalResize.size(session),
     normalizeResizeEpoch: (value) => terminalResize.normalizeEpoch(value),
     getThemePayload: () => terminalThemePayload(),
@@ -1893,7 +1919,7 @@ export function startGlobalRuntime() {
     recordEvent: recordTerminalSessionEvent,
   });
 
-  terminalSessionProtocol = createTerminalSessionProtocolController({
+  const sessionProtocolOptions = {
     isByteIOLogEnabled: () => diagnostics.isByteIOLogEnabled(),
     documentObject: document,
     navigatorObject: navigator,
@@ -1905,13 +1931,11 @@ export function startGlobalRuntime() {
     terminalSessionConnection,
     terminalUnifiedTransport,
     terminalReplay,
-    clientHistory,
     terminalOutput,
     terminalPresentation,
     terminalResize,
     terminalInput,
     TerminalReplayController,
-    ClientTerminalReplayAdapter,
     terminalCheckpointCapabilitiesForTerminal,
     terminalAgentPrepareTimeoutMs,
     serverRevisionClientID: serverRevision.getClientID(),
@@ -1919,7 +1943,6 @@ export function startGlobalRuntime() {
     terminalThemePayload,
     sendTerminalTheme,
     syncTerminalNetworkMonitorSockets,
-    isClientInstanceName,
     isCurrentInstanceSession,
     terminalLocationDescription,
     isRetryableTerminalTransportError,
@@ -1940,6 +1963,12 @@ export function startGlobalRuntime() {
     isDebugLogEnabled,
     serverLogSinceUnixMS,
     recordTerminalSessionEvent,
+  };
+  terminalSessionProtocol = createTerminalSessionProtocolController(sessionProtocolOptions);
+  clientTerminalProtocol = createClientTerminalProtocolController({
+    ...sessionProtocolOptions,
+    history: clientHistory,
+    isClientTarget: isClientInstanceName,
   });
 
   const terminalSessionResources = createTerminalSessionResourceFactory({
@@ -2076,7 +2105,6 @@ export function startGlobalRuntime() {
     refreshTabAutoLabel: (tab) => refreshTabAutoLabel(tab),
     markSessionTitleNotification: (session) => markSessionTitleNotification(session),
     transportRuntime: terminalTransportRuntime,
-    isClientTarget: (name) => isClientInstanceName(name),
   });
   const createPaneSession = (tab, instanceName, options) => (
     terminalSessionInstallation.createPaneSession(tab, instanceName, options)

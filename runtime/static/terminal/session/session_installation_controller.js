@@ -36,7 +36,6 @@ export function createTerminalSessionInstallationController({
   refreshTabAutoLabel = noop,
   markSessionTitleNotification = noop,
   transportRuntime = null,
-  isClientTarget = () => false,
   documentObject = globalThis.document,
 } = {}) {
   if (!sessionController || typeof sessionController.create !== "function") {
@@ -210,9 +209,7 @@ export function createTerminalSessionInstallationController({
     installDOMListeners(session);
 
     tab.panes?.set(session.id, session);
-    if (isClientTarget(instanceName)) {
-      transportRuntime?.registerSession?.(session);
-    }
+    transportRuntime?.registerSession?.(session);
     if (connect) {
       transportRuntime?.connectPendingSession?.(session, { allowHidden: true });
     }

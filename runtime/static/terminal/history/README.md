@@ -14,7 +14,7 @@
 
 本目录负责 replay identity、cursor、sequence、authorization、checkpoint 和最终提交门禁。普通容器只消费同一 Unified WebSocket 上由 persistent agent 提供的权威 `snapshot + live`；本目录不再包含 Cache API、warm replay、preview、manifest、compaction 或浏览器持久化逻辑。
 
-`client:` target 尚未升级 Unified 协议，因此继续通过独立 IndexedDB store 保存兼容历史范围。该兼容路径必须由 `isClientTarget()` 精确隔离，普通容器不得调用其 prepare/range/reset 或写入存储。
+`client:` target 尚未升级 Unified 协议，其 IndexedDB store、兼容历史范围与回放适配由同级 `terminal-client/` 模块维护并注入。普通容器不得调用其 prepare/range/reset 或写入存储。
 
 任何 replay、snapshot、resize 或重连中间过程都不得进入可见 Canvas。
 
@@ -22,11 +22,11 @@
 
 外部只能从 `terminal/history/index.js` 导入：
 
-- `TerminalReplayController`、`ClientTerminalReplayAdapter`：校验 request/connection identity、cursor、sequence 和完成边界。
+- `TerminalReplayController`：校验 request/connection identity、cursor、sequence 和完成边界。
 - `createTerminalSessionReplayController()`：拥有 replay authorization、失败暂停、connect range 查询和最终 commit transaction。
-- `createClientTerminalHistoryController()`：`client:` IndexedDB 历史的唯一 controller；普通容器调用必须为无副作用 false/null。
-- `createTerminalHistoryCache()`：IndexedDB store 原语，仅由 client history controller 使用。
 - checkpoint API：能力与 payload 校验。
+
+客户端历史与协议入口从 `terminal-client/index.js` 导入，具体边界见 [客户端终端模块](../../terminal-client/README.md)。
 
 普通容器 Unified open 必须携带 `workspace_generation`，不得携带 `history_generation`、`local_base_cursor` 或 `local_end_cursor`。snapshot 必须先在 render suppression 下 reset Ghostty，`history_replay_complete` 只表示 replay 数据已接收；只有 `receivedHistoryCursor` 与目标 cursor 追平、output queue 排空、cursor 连续且最终 full render 成功后才提交。`replay_output_drained` 是浏览器 output 已追平 replay 边界的诊断事件，不能替代 presentation commit。
 
@@ -34,7 +34,7 @@
 
 `session_replay_controller.js` 是 session replay authorization、失败次数/暂停、commit phase 和最终 presentation 请求的唯一 owner；`session_replay_lifecycle.js` 独占 checkpoint timer。
 
-`client_history_controller.js` 独占 `client:` load/reset/write/flush/touch/delete、timer 和迟到 Promise guard。session dispose 会先 flush 客户端历史，再取消其 schedule；普通容器不会创建任何浏览器历史任务。
+`terminal-client/history_controller.js` 独占 `client:` load/reset/write/flush/touch/delete、timer 和迟到 Promise guard。session dispose 会先 flush 客户端历史，再取消其 schedule；普通容器不会创建任何浏览器历史任务。
 
 兼容缓存每个会话只允许一笔写入进行中，后续字节留在有界队列，完成后再提交。写入在创建时固定 reset Promise，避免后来产生的 reset 反向等待该写入而成环；过期 generation 的失败不禁用新缓存。暂存最多 4 MiB / 8192 条，复制独立字节片段避免小尾片持有整个网络包；存储无法跟上时沿用缓存故障禁用路径，当前终端输出仍继续。touch 请求也按会话合并，销毁释放未提交队列与 snapshot 引用。
 
@@ -42,12 +42,9 @@
 
 - `index.js`：唯一公开入口。
 - `terminal_replay_controller.js`：现代 replay identity/cursor/sequence 校验。
-- `session_replay_state.js`：cursor、authorization、commit 和 client connect range 的纯状态查询。
+- `session_replay_state.js`：cursor、authorization 和 commit 的纯状态查询。
 - `session_replay_lifecycle.js`：checkpoint timer 和 generation/dispose guard。
 - `session_replay_controller.js`：replay 失败暂停和最终提交编排。
-- `client_terminal_replay.js`：`client:` 原始二进制 replay 适配。
-- `client_history_controller.js`：`client:` IndexedDB 历史 controller。
-- `terminal_history_cache.js`：IndexedDB store 原语。
 - `terminal_checkpoint.js`：checkpoint 能力和数据校验。
 
 ## 依赖与验证

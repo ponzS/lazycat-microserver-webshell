@@ -2,6 +2,7 @@ domains:
   terminal:
     paths:
       - runtime/static/terminal/**
+      - runtime/static/terminal-client/**
       - spec/terminal/**
       - spec-tests/terminal/**
   workspace:
@@ -27,6 +28,7 @@ rules:
       - runtime/static/**
     exclude_paths:
       - runtime/static/terminal/**
+      - runtime/static/terminal-client/**
       - runtime/static/workspace/**
       - runtime/static/app/**
       - spec-tests/terminal/**

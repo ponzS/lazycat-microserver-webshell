@@ -1,4 +1,5 @@
-import { createTerminalHistoryCache } from "./terminal_history_cache.js";
+import { createTerminalHistoryCache } from "./history_cache.js";
+import { terminalSessionHistoryRangeForConnect } from "./history_range.js";
 
 const noop = () => {};
 
@@ -263,6 +264,33 @@ export function createClientTerminalHistoryController({
     return true;
   };
 
+  const flushReplayCache = (session) => {
+    if (
+      isClientTarget(session.name)
+      && session.historyProtocolActive
+      && !session.historyCacheDisabled
+      && session.persistedHistoryCursor < session.historyReplayTargetCursor
+    ) {
+      if (!session.historyCacheReplayCommitPending) {
+        session.historyCacheReplayCommitPending = true;
+        const commitSeq = Number(session.historyCacheReplayCommitSeq || 0) + 1;
+        session.historyCacheReplayCommitSeq = commitSeq;
+        const historyGeneration = session.historyGeneration;
+        const replayTargetCursor = session.historyReplayTargetCursor;
+        Promise.resolve(flushSession(session)).catch((error) => disableSession(session, error)).finally(() => {
+          if (
+            session.historyCacheReplayCommitSeq === commitSeq
+            && !session.closed
+            && session.historyGeneration === historyGeneration
+            && session.historyReplayTargetCursor === replayTargetCursor
+          ) {
+            session.historyCacheReplayCommitPending = false;
+          }
+        });
+      }
+    }
+  };
+
   const flushAll = () => Promise.allSettled(Array.from(getSessions() || [], (session) => flushSession(session)));
 
   const touchAll = () => {
@@ -300,6 +328,10 @@ export function createClientTerminalHistoryController({
       return Boolean(session);
     },
     flushAll,
+    flushReplayCache,
+    rangeForConnect: (session) => (
+      isClientTarget(session?.name) ? terminalSessionHistoryRangeForConnect(session) : null
+    ),
     flushSession,
     handleHistoryWindowChange,
     prepareSession,
