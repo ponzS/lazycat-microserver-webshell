@@ -4,6 +4,26 @@
 
 它通过 LPK Resource Export 声明 `lightos.webshell` 能力，由 LightOS Admin 发现并打开。安装后，用户可以从 LightOS 的 WebShell 入口进入目标实例，直接在网页中进行命令行操作，并使用标签、分屏、文件传输、服务转发和快捷键等能力。
 
+## 模块导航
+
+服务端按职责分包，根目录 `main.go` 只组装依赖并选择 agent/Provider 入口。
+
+| 模块 | 职责 |
+| --- | --- |
+| [core](core/README.md) | 工作区、PTY 会话逻辑、终端应答、历史、checkpoint、agent 协议和 Unified 流控 |
+| [unix](unix/README.md) | Unix PTY/IPC 与现有 Linux Shell、进程扫描和回收实现 |
+| [windows](windows/README.md) | 后续 Windows 适配边界；目前没有实现 |
+| [provider](provider/README.md) | HTTP 入口、账号鉴权、实例发现、容器/旧客户端接入、文件和设置 |
+| [internal](internal/README.md) | 服务端日志与字体等内部公共模块 |
+| [runtime](runtime/README.md) | 运行资产及 Go checkpoint 的唯一 WASM 来源 |
+| [runtime/static](runtime/static/README.md) | 浏览器前端模块 |
+
+依赖方向为入口 → Provider/Unix/Core，Provider 和 Unix 通过 Core 接口接入；Core 不反向导入它们。构建仍从根目录执行 `go build .`，产物名称、CLI 参数、LPK 布局及 HTTP 路径保持不变。
+
+本次为第一阶段模块整理，完整运行入口仍只支持现有 Linux 环境。Core 可独立编译不代表 macOS/Windows 整机运行已实现，也不表示 PC/hclient-cli 集成已完成。
+
+Agent 推荐版本为 v28，保留 v27 及原兼容版本。此次仅调整代码组织和依赖边界，传输格式、快照 ABI 与 WASM 文件未改变，不强制重启兼容的旧 agent。
+
 ## 项目目标
 
 LightOS WebShell 的目标是为懒猫微服提供一个开箱即用的网页终端：

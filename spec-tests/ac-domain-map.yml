@@ -22,6 +22,12 @@ domains:
 rules:
   - paths:
       - '*.go'
+      - core/**
+      - unix/**
+      - windows/**
+      - provider/**
+      - internal/**
+      - runtime/assets.go
       - spec-tests/**
       - spec-tests/environment/**
       - run-ac.sh
