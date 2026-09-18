@@ -46,6 +46,8 @@ type terminalPane struct {
 	cwd                        string
 	activityCheckedAt          time.Time
 	controlPending             []byte
+	localCWDPending            []byte
+	localCWDReports            bool
 	terminalQueryPending       []byte
 	terminalForegroundColor    string
 	terminalBackgroundColor    string
@@ -100,6 +102,15 @@ func newTerminalPane(workspace *terminalWorkspace, paneID string, cols, rows int
 		done:              make(chan struct{}),
 	}
 	_ = workspace.runtime.platform.ResizePTY(ptyFile, pane.cols, pane.rows, 0, 0)
+	if named, ok := ptyFile.(interface{ TTYName() string }); ok {
+		pane.tty = named.TTYName()
+	}
+	if local, ok := ptyFile.(interface{ InitialWorkingDirectory() string }); ok && pane.cwd == "" {
+		pane.cwd = local.InitialWorkingDirectory()
+	}
+	if reports, ok := ptyFile.(interface{ SupportsCWDReports() bool }); ok {
+		pane.localCWDReports = reports.SupportsCWDReports()
+	}
 	if workspace.localPTY {
 		pane.checkpoint, err = newTerminalCheckpointEngine(pane.cols, pane.rows, historyLimitBytes/averageHistoryBytesPerLine)
 		if err != nil {
@@ -116,7 +127,7 @@ func newTerminalPane(workspace *terminalWorkspace, paneID string, cols, rows int
 func (p *terminalPane) readLoop() {
 	waitErr := make(chan error, 1)
 	go func() {
-		waitErr <- p.cmd.Wait()
+		waitErr <- p.workspace.runtime.platform.WaitCommand(p.cmd)
 	}()
 
 	buf := make([]byte, 32768)
@@ -148,6 +159,9 @@ func (p *terminalPane) appendOutput(data []byte) {
 	filtered := p.filterGeneratedInputEcho(data)
 	filtered = p.filterTerminalQueryOutput(filtered)
 	filtered = p.filterPrivateControlOutput(filtered)
+	if p.localCWDReports {
+		filtered = p.filterLocalCWDOutput(filtered)
+	}
 	if len(filtered) == 0 {
 		return
 	}

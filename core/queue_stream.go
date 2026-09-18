@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"github.com/gorilla/websocket"
 	"io"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,11 +34,11 @@ type terminalQueuePaneStream struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	command   *exec.Cmd
-	stdin     io.WriteCloser
-	stdout    io.ReadCloser
-	stderr    bytes.Buffer
-	stderrLog QueueLog
+	connection QueueConnection
+	stdin      io.WriteCloser
+	stdout     io.ReadCloser
+	stderr     bytes.Buffer
+	stderrLog  QueueLog
 
 	stdinMu sync.Mutex
 	stopMu  sync.Mutex
@@ -106,14 +105,14 @@ func (s *terminalQueuePaneStream) stop() {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	if s.command == nil || s.exited == nil {
+	if s.connection.Kill == nil || s.exited == nil {
 		return
 	}
 	go func() {
 		select {
 		case <-s.exited:
 		case <-time.After(2 * time.Second):
-			_ = s.broker.backend.KillCommand(s.command)
+			_ = s.connection.Kill()
 		}
 	}()
 }

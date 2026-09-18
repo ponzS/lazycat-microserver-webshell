@@ -22,8 +22,11 @@ func (s *pluginServer) attachPersistentPaneQueue(w http.ResponseWriter, r *http.
 		return nil
 	}
 	if isClientTarget(selector) {
-		http.Error(w, "queue websocket is not supported for client targets", http.StatusBadRequest)
-		return nil
+		if r.URL.Query().Get("transport_role") != "unified" {
+			http.Error(w, "client terminal requires unified transport", http.StatusBadRequest)
+			return nil
+		}
+		return s.attachClientPane(w, r, accountID, selector, "", 0, 0, s.currentTerminalScrollback())
 	}
 	transportRole := strings.TrimSpace(r.URL.Query().Get("transport_role"))
 	if transportRole == "" {

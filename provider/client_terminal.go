@@ -58,13 +58,12 @@ func (s *pluginServer) handleClientWorkspace(w http.ResponseWriter, r *http.Requ
 	}
 	switch r.Method {
 	case http.MethodGet:
-		state, err := s.clientWorkspaceState(r.Context(), r.Header, selector, cols, rows, terminalScrollback)
+		state, err := s.clientWorkspaceWithRecovery(r.Context(), r.Header, NormalizeAgentScope(selector, accountID), cols, rows, terminalScrollback, nil)
 		if err != nil {
 			log.Printf("client terminal workspace state failed: selector=%s err=%v", selector, err)
 			writeClientTerminalError(w, err)
 			return
 		}
-		disableClientWorkspaceGeneration(&state)
 		state.ServerRevision = s.currentServerRevision()
 		log.Printf("client terminal workspace state ready: selector=%s tabs=%d active_tab=%s", selector, len(state.Tabs), state.ActiveTabID)
 		writeJSON(w, state)
@@ -75,14 +74,17 @@ func (s *pluginServer) handleClientWorkspace(w http.ResponseWriter, r *http.Requ
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		if request.Action == "restore_workspace" || request.Recovery != nil {
+			http.Error(w, "workspace recovery is not a public action", http.StatusBadRequest)
+			return
+		}
 		log.Printf("client terminal workspace action request: selector=%s action=%s tab=%s pane=%s cols=%d rows=%d terminal_scrollback=%d", selector, request.Action, request.TabID, request.PaneID, cols, rows, terminalScrollback)
-		state, err := s.clientWorkspaceAction(r.Context(), r.Header, selector, cols, rows, terminalScrollback, request)
+		state, err := s.clientWorkspaceWithRecovery(r.Context(), r.Header, NormalizeAgentScope(selector, accountID), cols, rows, terminalScrollback, &request)
 		if err != nil {
 			log.Printf("client terminal workspace action failed: selector=%s action=%s err=%v", selector, request.Action, err)
 			writeClientTerminalError(w, err)
 			return
 		}
-		disableClientWorkspaceGeneration(&state)
 		state.ServerRevision = s.currentServerRevision()
 		log.Printf("client terminal workspace action ready: selector=%s action=%s tabs=%d active_tab=%s", selector, request.Action, len(state.Tabs), state.ActiveTabID)
 		writeJSON(w, state)
@@ -90,13 +92,6 @@ func (s *pluginServer) handleClientWorkspace(w http.ResponseWriter, r *http.Requ
 		log.Printf("client terminal workspace method not allowed: method=%s selector=%s", r.Method, selector)
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
-}
-
-func disableClientWorkspaceGeneration(state *WorkspaceState) {
-	if state == nil {
-		return
-	}
-	state.WorkspaceGeneration = ""
 }
 
 func (s *pluginServer) handleClientWorkspaceActivity(w http.ResponseWriter, r *http.Request, accountID, selector string, cols, rows, terminalScrollback int) {
@@ -114,6 +109,8 @@ func (s *pluginServer) handleClientWorkspaceActivity(w http.ResponseWriter, r *h
 	}
 	state.ServerRevision = s.currentServerRevision()
 	log.Printf("client terminal activity ready: selector=%s panes=%d", selector, len(state.Panes))
+	_, epoch := s.currentTerminalRuntimeSettings()
+	s.mergeWorkspaceRecoveryActivity(NormalizeAgentScope(selector, accountID), epoch, state)
 	writeJSON(w, state)
 }
 
@@ -422,7 +419,7 @@ func clientTerminalAttachURL(ticket clientTerminalTicket, r *http.Request, paneI
 	for key, value := range clientTerminalSessionQuery(cols, rows, terminalScrollback) {
 		query.Set(key, value)
 	}
-	for _, key := range []string{"history_generation", "local_base_cursor", "local_end_cursor", "history_replay_mode", "integrity_protocol"} {
+	for _, key := range []string{"workspace_generation", "transport_role", "checkpoint_protocol", "history_replay_mode", "integrity_protocol"} {
 		if value := strings.TrimSpace(r.URL.Query().Get(key)); value != "" {
 			query.Set(key, value)
 		}

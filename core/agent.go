@@ -17,8 +17,9 @@ import (
 const (
 	// v27 falls back to bounded raw history when a pane's checkpoint parser
 	// fails, retaining diagnostics without rebuilding it. WASM is unchanged from v26.
-	// v28 reorganizes server modules; the wire protocol and checkpoint ABI are unchanged.
-	AgentProtocolVersion = "lcmd-webshell-agent-v28"
+	// v29 adds the local runtime; existing wire and checkpoint formats are unchanged.
+	// v30 aligns the local Unified ready message with the container handshake.
+	AgentProtocolVersion = "lcmd-webshell-agent-v30"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')
@@ -38,6 +39,7 @@ type agentDaemon struct {
 	accountID string
 	username  string
 	workspace *terminalWorkspace
+	closed    bool
 }
 
 func (rt *Runtime) runAgentDaemon(socketPath, readyFile, selector, accountID, username string) error {

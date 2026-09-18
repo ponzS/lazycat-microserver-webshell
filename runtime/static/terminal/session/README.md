@@ -45,7 +45,7 @@ controller 公开：
 
 销毁顺序必须保持：
 
-1. 对 `client:` 请求 flush 尚未提交的 IndexedDB 历史写入；普通容器为无副作用操作。
+1. 会话不再 flush 浏览器历史；客户端与容器都只消费服务端权威回放。
 2. 设置 `session.closed = true`。
 3. reset replay 状态，并只 detach 当前 Unified logical stream。
 4. 注销 `client:` scheduler lease。

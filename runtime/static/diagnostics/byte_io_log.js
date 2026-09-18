@@ -10,7 +10,7 @@ const events = new Set([
 ]);
 const fields = new Set([
   "bytes", "inputBytes", "wireBytes", "batchID", "entries", "queuedBytes", "queueEntries",
-  "enqueueMs", "oldestQueueWaitMs", "newestQueueWaitMs", "coalesceMs", "writeAwaitMs", "cacheEnqueueMs", "renderCallMs",
+  "enqueueMs", "oldestQueueWaitMs", "newestQueueWaitMs", "coalesceMs", "writeAwaitMs", "renderCallMs",
   "operation", "requestID", "pendingRequests", "pendingBytes", "workerGeneration", "backendCount",
   "roundTripMs", "requestCopyMs", "postMessageMs", "workerQueueMs", "workerExecutionMs",
   "parseMs", "snapshotMs", "frameUnpackMs", "frameAcceptMs", "rpcTotalMs",
@@ -105,7 +105,7 @@ export function createByteIOLog({ windowObject = globalThis.window, now = () => 
         "Queue wait includes waiting for replay completion/resize/scheduling; parseMs includes WASM input copy and parsing.",
         "snapshotMs: worker snapshot preparation; workerExecutionMs includes parse+snapshot; workerQueueMs starts at the worker message handler (excludes an earlier blocked event loop).",
         "roundTripMs ends at UI reply arrival; frameUnpackMs/frameAcceptMs run afterwards; rpcTotalMs includes UI frame acceptance.",
-        "cacheEnqueueMs covers synchronous history-cache enqueue/copy, not storage completion; renderCallMs covers the synchronous full-render call, not GPU display completion.",
+        "renderCallMs covers the synchronous full-render call, not GPU display completion; no browser history-cache writes are performed.",
         "rpcTotalMs and writeAwaitMs are elapsed waits, NOT main-thread blocking time. Timing fields can overlap; do not sum them.",
         "Opening capture mid-stream cannot reconstruct earlier events. Terminal contents are not recorded.", ...lines].join("\n");
     },

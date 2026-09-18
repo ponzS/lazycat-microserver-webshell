@@ -8,13 +8,13 @@
 
 模块内存上限 256 MiB，压缩快照上限 16 MiB，分片 64 KiB；后台保留的未完成控制序列上限 1 MiB。Worker 校验后限长解压、在当前连接代次内导入，初始 clear 在导入前完成，尺寸操作和增量在导入后顺序执行，呈现须等待这些操作结束。恢复在 Worker 中执行，主线程不解压大内存。主题默认值通过独立桥接覆盖，程序设置的动态颜色保留。
 
-旧 Agent、未协商的浏览器和客户端主机终端保持原路径；检测到 Kitty 图形协议的 pane 停用影子引擎并使用原始历史，当前基线不宣称包含独立 UI 图形资源。Agent 维护状态会增加解析与内存成本，不是零开销。原始字节裁剪仍存在，但不会再用于支持新基线的普通 TUI 首屏恢复。
+旧容器 Agent 和未协商的浏览器保持原路径；受管理的 PC 使用相同快照模型；检测到 Kitty 图形协议的 pane 停用影子引擎并使用原始历史，当前基线不宣称包含独立 UI 图形资源。Agent 维护状态会增加解析与内存成本，不是零开销。原始字节裁剪仍存在，但不会再用于支持新基线的普通 TUI 首屏恢复。
 
 ## 职责
 
 本目录负责 replay identity、cursor、sequence、authorization、checkpoint 和最终提交门禁。普通容器只消费同一 Unified WebSocket 上由 persistent agent 提供的权威 `snapshot + live`；本目录不再包含 Cache API、warm replay、preview、manifest、compaction 或浏览器持久化逻辑。
 
-`client:` target 尚未升级 Unified 协议，其 IndexedDB store、兼容历史范围与回放适配由同级 `terminal-client/` 模块维护并注入。普通容器不得调用其 prepare/range/reset 或写入存储。
+`client:` target 与容器共用本模块的 Unified 快照恢复，不读写 IndexedDB。`terminal-client/` 只负责升级能力检查和旧数据库退役。
 
 任何 replay、snapshot、resize 或重连中间过程都不得进入可见 Canvas。
 
@@ -26,7 +26,7 @@
 - `createTerminalSessionReplayController()`：拥有 replay authorization、失败暂停、connect range 查询和最终 commit transaction。
 - checkpoint API：能力与 payload 校验。
 
-客户端历史与协议入口从 `terminal-client/index.js` 导入，具体边界见 [客户端终端模块](../../terminal-client/README.md)。
+客户端专属迁移入口见 [客户端终端模块](../../terminal-client/README.md)，不维护另一套历史或协议实现。
 
 普通容器 Unified open 必须携带 `workspace_generation`，不得携带 `history_generation`、`local_base_cursor` 或 `local_end_cursor`。snapshot 必须先在 render suppression 下 reset Ghostty，`history_replay_complete` 只表示 replay 数据已接收；只有 `receivedHistoryCursor` 与目标 cursor 追平、output queue 排空、cursor 连续且最终 full render 成功后才提交。`replay_output_drained` 是浏览器 output 已追平 replay 边界的诊断事件，不能替代 presentation commit。
 
@@ -34,9 +34,8 @@
 
 `session_replay_controller.js` 是 session replay authorization、失败次数/暂停、commit phase 和最终 presentation 请求的唯一 owner；`session_replay_lifecycle.js` 独占 checkpoint timer。
 
-`terminal-client/history_controller.js` 独占 `client:` load/reset/write/flush/touch/delete、timer 和迟到 Promise guard。session dispose 会先 flush 客户端历史，再取消其 schedule；普通容器不会创建任何浏览器历史任务。
+两种实例都不创建浏览器历史写入、flush、touch 或心跳任务。旧数据库只能删除，不能为清理而打开或重建。
 
-兼容缓存每个会话只允许一笔写入进行中，后续字节留在有界队列，完成后再提交。写入在创建时固定 reset Promise，避免后来产生的 reset 反向等待该写入而成环；过期 generation 的失败不禁用新缓存。暂存最多 4 MiB / 8192 条，复制独立字节片段避免小尾片持有整个网络包；存储无法跟上时沿用缓存故障禁用路径，当前终端输出仍继续。touch 请求也按会话合并，销毁释放未提交队列与 snapshot 引用。
 
 ## 文件清单
 
@@ -49,9 +48,9 @@
 
 ## 依赖与验证
 
-history 不建立 WebSocket、不操作 Canvas、不拥有 resize 或输入状态。相关测试为 `terminal_session_protocol_controller_test.mjs`、`terminal_session_replay_controller_test.mjs`、`terminal_replay_controller_test.mjs`、`client_terminal_history_controller_test.mjs`、`terminal_checkpoint_test.mjs` 和 `TestRuntimeTerminalHistoryModuleBoundary`。
+history 不建立 WebSocket、不操作 Canvas、不拥有 resize 或输入状态。真实场景见 `spec-tests/terminal/client-replay/` 和状态恢复规格；构建与局部检查不等于浏览器验收。
 
-最小回归：普通容器首次进入/刷新/断线重连只走服务端 snapshot；Unified open 无本地 range；snapshot 中间帧不可见；`client:` cache/memory range 仍连续；任一迟到 generation、cursor 不连续或 identity 不匹配都拒绝提交且不影响兄弟 stream。
+最小回归：普通容器首次进入/刷新/断线重连只走服务端 snapshot；Unified open 无本地 range；snapshot 中间帧不可见；`client:` 使用同样的服务端游标与快照；任一迟到 generation、cursor 不连续或 identity 不匹配都拒绝提交且不影响兄弟 stream。
 
 ## Agent v27 的原始历史 fallback 与故障日志
 

@@ -23,6 +23,8 @@ rules:
   - paths:
       - '*.go'
       - core/**
+      - localserver/**
+      - localtools/**
       - unix/**
       - windows/**
       - provider/**

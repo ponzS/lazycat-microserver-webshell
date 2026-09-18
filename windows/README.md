@@ -1,9 +1,13 @@
-# Windows 平台适配边界
+# Windows 本地终端适配
 
-本目录是后续 Windows 实现的归属说明，第一阶段不提供 Go 实现或可运行二进制，不表示已支持 Windows。
+实现 Core 的 Platform：ConPTY、PowerShell、尺寸、活动状态和所属进程回收。只由本地终端入口调用；容器 Provider 仍是 Linux 服务。
 
-后续负责实现 `core.Platform` 所需的 ConPTY、Shell、尺寸、进程树/句柄和本地通信能力；通过启动入口注入 Core，不复制会话、历史、主题、快照或流控算法。源文件使用 `_windows.go` 或明确构建约束。
+- platform_windows.go：New 创建服务级 Job Object；每个 pane 在挂起状态创建，加入独立 Job 后才恢复运行，失败即拒绝启动。
+- job_windows.go：句柄所有权、进程恢复与关闭。服务被强制结束时，由系统回收 Job 内后代；关闭 ConPTY 前先关闭管道，避免旧 Windows 的 ClosePseudoConsole 等待输出而卡住。
+- activity_windows.go：只观察受管理 pane 的进程后代；PowerShell 在当前进程内包装原 prompt 上报目录，不修改用户 Profile。
 
-不能通过空实现、静默忽略错误或放宽权限让 Windows 构建假装可用。需在下一阶段明确进程所有权、父进程退出、可靠清理和用户权限语义，再做 Windows 真机验证。
+使用 github.com/charmbracelet/x/conpty 的固定版本；关闭顺序依据 [Microsoft ClosePseudoConsole 文档](https://learn.microsoft.com/en-us/windows/console/closepseudoconsole)。不自动提权，不按进程名批量终止，不把网络核心的提升权限带给 Shell。
 
-本阶段检查本目录职责与公共接口是否清晰；跨平台编译 Core 不等于完成 Windows PTY、打包或运行验收。
+库检查：在仓库根目录执行 `GOOS=windows go build ./windows ./localserver`。实际二进制由 PC 的 terminal-core/build.mjs 构建，入口调用 New，不使用裸 Platform 绕过服务级 Job。
+
+必须实机验证 PowerShell Profile、Unicode、主题、resize、退出码、前台/后台子进程，以及父进程被结束时的回收；交叉编译不等于这些场景已验收。

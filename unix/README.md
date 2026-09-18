@@ -1,26 +1,18 @@
 # Unix 平台适配
 
-本包实现 Core 的系统操作接口。第一阶段仅接线并验证既有 Linux 行为，不增加 macOS 功能。
+实现 Core 的系统操作接口，不拥有历史、工作区或 WebSocket 调度。Linux 容器路径和 PC 本地路径分别组装，不复用容器的用户切换脚本来启动 PC Shell。
 
-## 入口与文件
+## 文件与入口
 
-- `platform_linux.go`：`Platform` 的 Linux 接线、Shell 命令环境、活动查询和 IPC/进程接口。
-- `pty_unix.go`、`process_unix.go`：Unix PTY 启动、尺寸调整和既有进程结束方式。
-- `ipc_unix.go`、`listener_unix.go`：agent socket、排他文件锁、权限和按文件身份清理。
-- `shell_linux.go`：原 Linux Shell 环境、用户切换与会话引导脚本，原样保留其行为。
-- `activity_linux.go`：Linux `/proc` 扫描、前台进程和工作目录识别；也提供 Provider 解析远程扫描结果的辅助能力。
-- `agent_reconcile_linux.go`：按 socket/selector/account 核对 agent 进程身份并回收。
-- `agent_signal_*`、`agent_limits_unix.go`：信号与文件句柄限制。
-- `dependencies.go`：引用 Core 的共享协议类型，不维护另一份终端协议。
+- platform_linux.go、shell_linux.go、activity_linux.go：原 Linux 容器平台、用户切换、Shell 引导和 /proc 活动查询。
+- platform_unix.go、pty_unix.go、ipc_unix.go、listener_unix.go：Unix 共用的原 agent PTY、等待和 IPC 原语。
+- local_unix.go：LocalPlatform，以桌面用户启动默认 Shell，保留系统 rc；Linux 交互非 login，macOS 交互 login。nano shim 仅通过 PATH 注入。
+- local_process_unix.go：关闭本地 PTY 前，回收所属 session 和当前可确认的后代；不按可执行名杀进程。
+- platform_darwin.go、activity_darwin.go：macOS 平台及 ps/lsof 活动查询；不依赖 /proc。
+- agent_reconcile_linux.go：原 Linux 持久 agent 的身份核对与回收。PC 使用管理层的私有父管道，不调用此扫描逻辑。
 
-## 边界与约束
+## 约束与验证
 
-依赖方向为 Unix → Core；Core 不导入本包。不得放入工作区业务、历史、checkpoint 或 WebSocket 流控逻辑。容器发现和 `lightosctl` 属于 Provider。
+依赖方向为 Unix → Core；Core 不反向导入。系统专属文件通过 build tags 或平台后缀隔离。容器原有脚本与 Process.Kill 行为保持不变；本地模式使用独立的 PTY/session 回收和编码兼容适配。
 
-通用 Unix 文件明确使用 `linux || darwin` 构建约束，Linux 专属实现使用 `_linux.go`。现有非 Linux 辅助片段不构成完整 macOS 适配；后续需补齐 Platform 接线并真实验证。
-
-保留原进程归属检查、锁与 socket 清理顺序，不能按同名进程批量终止。用户切换失败继续拒绝启动，不退回更高权限账号。本次不改变既有 `Process.Kill` 范围或 Shell 引导逻辑。
-
-## 验证
-
-在 Linux 执行 `go build ./unix`、`go vet ./unix`，并通过真实 agent 验证 PTY、resize、断开/重连、活动识别和退出。使用隔离的测试用户或容器，Shell 引导脚本可能读取或维护该用户配置，勿使用生产会话作可清理资源。
+Linux 执行 `go build ./unix`、`go vet ./unix`；macOS 库可用 `GOOS=darwin go build ./unix` 检查。真实回归需隔离用户 HOME，检查 rc、代理环境、CWD、resize、编码、关闭和父进程退出。进程有意自行脱离 session/父子关系或提权后，不按名称强行猜测归属；该边界需在实机审核。

@@ -70,7 +70,16 @@ func WorkspaceRecoveryDocumentFromState(epoch string, state WorkspaceState) Work
 
 func NormalizeRecoveryCWD(value string) string {
 	value = strings.TrimSpace(value)
-	if value == "" || len(value) > 4096 || !filepath.IsAbs(value) {
+	if value == "" || len(value) > 4096 || strings.IndexByte(value, 0) >= 0 {
+		return ""
+	}
+	// A Linux Provider can persist a Windows client's native CWD. Preserve that
+	// spelling here; the receiving platform validates/canonicalizes it again.
+	if !filepath.IsAbs(value) {
+		drive := len(value) >= 3 && ((value[0] >= 'A' && value[0] <= 'Z') || (value[0] >= 'a' && value[0] <= 'z')) && value[1] == ':' && (value[2] == '\\' || value[2] == '/')
+		if drive || strings.HasPrefix(value, `\\`) {
+			return value
+		}
 		return ""
 	}
 	return filepath.Clean(value)

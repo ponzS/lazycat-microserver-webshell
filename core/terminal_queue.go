@@ -285,40 +285,27 @@ func (b *terminalQueueBroker) startPaneStream(
 	processStartRequestedAt := time.Now()
 	syncRequest.CheckpointProtocol = subscription.CheckpointProtocol
 	streamCtx, cancel := context.WithCancel(b.ctx)
-	command := b.backend.Command(streamCtx, b.scope, subscription.PaneID, subscription.Cols, subscription.Rows, terminalScrollback, syncRequest)
-	stdout, err := command.StdoutPipe()
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-	stdin, err := command.StdinPipe()
-	if err != nil {
-		cancel()
-		return nil, err
-	}
 	stream := &terminalQueuePaneStream{
 		broker:       b,
 		subscription: subscription,
 		ctx:          streamCtx,
 		cancel:       cancel,
-		command:      command,
-		stdin:        stdin,
-		stdout:       stdout,
 		active:       true,
 		priority:     clampTerminalStreamPriority(subscription.Priority),
 		exited:       make(chan struct{}),
 	}
 	stderrLog := b.backend.Log(subscription.PaneID)
 	stream.stderrLog = stderrLog
-	command.Stderr = io.MultiWriter(&stream.stderr, stderrLog)
-	if err := command.Start(); err != nil {
+	connection, err := b.backend.Open(streamCtx, b.scope, subscription.PaneID, subscription.Cols, subscription.Rows, terminalScrollback, syncRequest, io.MultiWriter(&stream.stderr, stderrLog))
+	if err != nil {
 		cancel()
-		_ = stdin.Close()
-		_ = stdout.Close()
 		return nil, err
 	}
+	stream.connection = connection
+	stream.stdin = connection.Input
+	stream.stdout = connection.Output
 	go func() {
-		_ = command.Wait()
+		_ = connection.Wait()
 		stderrLog.Flush()
 		close(stream.exited)
 	}()

@@ -459,7 +459,6 @@ export function createTerminalSessionProtocolController({
       session.resetOnNextReplay = true;
       session.historyStateReady = false;
       session.historyProtocolActive = false;
-      session.historyCacheSnapshot = null;
       session.historyGeneration = "";
       session.replayController?.reset();
       session.queueReplayControllerActive = false;
@@ -728,7 +727,6 @@ export function createTerminalSessionProtocolController({
                   session.historyProtocolActive = false;
                   session.historyStateReady = false;
                   session.historyGeneration = "";
-                  session.historyCacheSnapshot = null;
                   session.localBaseCursor = 0n;
                   session.receivedHistoryCursor = 0n;
                   session.appliedHistoryCursor = 0n;

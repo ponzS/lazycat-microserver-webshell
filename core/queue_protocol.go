@@ -119,6 +119,9 @@ func encodeTerminalQueueBinaryFrame(header terminalQueueBinaryHeader, payload []
 }
 
 func validateTerminalQueueSubscription(subscription terminalQueueSubscription) (terminalQueueSubscription, HistorySyncRequest, error) {
+	if len(subscription.Foreground) > 64 || len(subscription.Background) > 64 || len(subscription.Cursor) > 64 {
+		return subscription, HistorySyncRequest{}, errors.New("invalid terminal theme")
+	}
 	subscription.PaneID = strings.TrimSpace(subscription.PaneID)
 	subscription.StreamID = strings.TrimSpace(subscription.StreamID)
 	subscription.WorkspaceGeneration = strings.TrimSpace(subscription.WorkspaceGeneration)

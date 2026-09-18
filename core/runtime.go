@@ -16,6 +16,7 @@ type Platform interface {
 	DefaultWorkingDirectory() string
 	Command(Launch) *exec.Cmd
 	StartPTY(*exec.Cmd) (PTY, error)
+	WaitCommand(*exec.Cmd) error
 	ResizePTY(PTY, int, int, int, int) error
 	KillCommand(*exec.Cmd) error
 	ScanActivities(context.Context, []string) (map[string]PaneActivity, error)
@@ -54,9 +55,17 @@ type QueueLog interface {
 // Each broker receives its own backend. Multiplexing, bounds and ACK handling
 // do not know how a target's persistent agent is reached.
 type QueueBackend interface {
-	Command(context.Context, AgentScope, string, int, int, int, HistorySyncRequest) *exec.Cmd
-	KillCommand(*exec.Cmd) error
+	Open(context.Context, AgentScope, string, int, int, int, HistorySyncRequest, io.Writer) (QueueConnection, error)
 	Log(string) QueueLog
+}
+
+// QueueConnection is an attach stream, not a terminal process. Closing it must
+// detach the viewer without killing the workspace's PTY.
+type QueueConnection struct {
+	Input  io.WriteCloser
+	Output io.ReadCloser
+	Wait   func() error
+	Kill   func() error
 }
 
 const agentReadyMarker = "__LCMD_WEBSHELL_AGENT_READY__"

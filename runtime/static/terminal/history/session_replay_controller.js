@@ -16,8 +16,6 @@ export function createTerminalSessionReplayController({
   windowObject = globalThis.window,
   getActiveName = () => "",
   hasQueuedOutput = () => false,
-  flushReplayCache = noop,
-  historyRangeForConnect = () => null,
   endRenderSuppression = noop,
   clearOutputOverload = noop,
   clearAttachReadyTimer = noop,
@@ -66,7 +64,6 @@ export function createTerminalSessionReplayController({
     ) {
       return false;
     }
-    flushReplayCache(session);
     recordEvent(session, "replay_output_drained", {
       receivedCursor: session.receivedHistoryCursor?.toString?.() || "",
       appliedCursor: session.appliedHistoryCursor?.toString?.() || "",
@@ -93,7 +90,6 @@ export function createTerminalSessionReplayController({
     session.replayComplete = true;
     setTerminalReplayAuthorization(session, false);
     session.historyStateReady = true;
-    session.historyCacheSnapshot = null;
     session.agentPreparing = false;
     clearOutputOverload(session);
     session.allowGeneratedInputDuringReplay = false;
@@ -172,8 +168,6 @@ export function createTerminalSessionReplayController({
     }
     lifecycle.clearCheckpoint(session);
     session.replayCompletionPending = false;
-    session.historyCacheReplayCommitSeq = Number(session.historyCacheReplayCommitSeq || 0) + 1;
-    session.historyCacheReplayCommitPending = false;
     return true;
   };
 
@@ -204,7 +198,6 @@ export function createTerminalSessionReplayController({
     isRetryPaused: terminalReplayRetryIsPaused,
     noteFailure,
     parseCursor: parseTerminalHistoryCursor,
-    rangeForConnect: historyRangeForConnect,
     resumeRetry,
     schedulePresentationCheckpoint: lifecycle.scheduleCheckpoint,
     setAuthorization: setTerminalReplayAuthorization,

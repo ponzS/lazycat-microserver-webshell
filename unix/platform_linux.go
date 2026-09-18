@@ -13,8 +13,6 @@ import (
 
 // Platform wires existing Linux behavior. macOS support is a later phase;
 // shared PTY/IPC primitives are already isolated in *_unix.go files.
-type Platform struct{}
-
 func (Platform) DefaultWorkingDirectory() string { return "/" }
 
 func (Platform) Command(launch core.Launch) *exec.Cmd {

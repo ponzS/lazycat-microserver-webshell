@@ -44,11 +44,9 @@ export function createTerminalTransportRuntimeController({
   windowObject = globalThis.window,
   documentObject = globalThis.document,
   createMembership = createTerminalUnifiedMembership,
-  clientConnections = null,
   lifecycle: providedLifecycle,
   getDisposed = () => false,
   isOnline = () => true,
-  isClientTarget = () => false,
   getActiveName = () => "",
   getActiveTabID = () => "",
   getTabs = () => [],
@@ -338,7 +336,7 @@ export function createTerminalTransportRuntimeController({
   };
 
   const reconcileUnifiedMembership = () => {
-    if (disposed || getDisposed() || !isOnline() || isClientTarget(getActiveName())) {
+    if (disposed || getDisposed() || !isOnline()) {
       return false;
     }
     const membershipSnapshot = membership.snapshot();
@@ -401,7 +399,7 @@ export function createTerminalTransportRuntimeController({
     interactionSession = null,
   } = {}) => {
     const activeName = getActiveName();
-    if (disposed || getDisposed() || isClientTarget(activeName)) {
+    if (disposed || getDisposed()) {
       return false;
     }
     if (isApplyingWorkspaceState()) {
@@ -436,7 +434,7 @@ export function createTerminalTransportRuntimeController({
   };
 
   const flushPendingMembershipRefresh = (reason = "workspace_restored") => {
-    if (!membershipRefreshPending || disposed || getDisposed() || isClientTarget(getActiveName())) {
+    if (!membershipRefreshPending || disposed || getDisposed()) {
       return false;
     }
     membershipRefreshPending = false;
@@ -462,7 +460,6 @@ export function createTerminalTransportRuntimeController({
     }
     if (userInteraction) {
       session.lastUserInteractionAt = now();
-      clientConnections?.noteInteraction(session);
     }
     recordRuntimeEvent("terminal_connection_request", {
       paneID: session.id,
@@ -475,23 +472,17 @@ export function createTerminalTransportRuntimeController({
       connectionChannel: String(session.connectionChannel || ""),
       connectionEpoch: Number(session.connectionEpoch || 0),
     });
-    if (!isClientTarget(getActiveName())) {
-      session.pendingConnect = !session.socket;
-      refreshMembership({
-        reason,
-        interactionSession: userInteraction && session.tabId === getActiveTabID() ? session : null,
-      });
-      return true;
-    }
-    return clientConnections?.request(session, { reason, userInteraction, immediate, allowHidden }) === true;
+    session.pendingConnect = !session.socket;
+    refreshMembership({
+      reason,
+      interactionSession: userInteraction && session.tabId === getActiveTabID() ? session : null,
+    });
+    return true;
   };
 
   function syncConnectionDemands(options = {}) {
     if (disposed || getDisposed()) {
       return false;
-    }
-    if (isClientTarget(getActiveName())) {
-      return clientConnections?.syncConnectionDemands(options) === true;
     }
     return refreshMembership(options);
   }
@@ -505,13 +496,13 @@ export function createTerminalTransportRuntimeController({
       session.pendingConnect = false;
       return true;
     }
-    if (!isClientTarget(getActiveName()) && Number(session.measuredFitGeneration || 0) > 0 && sessionHasKnownSize(session)) {
+    if (Number(session.measuredFitGeneration || 0) > 0 && sessionHasKnownSize(session)) {
       if (documentObject?.hidden && !allowHidden) return false;
       // Known geometry is sufficient for attach. Do not require the failed
       // old resize to complete before beginning its replacement connection.
       return requestConnection(session, { reason: "backend_ready", allowHidden });
     }
-    if (!isClientTarget(getActiveName()) && Number(session.measuredFitGeneration || 0) > 0) {
+    if (Number(session.measuredFitGeneration || 0) > 0) {
       session.pendingConnect = true;
       scheduleUnifiedSync({ reason: "backend_pending" });
       return false;
@@ -557,16 +548,11 @@ export function createTerminalTransportRuntimeController({
     return true;
   };
 
-  const registerSession = (session) => {
-    if (!session || !isClientTarget(session.name)) {
-      return false;
-    }
-    return clientConnections?.registerSession(session) === true;
-  };
+  const registerSession = (session) => Boolean(session);
 
   const unregisterSession = (session, reason = "session_closed") => {
     lifecycle.disposeSession(session);
-    return clientConnections?.unregisterSession(session, reason) === true;
+    return true;
   };
 
   const dispose = (reason = "page_disposed") => {
@@ -576,7 +562,6 @@ export function createTerminalTransportRuntimeController({
     disposed = true;
     const sessions = sessionsArray();
     lifecycle.dispose(sessions);
-    clientConnections?.dispose(reason);
     membership.clear();
     return true;
   };
@@ -586,36 +571,35 @@ export function createTerminalTransportRuntimeController({
       if (!session?.exitExpected) return false;
       clearUnifiedRetry(session, { resetAttempts: true });
       if (session.connectionChannel === "unified") detachUnifiedSession(session, "terminal_exited");
-      else clientConnections?.releaseSession(session, "tab_or_target_removed");
       refreshMembership({ reason: "terminal_exited" });
       return true;
     },
     clearUnifiedRetry,
     connectPendingSession,
     connectPendingSessionsForTab,
-    currentLease: (session) => clientConnections?.currentLease(session) || null,
+    currentLease: () => null,
     detachUnifiedSession,
     dispose,
     flushPendingMembershipRefresh,
     hasKnownSize: sessionHasKnownSize,
-    notifyDirectClosed: (session, leaseID, details) => clientConnections?.notifyClosed(session, leaseID, details) === true,
-    notifyDirectFailure: (session, leaseID, error, options) => clientConnections?.notifyFailure(session, leaseID, error, options) === true,
-    notifyDirectOpen: (session, leaseID) => clientConnections?.notifyOpen(session, leaseID) === true,
-    notifyDirectReplayReady: (session, leaseID) => clientConnections?.notifyReplayReady(session, leaseID) === true,
+    notifyDirectClosed: () => false,
+    notifyDirectFailure: () => false,
+    notifyDirectOpen: () => false,
+    notifyDirectReplayReady: () => false,
     recycleUnifiedSession,
     refreshMembership,
     registerSession,
-    releaseDirectSession: (session, reason) => clientConnections?.releaseSession(session, reason) === true,
+    releaseDirectSession: () => false,
     requestConnection,
     resetMeasurementAttempts: lifecycle.resetMeasurementAttempts,
     scheduleUnifiedPaneRetry,
     scheduleUnifiedSync,
-    setOnline: (value) => clientConnections?.setOnline(value),
+    setOnline: () => {},
     snapshot: () => Object.freeze({
       membership: membership.snapshot(),
-      scheduler: clientConnections?.snapshot().scheduler || null,
+      scheduler: null,
       membershipRefreshPending,
-      demandGeneration: clientConnections?.snapshot().demandGeneration || 0,
+      demandGeneration: 0,
       unifiedChannelGeneration,
     }),
     syncConnectionDemands,

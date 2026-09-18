@@ -11,7 +11,7 @@
 - `agent_runtime.go`、`agent_protocol_update.go`：agent 安装、版本检查、复用、更新和原 attach 路径。
 - `terminal_queue.go`：Unified WebSocket 的 HTTP 鉴权、升级、准备与控制分派；队列算法属于 Core。
 - `workspace.go`、`workspace_recovery.go`：工作区 HTTP 接口与按账号/实例保存的可选重启恢复描述。
-- `client_terminal.go`：原 PC 客户端票据与转发路径，本阶段不升级它的协议。
+- `client_terminal.go`、`client_recovery.go`：PC 票据/Unified 转发与可选布局恢复，共用账号隔离的文档存储，不引用容器安装逻辑。
 - `attachments.go`、`settings.go`、`devices.go`：原文件、设置和设备接口。
 - `dependencies.go`：显式列出沿用原调用形式的 Core/Unix/日志接口别名，便于审查跨包依赖。
 
@@ -21,9 +21,9 @@
 
 保留原账号、selector 与票据验证次序；HTTP 路径、头、状态码和 WebSocket 消息不因文件迁移改变。容器的用户名选择与用户切换脚本保持原有规则。
 
-v28 仅调整模块组织，显式兼容 v27 及原兼容版本，不能因此次升级自动杀掉兼容 agent。二进制名、`agent` 子命令及 LPK 内的 `runtime/` 布局保持不变。
+v30 显式兼容 v29/v28/v27 及原容器兼容版本，不能因此次升级自动杀掉兼容容器 agent。本次修正的是 PC Local 的 `queue-ready` 握手，容器入口行为不变。二进制名、`agent` 子命令及 LPK 内的 `runtime/` 布局保持不变。
 
-版本是否最新、是否可 attach、是否支持工作区恢复、是否可导入内存快照是不同判断：v27 继续提供标签排序和工作区恢复，v26/v27/v28 使用同一快照 WASM；更早的兼容 agent 沿用字节回放。以后升级不能只修改版本常量而漏掉这些能力边界。
+版本是否最新、是否可 attach、是否支持工作区恢复、是否可导入内存快照是不同判断：v27/v28/v29 继续提供标签排序和工作区恢复，v26/v27/v28/v29/v30 使用同一快照 WASM；更早的兼容 agent 沿用字节回放。以后升级不能只修改版本常量而漏掉这些能力边界。
 
 ## 验证
 

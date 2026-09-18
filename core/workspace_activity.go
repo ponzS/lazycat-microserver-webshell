@@ -44,12 +44,17 @@ func (w *terminalWorkspace) refreshActivity(ctx context.Context) (WorkspaceActiv
 			if pane == nil {
 				continue
 			}
-			activity := activities[target.TTY]
+			activity, found := activities[target.TTY]
+			if !found {
+				continue
+			}
 			pane.mu.Lock()
 			pane.busy = activity.Busy
 			pane.command = activity.Command
 			pane.commandLine = activity.CommandLine
-			pane.cwd = activity.CWD
+			if activity.CWD != "" {
+				pane.cwd = activity.CWD
+			}
 			pane.activityCheckedAt = checkedAt
 			pane.mu.Unlock()
 		}

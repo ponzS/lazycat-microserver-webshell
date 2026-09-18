@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 
@@ -36,10 +37,25 @@ func (ContainerTargets) ScanActivities(ctx context.Context, selector string, tty
 
 type containerQueueBackend struct{}
 
-func (containerQueueBackend) Command(ctx context.Context, scope core.AgentScope, paneID string, cols, rows, scrollback int, request core.HistorySyncRequest) *exec.Cmd {
-	return exec.CommandContext(ctx, lightosctlPath, persistentAgentAttachCommandArgs(scope, paneID, cols, rows, scrollback, request)...)
+func (containerQueueBackend) Open(ctx context.Context, scope core.AgentScope, paneID string, cols, rows, scrollback int, request core.HistorySyncRequest, stderr io.Writer) (core.QueueConnection, error) {
+	cmd := exec.CommandContext(ctx, lightosctlPath, persistentAgentAttachCommandArgs(scope, paneID, cols, rows, scrollback, request)...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return core.QueueConnection{}, err
+	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		_ = stdout.Close()
+		return core.QueueConnection{}, err
+	}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		return core.QueueConnection{}, err
+	}
+	return core.QueueConnection{Input: stdin, Output: stdout, Wait: cmd.Wait, Kill: func() error { return unixplatform.KillCommand(cmd) }}, nil
 }
-func (containerQueueBackend) KillCommand(cmd *exec.Cmd) error { return unixplatform.KillCommand(cmd) }
 func (containerQueueBackend) Log(paneID string) core.QueueLog {
 	return serverlog.NewWriter(fmt.Sprintf("lightosctl pane=%s", paneID))
 }

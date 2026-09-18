@@ -8,6 +8,9 @@ import (
 )
 
 func (d *agentDaemon) ensureWorkspaceLocked(request AgentRequest) (*terminalWorkspace, error) {
+	if d.closed {
+		return nil, errors.New("terminal access disabled")
+	}
 	if err := d.validateRequestSelectorLocked(request.Selector); err != nil {
 		return nil, err
 	}
@@ -130,6 +133,9 @@ func (d *agentDaemon) restoreWorkspace(request AgentRequest) (WorkspaceState, er
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.closed {
+		return WorkspaceState{}, errors.New("terminal access disabled")
+	}
 	if err := d.validateRequestSelectorLocked(request.Selector); err != nil {
 		return WorkspaceState{}, err
 	}

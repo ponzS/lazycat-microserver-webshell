@@ -1,10 +1,11 @@
 # 共用终端核心
 
-本包拥有终端业务状态，不依赖 LightOS 设备发现、容器命令、PC UI 或平台实现。现阶段对外提供原 agent 命令与 Unified broker；独立跨平台 HTTP 服务入口留待下一阶段。
+本包拥有终端业务状态，不依赖 LightOS 设备发现、容器命令、PC UI 或平台实现。对外提供容器 agent、进程内 Local 工作区与同一套 Unified broker；本地 HTTP 门禁位于 localserver/。
 
 ## 入口与文件
 
 - `runtime.go`：`NewRuntime`、`Platform`、`TargetAccess`、`QueueBackend`。启动入口注入依赖，每个 Runtime/工作区持有自己的适配器，不使用可变的全局平台注册表。
+- `local*.go`：账号绑定的进程内入口、取消中的 PTY 启动清理、环境与目录元数据；有界管道替代本地 attach 子进程，不另写会话或回放算法。
 - `agent.go`、`agent_cli.go`、`agent_protocol.go`、`agent_workspace.go`、`agent_attach.go`：原 `agent version/daemon/request/attach/reconcile` 入口、请求身份检查和帧协议。
 - `types.go`、`workspace*.go`、`layout.go`：工作区、标签、分屏、活动状态、布局和显式重建。对外状态继续使用原 JSON 字段。
 - `pane.go`、`pane_control.go`、`pane_resize.go`、`pane_replay.go`、`subscriber.go`：PTY 会话生命周期、输入、尺寸所有权、恢复与订阅队列。
@@ -15,7 +16,7 @@
 
 ## 依赖与接口边界
 
-`Platform` 提供 PTY、尺寸操作、进程结束、活动扫描和 agent IPC；`TargetAccess` 提供容器等目标的发现与命令接入；`QueueBackend` 提供 agent attach 子进程和诊断日志。核心保留原有调度、锁和生命周期次序，只将外部操作交给这些接口。
+`Platform` 提供 PTY、等待、尺寸、进程结束、活动扫描和 agent IPC；`TargetAccess` 提供容器等目标的发现与命令接入；`QueueBackend.Open` 提供可关闭的 attach 字节流及诊断日志。容器后端仍运行原 lightosctl attach 命令，本地后端使用有界进程内管道；调度、ACK 和重放由同一核心维护。
 
 Core 可以使用标准库及通用协议/解析库，并依赖 `internal/pkg/fonts` 的设置定义和 `runtime` 的嵌入资产。不得导入 `unix`、`windows` 或 `provider`，不得写入 `lightosctl`、`/proc`、Unix syscall 或具体 Shell 启动逻辑。
 
@@ -25,7 +26,7 @@ Core 可以使用标准库及通用协议/解析库，并依赖 `internal/pkg/fo
 - 工作区、pane 和快照状态保持独立；字段只在原有锁保护下修改，关闭与迟到输出不能交叉访问已释放解析器。
 - `snapshot + live` 的游标边界、ACK、resize epoch、回放顺序和队列上限保持不变。
 - 解析失败仅让该 pane 使用有界原始历史，不重启 PTY、不自动重建解析器。
-- `AgentProtocolVersion` 位于 `agent.go`。v28 保持 v27 的 wire/内存快照 ABI，兼容列表由 Provider 维护。
+- `AgentProtocolVersion` 位于 `agent.go`。v30 修正 Local 的就绪握手，保持 v29/v28/v27 的帧格式/内存快照 ABI，容器兼容列表由 Provider 维护。关闭 Local 后不得重新创建工作区；账号改变由上层创建新的生命周期。
 
 ## 验证
 

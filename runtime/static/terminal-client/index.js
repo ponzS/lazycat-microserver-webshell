@@ -1,5 +1,4 @@
-export { CLIENT_TERMINAL_CONFIG } from "./config.js";
-export { createClientTerminalConnectionController } from "./connection_controller.js";
-export { createClientTerminalHistoryController } from "./history_controller.js";
-export { createTerminalHistoryCache } from "./history_cache.js";
-export { createClientTerminalProtocolController } from "./protocol_controller.js";
+// Client-specific migration and capability checks only. Sessions, transport,
+// replay, theme and flow control use the shared terminal/ modules.
+export { retireClientTerminalHistory } from "./retirement.js";
+export { requireManagedClientWorkspace } from "./capabilities.js";
