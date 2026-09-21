@@ -6,6 +6,7 @@
 // them, passes explicit dependencies and coordinates their public APIs.
 import { FitAddon, Terminal, init as initGhostty } from "./ghostty-web.js";
 import {
+  createCodexThemeAdapter,
   installClaudeFullscreenContextMenuAdapter,
   isClaudeFullscreenContextMenuCandidate,
   installClaudeFullscreenDesktopSelectionAdapter,
@@ -842,6 +843,7 @@ export function startGlobalRuntime() {
     transitionTimeoutMs: terminalUnifiedTransitionTimeoutMs,
   });
 
+  const codexThemeAdapter = createCodexThemeAdapter({ getThemes: () => appearance.snapshot().themes });
   terminalRenderer = createTerminalRendererAdapter({
     documentObject: document,
     windowObject: window,
@@ -851,6 +853,7 @@ export function startGlobalRuntime() {
     getFontSize: () => settings?.getTerminalFontSize(),
     initialFontSize: initialTerminalFontSize,
     getFontFamily: () => terminalOptionsBase.fontFamily,
+    getBackgroundColorMap: (session, theme) => codexThemeAdapter.getBackgroundColorMap(session, theme),
   });
 
   terminalPresentation = createTerminalPresentationController({
@@ -1580,6 +1583,11 @@ export function startGlobalRuntime() {
     isCurrentInstanceRequest: (name, generation) => isCurrentInstanceRequest(name, generation),
     ensureResponseSelector: (state, name, label) => ensureResponseSelector(state, name, label),
     observeServerGeometry: (pane, state) => terminalResize?.observeServerGeometry(pane, state),
+    onPaneProcessChange: (session) => {
+      if (terminalRenderer?.syncBackgroundColors(session) && terminalPresentation?.isRenderAllowed(session)) {
+        session.term?.requestRender?.({ full: true });
+      }
+    },
     recoverSessions: (sessions) => terminalPresentation?.recoverSessions(sessions),
     refreshTabAutoLabel: (tab) => refreshTabAutoLabel(tab),
     updateMobileActiveTabTitle: () => updateMobileActiveTabTitle(),
