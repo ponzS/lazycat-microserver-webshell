@@ -32,7 +32,7 @@ Worker 随 pane 创建和销毁；reset 终止旧 Worker 并启动新代际，�
 
 RPC 最多同时 64 项、在途输入最多 4 MiB。UI 历史最多 `max(512, viewportRows * 4)` 行，每次分段读取 64 行；文本导出最多 32 Mi 字符。Worker 数量随存活 pane 变化，关闭 pane 时终止。初始化超时 20 秒，其他请求 15 秒；页面隐藏或 UI 长暂停后重建观察窗口。Worker 不是进程隔离，也不能强制重启 UI 主线程。
 
-Vite 将 module worker 入口和 WASM 放入版本化资源集合。不回退到 UI 线程解析。真实使用由开发者手动验证，本轮不新增场景测试。
+Vite 将 module worker 入口和 WASM 放入版本化资源集合。不回退到 UI 线程解析。
 
 v20 保留原生 resize 的错误名供服务端诊断读取，resize 原有成功／失败返回值与终端行为不变。错误名通过静态 WASM 内存读取，失败后不额外申请原生堆内存；同一模块每次调用记录最后一次 resize 错误。新 WASM 指纹需要前后端同步更新。
 

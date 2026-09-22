@@ -44,4 +44,4 @@ go test ./... -count=1
 git diff --check
 ```
 
-v21 增加 Provider 的窗口消费协议（1 MiB／256 个轮次），保留旧逐轮协议；前端解析与画面生成分离，增加同步绘制保护。继续显式兼容 v20 至 v9，WASM 与 checkpoint ABI 沿用 v20，本轮未修改原生 resize。新消费协议由 Provider 执行，不要求自动替换仍在运行的旧 Agent。
+v21 支持 Provider 的窗口消费协议（1 MiB／256 个轮次），保留旧逐轮协议；前端解析与画面生成分离，提供同步绘制保护。显式兼容 v20 至 v9，WASM 与 checkpoint ABI 沿用 v20。窗口消费协议由 Provider 执行，不要求自动替换仍在运行的旧 Agent。
