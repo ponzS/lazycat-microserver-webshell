@@ -16,15 +16,16 @@
 | [provider](provider/README.md) | Linux HTTP 入口、鉴权、发现、容器/客户端转发、恢复和文件 |
 | [localserver](localserver/README.md) | PC 本地服务、绑定门禁及共享 Unified 队列入口 |
 | [localtools](localtools/README.md) | PC 编码和 nano 兼容适配 |
+| [sshserver](sshserver/README.md) | 独立 SSH 协议与受控隧道，复用 Core PTY；仅由 PC/CLI 终端产物装配，默认关闭 |
 | [internal](internal/README.md) | 服务端日志与字体等内部公共模块 |
 | [runtime](runtime/README.md) | 运行资产及 Go checkpoint 的唯一 WASM 来源 |
 | [runtime/static](runtime/static/README.md) | 浏览器前端模块 |
 
 依赖方向为入口 → Provider/Unix/Core，Provider 和 Unix 通过 Core 接口接入；Core 不反向导入它们。构建仍从根目录执行 `go build .`，产物名称、CLI 参数、LPK 布局及 HTTP 路径保持不变。
 
-容器 Provider 继续使用原 Linux 构建入口。PC 的 terminal-core/ 入口组合本仓库 LocalServer/Core 和 hportal 管理层，分别构建 Linux、macOS、Windows 的本地终端二进制，不携带 Provider 网页和容器管理能力。交叉编译不代替实机验收；hclient-cli 接入尚未实施。
+容器 Provider 继续使用原 Linux 构建入口。PC 和 hclient-cli 的 terminal-core/ 入口组合本仓库 LocalServer/Core、可选 SSH 与 hportal 管理层，分别构建 Linux、macOS、Windows 的本地终端二进制，不携带 Provider 网页和容器管理能力。交叉编译不代替实机验收。
 
-Agent 推荐版本为 v30，修正客户端 Unified 连接的就绪消息，保留 v29/v28/v27 及原容器兼容版本。内存快照 ABI 与 WASM 文件未改变，不强制重启兼容的旧容器 agent；PC 本地服务需重建并重新启用，旧 TS agent 不复用。
+Agent 推荐版本为 v33，客户端 SSH 支持任意非空密码（兼容旧 bcrypt 配置），交互认证等待 120 秒；保留 v32/v31/v30/v29/v28/v27 及原容器兼容版本。内存快照 ABI 与 WASM 文件未改变，不强制重启兼容的旧容器 agent；PC/CLI 本地终端需重建并重新启动以应用修改，旧 TS agent 不复用。SSH 默认关闭，须通过 LightOS 设置并确认入口就绪，版本升级不等于自动开放 SSH。
 
 ## 项目目标
 

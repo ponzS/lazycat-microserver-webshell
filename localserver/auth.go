@@ -28,7 +28,7 @@ func (s *Server) identity(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(hex.EncodeToString(mac.Sum(nil))))
 }
 
-func (s *Server) authorize(r *http.Request) bool {
+func (s *Server) authorizeGateway(r *http.Request) bool {
 	if subtle.ConstantTimeCompare([]byte(r.Header.Get(CredentialHeader)), []byte(s.config.Credential)) != 1 {
 		return false
 	}
@@ -36,6 +36,10 @@ func (s *Server) authorize(r *http.Request) bool {
 	if r.Header.Get(BoxHeader) != s.config.BoxID {
 		return false
 	}
+	return true
+}
+
+func (s *Server) authorize(r *http.Request) bool {
 	token := r.URL.Query().Get("ticket")
 	if len(token) > 4096 {
 		return false

@@ -19,7 +19,11 @@ const (
 	// fails, retaining diagnostics without rebuilding it. WASM is unchanged from v26.
 	// v29 adds the local runtime; existing wire and checkpoint formats are unchanged.
 	// v30 aligns the local Unified ready message with the container handshake.
-	AgentProtocolVersion = "lcmd-webshell-agent-v30"
+	// v31 adds independent local shell sessions for the optional SSH adapter.
+	// v32 adds optional managed SSH routes with purpose-scoped authorization.
+	// v33 accepts non-empty SSH passwords without bcrypt's input limit and allows
+	// 120 seconds for interactive authentication. Browser/checkpoint wire is unchanged.
+	AgentProtocolVersion = "lcmd-webshell-agent-v33"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')

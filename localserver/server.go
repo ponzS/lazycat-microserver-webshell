@@ -20,6 +20,13 @@ import (
 const CredentialHeader = "X-Lightos-Client-Terminal"
 const BoxHeader = "X-Lightos-Terminal-Box"
 
+// SSHService authenticates purpose-scoped tickets after the gateway checks.
+// Only desktop/CLI assembly supplies it; Core and this package do not import SSH.
+type SSHService interface {
+	http.Handler
+	Close() error
+}
+
 type Config struct {
 	InstanceID string `json:"instance_id"`
 	AccountID  string `json:"account_id"`
@@ -41,9 +48,15 @@ type Server struct {
 	closed     bool
 	sockets    map[*websocket.Conn]struct{}
 	scrollback atomic.Int64
+	ssh        SSHService
 }
 
 func Start(parent context.Context, config Config, platform core.Platform) (*Server, error) {
+	return StartWithSSH(parent, config, platform, nil)
+}
+
+// Ownership of ssh passes to the server only on success.
+func StartWithSSH(parent context.Context, config Config, platform core.Platform, ssh SSHService) (*Server, error) {
 	for _, value := range []string{config.InstanceID, config.AccountID, config.BoxID, config.DeviceID, config.Epoch} {
 		if strings.TrimSpace(value) == "" || strings.ContainsAny(value, "\r\n") {
 			return nil, errors.New("terminal binding is incomplete")
@@ -62,7 +75,7 @@ func Start(parent context.Context, config Config, platform core.Platform) (*Serv
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(parent)
-	s := &Server{config: config, local: local, listener: listener, ctx: ctx, cancel: cancel, sockets: make(map[*websocket.Conn]struct{})}
+	s := &Server{config: config, local: local, listener: listener, ctx: ctx, cancel: cancel, sockets: make(map[*websocket.Conn]struct{}), ssh: ssh}
 	s.scrollback.Store(5000)
 	s.http = &http.Server{Handler: s, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second,
 		BaseContext: func(net.Listener) context.Context { return ctx }}
@@ -86,6 +99,9 @@ func (s *Server) Close() {
 	s.mu.Unlock()
 	_ = s.http.Close()
 	s.local.Close()
+	if s.ssh != nil {
+		_ = s.ssh.Close()
+	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -94,12 +110,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.identity(w, r)
 		return
 	}
-	if s.ctx.Err() != nil || !s.authorize(r) {
+	if s.ctx.Err() != nil || !s.authorizeGateway(r) {
 		http.Error(w, "terminal access denied", http.StatusUnauthorized)
 		return
 	}
 	// The gateway strips its service prefix, with or without the leading slash.
 	r.URL.Path = "/" + strings.TrimLeft(r.URL.Path, "/")
+	if strings.HasPrefix(r.URL.Path, "/ssh/") {
+		if s.ssh == nil {
+			http.NotFound(w, r)
+		} else {
+			s.ssh.ServeHTTP(w, r)
+		}
+		return
+	}
+	if !s.authorize(r) {
+		http.Error(w, "terminal access denied", http.StatusUnauthorized)
+		return
+	}
 	switch r.URL.Path {
 	case "/workspace", "/activity":
 		s.workspace(w, r)

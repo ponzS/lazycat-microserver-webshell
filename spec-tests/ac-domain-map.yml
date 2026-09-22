@@ -3,6 +3,7 @@ domains:
     paths:
       - runtime/static/terminal/**
       - runtime/static/terminal-client/**
+      - sshserver/**
       - spec/terminal/**
       - spec-tests/terminal/**
   workspace:

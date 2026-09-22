@@ -6,6 +6,7 @@
 
 - `runtime.go`：`NewRuntime`、`Platform`、`TargetAccess`、`QueueBackend`。启动入口注入依赖，每个 Runtime/工作区持有自己的适配器，不使用可变的全局平台注册表。
 - `local*.go`：账号绑定的进程内入口、取消中的 PTY 启动清理、环境与目录元数据；有界管道替代本地 attach 子进程，不另写会话或回放算法。
+- `shell_sessions.go`：独立于浏览器工作区的临时交互 shell 集合，复用 Platform 的环境、PTY、尺寸及所属进程回收；供 SSH 等适配层使用，不承担外部鉴权。
 - `agent.go`、`agent_cli.go`、`agent_protocol.go`、`agent_workspace.go`、`agent_attach.go`：原 `agent version/daemon/request/attach/reconcile` 入口、请求身份检查和帧协议。
 - `types.go`、`workspace*.go`、`layout.go`：工作区、标签、分屏、活动状态、布局和显式重建。对外状态继续使用原 JSON 字段。
 - `pane.go`、`pane_control.go`、`pane_resize.go`、`pane_replay.go`、`subscriber.go`：PTY 会话生命周期、输入、尺寸所有权、恢复与订阅队列。
@@ -26,7 +27,7 @@ Core 可以使用标准库及通用协议/解析库，并依赖 `internal/pkg/fo
 - 工作区、pane 和快照状态保持独立；字段只在原有锁保护下修改，关闭与迟到输出不能交叉访问已释放解析器。
 - `snapshot + live` 的游标边界、ACK、resize epoch、回放顺序和队列上限保持不变。
 - 解析失败仅让该 pane 使用有界原始历史，不重启 PTY、不自动重建解析器。
-- `AgentProtocolVersion` 位于 `agent.go`。v30 修正 Local 的就绪握手，保持 v29/v28/v27 的帧格式/内存快照 ABI，容器兼容列表由 Provider 维护。关闭 Local 后不得重新创建工作区；账号改变由上层创建新的生命周期。
+- `AgentProtocolVersion` 位于 `agent.go`。v31 新增独立 shell 生命周期接口，v32 挂载可选 managed SSH 路由，v33 支持任意非空 SSH 密码与 120 秒交互认证；保持 v32/v31/v30/v29/v28/v27 的帧格式/内存快照 ABI，容器兼容列表由 Provider 维护。关闭 Local 后不得重新创建工作区；账号改变由上层创建新的生命周期。此版本号不表示已开放微服 SSH 端口。
 
 ## 验证
 
