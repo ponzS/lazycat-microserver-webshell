@@ -4,6 +4,7 @@ domains:
       - runtime/static/terminal/**
       - runtime/static/terminal-client/**
       - sshserver/**
+      - hostmetrics/**
       - spec/terminal/**
       - spec-tests/terminal/**
   workspace:

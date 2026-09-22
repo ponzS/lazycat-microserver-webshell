@@ -27,9 +27,11 @@ Core 可以使用标准库及通用协议/解析库，并依赖 `internal/pkg/fo
 - 工作区、pane 和快照状态保持独立；字段只在原有锁保护下修改，关闭与迟到输出不能交叉访问已释放解析器。
 - `snapshot + live` 的游标边界、ACK、resize epoch、回放顺序和队列上限保持不变。
 - 解析失败仅让该 pane 使用有界原始历史，不重启 PTY、不自动重建解析器。
-- `AgentProtocolVersion` 位于 `agent.go`。v31 新增独立 shell 生命周期接口，v32 挂载可选 managed SSH 路由，v33 支持任意非空 SSH 密码与 120 秒交互认证；保持 v32/v31/v30/v29/v28/v27 的帧格式/内存快照 ABI，容器兼容列表由 Provider 维护。关闭 Local 后不得重新创建工作区；账号改变由上层创建新的生命周期。此版本号不表示已开放微服 SSH 端口。
+- `AgentProtocolVersion` 位于 `agent.go`。v31 新增独立 shell 生命周期接口，v32 挂载可选 managed SSH 路由，v33 支持任意非空 SSH 密码与 120 秒交互认证，v34 增加可选按需整机指标，v35 统一物理机实例中文文案；保持 v34/v33/v32/v31/v30/v29/v28/v27 的帧格式/内存快照 ABI，容器兼容列表由 Provider 维护。关闭 Local 后不得重新创建工作区；账号改变由上层创建新的生命周期。此版本号不表示已开放微服 SSH 端口。
 
 ## 验证
+
+`host_metrics.go` 仅定义客户端整机指标的可空数据类型及注入接口，不读系统资源、不创建采样任务。实际采样位于独立 `hostmetrics` module，Linux 磁盘选择由 Unix adapter 注入，容器入口不装配它。
 
 在仓库根目录执行 `go build ./core`、`go build ./...`、`go vet ./...`。可交叉编译 Core 以检查平台依赖泄漏，但这不是整机平台支持验收。
 

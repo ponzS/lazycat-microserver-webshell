@@ -2,7 +2,7 @@
 ID: SC-CLIENT-SSH-INTERACTIVE-SHELL
 Profile: draft
 Gate: required
-Given 当前活动账号拥有该客户端实例，已启用 SSH 并设置独立密码，微服接入端口可达
+Given 当前活动账号拥有该物理机实例，已启用 SSH 并设置独立密码，微服接入端口可达
 When 用户在标准 SSH 客户端中使用实例连接命令和正确密码登录
 Then 用户进入目标电脑的独立交互终端，输入输出和窗口调整正常，退出结果可被 SSH 客户端接收
 And 终端使用客户端进程所属的本机用户权限，不接管浏览器已有会话

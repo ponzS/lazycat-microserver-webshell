@@ -3,6 +3,7 @@
 Start 接收受信任管理层提供的微服、账号、设备、启用代次和独立随机密钥，只监听 127.0.0.1 的随机端口。PC 入口注入 Unix/Windows 平台；本包不安装 agent、不访问 lightos-admin 私有实现，不负责账号登录或二进制重启。
 
 - server.go / auth.go：生命周期与门禁。业务请求同时校验网关凭据、可信微服头、HMAC 票据的实例/账号/设备/代次及过期时间。
+- `StartWithServices` 注入独立 SSH 与整机指标能力；未装配的能力不可访问。`metrics.go` 的 GET `/metrics` 在普通终端门禁后按请求调用 `core.HostMetricsSource`，3 秒请求时限，追加代次摘要，无计时器或后台采样；不打开或关闭终端会话。PC/CLI 在各自入口注入独立 `hostmetrics` module，容器不导入采样依赖。
 - `StartWithSSH` 可注入独立 SSH handler。仅 `/ssh/` 路由交给它，在此之前仍校验 gateway credential 和可信微服头，handler 再校验用途专属票据；普通路由保留既有 Webshell 票据。根模块不导入 SSH 依赖，默认 `Start` 不提供 SSH。
 - queue.go：一条 Unified WebSocket 复用所有 pane，直接调用 Core broker 和进程内 attach，不启动附加 agent。连接就绪时发送与容器一致的 `queue-ready`（`state: open`）；不能用 `queue-state` 代替，否则公共前端不会进入就绪状态，也不会正常启动心跳。
 - legacy.go：保留现有 MCP 单 pane 接口，只转换帧，不维护另一套 PTY/历史。

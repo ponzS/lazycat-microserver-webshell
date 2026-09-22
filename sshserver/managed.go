@@ -16,12 +16,17 @@ import (
 // StartManaged uses the existing authenticated HTTP listener. Failure of SSH
 // key storage disables only SSH, not the user's browser workspace.
 func StartManaged(ctx context.Context, config localserver.Config, stateDir string, platform core.Platform) (*localserver.Server, error) {
+	return StartManagedWithMetrics(ctx, config, stateDir, platform, nil)
+}
+
+// The optional metrics source is independent of the SSH switch and lifetime.
+func StartManagedWithMetrics(ctx context.Context, config localserver.Config, stateDir string, platform core.Platform, metrics core.HostMetricsSource) (*localserver.Server, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	owner := sha256.Sum256([]byte(config.BoxID + "\x00" + config.AccountID + "\x00" + config.DeviceID))
 	ssh, initErr := New(ctx, Binding{BoxID: config.BoxID, AccountID: config.AccountID, DeviceID: config.DeviceID, Epoch: config.Epoch},
 		filepath.Join(stateDir, "ssh", hex.EncodeToString(owner[:])), platform)
 	handler := &managedHandler{config: config, server: ssh, ctx: ctx, cancel: cancel, used: make(map[string]int64), unavailable: initErr != nil}
-	server, err := localserver.StartWithSSH(ctx, config, platform, handler)
+	server, err := localserver.StartWithServices(ctx, config, platform, localserver.Services{SSH: handler, Metrics: metrics})
 	if err != nil {
 		_ = handler.Close()
 	}

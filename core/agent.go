@@ -23,7 +23,9 @@ const (
 	// v32 adds optional managed SSH routes with purpose-scoped authorization.
 	// v33 accepts non-empty SSH passwords without bcrypt's input limit and allows
 	// 120 seconds for interactive authentication. Browser/checkpoint wire is unchanged.
-	AgentProtocolVersion = "lcmd-webshell-agent-v33"
+	// v34 adds optional, on-demand host metrics for client instance cards.
+	// v35 updates Chinese instance terminology; wire and checkpoint formats are unchanged.
+	AgentProtocolVersion = "lcmd-webshell-agent-v35"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')

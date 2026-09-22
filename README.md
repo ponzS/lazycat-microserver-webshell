@@ -25,7 +25,7 @@
 
 容器 Provider 继续使用原 Linux 构建入口。PC 和 hclient-cli 的 terminal-core/ 入口组合本仓库 LocalServer/Core、可选 SSH 与 hportal 管理层，分别构建 Linux、macOS、Windows 的本地终端二进制，不携带 Provider 网页和容器管理能力。交叉编译不代替实机验收。
 
-Agent 推荐版本为 v33，客户端 SSH 支持任意非空密码（兼容旧 bcrypt 配置），交互认证等待 120 秒；保留 v32/v31/v30/v29/v28/v27 及原容器兼容版本。内存快照 ABI 与 WASM 文件未改变，不强制重启兼容的旧容器 agent；PC/CLI 本地终端需重建并重新启动以应用修改，旧 TS agent 不复用。SSH 默认关闭，须通过 LightOS 设置并确认入口就绪，版本升级不等于自动开放 SSH。
+Agent 推荐版本为 v35，新增客户端卡片的按需整机指标；客户端 SSH 支持任意非空密码（兼容旧 bcrypt 配置），交互认证等待 120 秒；保留 v34/v33/v32/v31/v30/v29/v28/v27 及原容器兼容版本。内存快照 ABI 与 WASM 文件未改变，不强制重启兼容的旧容器 agent；PC/CLI 本地终端需重建并重新启动以应用修改，旧 TS agent 不复用。SSH 默认关闭，须通过 LightOS 设置并确认入口就绪，版本升级不等于自动开放 SSH。
 
 ## 项目目标
 

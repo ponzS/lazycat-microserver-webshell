@@ -27,6 +27,12 @@ type SSHService interface {
 	Close() error
 }
 
+// Services are optional client-only integrations, separate from wire identity.
+type Services struct {
+	SSH     SSHService
+	Metrics core.HostMetricsSource
+}
+
 type Config struct {
 	InstanceID string `json:"instance_id"`
 	AccountID  string `json:"account_id"`
@@ -49,6 +55,7 @@ type Server struct {
 	sockets    map[*websocket.Conn]struct{}
 	scrollback atomic.Int64
 	ssh        SSHService
+	metrics    core.HostMetricsSource
 }
 
 func Start(parent context.Context, config Config, platform core.Platform) (*Server, error) {
@@ -57,6 +64,10 @@ func Start(parent context.Context, config Config, platform core.Platform) (*Serv
 
 // Ownership of ssh passes to the server only on success.
 func StartWithSSH(parent context.Context, config Config, platform core.Platform, ssh SSHService) (*Server, error) {
+	return StartWithServices(parent, config, platform, Services{SSH: ssh})
+}
+
+func StartWithServices(parent context.Context, config Config, platform core.Platform, services Services) (*Server, error) {
 	for _, value := range []string{config.InstanceID, config.AccountID, config.BoxID, config.DeviceID, config.Epoch} {
 		if strings.TrimSpace(value) == "" || strings.ContainsAny(value, "\r\n") {
 			return nil, errors.New("terminal binding is incomplete")
@@ -75,7 +86,7 @@ func StartWithSSH(parent context.Context, config Config, platform core.Platform,
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(parent)
-	s := &Server{config: config, local: local, listener: listener, ctx: ctx, cancel: cancel, sockets: make(map[*websocket.Conn]struct{}), ssh: ssh}
+	s := &Server{config: config, local: local, listener: listener, ctx: ctx, cancel: cancel, sockets: make(map[*websocket.Conn]struct{}), ssh: services.SSH, metrics: services.Metrics}
 	s.scrollback.Store(5000)
 	s.http = &http.Server{Handler: s, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second,
 		BaseContext: func(net.Listener) context.Context { return ctx }}
@@ -129,6 +140,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
+	case "/metrics":
+		s.hostMetrics(w, r)
 	case "/workspace", "/activity":
 		s.workspace(w, r)
 	case "/ws":

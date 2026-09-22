@@ -1,4 +1,4 @@
-# 客户端实例适配
+# 物理机实例适配
 
 客户端与容器复用同一套 terminal/ 会话、单 WebSocket Unified 调度、主题、流控及 checkpoint/replay。这里不再维护另一套终端引擎或直连调度器。
 

@@ -9,6 +9,7 @@
 - `session.go`：独立交互 shell、PTY、窗口调整及退出；通过 `core.ShellSessions` 复用注入的平台实现。
 - `password.go`：PBKDF2 密码校验材料生成/验证与固定计算成本、旧 bcrypt 兼容；`hostkey.go`：客户端本地 Ed25519 主机密钥。
 - `managed.go` / `ticket.go` / `config_http.go`：账号作用域私有存储、用途隔离的短期票据、签名内容绑定的配置更新和不含密码的状态。
+- `StartManagedWithMetrics` 可由 PC/CLI 注入独立指标源，交给 localserver 的普通终端门禁管理；指标不依赖 SSH 密码或开关，本 module 不导入系统采样库。
 - `tunnel.go` / `websocket_stream.go`：仅供服务端调用的二进制 WebSocket 隧道、单次入场票据、心跳与有界流量缓冲；不提供任意目标地址。
 
 依赖方向是装配入口 → SSH adapter → Core → 注入的平台接口。Core 不导入本模块。使用 [Go SSH](https://pkg.go.dev/golang.org/x/crypto/ssh)、标准库 `crypto/pbkdf2` 和 [bcrypt](https://pkg.go.dev/golang.org/x/crypto/bcrypt) 兼容旧密码，不自行实现加密算法。

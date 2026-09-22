@@ -77,12 +77,12 @@ func isCurrentAgentProtocolVersion(version string) bool {
 
 // v27 and later implement these workspace features.
 func supportsWorkspaceRecovery(version string) bool {
-	return isCurrentAgentProtocolVersion(version) || strings.TrimSpace(version) == "lcmd-webshell-agent-v32" || strings.TrimSpace(version) == "lcmd-webshell-agent-v31" || strings.TrimSpace(version) == "lcmd-webshell-agent-v30" || strings.TrimSpace(version) == "lcmd-webshell-agent-v29" || strings.TrimSpace(version) == "lcmd-webshell-agent-v28" || strings.TrimSpace(version) == "lcmd-webshell-agent-v27"
+	return isCurrentAgentProtocolVersion(version) || strings.TrimSpace(version) == "lcmd-webshell-agent-v34" || strings.TrimSpace(version) == "lcmd-webshell-agent-v33" || strings.TrimSpace(version) == "lcmd-webshell-agent-v32" || strings.TrimSpace(version) == "lcmd-webshell-agent-v31" || strings.TrimSpace(version) == "lcmd-webshell-agent-v30" || strings.TrimSpace(version) == "lcmd-webshell-agent-v29" || strings.TrimSpace(version) == "lcmd-webshell-agent-v28" || strings.TrimSpace(version) == "lcmd-webshell-agent-v27"
 }
 
 func isAttachCompatibleAgentProtocolVersion(version string) bool {
 	switch strings.TrimSpace(version) {
-	case AgentProtocolVersion, "lcmd-webshell-agent-v32", "lcmd-webshell-agent-v31", "lcmd-webshell-agent-v30", "lcmd-webshell-agent-v29", "lcmd-webshell-agent-v28", "lcmd-webshell-agent-v27", "lcmd-webshell-agent-v26", "lcmd-webshell-agent-v25", "lcmd-webshell-agent-v24", "lcmd-webshell-agent-v23", "lcmd-webshell-agent-v22", "lcmd-webshell-agent-v21", "lcmd-webshell-agent-v20", "lcmd-webshell-agent-v19", "lcmd-webshell-agent-v18", "lcmd-webshell-agent-v17", "lcmd-webshell-agent-v16", "lcmd-webshell-agent-v15", "lcmd-webshell-agent-v14", "lcmd-webshell-agent-v13", "lcmd-webshell-agent-v12", "lcmd-webshell-agent-v11", "lcmd-webshell-agent-v10", "lcmd-webshell-agent-v9":
+	case AgentProtocolVersion, "lcmd-webshell-agent-v34", "lcmd-webshell-agent-v33", "lcmd-webshell-agent-v32", "lcmd-webshell-agent-v31", "lcmd-webshell-agent-v30", "lcmd-webshell-agent-v29", "lcmd-webshell-agent-v28", "lcmd-webshell-agent-v27", "lcmd-webshell-agent-v26", "lcmd-webshell-agent-v25", "lcmd-webshell-agent-v24", "lcmd-webshell-agent-v23", "lcmd-webshell-agent-v22", "lcmd-webshell-agent-v21", "lcmd-webshell-agent-v20", "lcmd-webshell-agent-v19", "lcmd-webshell-agent-v18", "lcmd-webshell-agent-v17", "lcmd-webshell-agent-v16", "lcmd-webshell-agent-v15", "lcmd-webshell-agent-v14", "lcmd-webshell-agent-v13", "lcmd-webshell-agent-v12", "lcmd-webshell-agent-v11", "lcmd-webshell-agent-v10", "lcmd-webshell-agent-v9":
 		return true
 	default:
 		return false
@@ -1245,7 +1245,7 @@ func persistentAgentAttachCommandArgs(scope AgentScope, paneID string, cols, row
 		commandArgs = append(commandArgs, "--integrity-protocol", syncRequest.IntegrityProtocol)
 	}
 	if syncRequest.CheckpointProtocol == TerminalMemoryCheckpointProtocol {
-		// v33 shares the v32/v31/v30/v29/v28/v27/v26 WASM. Earlier agents remain wire-compatible,
+		// v35 shares the v34/v33/v32/v31/v30/v29/v28/v27/v26 WASM. Earlier agents remain wire-compatible,
 		// but use byte replay rather than importing a different WASM heap.
 		quoted := make([]string, 0, len(commandArgs)-3)
 		for _, arg := range commandArgs[3:] {
@@ -1253,7 +1253,7 @@ func persistentAgentAttachCommandArgs(scope AgentScope, paneID string, cols, row
 		}
 		script := "set -- " + strings.Join(quoted, " ") + "\n" +
 			"case \"$(" + ShellScriptQuote(agentInstallPath) + " agent version)\" in\n" +
-			ShellScriptQuote(AgentProtocolVersion) + "|lcmd-webshell-agent-v32|lcmd-webshell-agent-v31|lcmd-webshell-agent-v30|lcmd-webshell-agent-v29|lcmd-webshell-agent-v28|lcmd-webshell-agent-v27|lcmd-webshell-agent-v26)\n" +
+			ShellScriptQuote(AgentProtocolVersion) + "|lcmd-webshell-agent-v34|lcmd-webshell-agent-v33|lcmd-webshell-agent-v32|lcmd-webshell-agent-v31|lcmd-webshell-agent-v30|lcmd-webshell-agent-v29|lcmd-webshell-agent-v28|lcmd-webshell-agent-v27|lcmd-webshell-agent-v26)\n" +
 			"set -- \"$@\" --checkpoint-protocol " + ShellScriptQuote(TerminalMemoryCheckpointProtocol) + "\n;;\nesac\nexec \"$@\""
 		return []string{"exec", "-i", scope.Selector, "/bin/sh", "-c", script}
 	}

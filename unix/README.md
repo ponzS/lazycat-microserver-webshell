@@ -13,6 +13,8 @@
 
 ## 约束与验证
 
+`metrics_linux.go` 仅为 `LocalPlatform` 提供 `/sys/block` 整盘选择，排除分区、loop 和虚拟叠加层；仅在指标请求内调用，不参与容器资源统计或后台扫描。macOS 的指标由独立 hostmetrics module 委托原生采样库读取，不使用 Linux 路径。
+
 依赖方向为 Unix → Core；Core 不反向导入。系统专属文件通过 build tags 或平台后缀隔离。容器原有脚本与 Process.Kill 行为保持不变；本地模式使用独立的 PTY/session 回收和编码兼容适配。
 
 Linux 执行 `go build ./unix`、`go vet ./unix`；macOS 库可用 `GOOS=darwin go build ./unix` 检查。真实回归需隔离用户 HOME，检查 rc、代理环境、CWD、resize、编码、关闭和父进程退出。进程有意自行脱离 session/父子关系或提权后，不按名称强行猜测归属；该边界需在实机审核。
