@@ -19,7 +19,7 @@ type configRequest struct {
 
 func (h *managedHandler) configure(w http.ResponseWriter, r *http.Request, grant ticketGrant) {
 	control := http.NewResponseController(w)
-	_ = control.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = control.SetReadDeadline(time.Now().Add(15 * time.Second))
 	defer control.SetReadDeadline(time.Time{})
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	body, err := io.ReadAll(r.Body)
@@ -48,15 +48,17 @@ func (h *managedHandler) configure(w http.ResponseWriter, r *http.Request, grant
 		http.Error(w, "SSH configuration not applied", http.StatusConflict)
 		return
 	}
-	writeStatus(w, h.server.Status())
+	h.writeStatus(w, h.server.Status())
 }
 
-func writeStatus(w http.ResponseWriter, status Status) {
+func (h *managedHandler) writeStatus(w http.ResponseWriter, status Status) {
+	admission := h.config.AdmissionAllowed == nil || h.config.AdmissionAllowed()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
-		Enabled     bool   `json:"enabled"`
-		Revision    uint64 `json:"revision"`
-		Fingerprint string `json:"host_key_fingerprint"`
-		Connections int    `json:"connections"`
-	}{status.Enabled, status.Revision, status.HostKeyFingerprint, status.Connections})
+		Enabled          bool   `json:"enabled"`
+		AdmissionAllowed bool   `json:"admission_allowed"`
+		Revision         uint64 `json:"revision"`
+		Fingerprint      string `json:"host_key_fingerprint"`
+		Connections      int    `json:"connections"`
+	}{status.Enabled, admission, status.Revision, status.HostKeyFingerprint, status.Connections})
 }

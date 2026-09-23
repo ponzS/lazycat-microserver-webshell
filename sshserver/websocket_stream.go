@@ -23,14 +23,15 @@ func (s *websocketStream) Write(data []byte) (int, error) {
 	defer s.mu.Unlock()
 	written := 0
 	for len(data) > 0 {
-		deadline := time.Now().Add(10 * time.Second)
+		// Bound a stalled network frame, never the lifetime of the SSH task.
+		deadline := time.Now().Add(120 * time.Second)
 		if !s.deadline.IsZero() && s.deadline.Before(deadline) {
 			deadline = s.deadline
 		}
 		if err := s.ws.SetWriteDeadline(deadline); err != nil {
 			return written, err
 		}
-		n := min(len(data), 32<<10)
+		n := min(len(data), 16<<10)
 		if err := s.ws.WriteMessage(websocket.BinaryMessage, data[:n]); err != nil {
 			return written, err
 		}

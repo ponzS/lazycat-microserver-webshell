@@ -33,7 +33,7 @@ func (h *managedHandler) tunnel(w http.ResponseWriter, r *http.Request, grant ti
 		return
 	}
 	upgrade := websocket.Upgrader{Subprotocols: []string{TunnelProtocol}, EnableCompression: false,
-		HandshakeTimeout: 5 * time.Second, ReadBufferSize: 4096, WriteBufferSize: 4096,
+		HandshakeTimeout: 12 * time.Second, ReadBufferSize: 4096, WriteBufferSize: 4096,
 		CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == "" }}
 	ws, err := upgrade.Upgrade(w, r, nil)
 	if err != nil {
@@ -50,8 +50,8 @@ func (h *managedHandler) tunnel(w http.ResponseWriter, r *http.Request, grant ti
 	stop := context.AfterFunc(ctx, closeAll)
 	defer stop()
 	ws.SetReadLimit(64 << 10)
-	_ = ws.SetReadDeadline(time.Now().Add(45 * time.Second))
-	ws.SetPongHandler(func(string) error { return ws.SetReadDeadline(time.Now().Add(45 * time.Second)) })
+	_ = ws.SetReadDeadline(time.Now().Add(120 * time.Second))
+	ws.SetPongHandler(func(string) error { return ws.SetReadDeadline(time.Now().Add(120 * time.Second)) })
 	var pumps sync.WaitGroup
 	pumps.Add(2)
 	go func() {
@@ -77,9 +77,9 @@ func (h *managedHandler) tunnel(w http.ResponseWriter, r *http.Request, grant ti
 			case <-ctx.Done():
 				return
 			case <-timer.C:
-				if ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)) != nil {
-					return
-				}
+				// One delayed control frame is not proof that the SSH connection died.
+				// The reader and its pong deadline decide when to close the transport.
+				_ = ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(15*time.Second))
 			}
 		}
 	}()

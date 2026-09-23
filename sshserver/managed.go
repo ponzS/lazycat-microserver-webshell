@@ -75,7 +75,7 @@ func (h *managedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch purpose {
 	case "ssh-status":
-		writeStatus(w, h.server.Status())
+		h.writeStatus(w, h.server.Status())
 	case "ssh-config":
 		h.configure(w, r, grant)
 	case "ssh-tunnel":
@@ -84,7 +84,7 @@ func (h *managedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Tunnel admission tickets are single-use. Established sessions follow the
-// parent's bounded account lease, not the short admission-ticket expiry.
+// explicit revocation, not the short admission-ticket expiry.
 func (h *managedHandler) consume(grant ticketGrant) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()

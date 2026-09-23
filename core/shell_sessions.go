@@ -39,6 +39,11 @@ func NewShellSessions(ctx context.Context, platform Platform) *ShellSessions {
 }
 
 func (s *ShellSessions) Open(ctx context.Context, term string, size ShellSize) (*ShellSession, error) {
+	return s.open(ctx, ShellOptions{Term: term, Size: size})
+}
+
+func (s *ShellSessions) open(ctx context.Context, options ShellOptions) (*ShellSession, error) {
+	term, size := options.Term, options.Size
 	if err := size.Validate(); err != nil {
 		return nil, err
 	}
@@ -54,6 +59,14 @@ func (s *ShellSessions) Open(ctx context.Context, term string, size ShellSize) (
 		return nil, ctx.Err()
 	}
 	cmd := s.platform.Command(Launch{RootDir: s.platform.DefaultWorkingDirectory()})
+	if options.Execute {
+		p, ok := s.platform.(SSHPlatform)
+		if !ok {
+			return nil, errors.New("command execution unavailable")
+		}
+		cmd = p.SSHCommand(options.Command, true)
+	}
+	cmd.Env = ShellEnvironment(cmd.Env, options.Env)
 	env := make([]string, 0, len(cmd.Env)+1)
 	for _, entry := range cmd.Env {
 		key, _, _ := strings.Cut(entry, "=")
@@ -71,7 +84,13 @@ func (s *ShellSessions) Open(ctx context.Context, term string, size ShellSize) (
 		s.mu.Unlock()
 		return nil, errors.New("too many terminal sessions")
 	}
-	stream, err := s.platform.StartPTY(cmd)
+	var stream PTY
+	var err error
+	if p, ok := s.platform.(SSHPlatform); ok {
+		stream, err = p.StartSSHPTY(cmd, size, options.Modes)
+	} else {
+		stream, err = s.platform.StartPTY(cmd)
+	}
 	if err != nil {
 		s.mu.Unlock()
 		return nil, err

@@ -25,7 +25,9 @@ const (
 	// 120 seconds for interactive authentication. Browser/checkpoint wire is unchanged.
 	// v34 adds optional, on-demand host metrics for client instance cards.
 	// v35 updates Chinese instance terminology; wire and checkpoint formats are unchanged.
-	AgentProtocolVersion = "lcmd-webshell-agent-v35"
+	// v36 adds SSH exec, file transfer, forwarding, terminal modes and resume.
+	// v37 separates SSH admission from the lifetime of owned terminal tasks.
+	AgentProtocolVersion = "lcmd-webshell-agent-v37"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')

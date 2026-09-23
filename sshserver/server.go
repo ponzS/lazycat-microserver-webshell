@@ -1,5 +1,5 @@
-// Package sshserver adapts authenticated SSH shell sessions to shared Core PTYs.
-// It never opens a listening socket and never installs a system SSH service.
+// Package sshserver adapts authenticated SSH channels to local processes,
+// files and forwarding. It never opens an SSH listener or installs system sshd.
 package sshserver
 
 import (
@@ -36,18 +36,23 @@ type connection struct {
 }
 
 type Server struct {
-	lifetime    context.Context
-	mu          sync.Mutex
-	update      sync.Mutex
-	wg          sync.WaitGroup
-	binding     Binding
-	key         ssh.Signer
-	shells      *core.ShellSessions
-	config      Config
-	closed      bool
-	connections map[*connection]struct{}
-	authWindow  time.Time
-	authChecks  int
+	lifetime       context.Context
+	mu             sync.Mutex
+	update         sync.Mutex
+	wg             sync.WaitGroup
+	binding        Binding
+	key            ssh.Signer
+	shells         *core.ShellSessions
+	platform       core.Platform
+	workCtx        context.Context
+	workCancel     context.CancelFunc
+	retained       map[string]*retainedShell
+	config         Config
+	closed         bool
+	connections    map[*connection]struct{}
+	commandCleanup error
+	authWindow     time.Time
+	authChecks     int
 }
 
 func New(ctx context.Context, binding Binding, stateDir string, platform core.Platform) (*Server, error) {
@@ -63,7 +68,8 @@ func New(ctx context.Context, binding Binding, stateDir string, platform core.Pl
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{lifetime: ctx, binding: binding, key: key, shells: core.NewShellSessions(ctx, platform), connections: make(map[*connection]struct{})}
+	workCtx, workCancel := context.WithCancel(ctx)
+	s := &Server{lifetime: ctx, binding: binding, key: key, shells: core.NewShellSessions(ctx, platform), platform: platform, workCtx: workCtx, workCancel: workCancel, retained: make(map[string]*retainedShell), connections: make(map[*connection]struct{})}
 	context.AfterFunc(ctx, func() { _ = s.Close() })
 	return s, nil
 }
@@ -106,6 +112,7 @@ func (s *Server) Apply(next Config) error {
 	}
 	s.config = next
 	s.config.Enabled = false
+	s.workCancel()
 	items := s.connectionListLocked()
 	s.mu.Unlock()
 	if err := s.closeConnections(items); err != nil {
@@ -116,6 +123,7 @@ func (s *Server) Apply(next Config) error {
 		s.mu.Unlock()
 		return errors.New("SSH authorization expired")
 	}
+	s.workCtx, s.workCancel = context.WithCancel(s.lifetime)
 	s.config = next
 	s.mu.Unlock()
 	return nil
@@ -134,15 +142,23 @@ func (s *Server) closeConnections(items []*connection) error {
 		_ = c.raw.Close()
 	}
 	done := make(chan struct{})
-	go func() { s.wg.Wait(); close(done) }()
+	go func() { s.closeRetained(); s.wg.Wait(); close(done) }()
 	timer := time.NewTimer(10 * time.Second)
 	defer timer.Stop()
 	select {
 	case <-done:
-		return s.shells.CleanupError()
+		s.mu.Lock()
+		commandErr := s.commandCleanup
+		s.mu.Unlock()
+		return errors.Join(s.shells.CleanupError(), commandErr)
 	case <-timer.C:
 		return errors.New("SSH cleanup incomplete; access remains disabled")
 	}
+}
+func (s *Server) recordCommandCleanup(err error) {
+	s.mu.Lock()
+	s.commandCleanup = errors.Join(s.commandCleanup, err)
+	s.mu.Unlock()
 }
 func (s *Server) Close() error {
 	s.update.Lock()
@@ -150,6 +166,7 @@ func (s *Server) Close() error {
 	s.mu.Lock()
 	s.closed = true
 	s.config.Enabled = false
+	s.workCancel()
 	items := s.connectionListLocked()
 	s.mu.Unlock()
 	err := s.closeConnections(items)

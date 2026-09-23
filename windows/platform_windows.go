@@ -17,8 +17,9 @@ import (
 )
 
 type Platform struct {
-	panes   sync.Map // *exec.Cmd -> *terminal; handles belong to this runtime only
-	rootJob win.Handle
+	panes    sync.Map // *exec.Cmd -> *terminal; handles belong to this runtime only
+	commands sync.Map // non-PTY SSH commands -> owned Job Object
+	rootJob  win.Handle
 }
 
 func New() (*Platform, error) {

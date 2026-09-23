@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -69,13 +68,12 @@ func (s *Server) ServeConn(ctx context.Context, raw net.Conn, access Access) err
 		return err
 	}
 	defer conn.Close()
-	// Authenticated clients must request a shell promptly, not reserve a slot.
-	_ = raw.SetDeadline(time.Now().Add(30 * time.Second))
-	go ssh.DiscardRequests(requests)
-	var sessions sync.WaitGroup
-	defer sessions.Wait()
-	defer cancel()
-	used := false
+	// Authentication is bounded. An authenticated SSH connection may remain
+	// idle while local or dynamic forwarding waits for its first connection.
+	_ = raw.SetDeadline(time.Time{})
+	peer := newPeer(ctx, s, conn, raw, access)
+	defer peer.close()
+	go peer.handleRequests(requests)
 	for {
 		select {
 		case <-ctx.Done():
@@ -84,24 +82,7 @@ func (s *Server) ServeConn(ctx context.Context, raw net.Conn, access Access) err
 			if !ok {
 				return nil
 			}
-			if next.ChannelType() != "session" {
-				_ = next.Reject(ssh.UnknownChannelType, "only interactive sessions are supported")
-				continue
-			}
-			s.mu.Lock()
-			valid := s.currentLocked(access)
-			s.mu.Unlock()
-			if !valid || used {
-				_ = next.Reject(ssh.Prohibited, "SSH session unavailable")
-				continue
-			}
-			channel, reqs, err := next.Accept()
-			if err != nil {
-				return err
-			}
-			used = true
-			sessions.Add(1)
-			go func() { defer sessions.Done(); defer cancel(); s.handleSession(ctx, raw, channel, reqs, access) }()
+			peer.accept(next)
 		}
 	}
 }

@@ -5,6 +5,7 @@ Start 接收受信任管理层提供的微服、账号、设备、启用代次�
 - server.go / auth.go：生命周期与门禁。业务请求同时校验网关凭据、可信微服头、HMAC 票据的实例/账号/设备/代次及过期时间。
 - `StartWithServices` 注入独立 SSH 与整机指标能力；未装配的能力不可访问。`metrics.go` 的 GET `/metrics` 在普通终端门禁后按请求调用 `core.HostMetricsSource`，3 秒请求时限，追加代次摘要，无计时器或后台采样；不打开或关闭终端会话。PC/CLI 在各自入口注入独立 `hostmetrics` module，容器不导入采样依赖。
 - `StartWithSSH` 可注入独立 SSH handler。仅 `/ssh/` 路由交给它，在此之前仍校验 gateway credential 和可信微服头，handler 再校验用途专属票据；普通路由保留既有 Webshell 票据。根模块不导入 SSH 依赖，默认 `Start` 不提供 SSH。
+- 可选 `Config.AdmissionAllowed` 只控制新业务请求，不关闭已有 WebSocket 或 PTY。暂停时仍允许经过原有网关及专用票据鉴权的 `/ssh/status`、`/ssh/config`，以便查询状态和明确撤权；普通终端和 SSH 隧道新接入返回不可用。容器未注入此门禁时保持原行为。
 - queue.go：一条 Unified WebSocket 复用所有 pane，直接调用 Core broker 和进程内 attach，不启动附加 agent。连接就绪时发送与容器一致的 `queue-ready`（`state: open`）；不能用 `queue-state` 代替，否则公共前端不会进入就绪状态，也不会正常启动心跳。
 - legacy.go：保留现有 MCP 单 pane 接口，只转换帧，不维护另一套 PTY/历史。
 - files.go：保留客户端的系统根目录视图及路径格式，按桌面用户权限执行文件操作。上传到独立临时目录，不覆盖已有文件。

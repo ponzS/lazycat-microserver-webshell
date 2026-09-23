@@ -29,6 +29,18 @@ type Platform interface {
 	ReconcileAgents(string, string, string, bool, bool) (int, error)
 }
 
+// SSHPlatform is optional: container/browser Platform implementations need not
+// implement SSH-specific launch, termios or process-group operations. The bool
+// in SSHCommand indicates whether the command will run inside a PTY.
+type SSHPlatform interface {
+	SSHCommand(string, bool) *exec.Cmd
+	StartSSHPTY(*exec.Cmd, ShellSize, map[uint8]uint32) (PTY, error)
+	StartSSHCommand(*exec.Cmd) error
+	KillSSHCommand(*exec.Cmd) error
+	SignalSSHCommand(*exec.Cmd, PTY, string) error
+	ExitSSHSignal(*exec.Cmd) string
+}
+
 // TargetAccess is an integration boundary, not part of the OS implementation.
 // The current Provider supplies container discovery and remote command access.
 type TargetAccess interface {

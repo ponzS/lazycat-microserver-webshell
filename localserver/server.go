@@ -41,6 +41,8 @@ type Config struct {
 	Epoch      string `json:"epoch"`
 	Secret     string `json:"secret"`
 	Credential string `json:"credential"`
+	// AdmissionAllowed gates new requests; it does not own existing PTYs.
+	AdmissionAllowed func() bool `json:"-"`
 }
 
 type Server struct {
@@ -127,6 +129,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// The gateway strips its service prefix, with or without the leading slash.
 	r.URL.Path = "/" + strings.TrimLeft(r.URL.Path, "/")
+	if s.config.AdmissionAllowed != nil && !s.config.AdmissionAllowed() &&
+		r.URL.Path != "/ssh/status" && r.URL.Path != "/ssh/config" {
+		http.Error(w, "terminal admission is paused", http.StatusServiceUnavailable)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/ssh/") {
 		if s.ssh == nil {
 			http.NotFound(w, r)

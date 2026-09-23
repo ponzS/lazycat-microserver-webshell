@@ -41,3 +41,68 @@ Given 当前账号已设置非空 SSH 密码，包括短密码、空格、中文
 When 用户用正确密码、错误密码或空密码登录
 Then 只有完整正确的密码可以进入终端，包括只在第 72 字节之后不同的错误密码也被拒绝
 And 升级前已保存的密码无需重置即可使用
+
+# 场景 6：执行命令并接收独立输出与退出结果
+ID: SC-CLIENT-SSH-EXEC
+Profile: draft
+Gate: required
+Given 所属账号已启用支持扩展能力的客户端 SSH
+When 用户通过标准 SSH 执行非交互命令，输入二进制数据并等待完成
+Then 命令以客户端本机用户权限执行，标准输入、输出和错误流保持正确，客户端收到退出码或退出信号
+And 同一 SSH 连接上的多个命令可独立完成，交互 shell 与浏览器终端继续可用
+
+# 场景 7：使用标准工具传输文件
+ID: SC-CLIENT-SSH-FILES
+Profile: draft
+Gate: required
+Given 所属账号已启用 SSH，目标目录可由客户端本机用户读写
+When 用户用 SFTP、默认 SCP 和传统 SCP 上传下载文件及目录
+Then 文件内容保持一致，支持包含空格和中文的名称，目录层次保持完整
+And 本机权限不足时操作失败，中断传输不会被报告为完成
+
+# 场景 8：TCP 转发和跳板按连接生命周期工作
+ID: SC-CLIENT-SSH-TCP-FORWARD
+Profile: draft
+Gate: required
+Given 所属账号已登录 SSH，客户端本机可访问测试 TCP 服务
+When 用户分别建立本地、远端、动态转发及跳板连接并传输数据
+Then 请求从预期端点到达目标，纯转发连接无需启动 shell，远端动态分配端口可被读取和取消
+And 连接断开或 SSH 授权撤销后监听器及关联连接释放
+
+# 场景 9：显式使用 Agent 和 X11 转发
+ID: SC-CLIENT-SSH-AGENT-X11
+Profile: draft
+Gate: required
+Given 用户的 SSH 发起端具有可用 SSH Agent 和 X11 显示服务器
+When 用户显式请求 Agent 和 X11 转发并在目标电脑使用相应程序
+Then 目标程序可通过当前连接访问用户 Agent 和显示服务器，不复制私钥到微服或目标电脑
+And 原连接断开后转发凭据与通道失效，不因交互 shell 保留而继续授权
+
+# 场景 10：重新认证后续接自己的交互终端
+ID: SC-CLIENT-SSH-RESUME
+Profile: draft
+Gate: required
+Given 用户的交互终端正在运行任务且客户端账号授权仍有效
+When SSH 连接中断，用户在客户端终端进程持续运行期间重新认证并选择原会话续接
+Then 原终端、运行任务和环境继续可用，用户可列出或手动终止自己的保留会话
+And 同一终端拒绝并发附着，超过 1 MiB 的历史回放明确提示早期内容已丢弃
+And 关闭 SSH、改密或成功换端口、账号切换、关闭整个客户端接入会回收保留会话，旧标识不能恢复访问
+
+# 场景 11：终端参数按平台能力生效
+ID: SC-CLIENT-SSH-TERMINAL-PARAMETERS
+Profile: draft
+Gate: required
+Given 用户使用支持环境变量、PTY 模式和信号请求的 SSH 客户端
+When 用户设置允许的语言环境、申请 PTY 参数、调整窗口并发送受支持的信号
+Then 新建进程获得对应环境，Unix 的受支持终端模式和信号作用于所属任务，窗口变化继续生效
+And Windows 使用 ConPTY 能力，不支持的 raw/no-echo 模式和信号明确拒绝，不冒充已应用
+And 禁止的环境变量不能覆盖服务的认证或加载器环境
+
+# 场景 12：暂时失联不结束用户任务
+ID: SC-CLIENT-SSH-NETWORK-PAUSE
+Profile: draft
+Gate: required
+Given 当前账号已通过验证并在交互 SSH 会话中运行任务
+When 云端暂时无法验证身份、状态查询超时或 SSH 网络连接中断
+Then 已启动的任务在客户端进程内继续运行，新远程连接等待重新验证
+And 连接恢复并重新验证同一账号后可续接原会话；明确撤权仍立即回收
