@@ -141,18 +141,20 @@ lzc-cli project deploy
 
 ## 测试
 
-规格按 `runtime/static` 一级模块放在 `spec/<模块>/<场景>/REQ.md` 和 `AC.md`。场景实现和原说明保留在 `spec-tests/<模块>/<场景>/`，由唯一执行器调用 `test-all.sh` 编排。
+规格按 `runtime/static` 一级模块放在 `spec/<模块>/<场景>/REQ.md` 和 `AC.md`。场景实现和原说明保留在 `spec-tests/<模块>/<场景>/`，由唯一执行器按目标选择测试批次。
 
 ```sh
-./run-ac.sh                         # 全部已接入场景
-./run-ac.sh --dry-run               # 核对选择和映射，不启动测试
+./run-ac.sh                         # 显示帮助
+./run-ac.sh --all                   # 选择全部非 draft 场景；未接入的场景会明确失败
+./run-ac.sh --dry-run --selector terminal/input  # 核对选择和映射，不启动测试
 ./run-ac.sh --selector terminal/input
+./run-ac.sh --selector terminal/input --target android-emulator
 ./run-ac.sh --help
 ```
 
 先读 [测试环境说明](spec-tests/ENVIRONMENT.md) 配置测试地址、认证、Google Chrome 和 X11 DISPLAY。账号及密码只从本地 `.env` 或运行环境注入，前端构建由入口自动准备。默认打开有界面的桌面及移动布局窗口。真机和模拟器操作使用独立安装的 `agent-device-mcp` skill 与 MCP，安装方式见测试环境说明。
 
-`run-ac.sh` 执行前自动构建当前工作树前端，整批使用独立快照并校验源码/资源摘要；本地资源缺失时失败，禁止回退远端旧代码。Service Worker 场景同样使用本地构建。agent-device 自动测试在接入可验证的本地前端通道前保持阻断。
+桌面 `run-ac.sh` 批次自动构建当前工作树前端并固定快照；Android MCP 批次构建完整 LightOS LPK，经所选设备的网络通道安装到 `debug123`，再核对运行文件及设备实际加载的资源摘要。构建、安装或内容核验失败时停止验收，不回退远端旧代码。
 
 单模块上下文通过 `spec-tests/task-context --module terminal/input` 读取；入口与目录说明见 [测试说明](spec-tests/README.md)。执行报告保留每个模块的状态、耗时和事件证据，发现或 dry run 成功不代表真实测试通过。
 
