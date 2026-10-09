@@ -30,7 +30,8 @@ const (
 	// v38 adds native allocation safety/diagnostics and changes the checkpoint WASM hash.
 	// v39 initializes reused WASM page cells before publishing their new managed tables.
 	// v40 adds a purpose-scoped local service publication tunnel; terminal replay is unchanged.
-	AgentProtocolVersion = "lcmd-webshell-agent-v40"
+	// v41 owns the standalone client runtime; v40 wire protocols remain compatible.
+	AgentProtocolVersion = "lcmd-webshell-agent-v41"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')
