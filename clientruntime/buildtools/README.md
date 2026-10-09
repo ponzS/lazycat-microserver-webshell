@@ -1,6 +1,6 @@
 # 终端构建专用 Go 工具链
 
-Webshell 的 `clientruntime/build.mjs` 通过本模块的 `cmd/prepare` 准备终端工具链。它使用 Go 标准库，在构建时运行，可由 Go 1.24.6 或更高版本编译。
+Webshell 的 `clientruntime/build.mjs` 通过本模块的 `cmd/prepare` 准备终端工具链。它使用 Go 标准库，在构建时运行，可由 Go 1.24.4 或更高版本编译。
 
 `manifest.json` 固定 Go 1.26.8 和 Go 官方发布归档的大小、SHA-256。选择依据是构建机系统和 CPU，不是交叉编译目标。升级时从文件中标明的官方发布索引核对并更新版本及全部归档摘要，不能在构建时动态选择 latest。
 
