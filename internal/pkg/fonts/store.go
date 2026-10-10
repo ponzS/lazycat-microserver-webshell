@@ -29,6 +29,7 @@ const (
 	MinTerminalLineHeightPercent     = 100
 	MaxTerminalLineHeightPercent     = 160
 	DefaultTerminalFontID            = "03e60d3c1a9f8bef4e1f78836f80aacb9ec005260a6b094f5bfc10043bb115ab"
+	DefaultTerminalCursorStyle       = "block"
 	MaxMobileShortcutTextRunes       = 1024
 )
 
@@ -46,6 +47,7 @@ type Store struct {
 
 type State struct {
 	TerminalFontID                 string               `json:"terminal_font_id"`
+	TerminalCursorStyle            string               `json:"terminal_cursor_style"`
 	TerminalSymbolFont             *SymbolDescriptor    `json:"terminal_symbol_font,omitempty"`
 	TerminalScrollback             int                  `json:"terminal_scrollback"`
 	TerminalLineHeightPercent      int                  `json:"terminal_line_height_percent"`
@@ -61,6 +63,7 @@ type State struct {
 
 type Settings struct {
 	TerminalFontID                 string               `json:"terminal_font_id"`
+	TerminalCursorStyle            string               `json:"terminal_cursor_style"`
 	TerminalFontSystemDefault      bool                 `json:"terminal_font_system_default,omitempty"`
 	TerminalScrollback             int                  `json:"terminal_scrollback"`
 	TerminalLineHeightPercent      int                  `json:"terminal_line_height_percent"`
@@ -365,6 +368,7 @@ func (s Store) State() (State, error) {
 	}
 	return State{
 		TerminalFontID:                 selected,
+		TerminalCursorStyle:            settings.TerminalCursorStyle,
 		TerminalSymbolFont:             symbolFont,
 		TerminalScrollback:             settings.TerminalScrollback,
 		TerminalLineHeightPercent:      settings.TerminalLineHeightPercent,
@@ -383,6 +387,7 @@ func (s Store) ReadSettings() (Settings, error) {
 	data, err := os.ReadFile(s.settingsPath())
 	if errors.Is(err, os.ErrNotExist) {
 		return Settings{
+			TerminalCursorStyle:            DefaultTerminalCursorStyle,
 			TerminalScrollback:             DefaultTerminalScrollback,
 			TerminalLineHeightPercent:      DefaultTerminalLineHeightPercent,
 			DesktopMouseClipboardEnabled:   boolPtr(true),
@@ -400,6 +405,7 @@ func (s Store) ReadSettings() (Settings, error) {
 		return Settings{}, err
 	}
 	settings.TerminalFontID = strings.TrimSpace(settings.TerminalFontID)
+	settings.TerminalCursorStyle = normalizeTerminalCursorStyle(settings.TerminalCursorStyle)
 	settings.TerminalScrollback = normalizeTerminalScrollback(settings.TerminalScrollback)
 	settings.TerminalLineHeightPercent = normalizeTerminalLineHeightPercent(settings.TerminalLineHeightPercent)
 	settings.DesktopMouseClipboardEnabled = normalizeDesktopMouseClipboardEnabled(settings.DesktopMouseClipboardEnabled)
@@ -639,6 +645,7 @@ func (s Store) WriteMetadata(metadata Metadata) error {
 
 func (s Store) WriteSettings(settings Settings) error {
 	settings.TerminalFontID = strings.TrimSpace(settings.TerminalFontID)
+	settings.TerminalCursorStyle = normalizeTerminalCursorStyle(settings.TerminalCursorStyle)
 	settings.TerminalScrollback = normalizeTerminalScrollback(settings.TerminalScrollback)
 	settings.TerminalLineHeightPercent = normalizeTerminalLineHeightPercent(settings.TerminalLineHeightPercent)
 	settings.DesktopMouseClipboardEnabled = normalizeDesktopMouseClipboardEnabled(settings.DesktopMouseClipboardEnabled)
@@ -698,6 +705,10 @@ func (s Store) WriteSettings(settings Settings) error {
 func (s Store) SaveSettings(settings Settings) error {
 	settings.TerminalFontID = strings.TrimSpace(settings.TerminalFontID)
 	var err error
+	settings.TerminalCursorStyle, err = normalizeTerminalCursorStyleForSave(settings.TerminalCursorStyle)
+	if err != nil {
+		return err
+	}
 	settings.TerminalLineHeightPercent, err = normalizeTerminalLineHeightPercentForSave(settings.TerminalLineHeightPercent)
 	if err != nil {
 		return err
@@ -738,6 +749,10 @@ func (s Store) SaveSettings(settings Settings) error {
 func (s Store) MergeSettings(settings Settings, pruneMissingSelection bool) (Settings, error) {
 	settings.TerminalFontID = strings.TrimSpace(settings.TerminalFontID)
 	var err error
+	settings.TerminalCursorStyle, err = normalizeTerminalCursorStyleForSave(settings.TerminalCursorStyle)
+	if err != nil {
+		return Settings{}, err
+	}
 	settings.TerminalLineHeightPercent, err = normalizeTerminalLineHeightPercentForSave(settings.TerminalLineHeightPercent)
 	if err != nil {
 		return Settings{}, err
@@ -940,6 +955,29 @@ func normalizeTerminalScrollback(value int) int {
 		return DefaultTerminalScrollback
 	}
 	return value
+}
+
+func ValidateTerminalCursorStyle(value string) error {
+	switch value {
+	case "block", "bar", "underline":
+		return nil
+	default:
+		return fmt.Errorf("%w: terminal cursor style must be block, bar or underline", ErrBadRequest)
+	}
+}
+
+func normalizeTerminalCursorStyle(value string) string {
+	if ValidateTerminalCursorStyle(value) != nil {
+		return DefaultTerminalCursorStyle
+	}
+	return value
+}
+
+func normalizeTerminalCursorStyleForSave(value string) (string, error) {
+	if value == "" {
+		return DefaultTerminalCursorStyle, nil
+	}
+	return value, ValidateTerminalCursorStyle(value)
 }
 
 func normalizeTerminalLineHeightPercent(value int) int {

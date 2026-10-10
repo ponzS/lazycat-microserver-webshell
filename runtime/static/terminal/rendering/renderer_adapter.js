@@ -1,3 +1,5 @@
+import { drawTerminalBlockCursor } from "./cursor_renderer.js";
+
 const terminalCellFlagInverse = 16;
 const terminalCellFlagInvisible = 32;
 const terminalCellFlagFaint = 128;
@@ -15,6 +17,7 @@ export function createTerminalRendererAdapter({
   initialFontSize = 16,
   getFontFamily = () => "monospace",
   getBackgroundColorMap = () => null,
+  getSessions = () => [],
   pixelScrollOffsetEpsilon = defaultPixelScrollOffsetEpsilon,
   viewportBottomEpsilon = defaultViewportBottomEpsilon,
 } = {}) {
@@ -531,16 +534,13 @@ export function createTerminalRendererAdapter({
           renderer.webshellOriginalRenderCursor(column, row);
           return;
         }
-        const metrics = renderer.metrics || renderer.getMetrics?.();
-        const width = Number(metrics?.width) || 0;
-        const height = Number(metrics?.height) || 0;
-        if (!width || !height) {
+        if (!drawTerminalBlockCursor(renderer, column, row, {
+          getCell: terminalLineCellAt,
+          getBackground: terminalCellBackgroundCSS,
+          bleed: terminalCellBleedPx(renderer),
+        })) {
           renderer.webshellOriginalRenderCursor(column, row);
-          return;
         }
-        const bleed = terminalCellBleedPx(renderer);
-        renderer.ctx.fillStyle = renderer.theme.cursor;
-        renderer.ctx.fillRect(column * width - bleed, row * height, width + bleed * 2, height);
       };
     }
     if (typeof renderer.renderCellText === "function") {
@@ -602,6 +602,17 @@ export function createTerminalRendererAdapter({
 
   return Object.freeze({
     adjustFontMetrics: terminalAdjustedFontMetrics,
+    applyCursorStyle(style) {
+      if (disposed) return false;
+      for (const session of getSessions()) {
+        const term = session?.term;
+        if (session.closed || !term?.options || term.options.cursorStyle === style) continue;
+        term.options.cursorStyle = style;
+        // Clear the old block even when cursor position and VT cells are unchanged.
+        term.requestRender?.({ full: true });
+      }
+      return true;
+    },
     captureViewport,
 
     dispose() {

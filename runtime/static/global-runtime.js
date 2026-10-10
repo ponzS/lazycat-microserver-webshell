@@ -55,6 +55,7 @@ import {
   createAppearanceRuntimeController,
 } from "./appearance/index.js";
 import {
+  DEFAULT_TERMINAL_CURSOR_STYLE as defaultTerminalCursorStyle,
   DEFAULT_TERMINAL_FONT_FAMILY as defaultTerminalFontFamily,
   DEFAULT_TERMINAL_LINE_HEIGHT_PERCENT as defaultTerminalLineHeightPercent,
   DEFAULT_TERMINAL_SCROLLBACK as defaultTerminalScrollback,
@@ -292,6 +293,7 @@ export function startGlobalRuntime() {
   const initialTerminalFontSize = readStoredTerminalFontSize(window.localStorage, storagePrefix);
   const terminalOptionsBase = {
     cursorBlink: false,
+    cursorStyle: defaultTerminalCursorStyle,
     // PTY LF preserves the current column; inserting CR corrupts TUI updates.
     convertEol: false,
     scrollback: defaultTerminalScrollback,
@@ -448,6 +450,7 @@ export function startGlobalRuntime() {
   const terminalOptions = (overrides = {}) => ({
     ...terminalOptionsBase,
     fontSize: settings?.getTerminalFontSize() || initialTerminalFontSize,
+    cursorStyle: settings?.getTerminalCursorStyle() || defaultTerminalCursorStyle,
     theme: appearance.getTerminalTheme(),
     ...overrides,
   });
@@ -702,6 +705,7 @@ export function startGlobalRuntime() {
     },
     onDebugModeDependents: (enabled) => devices.setDebugMode(enabled),
     onTerminalFontFamilyChange: (fontFamily) => terminalMetrics?.applyFontFamily(fontFamily),
+    onTerminalCursorStyleChange: (style) => terminalRenderer?.applyCursorStyle(style),
     onTerminalFontSizeChange: (fontSize) => terminalMetrics?.applyFontSize(fontSize),
     onTerminalScrollbackChange: (previousScrollback, nextScrollback) => (
       terminalMetrics?.applyScrollbackChange(previousScrollback, nextScrollback)
@@ -866,6 +870,7 @@ export function startGlobalRuntime() {
     initialFontSize: initialTerminalFontSize,
     getFontFamily: () => terminalOptionsBase.fontFamily,
     getBackgroundColorMap: (session, theme) => codexThemeAdapter.getBackgroundColorMap(session, theme),
+    getSessions: () => Array.from(tabs.values()).flatMap((tab) => Array.from(tab.panes.values())),
   });
 
   terminalPresentation = createTerminalPresentationController({

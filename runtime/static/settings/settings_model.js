@@ -1,6 +1,7 @@
 export const BACKTAB_SEQUENCE = "\x1b[Z";
 
 export const DEFAULT_TERMINAL_FONT_SIZE = 16;
+export const DEFAULT_TERMINAL_CURSOR_STYLE = "block";
 export const MIN_TERMINAL_FONT_SIZE = 10;
 export const MAX_TERMINAL_FONT_SIZE = 32;
 export const DEFAULT_TERMINAL_SCROLLBACK = 5000;
@@ -763,8 +764,13 @@ export function buildTerminalFontFamily(selectedFont, symbolFont) {
   ].filter(Boolean).join(", ");
 }
 
+export function normalizeTerminalCursorStyle(value) {
+  return ["block", "bar", "underline"].includes(value) ? value : DEFAULT_TERMINAL_CURSOR_STYLE;
+}
+
 export function cloneSettingsSnapshot(snapshot) {
   return {
+    terminalCursorStyle: normalizeTerminalCursorStyle(snapshot?.terminalCursorStyle),
     terminalFontSize: normalizeTerminalFontSize(snapshot?.terminalFontSize),
     terminalLineHeightPercent: normalizeTerminalLineHeightPercent(snapshot?.terminalLineHeightPercent),
     terminalScrollback: normalizeTerminalScrollback(snapshot?.terminalScrollback),
@@ -791,6 +797,7 @@ export function normalizeServerSettings(raw, { defaults = createDefaultDesktopSh
   const terminalSymbolFont = normalizeTerminalSymbolFont(raw?.terminal_symbol_font);
   return {
     fonts,
+    terminalCursorStyle: normalizeTerminalCursorStyle(raw?.terminal_cursor_style),
     terminalFontID: selectedFontID,
     terminalSymbolFont,
     terminalFontFamily: buildTerminalFontFamily(fonts.find((font) => font.id === selectedFontID), terminalSymbolFont),

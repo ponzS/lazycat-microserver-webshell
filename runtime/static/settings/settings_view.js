@@ -45,6 +45,7 @@ export function createSettingsView({
     fontDeleteSelectedButton: byID("settingsFontDeleteSelectedButton"),
     fontCards: byID("settingsFontCards"),
     fontInput: byID("settingsFontInput"),
+    cursorStyleSelect: byID("settingsCursorStyleSelect"),
     lineHeightInput: byID("settingsLineHeightInput"),
     lineHeightResetButton: byID("settingsLineHeightResetButton"),
     scrollbackInput: byID("settingsScrollbackInput"),
@@ -534,11 +535,15 @@ export function createSettingsView({
     setLineHeight(value) {
       if (elements.lineHeightInput) elements.lineHeightInput.value = String(value || DEFAULT_TERMINAL_LINE_HEIGHT_PERCENT);
     },
+    setCursorStyle(value) {
+      if (elements.cursorStyleSelect) elements.cursorStyleSelect.value = value;
+    },
     setMobileShortcutsScrolling(scrolling) {
       elements.mobileShortcutsPanel?.classList.toggle("is-scrolling", scrolling);
     },
     setSaving(kind, saving) {
       const map = {
+        cursorStyle: [elements.cursorStyleSelect],
         lineHeight: [elements.lineHeightResetButton],
         scrollback: [elements.scrollbackResetButton],
         desktopMouseClipboard: [elements.desktopMouseClipboardToggle],

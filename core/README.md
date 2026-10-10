@@ -33,6 +33,8 @@ Core 可以使用标准库及通用协议/解析库，并依赖 `internal/pkg/fo
 
 ## 验证
 
+v42 新增浏览器光标样式的设置持久化；终端帧、发布和 SSH 协议保持兼容，WASM 与 v39/v40/v41 相同。Provider 显式保留 v41 的 attach、工作区恢复和内存快照协商能力；Core 不负责浏览器光标绘制。
+
 `host_metrics.go` 仅定义客户端整机指标的可空数据类型及注入接口，不读系统资源、不创建采样任务。实际采样位于独立 `hostmetrics` module，Linux 磁盘选择由 Unix adapter 注入，容器入口不装配它。
 
 在仓库根目录执行 `go build ./core`、`go build ./...`、`go vet ./...`。可交叉编译 Core 以检查平台依赖泄漏，但这不是整机平台支持验收。

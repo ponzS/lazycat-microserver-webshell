@@ -274,6 +274,16 @@
                   <div class="settings-font-cards" id="settingsFontCards" role="listbox" aria-label="{{ $t('终端字体') }}"></div>
                 </div>
               </section>
+              <section class="settings-section" aria-labelledby="settingsCursorStyleTitle">
+                <div class="settings-section-head">
+                  <h3 id="settingsCursorStyleTitle">{{ $t('光标样式') }}</h3>
+                </div>
+                <select class="settings-select" id="settingsCursorStyleSelect" aria-label="{{ $t('光标样式') }}">
+                  <option value="block">{{ $t('块状') }}</option>
+                  <option value="bar">{{ $t('竖线') }}</option>
+                  <option value="underline">{{ $t('下划线') }}</option>
+                </select>
+              </section>
               <section class="settings-section" aria-labelledby="settingsLineHeightTitle">
                 <div class="settings-section-head">
                   <h3 id="settingsLineHeightTitle">{{ $t('显示') }}</h3>

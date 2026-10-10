@@ -14,6 +14,7 @@ import (
 
 type settingsPatch struct {
 	TerminalFontID                 optionalString           `json:"terminal_font_id"`
+	TerminalCursorStyle            optionalString           `json:"terminal_cursor_style"`
 	TerminalScrollback             optionalInt              `json:"terminal_scrollback"`
 	TerminalLineHeightPercent      optionalInt              `json:"terminal_line_height_percent"`
 	DesktopMouseClipboardEnabled   optionalBool             `json:"desktop_mouse_clipboard_enabled"`
@@ -159,6 +160,12 @@ func (s *pluginServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid settings payload", http.StatusBadRequest)
 			return
 		}
+		if payload.TerminalCursorStyle.Set && !payload.TerminalCursorStyle.Null {
+			if err := fonts.ValidateTerminalCursorStyle(payload.TerminalCursorStyle.Value); err != nil {
+				writeSettingsError(w, err)
+				return
+			}
+		}
 		if payload.TerminalScrollback.Set && !payload.TerminalScrollback.Null {
 			if err := fonts.ValidateTerminalScrollback(payload.TerminalScrollback.Value); err != nil {
 				writeSettingsError(w, err)
@@ -175,6 +182,9 @@ func (s *pluginServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 		settings, err := store.ReadSettings()
 		updateFont := payload.TerminalFontID.Set && !payload.TerminalFontID.Null
 		if err == nil {
+			if payload.TerminalCursorStyle.Set && !payload.TerminalCursorStyle.Null {
+				settings.TerminalCursorStyle = payload.TerminalCursorStyle.Value
+			}
 			if updateFont {
 				settings.TerminalFontID = strings.TrimSpace(payload.TerminalFontID.Value)
 				settings.TerminalFontSystemDefault = settings.TerminalFontID == ""

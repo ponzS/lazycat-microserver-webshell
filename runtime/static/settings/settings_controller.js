@@ -3,6 +3,7 @@ import { createSettingsAPI } from "./settings_api.js";
 import { createSettingsLifecycle } from "./settings_lifecycle.js";
 import {
   BACKTAB_SEQUENCE,
+  DEFAULT_TERMINAL_CURSOR_STYLE,
   DEFAULT_TERMINAL_FONT_FAMILY,
   DEFAULT_TERMINAL_FONT_SIZE,
   DEFAULT_TERMINAL_LINE_HEIGHT_PERCENT,
@@ -22,6 +23,7 @@ import {
   normalizeShortcutDefinition,
   normalizeShortcutInputModifiers,
   normalizeTerminalFontSize,
+  normalizeTerminalCursorStyle,
   readStoredBoolean,
   readStoredTerminalFontSize,
   resolveMobileShortcutInputData,
@@ -73,6 +75,7 @@ export function createSettingsController({
   syncDebugControls = noop,
   onDebugModeDependents = noop,
   onTerminalFontFamilyChange = noop,
+  onTerminalCursorStyleChange = noop,
   onTerminalFontSizeChange = noop,
   onTerminalScrollbackChange = noop,
   onTerminalLineHeightChange = noop,
@@ -89,6 +92,7 @@ export function createSettingsController({
   const forcePCModeStorageKey = `${storagePrefix}.forcePCMode`;
   const mobileRemoteDesktopStorageKey = "lightos-mobile-remote-desktop-enabled";
   let snapshot = cloneSettingsSnapshot({
+    terminalCursorStyle: DEFAULT_TERMINAL_CURSOR_STYLE,
     terminalFontSize: readStoredTerminalFontSize(storage, storagePrefix),
     terminalLineHeightPercent: DEFAULT_TERMINAL_LINE_HEIGHT_PERCENT,
     terminalScrollback: DEFAULT_TERMINAL_SCROLLBACK,
@@ -190,6 +194,7 @@ export function createSettingsController({
   };
 
   const syncView = () => {
+    view.setCursorStyle?.(snapshot.terminalCursorStyle);
     view.setLineHeight?.(snapshot.terminalLineHeightPercent);
     view.setScrollback?.(snapshot.terminalScrollback);
     view.syncToggles?.(snapshot, { debugMode: isDebugModeEnabled() });
@@ -201,6 +206,9 @@ export function createSettingsController({
   };
 
   const notifyChanges = (next, previous, { force = false, forceFontRefresh = false } = {}) => {
+    if (force || next.terminalCursorStyle !== previous.terminalCursorStyle) {
+      onTerminalCursorStyleChange(next.terminalCursorStyle, previous.terminalCursorStyle);
+    }
     if (force || next.terminalScrollback !== previous.terminalScrollback) {
       onTerminalScrollbackChange(previous.terminalScrollback, next.terminalScrollback);
     }
@@ -839,6 +847,17 @@ export function createSettingsController({
       if (!fontEditMode && !view.elements?.fontInput?.disabled) view.openFontPicker?.();
     },
     onFontInputChange: uploadFonts,
+    onCursorStyleChange: (event) => {
+      const value = normalizeTerminalCursorStyle(event.target?.value);
+      if (value === snapshot.terminalCursorStyle) return;
+      enqueueMutation({
+        field: "terminalCursorStyle",
+        value,
+        patch: { terminal_cursor_style: value },
+        savingKind: "cursorStyle",
+        refreshFonts: false,
+      }).catch((error) => view.setFeedback?.(error.message || "光标样式保存失败。", "error"));
+    },
     onLineHeightInput: () => {
       clearTimer(lineHeightSaveTimer);
       try {
@@ -1129,6 +1148,7 @@ export function createSettingsController({
     getMobileShortcutRows: () => cloneMobileShortcutRows(snapshot.mobileShortcuts),
     getSnapshot: () => cloneSettingsSnapshot(snapshot),
     getTerminalFontFamily: () => snapshot.terminalFontFamily,
+    getTerminalCursorStyle: () => snapshot.terminalCursorStyle,
     getTerminalFontSize: () => snapshot.terminalFontSize,
     getTerminalLineHeightPercent: () => snapshot.terminalLineHeightPercent,
     getTerminalScrollback: () => snapshot.terminalScrollback,

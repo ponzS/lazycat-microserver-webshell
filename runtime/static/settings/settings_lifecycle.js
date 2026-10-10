@@ -50,6 +50,7 @@ export function createSettingsLifecycle({
       listen(elements.fontDeleteSelectedButton, "click", handlers.onFontDeleteSelectedClick);
       listen(elements.fontUploadButton, "click", handlers.onFontUploadClick);
       listen(elements.fontInput, "change", handlers.onFontInputChange);
+      listen(elements.cursorStyleSelect, "change", handlers.onCursorStyleChange);
       listen(elements.lineHeightInput, "input", handlers.onLineHeightInput);
       listen(elements.lineHeightInput, "change", handlers.onLineHeightChange);
       listen(elements.lineHeightResetButton, "click", handlers.onLineHeightReset);

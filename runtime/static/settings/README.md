@@ -6,6 +6,8 @@
 
 本模块不持有 tab、pane、session、WebSocket、history、replay、resize 或 Canvas 呈现状态。字体、字号、行高、scrollback 和移动布局变化只通过构造参数中的显式回调交给终端运行时适配层。设置变化不得触发、管理或展示历史回放过程。
 
+字体模块下方的光标样式文本下拉框提供块状、竖线和下划线，默认块状，沿用快捷键编辑器的选择框样式及移动端展开选项交互。`terminalCursorStyle` 属于设置快照，`getTerminalCursorStyle()` 供新建终端读取，`onTerminalCursorStyleChange` 将现有终端的显示更新交给 rendering owner。选项使用原生 select 支持键盘选择。
+
 ## 公开入口
 
 外部只能从 `settings/index.js` 导入：
@@ -39,6 +41,7 @@ controller 对外提供只读快照/getter、`start()`、`load()`、`open()`、`
 - 手机快捷键 `text` 原样保留空格、换行和制表符，不得 `trim()`。
 - 并发修改通过 pending overlay 防止较早 PATCH 响应覆盖尚未完成的较新字段。
 - 行高 PATCH 响应不重复注册或刷新未变化的字体族，避免在行高 live geometry 结束后额外开启 presentation hold；字体选择、上传、删除和初始 load 仍执行字体注册。
+- 光标样式只保存 `terminal_cursor_style`，复用串行队列和失败回滚；保存响应不刷新字体，显示变化只请求完整重绘，不调整终端尺寸。保存期间禁用样式选项，失败时回滚设置和现有终端样式并提示错误。
 - 重启恢复开关保存成功后只通过显式回调请求当前普通实例刷新一次 workspace，由服务端建立首份恢复描述；客户端物理机不触发该刷新。
 
 ## 生命周期
@@ -67,3 +70,5 @@ controller 对外提供只读快照/getter、`start()`、`load()`、`open()`、`
 相关 guard：`settings_controller_test.mjs`、`workspace_test.go` 的 PATCH 语义测试、`TestRuntimeSettingsModuleBoundary`、终端快捷键/字体/scrollback 静态契约和版本化资源/LPK 内容检查。触摸排序、边缘滚动与双指滚动需要在真实移动浏览器中手工核对。
 
 最小回归步骤：加载设置、切换布尔项、修改字号/行高/scrollback、上传和删除字体、保存/重置/清空两套快捷键、关闭并重新打开面板、触发 pagehide，再确认终端当前画面没有出现历史回放中间过程。
+
+光标样式手工回归：在多个已有终端间选择三种样式，新建终端并刷新页面确认保留；阻断设置保存请求确认选项和终端一起回滚且错误可见；输入内容与会话状态保持完整。产品口径见 `spec/terminal/cursor-appearance/`，本次不新增自动化场景代码。
