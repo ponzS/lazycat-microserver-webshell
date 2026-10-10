@@ -3,13 +3,14 @@ package provider
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	lzcsdk "gitee.com/linakesi/lzc-sdk/lang/go"
 	"github.com/gorilla/websocket"
 	"io"
+	"lcmd-webshell/physical"
 	"log"
 	"net/http"
 	"net/url"
@@ -30,7 +31,7 @@ type clientTerminalTicket struct {
 }
 
 var newClientTerminalHTTPClient = func() *http.Client {
-	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, Timeout: 30 * time.Second}
+	return physical.HTTPClient(30 * time.Second)
 }
 
 var resolveClientDeviceAPIAuthToken = clientDeviceAPIAuthToken
@@ -144,8 +145,8 @@ func (s *pluginServer) attachClientPane(w http.ResponseWriter, r *http.Request, 
 	log.Printf("client terminal websocket source upgraded: selector=%s pane=%s target=%s", selector, paneID, sanitizeClientTerminalURL(targetURL.String()))
 
 	headers := http.Header{}
-	headers.Set("lzc_dapi_auth_token", authToken)
-	dialer := websocket.Dialer{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	headers.Set(physical.OwnerHeader, authToken)
+	dialer := websocket.Dialer{NetDialContext: physical.DialContext}
 	target, dialResponse, err := dialer.DialContext(r.Context(), websocketHTTPToWS(targetURL.String()), headers)
 	if err != nil {
 		failure := readWebSocketDialFailure(err, dialResponse)
@@ -269,7 +270,7 @@ func (s *pluginServer) clientTerminalRequest(ctx context.Context, header http.He
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("lzc_dapi_auth_token", authToken)
+	req.Header.Set(physical.OwnerHeader, authToken)
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -295,6 +296,10 @@ func writeClientTerminalError(w http.ResponseWriter, err error) {
 	}
 	var statusErr clientTerminalStatusError
 	if errors.As(err, &statusErr) {
+		if statusErr.status == http.StatusUpgradeRequired {
+			http.Error(w, "Update the physical client to use LightOS terminal access.", http.StatusUpgradeRequired)
+			return
+		}
 		if statusErr.status == http.StatusUnauthorized || statusErr.status == http.StatusForbidden {
 			http.Error(w, errInstanceForbidden.Error(), statusErr.status)
 			return
@@ -355,13 +360,24 @@ func (s *pluginServer) clientTerminalDialInfo(ctx context.Context, header http.H
 		return clientTerminalTicket{}, "", err
 	}
 	log.Printf("client terminal dial info ticket decoded: client_id=%s ticket_client=%s service=%s device_api=%s ticket_present=%t expires_at=%s", clientID, ticket.ClientInstanceID, ticket.TerminalServiceName, safeURLOrigin(ticket.DeviceAPIURL), ticket.Ticket != "", ticket.ExpiresAt)
-	authToken, err := resolveClientDeviceAPIAuthToken(ctx, ticket.DeviceAPIURL)
-	if err != nil {
-		log.Printf("client terminal dial info auth token failed: client_id=%s device_api=%s err=%v", clientID, safeURLOrigin(ticket.DeviceAPIURL), err)
-		return clientTerminalTicket{}, "", err
+	// The signed ticket carries the already authenticated owner. IPC is private;
+	// the handler independently verifies this ticket before executing any action.
+	encoded, _, ok := strings.Cut(ticket.Ticket, ".")
+	if !ok {
+		return clientTerminalTicket{}, "", errors.New("invalid terminal ticket")
 	}
-	log.Printf("client terminal dial info ready: client_id=%s service=%s device_api=%s auth_token_present=%t", clientID, ticket.TerminalServiceName, safeURLOrigin(ticket.DeviceAPIURL), authToken != "")
-	return ticket, authToken, nil
+	payload, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return clientTerminalTicket{}, "", errors.New("invalid terminal ticket")
+	}
+	fields := strings.Split(string(payload), "\n")
+	if len(fields) != 6 {
+		return clientTerminalTicket{}, "", errors.New("update physical client")
+	}
+	if ticket.DeviceAPIURL != "http://physical/targets/"+clientID || ticket.TerminalServiceName != "cloud.lazycat.pty.v1" {
+		return clientTerminalTicket{}, "", errors.New("update physical client")
+	}
+	return ticket, fields[1], nil
 }
 
 func (s *pluginServer) publishHTTPClientOrDefault() *http.Client {

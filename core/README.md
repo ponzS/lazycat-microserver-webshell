@@ -44,3 +44,5 @@ Core 可以使用标准库及通用协议/解析库，并依赖 `internal/pkg/fo
 Unified 队列接收关键 checkpoint 诊断时转记当前应用日志；原生 daemon 仍写自己的独立日志。去重标识包含作用域、pane、创建时间、首次故障时间及 WASM 指纹。输入日志载荷上限 128 KiB，输出上限 64 KiB，超限明确标注省略。
 
 WASM 页面初始化由 `tools/ghostty-page-initialization.patch` 在 `Page.initBuf` 统一处理，只清零新页面的单元格区；链接、字形和样式表沿用各自初始化。不得依赖 WASM 的 page allocator 返回全零内存。该约束覆盖初始化、重排、扩容和页面复制；不清空运行中的终端、既有历史或待恢复的完整内存快照。
+
+物理机服务可注入 `ExecutionBackend` 与真实进程句柄；容器默认执行路径保持原样。原始事件与私有 checkpoint 的恢复仅用于此后端。`TargetFiles`/`TargetNetwork` 定义目标资源边界，不在 Core 调用原生系统操作。`Local.Detach` 用于服务重启，显式撤权仍使用 `Close`。

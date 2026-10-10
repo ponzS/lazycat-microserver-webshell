@@ -100,3 +100,19 @@ func (h *managedHandler) consume(grant ticketGrant) bool {
 	h.used[grant.nonce] = grant.expires
 	return true
 }
+
+// NewManagedService mounts SSH on an existing private service listener.
+func NewManagedService(ctx context.Context, config localserver.Config, stateDir string, platform core.Platform) localserver.SSHService {
+	ctx, cancel := context.WithCancel(ctx)
+	server, err := New(ctx, Binding{BoxID: config.BoxID, AccountID: config.AccountID, DeviceID: config.DeviceID, Epoch: config.Epoch}, stateDir, platform)
+	return &managedHandler{config: config, server: server, ctx: ctx, cancel: cancel, used: make(map[string]int64), unavailable: err != nil}
+}
+
+func (h *managedHandler) Detach() error {
+	var err error
+	if h.server != nil {
+		err = h.server.Detach()
+	}
+	h.cancel()
+	return err
+}

@@ -171,14 +171,18 @@ func numericWorkspaceID(value string, prefix string) (int, bool) {
 }
 
 func newRecoveredTerminalWorkspace(runtime *Runtime, document WorkspaceRecoveryDocument, selector, username string, historyLimitBytes, cols, rows int) (*terminalWorkspace, error) {
-	if err := ValidateWorkspaceRecoveryDocument(document); err != nil {
+	if err := ValidateWorkspaceRecoveryDocument(document); err != nil && runtime.execution == nil {
 		return nil, err
 	}
 	workspaceGeneration, err := NewHistoryGeneration()
+	if runtime.execution != nil {
+		workspaceGeneration = document.WorkspaceGeneration
+	}
 	if err != nil {
 		return nil, err
 	}
 	workspace := &terminalWorkspace{
+		restoring:           runtime.execution != nil,
 		selector:            selector,
 		runtime:             runtime,
 		workspaceGeneration: workspaceGeneration,
@@ -193,7 +197,11 @@ func newRecoveredTerminalWorkspace(runtime *Runtime, document WorkspaceRecoveryD
 	failed := true
 	defer func() {
 		if failed {
-			workspace.closeAllPanes()
+			if runtime.execution != nil {
+				workspace.detachExecutionPanes()
+			} else {
+				workspace.closeAllPanes()
+			}
 		}
 	}()
 	for _, recoveredTab := range document.Tabs {
@@ -230,6 +238,12 @@ func newRecoveredTerminalWorkspace(runtime *Runtime, document WorkspaceRecoveryD
 	}
 	workspace.activeTab = document.ActiveTabID
 	workspace.setRecentTabsLocked(document.RecentTabIDs)
+	if workspace.restoring {
+		workspace.restoring = false
+		for _, pane := range workspace.panes {
+			go pane.readLoop()
+		}
+	}
 	failed = false
 	return workspace, nil
 }

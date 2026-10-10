@@ -14,6 +14,8 @@ import (
 // exec.Cmd.Wait, so process exit cannot close a pipe before its reader drains it.
 type CommandSession struct {
 	cmd            *exec.Cmd
+	execution      CommandHandle
+	result         ProcessResult
 	platform       SSHPlatform
 	Stdin          io.WriteCloser
 	Stdout, Stderr io.ReadCloser
@@ -24,6 +26,9 @@ type CommandSession struct {
 }
 
 func StartShellCommand(ctx context.Context, platform Platform, command string, env []string) (*CommandSession, error) {
+	if p, ok := platform.(ExecutionBackendProvider); ok {
+		return startExecutionCommand(ctx, p.ExecutionBackend(), command, env)
+	}
 	p, ok := platform.(SSHPlatform)
 	if !ok {
 		return nil, errors.New("command execution unavailable")
@@ -74,6 +79,12 @@ func StartShellCommand(ctx context.Context, platform Platform, command string, e
 func (s *CommandSession) Done() <-chan struct{} { return s.done }
 func (s *CommandSession) ExitCode() uint32 {
 	<-s.done
+	if s.execution != nil {
+		if s.result.Code >= 0 {
+			return uint32(s.result.Code)
+		}
+		return 255
+	}
 	if s.cmd.ProcessState != nil && s.cmd.ProcessState.ExitCode() >= 0 {
 		return uint32(s.cmd.ProcessState.ExitCode())
 	}
@@ -82,18 +93,31 @@ func (s *CommandSession) ExitCode() uint32 {
 	}
 	return 0
 }
-func (s *CommandSession) ExitSignal() string { <-s.done; return s.platform.ExitSSHSignal(s.cmd) }
+func (s *CommandSession) ExitSignal() string {
+	<-s.done
+	if s.execution != nil {
+		return s.result.Signal
+	}
+	return s.platform.ExitSSHSignal(s.cmd)
+}
 func (s *CommandSession) Signal(name string) error {
 	select {
 	case <-s.done:
 		return errors.New("command exited")
 	default:
 	}
+	if s.execution != nil {
+		return s.execution.Signal(name)
+	}
 	return s.platform.SignalSSHCommand(s.cmd, nil, name)
 }
 func (s *CommandSession) Close() error {
 	s.once.Do(func() {
-		s.closeErr = s.platform.KillSSHCommand(s.cmd)
+		if s.execution != nil {
+			s.closeErr = s.execution.Terminate()
+		} else {
+			s.closeErr = s.platform.KillSSHCommand(s.cmd)
+		}
 		_ = s.Stdin.Close()
 		_ = s.Stdout.Close()
 		_ = s.Stderr.Close()
@@ -104,4 +128,19 @@ func (s *CommandSession) Close() error {
 		}
 	})
 	return s.closeErr
+}
+
+func startExecutionCommand(ctx context.Context, backend ExecutionBackend, command string, env []string) (*CommandSession, error) {
+	key, err := NewHistoryGeneration()
+	if err != nil {
+		return nil, err
+	}
+	handle, err := backend.OpenCommand(ctx, "exec/"+key, command, env)
+	if err != nil {
+		return nil, err
+	}
+	s := &CommandSession{execution: handle, Stdin: handle.Input(), Stdout: handle.Output(), Stderr: handle.Errors(), done: make(chan struct{})}
+	go func() { s.result = handle.Wait(); s.waitErr = s.result.Err(); close(s.done) }()
+	context.AfterFunc(ctx, func() { _ = s.Close() })
+	return s, nil
 }

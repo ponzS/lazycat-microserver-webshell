@@ -5,9 +5,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"lcmd-webshell/core"
 	"net"
-	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 
@@ -22,6 +21,7 @@ type sessionServices struct {
 	dirs             []string
 	wg               sync.WaitGroup
 	hasAgent, hasX11 bool
+	files            core.TargetFiles
 }
 
 func (s *sessionServices) init() {
@@ -38,7 +38,9 @@ func (s *sessionServices) close() {
 	}
 	s.wg.Wait()
 	for _, dir := range s.dirs {
-		_ = os.RemoveAll(dir)
+		if s.files != nil {
+			_ = s.files.RemoveAll(dir)
+		}
 	}
 }
 func (s *sessionServices) agent(p *peer) error {
@@ -46,13 +48,23 @@ func (s *sessionServices) agent(p *peer) error {
 		return errors.New("agent forwarding already requested")
 	}
 	s.init()
-	dir, err := os.MkdirTemp("", "lightos-ssh-agent-")
+	s.files = p.server.files
+	dir, err := s.files.MkdirTemp("", "lightos-ssh-agent-")
 	if err != nil {
 		return err
 	}
-	ln, path, err := listenForwardedAgent(dir)
+	var ln net.Listener
+	var path string
+	if _, remote := p.server.platform.(core.TargetNetworkProvider); remote {
+		ln, err = p.server.network.Listen(s.ctx, "agent", dir)
+		if err == nil {
+			path = ln.Addr().String()
+		}
+	} else {
+		ln, path, err = listenForwardedAgent(dir)
+	}
 	if err != nil {
-		os.RemoveAll(dir)
+		s.files.RemoveAll(dir)
 		return err
 	}
 	s.dirs = append(s.dirs, dir)
@@ -76,10 +88,11 @@ func (s *sessionServices) x11(p *peer, payload []byte) error {
 		return errors.New("invalid X11 cookie")
 	}
 	s.init()
+	s.files = p.server.files
 	var ln net.Listener
 	display := 10
 	for ; display < 1000; display++ {
-		ln, err = net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(6000+display)))
+		ln, err = p.server.network.Listen(s.ctx, "tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(6000+display)))
 		if err == nil {
 			break
 		}
@@ -87,12 +100,12 @@ func (s *sessionServices) x11(p *peer, payload []byte) error {
 	if err != nil {
 		return err
 	}
-	dir, err := os.MkdirTemp("", "lightos-ssh-x11-")
+	dir, err := s.files.MkdirTemp("", "lightos-ssh-x11-")
 	if err != nil {
 		ln.Close()
 		return err
 	}
-	path := filepath.Join(dir, "Xauthority")
+	path := s.files.Join(dir, "Xauthority")
 	// FamilyWild works with both hostname/unix and localhost Xlib lookups. The
 	// private file contains only the fake cookie supplied by the SSH client.
 	data := []byte{255, 255}
@@ -100,9 +113,9 @@ func (s *sessionServices) x11(p *peer, payload []byte) error {
 		data = binary.BigEndian.AppendUint16(data, uint16(len(field)))
 		data = append(data, field...)
 	}
-	if err = os.WriteFile(path, data, 0600); err != nil {
+	if err = writeTargetFile(s.files, path, data, 0600); err != nil {
 		ln.Close()
-		os.RemoveAll(dir)
+		s.files.RemoveAll(dir)
 		return err
 	}
 	s.dirs = append(s.dirs, dir)

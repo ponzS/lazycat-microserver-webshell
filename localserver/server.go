@@ -29,8 +29,13 @@ type SSHService interface {
 
 // Services are optional client-only integrations, separate from wire identity.
 type Services struct {
-	SSH     SSHService
-	Metrics core.HostMetricsSource
+	SSH                SSHService
+	Metrics            core.HostMetricsSource
+	Files              http.Handler
+	Network            core.TargetNetwork
+	Listener           net.Listener
+	PreserveOnShutdown bool
+	NoListener         bool
 }
 
 type Config struct {
@@ -46,18 +51,21 @@ type Config struct {
 }
 
 type Server struct {
-	config     Config
-	local      *core.Local
-	http       *http.Server
-	listener   net.Listener
-	ctx        context.Context
-	cancel     context.CancelFunc
-	mu         sync.Mutex
-	closed     bool
-	sockets    map[*websocket.Conn]struct{}
-	scrollback atomic.Int64
-	ssh        SSHService
-	metrics    core.HostMetricsSource
+	config      Config
+	local       *core.Local
+	http        *http.Server
+	listener    net.Listener
+	ctx         context.Context
+	cancel      context.CancelFunc
+	mu          sync.Mutex
+	closed      bool
+	sockets     map[*websocket.Conn]struct{}
+	scrollback  atomic.Int64
+	ssh         SSHService
+	metrics     core.HostMetricsSource
+	remoteFiles http.Handler
+	network     core.TargetNetwork
+	preserve    bool
 }
 
 func Start(parent context.Context, config Config, platform core.Platform) (*Server, error) {
@@ -82,17 +90,22 @@ func StartWithServices(parent context.Context, config Config, platform core.Plat
 	if err != nil {
 		return nil, err
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener := services.Listener
+	if listener == nil && !services.NoListener {
+		listener, err = net.Listen("tcp", "127.0.0.1:0")
+	}
 	if err != nil {
 		local.Close()
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(parent)
-	s := &Server{config: config, local: local, listener: listener, ctx: ctx, cancel: cancel, sockets: make(map[*websocket.Conn]struct{}), ssh: services.SSH, metrics: services.Metrics}
+	s := &Server{config: config, local: local, listener: listener, ctx: ctx, cancel: cancel, sockets: make(map[*websocket.Conn]struct{}), ssh: services.SSH, metrics: services.Metrics, remoteFiles: services.Files, network: services.Network, preserve: services.PreserveOnShutdown}
 	s.scrollback.Store(5000)
 	s.http = &http.Server{Handler: s, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second,
 		BaseContext: func(net.Listener) context.Context { return ctx }}
-	go func() { _ = s.http.Serve(listener); s.Close() }()
+	if listener != nil {
+		go func() { _ = s.http.Serve(listener); s.Close() }()
+	}
 	go func() { <-ctx.Done(); s.Close() }()
 	return s, nil
 }
@@ -111,9 +124,17 @@ func (s *Server) Close() {
 	}
 	s.mu.Unlock()
 	_ = s.http.Close()
-	s.local.Close()
+	if s.preserve {
+		s.local.Detach()
+	} else {
+		s.local.Close()
+	}
 	if s.ssh != nil {
-		_ = s.ssh.Close()
+		if detach, ok := s.ssh.(interface{ Detach() error }); ok && s.preserve {
+			_ = detach.Detach()
+		} else {
+			_ = s.ssh.Close()
+		}
 	}
 }
 
@@ -158,7 +179,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/ws":
 		s.queue(w, r)
 	case "/attachments", "/attachments/files", "/attachments/stat", "/attachments/open":
-		s.files(w, r)
+		if s.remoteFiles != nil {
+			s.remoteFiles.ServeHTTP(w, r)
+		} else {
+			s.files(w, r)
+		}
 	default:
 		http.NotFound(w, r)
 	}
@@ -205,3 +230,5 @@ func (s *Server) setScrollback(value int) {
 		s.scrollback.Store(int64(value))
 	}
 }
+
+func (s *Server) Revoke() { s.mu.Lock(); s.preserve = false; s.mu.Unlock(); s.Close() }

@@ -36,6 +36,8 @@ type connection struct {
 }
 
 type Server struct {
+	stateDir       string
+	detached       bool
 	lifetime       context.Context
 	mu             sync.Mutex
 	update         sync.Mutex
@@ -44,6 +46,8 @@ type Server struct {
 	key            ssh.Signer
 	shells         *core.ShellSessions
 	platform       core.Platform
+	files          core.TargetFiles
+	network        core.TargetNetwork
 	workCtx        context.Context
 	workCancel     context.CancelFunc
 	retained       map[string]*retainedShell
@@ -64,12 +68,32 @@ func New(ctx context.Context, binding Binding, stateDir string, platform core.Pl
 	if ctx.Err() != nil || platform == nil {
 		return nil, errors.New("SSH runtime is unavailable")
 	}
-	key, err := loadHostKey(stateDir)
+	var key ssh.Signer
+	var err error
+	if provider, ok := platform.(interface{ HostSigner() (ssh.Signer, error) }); ok {
+		key, err = provider.HostSigner()
+	} else {
+		key, err = loadHostKey(stateDir)
+	}
 	if err != nil {
 		return nil, err
 	}
 	workCtx, workCancel := context.WithCancel(ctx)
 	s := &Server{lifetime: ctx, binding: binding, key: key, shells: core.NewShellSessions(ctx, platform), platform: platform, workCtx: workCtx, workCancel: workCancel, retained: make(map[string]*retainedShell), connections: make(map[*connection]struct{})}
+	s.files = nativeFiles{}
+	s.network = nativeNetwork{}
+	if provider, ok := platform.(core.TargetFilesProvider); ok {
+		s.files = provider.TargetFiles()
+	}
+	if provider, ok := platform.(core.TargetNetworkProvider); ok {
+		s.network = provider.TargetNetwork()
+	}
+	if _, remote := platform.(core.ExecutionBackendProvider); remote {
+		s.stateDir = stateDir
+		if err = s.restoreRetained(); err != nil {
+			return nil, err
+		}
+	}
 	context.AfterFunc(ctx, func() { _ = s.Close() })
 	return s, nil
 }
@@ -125,8 +149,9 @@ func (s *Server) Apply(next Config) error {
 	}
 	s.workCtx, s.workCancel = context.WithCancel(s.lifetime)
 	s.config = next
+	persistErr := s.saveRetainedIndexLocked()
 	s.mu.Unlock()
-	return nil
+	return persistErr
 }
 
 func (s *Server) connectionListLocked() []*connection {
@@ -161,6 +186,12 @@ func (s *Server) recordCommandCleanup(err error) {
 	s.mu.Unlock()
 }
 func (s *Server) Close() error {
+	s.mu.Lock()
+	detached := s.detached
+	s.mu.Unlock()
+	if detached {
+		return nil
+	}
 	s.update.Lock()
 	defer s.update.Unlock()
 	s.mu.Lock()

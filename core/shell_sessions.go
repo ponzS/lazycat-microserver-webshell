@@ -14,6 +14,7 @@ import (
 type ShellSessions struct {
 	mu        sync.Mutex
 	platform  Platform
+	execution ExecutionBackend
 	cancel    context.CancelFunc
 	ctx       context.Context
 	closed    bool
@@ -34,6 +35,9 @@ func (s ShellSize) Validate() error {
 func NewShellSessions(ctx context.Context, platform Platform) *ShellSessions {
 	ctx, cancel := context.WithCancel(ctx)
 	s := &ShellSessions{ctx: ctx, cancel: cancel, platform: platform, sessions: make(map[*ShellSession]struct{})}
+	if p, ok := platform.(ExecutionBackendProvider); ok {
+		s.execution = p.ExecutionBackend()
+	}
 	context.AfterFunc(ctx, s.Close)
 	return s
 }
@@ -57,6 +61,9 @@ func (s *ShellSessions) open(ctx context.Context, options ShellOptions) (*ShellS
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
+	}
+	if s.execution != nil {
+		return s.openExecution(ctx, options)
 	}
 	cmd := s.platform.Command(Launch{RootDir: s.platform.DefaultWorkingDirectory()})
 	if options.Execute {
@@ -138,6 +145,8 @@ func (s *ShellSessions) CleanupError() error {
 type ShellSession struct {
 	owner     *ShellSessions
 	cmd       *exec.Cmd
+	execution ProcessHandle
+	result    ProcessResult
 	stream    PTY
 	done      chan struct{}
 	waitErr   error
@@ -153,6 +162,12 @@ func (s *ShellSession) Write(p []byte) (int, error) { return s.stream.Write(p) }
 func (s *ShellSession) Done() <-chan struct{}       { return s.done }
 func (s *ShellSession) ExitCode() uint32 {
 	<-s.done
+	if s.execution != nil {
+		if s.result.Code >= 0 {
+			return uint32(s.result.Code)
+		}
+		return 255
+	}
 	if s.cmd.ProcessState != nil {
 		code := s.cmd.ProcessState.ExitCode()
 		if code >= 0 {
@@ -173,6 +188,9 @@ func (s *ShellSession) Resize(size ShellSize) error {
 	if s.closed {
 		return errors.New("terminal session closed")
 	}
+	if s.execution != nil {
+		return s.execution.Resize(size)
+	}
 	return s.owner.platform.ResizePTY(s.stream, size.Cols, size.Rows, size.PixelWidth, size.PixelHeight)
 }
 func (s *ShellSession) Close() error {
@@ -184,7 +202,11 @@ func (s *ShellSession) Close() error {
 		}
 		s.mu.Unlock()
 		_ = s.stream.Close()
-		s.closeErr = s.owner.platform.KillCommand(s.cmd)
+		if s.execution != nil {
+			s.closeErr = s.execution.Terminate()
+		} else {
+			s.closeErr = s.owner.platform.KillCommand(s.cmd)
+		}
 		timer := time.NewTimer(2 * time.Second)
 		defer timer.Stop()
 		select {
@@ -201,4 +223,47 @@ func (s *ShellSession) Close() error {
 		s.owner.mu.Unlock()
 	})
 	return s.closeErr
+}
+
+func (s *ShellSessions) openExecution(ctx context.Context, options ShellOptions) (*ShellSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.failure != nil || s.ctx.Err() != nil {
+		return nil, errors.New("terminal access disabled")
+	}
+	if len(s.sessions) >= 32 {
+		return nil, errors.New("too many terminal sessions")
+	}
+	key, err := NewHistoryGeneration()
+	if options.ExecutionKey != "" {
+		key = options.ExecutionKey
+	}
+	if err != nil {
+		return nil, err
+	}
+	handle, err := s.execution.OpenPTY(ctx, "ssh/"+key, Launch{}, options)
+	if err != nil {
+		return nil, err
+	}
+	session := &ShellSession{owner: s, execution: handle, stream: handle, done: make(chan struct{})}
+	s.sessions[session] = struct{}{}
+	go func() { session.result = handle.Wait(); session.waitErr = session.result.Err(); close(session.done) }()
+	session.stop = context.AfterFunc(ctx, func() { _ = session.Close() })
+	return session, nil
+}
+
+func (s *ShellSessions) Detach() {
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		items := make([]*ShellSession, 0, len(s.sessions))
+		for item := range s.sessions {
+			items = append(items, item)
+		}
+		s.mu.Unlock()
+		for _, item := range items {
+			item.Detach()
+		}
+		s.cancel()
+	})
 }

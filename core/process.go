@@ -12,6 +12,10 @@ func processExitCode(err error) int {
 	if err == nil || errors.Is(err, os.ErrProcessDone) {
 		return 0
 	}
+	var result interface{ ExitCode() int }
+	if errors.As(err, &result) {
+		return result.ExitCode()
+	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		return exitErr.ExitCode()

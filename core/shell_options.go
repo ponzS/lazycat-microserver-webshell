@@ -7,12 +7,13 @@ import (
 )
 
 type ShellOptions struct {
-	Term    string
-	Size    ShellSize
-	Command string
-	Execute bool
-	Env     []string
-	Modes   map[uint8]uint32
+	ExecutionKey string
+	Term         string
+	Size         ShellSize
+	Command      string
+	Execute      bool
+	Env          []string
+	Modes        map[uint8]uint32
 }
 
 func ShellEnvironment(base, extra []string) []string {
@@ -40,6 +41,9 @@ func (s *ShellSessions) OpenWithOptions(ctx context.Context, options ShellOption
 
 func (s *ShellSession) ExitSignal() string {
 	<-s.done
+	if s.execution != nil {
+		return s.result.Signal
+	}
 	if p, ok := s.owner.platform.(SSHPlatform); ok {
 		return p.ExitSSHSignal(s.cmd)
 	}
@@ -52,9 +56,41 @@ func (s *ShellSession) Signal(name string) error {
 	if s.closed {
 		return errors.New("terminal session closed")
 	}
+	if s.execution != nil {
+		return s.execution.Signal(name)
+	}
 	p, ok := s.owner.platform.(SSHPlatform)
 	if !ok {
 		return errors.New("terminal signals unavailable")
 	}
 	return p.SignalSSHCommand(s.cmd, s.stream, name)
+}
+
+func (s *ShellSession) LoadExecutionReplay() ([]byte, error) {
+	if p, ok := s.execution.(interface{ LoadReplay() ([]byte, error) }); ok {
+		return p.LoadReplay()
+	}
+	return nil, nil
+}
+func (s *ShellSession) SaveExecutionReplay(raw []byte) error {
+	if p, ok := s.execution.(interface{ SaveReplay([]byte) error }); ok {
+		return p.SaveReplay(raw)
+	}
+	return nil
+}
+func (s *ShellSession) Detach() {
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		if s.stop != nil {
+			s.stop()
+		}
+		s.mu.Unlock()
+		if s.execution != nil {
+			s.execution.Detach()
+		} else {
+			s.stream.Close()
+			s.owner.platform.KillCommand(s.cmd)
+		}
+	})
 }

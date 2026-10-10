@@ -7,6 +7,9 @@ import (
 func (p *terminalPane) attachClient(syncRequest HistorySyncRequest) (paneHistorySnapshot, *paneClient, bool, paneExitSnapshot, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.executionFailure != nil {
+		return paneHistorySnapshot{}, nil, false, paneExitSnapshot{}, fmt.Errorf("terminal execution recovery failed: %w", p.executionFailure)
+	}
 	if p.closing {
 		return paneHistorySnapshot{}, nil, false, paneExitSnapshot{}, errTerminalPaneClosing
 	}

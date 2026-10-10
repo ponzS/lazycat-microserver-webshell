@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"regexp"
@@ -19,17 +20,20 @@ const replayLimit = 1 << 20
 var sessionName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 type retainedShell struct {
-	id       string
-	terminal *core.ShellSession
-	mu       sync.Mutex
-	inputMu  sync.Mutex
-	history  []byte
-	base     uint64
-	changed  chan struct{}
-	ended    bool
-	endedAt  time.Time
-	attached bool
-	revision uint64
+	options   core.ShellOptions
+	detaching bool
+	owner     *Server
+	id        string
+	terminal  *core.ShellSession
+	mu        sync.Mutex
+	inputMu   sync.Mutex
+	history   []byte
+	base      uint64
+	changed   chan struct{}
+	ended     bool
+	endedAt   time.Time
+	attached  bool
+	revision  uint64
 }
 
 func (s *Server) newTerminal(access Access, name string, options core.ShellOptions) (*retainedShell, error) {
@@ -69,12 +73,33 @@ func (s *Server) newTerminal(access Access, name string, options core.ShellOptio
 		}
 		delete(s.retained, oldest.id)
 	}
+	if s.stateDir != "" {
+		key, err := core.NewHistoryGeneration()
+		if err != nil {
+			return nil, err
+		}
+		options.ExecutionKey = key
+	}
+	if s.stateDir != "" {
+		s.retained[name] = &retainedShell{id: name, revision: access.Revision, options: options, owner: s, changed: make(chan struct{})}
+		if err := s.saveRetainedIndexLocked(); err != nil {
+			delete(s.retained, name)
+			return nil, err
+		}
+	}
 	terminal, err := s.shells.OpenWithOptions(s.workCtx, options)
 	if err != nil {
+		delete(s.retained, name)
+		s.saveRetainedIndexLocked()
 		return nil, err
 	}
-	r := &retainedShell{id: name, terminal: terminal, changed: make(chan struct{}), revision: access.Revision}
+	r := &retainedShell{id: name, terminal: terminal, changed: make(chan struct{}), revision: access.Revision, options: options, owner: s}
 	s.retained[name] = r
+	if err := s.saveRetainedIndexLocked(); err != nil {
+		terminal.Close()
+		delete(s.retained, name)
+		return nil, err
+	}
 	go r.readOutput()
 	// A shell may exit while background children still hold its PTY open.
 	go func() {
@@ -88,7 +113,17 @@ func (s *Server) newTerminal(access Access, name string, options core.ShellOptio
 }
 func (r *retainedShell) notify() { close(r.changed); r.changed = make(chan struct{}) }
 func (r *retainedShell) readOutput() {
-	defer func() { r.mu.Lock(); r.ended = true; r.endedAt = time.Now(); r.notify(); r.mu.Unlock() }()
+	defer func() {
+		r.mu.Lock()
+		if r.detaching {
+			r.mu.Unlock()
+			return
+		}
+		r.ended = true
+		r.endedAt = time.Now()
+		r.notify()
+		r.mu.Unlock()
+	}()
 	buf := make([]byte, 32<<10)
 	for {
 		n, err := r.terminal.Read(buf)
@@ -100,6 +135,16 @@ func (r *retainedShell) readOutput() {
 				r.base += uint64(drop)
 				copy(r.history, r.history[drop:])
 				r.history = r.history[:replayLimit]
+			}
+			if r.owner != nil && r.owner.stateDir != "" {
+				raw, saveErr := json.Marshal(retainedReplay{History: r.history, Base: r.base})
+				if saveErr == nil {
+					saveErr = r.terminal.SaveExecutionReplay(raw)
+				}
+				if saveErr != nil {
+					r.mu.Unlock()
+					return
+				}
 			}
 			r.notify()
 			r.mu.Unlock()
@@ -133,11 +178,12 @@ func (s *Server) detachTerminal(r *retainedShell) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.attached = false
-	if s.retained[r.id] != r {
+	if r.detaching || s.retained[r.id] != r {
 		return
 	}
 	if r.ended {
 		delete(s.retained, r.id)
+		s.saveRetainedIndexLocked()
 		return
 	}
 }
@@ -153,6 +199,7 @@ func (s *Server) killTerminal(access Access, id string) error {
 		return errors.New("session unavailable")
 	}
 	delete(s.retained, id)
+	s.saveRetainedIndexLocked()
 	s.mu.Unlock()
 	return r.terminal.Close()
 }
@@ -160,6 +207,7 @@ func (s *Server) closeRetained() {
 	s.mu.Lock()
 	items := s.retained
 	s.retained = make(map[string]*retainedShell)
+	s.saveRetainedIndexLocked()
 	s.mu.Unlock()
 	for _, r := range items {
 		_ = r.terminal.Close()

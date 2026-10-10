@@ -114,7 +114,12 @@ func (s *Server) publishConnect(w http.ResponseWriter, r *http.Request) {
 	// This deadline bounds only the initial dial, never an established service.
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	stopOwner := context.AfterFunc(s.ctx, cancel)
-	upstream, err := (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(target.host, strconv.Itoa(target.port)))
+	var upstream net.Conn
+	if s.network != nil {
+		upstream, err = s.network.DialContext(ctx, "tcp", net.JoinHostPort(target.host, strconv.Itoa(target.port)))
+	} else {
+		upstream, err = (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort(target.host, strconv.Itoa(target.port)))
+	}
 	stopOwner()
 	cancel()
 	if err != nil {

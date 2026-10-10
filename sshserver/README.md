@@ -41,3 +41,5 @@
 在本目录执行 `go build ./...`、`go vet ./...`；根目录另行构建 Provider/Core。
 
 功能约定及场景定义见 [物理机实例 SSH 规格](../spec/terminal/client-ssh/REQ.md)和[验收场景](../spec/terminal/client-ssh/AC.md)。
+
+远端执行后端可注入目标文件/网络与 SSH 主机签名。协议仍由本模块处理，私钥保留在目标机。服务端私有目录保存当前配置、保留会话映射及有界回放；重启使用 `Detach`，显式关闭/改密/换端口使用原清理逻辑。

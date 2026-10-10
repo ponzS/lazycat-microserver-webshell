@@ -87,6 +87,11 @@ func (p *terminalPane) resizeWithPixelsUnlocked(cols, rows, pixelWidth, pixelHei
 		p.mu.Unlock()
 		return nil
 	}
+	if p.execution != nil && !p.exited {
+		handle := p.execution
+		p.mu.Unlock()
+		return handle.Resize(ShellSize{Cols: cols, Rows: rows, PixelWidth: pixelWidth, PixelHeight: pixelHeight})
+	}
 	ptyFile := p.ptyFile
 	exited := p.exited
 	p.cols = cols

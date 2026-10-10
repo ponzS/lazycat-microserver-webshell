@@ -106,6 +106,19 @@ type subsystemStream struct{ ssh.Channel }
 func (subsystemStream) Close() error { return nil }
 
 func (st *sessionState) startSFTP() bool {
+	if _, remote := st.peer.server.platform.(core.TargetFilesProvider); remote {
+		h := targetSFTP{files: st.peer.server.files, home: st.peer.server.platform.DefaultWorkingDirectory()}
+		server := sftp.NewRequestServer(subsystemStream{st.channel}, sftp.Handlers{FileGet: h, FilePut: h, FileCmd: h, FileList: h}, sftp.WithStartDirectory(h.home))
+		st.run = func() uint32 {
+			defer server.Close()
+			if err := server.Serve(); err != nil && err != io.EOF {
+				return 1
+			}
+			return 0
+		}
+		return true
+	}
+
 	server, err := sftp.NewServer(subsystemStream{st.channel}, sftp.WithServerWorkingDirectory(st.peer.server.platform.DefaultWorkingDirectory()))
 	if err != nil {
 		return st.fail(err)

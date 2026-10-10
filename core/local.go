@@ -12,12 +12,14 @@ import (
 // Local owns exactly one account-bound workspace. It never launches an agent
 // subprocess: viewers use the same framed attach and queue algorithms in-process.
 type Local struct {
-	mu     sync.RWMutex
-	closed bool
-	daemon *agentDaemon
-	ctx    context.Context
-	cancel context.CancelFunc
-	scope  AgentScope
+	mu            sync.RWMutex
+	persistenceMu sync.Mutex
+	store         WorkspaceStore
+	closed        bool
+	daemon        *agentDaemon
+	ctx           context.Context
+	cancel        context.CancelFunc
+	scope         AgentScope
 }
 
 func NewLocal(platform Platform, selector, account string) (*Local, error) {
@@ -25,10 +27,23 @@ func NewLocal(platform Platform, selector, account string) (*Local, error) {
 		return nil, errors.New("local scope is required")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	original := platform
 	platform = &localPlatform{Platform: platform, ctx: ctx}
-	return &Local{ctx: ctx, cancel: cancel, scope: NormalizeAgentScope(selector, account), daemon: &agentDaemon{
-		runtime: NewRuntime(platform, nil), selector: selector, accountID: account,
-	}}, nil
+	rt := NewRuntime(platform, nil)
+	if p, ok := original.(ExecutionBackendProvider); ok {
+		rt.execution = p.ExecutionBackend()
+	}
+	local := &Local{ctx: ctx, cancel: cancel, scope: NormalizeAgentScope(selector, account), daemon: &agentDaemon{
+		runtime: rt, selector: selector, accountID: account,
+	}}
+	if store, ok := original.(WorkspaceStore); ok {
+		local.store = store
+		if err := local.restoreWorkspace(); err != nil {
+			cancel()
+			return nil, err
+		}
+	}
+	return local, nil
 }
 
 func (l *Local) request(request AgentRequest) AgentRequest {
@@ -44,7 +59,12 @@ func (l *Local) State(ctx context.Context, request AgentRequest) (WorkspaceState
 	if l.closed {
 		return WorkspaceState{}, errors.New("terminal access disabled")
 	}
+	l.persistenceMu.Lock()
+	defer l.persistenceMu.Unlock()
 	state, err := l.daemon.WorkspaceState(ctx, l.request(request))
+	if err == nil && l.store != nil {
+		err = l.persistWorkspace(state, nil)
+	}
 	state.AgentCapabilities = []string{"tab_reorder_anchor", "workspace_restart_restore", "unified_terminal"}
 	return state, err
 }
@@ -55,7 +75,21 @@ func (l *Local) Action(ctx context.Context, request AgentRequest) (WorkspaceStat
 	if l.closed {
 		return WorkspaceState{}, errors.New("terminal access disabled")
 	}
+	l.persistenceMu.Lock()
+	defer l.persistenceMu.Unlock()
+	if l.store != nil {
+		state, err := l.daemon.WorkspaceState(ctx, l.request(request))
+		if err != nil {
+			return WorkspaceState{}, err
+		}
+		if err = l.persistWorkspace(state, &request); err != nil {
+			return WorkspaceState{}, err
+		}
+	}
 	state, err := l.daemon.applyWorkspaceAction(ctx, l.request(request))
+	if err == nil && l.store != nil {
+		err = l.persistWorkspace(state, nil)
+	}
 	state.AgentCapabilities = []string{"tab_reorder_anchor", "workspace_restart_restore", "unified_terminal"}
 	return state, err
 }
@@ -120,3 +154,64 @@ func (discardQueueLog) Flush()                      {}
 func (l *Local) Log(string) QueueLog                { return discardQueueLog{} }
 
 var _ QueueBackend = (*Local)(nil)
+
+type storedExecutionWorkspace struct {
+	Document   WorkspaceRecoveryDocument
+	Pending    *AgentRequest
+	Scrollback int
+}
+
+func (l *Local) persistWorkspace(state WorkspaceState, pending *AgentRequest) error {
+	saved := storedExecutionWorkspace{Document: WorkspaceRecoveryDocumentFromState("execution", state), Pending: pending, Scrollback: 5000}
+	if w := l.daemon.workspace; w != nil {
+		saved.Scrollback = w.historyLimitBytes / averageHistoryBytesPerLine
+	}
+	raw, err := json.Marshal(saved)
+	if err != nil {
+		return err
+	}
+	return l.store.SaveWorkspace(raw)
+}
+func (l *Local) restoreWorkspace() error {
+	raw, err := l.store.LoadWorkspace()
+	if err != nil {
+		return err
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	var saved storedExecutionWorkspace
+	if err = json.Unmarshal(raw, &saved); err != nil {
+		return errors.New("invalid private workspace recovery")
+	}
+	workspace, err := newRecoveredTerminalWorkspace(l.daemon.runtime, saved.Document, l.scope.Selector, "", historyLimitBytesForTerminalScrollback(saved.Scrollback), 120, 32)
+	if err != nil {
+		return err
+	}
+	l.daemon.workspace = workspace
+	if saved.Pending != nil {
+		state, err := l.daemon.applyWorkspaceAction(l.ctx, l.request(*saved.Pending))
+		if err != nil {
+			return err
+		}
+		return l.persistWorkspace(state, nil)
+	}
+	return nil
+}
+
+// Detach is service shutdown, distinct from explicit scope revocation.
+func (l *Local) Detach() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return
+	}
+	l.closed = true
+	l.daemon.mu.Lock()
+	defer l.daemon.mu.Unlock()
+	l.daemon.closed = true
+	if w := l.daemon.workspace; w != nil {
+		w.detachExecutionPanes()
+	}
+	l.cancel()
+}

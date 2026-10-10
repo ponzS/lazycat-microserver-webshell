@@ -23,6 +23,9 @@ func (d *agentDaemon) ensureWorkspaceLocked(request AgentRequest) (*terminalWork
 	historyLimitBytes := historyLimitBytesForTerminalScrollback(request.TerminalScrollback)
 	if d.workspace == nil {
 		workspaceGeneration, err := NewHistoryGeneration()
+		if identity, ok := d.runtime.execution.(ExecutionWorkspaceIdentity); ok {
+			workspaceGeneration, err = identity.InitialWorkspaceGeneration()
+		}
 		if err != nil {
 			return nil, fmt.Errorf("create workspace generation: %w", err)
 		}

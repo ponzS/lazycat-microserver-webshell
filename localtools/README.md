@@ -5,3 +5,5 @@
 text.go 的 Reader 保留跨 Read 的未完成字符；nano.go 通过临时 PATH shim 调用同一终端二进制的 nano 子命令，不写入或替换用户 rc、ZDOTDIR/BASH_ENV/ENV。只有 nano 成功退出后才回写转换文件。
 
 依赖标准库和 x/text，不拥有会话或权限。调用方在服务关闭时回收 shim 目录。验证使用实际 PTY 和真实编码文件，重点检查分片、UTF-8 原样输出及 nano 取消不写回。
+
+远端物理机执行适配只复用 `TextDecoder`，由服务端转换原始 PTY 输出并保存未完成字符；不使用 nano shim，nano 直接在目标机运行。上述 nano 兼容工具仅属于原有本地模式。

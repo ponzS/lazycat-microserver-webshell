@@ -51,12 +51,17 @@ type TargetAccess interface {
 }
 
 type Runtime struct {
-	platform Platform
-	targets  TargetAccess
+	platform  Platform
+	targets   TargetAccess
+	execution ExecutionBackend
 }
 
 func NewRuntime(platform Platform, targets TargetAccess) *Runtime {
-	return &Runtime{platform: platform, targets: targets}
+	rt := &Runtime{platform: platform, targets: targets}
+	if p, ok := platform.(ExecutionBackendProvider); ok {
+		rt.execution = p.ExecutionBackend()
+	}
+	return rt
 }
 
 type QueueLog interface {

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,14 @@ type terminalPane struct {
 	resizeMu                   sync.Mutex
 	outputMu                   sync.Mutex
 	cmd                        *exec.Cmd
+	execution                  ProcessHandle
+	generatedMu                sync.Mutex
+	pendingGeneratedSources    map[string][]string
+	pendingCursorSources       []string
+	executionFailure           error
+	executionExit              *ProcessResult
+	rawSequence                uint64
+	generatedSequence          uint64
 	ptyFile                    PTY
 	clients                    map[*paneClient]struct{}
 	history                    paneHistory
@@ -73,12 +82,20 @@ func newTerminalPane(workspace *terminalWorkspace, paneID string, cols, rows int
 	}
 	launch := Launch{Selector: workspace.selector, Username: workspace.username, RootDir: workspace.rootDir, InitialCWD: initialCWD}
 	var command *exec.Cmd
-	if workspace.localPTY {
-		command = workspace.runtime.platform.Command(launch)
+	var ptyFile PTY
+	var execution ProcessHandle
+	if backend := workspace.runtime.execution; backend != nil {
+		key := workspace.workspaceGeneration + "/" + paneID
+		execution, err = backend.OpenPTY(context.Background(), key, launch, ShellOptions{Term: "xterm-256color", Size: ShellSize{Cols: NormalizeCols(cols), Rows: NormalizeRows(rows)}})
+		ptyFile = execution
 	} else {
-		command = workspace.runtime.targets.Command(launch)
+		if workspace.localPTY {
+			command = workspace.runtime.platform.Command(launch)
+		} else {
+			command = workspace.runtime.targets.Command(launch)
+		}
+		ptyFile, err = workspace.runtime.platform.StartPTY(command)
 	}
-	ptyFile, err := workspace.runtime.platform.StartPTY(command)
 	if err != nil {
 		return nil, err
 	}
@@ -92,6 +109,7 @@ func newTerminalPane(workspace *terminalWorkspace, paneID string, cols, rows int
 		selector:          workspace.selector,
 		rootDir:           workspace.rootDir,
 		cmd:               command,
+		execution:         execution,
 		ptyFile:           ptyFile,
 		clients:           make(map[*paneClient]struct{}),
 		historyLimitBytes: historyLimitBytes,
@@ -101,7 +119,9 @@ func newTerminalPane(workspace *terminalWorkspace, paneID string, cols, rows int
 		cwd:               strings.TrimSpace(initialCWD),
 		done:              make(chan struct{}),
 	}
-	_ = workspace.runtime.platform.ResizePTY(ptyFile, pane.cols, pane.rows, 0, 0)
+	if execution == nil {
+		_ = workspace.runtime.platform.ResizePTY(ptyFile, pane.cols, pane.rows, 0, 0)
+	}
 	if named, ok := ptyFile.(interface{ TTYName() string }); ok {
 		pane.tty = named.TTYName()
 	}
@@ -115,16 +135,46 @@ func newTerminalPane(workspace *terminalWorkspace, paneID string, cols, rows int
 		pane.checkpoint, err = newTerminalCheckpointEngine(pane.cols, pane.rows, historyLimitBytes/averageHistoryBytesPerLine)
 		if err != nil {
 			_ = ptyFile.Close()
-			_ = workspace.runtime.platform.KillCommand(command)
+			if execution != nil {
+				_ = execution.Terminate()
+			} else {
+				_ = workspace.runtime.platform.KillCommand(command)
+			}
 			return nil, fmt.Errorf("initialize terminal recovery state: %w", err)
 		}
 		pane.checkpointCreatedAt = time.Now().UnixMilli()
 	}
-	go pane.readLoop()
+	if events, ok := execution.(OrderedExecutionEvents); ok {
+		saved, loadErr := events.LoadCheckpoint()
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		if len(saved) == 0 {
+			initial, saveErr := pane.executionCheckpoint()
+			if saveErr != nil {
+				return nil, saveErr
+			}
+			if saveErr = events.Commit(0, initial); saveErr != nil {
+				return nil, saveErr
+			}
+		}
+		if len(saved) > 0 {
+			if err = pane.restoreExecutionCheckpoint(saved); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if !workspace.restoring {
+		go pane.readLoop()
+	}
 	return pane, nil
 }
 
 func (p *terminalPane) readLoop() {
+	if p.execution != nil {
+		p.readExecutionLoop()
+		return
+	}
 	waitErr := make(chan error, 1)
 	go func() {
 		waitErr <- p.workspace.runtime.platform.WaitCommand(p.cmd)
@@ -146,7 +196,11 @@ func (p *terminalPane) readLoop() {
 	select {
 	case err = <-waitErr:
 	case <-time.After(2 * time.Second):
-		_ = p.workspace.runtime.platform.KillCommand(p.cmd)
+		if p.execution != nil {
+			_ = p.execution.Terminate()
+		} else {
+			_ = p.workspace.runtime.platform.KillCommand(p.cmd)
+		}
 		err = <-waitErr
 	}
 	p.markExited(err)
@@ -252,13 +306,26 @@ func (p *terminalPane) writeInputWithDimensions(data []byte, cols, rows, pixelWi
 	if cols > 0 && rows > 0 {
 		_ = p.resizeWithPixels(cols, rows, pixelWidth, pixelHeight)
 	}
-	dropInput, generatedInput := p.consumeGeneratedCursorReportInput(data)
+	if p.execution != nil {
+		p.generatedMu.Lock()
+	}
+	dropInput, generatedInput, source := p.consumeGeneratedCursorReportInput(data)
 	if dropInput {
+		if p.execution != nil {
+			p.generatedMu.Unlock()
+		}
 		return nil
 	}
 	if len(generatedInput) > 0 {
 		p.addGeneratedEchoFilter(generatedInput)
 		data = generatedInput
+		if events, ok := p.execution.(OrderedExecutionEvents); ok && source != "" {
+			defer p.generatedMu.Unlock()
+			return events.WriteGenerated(data, source)
+		}
+	}
+	if p.execution != nil {
+		p.generatedMu.Unlock()
 	}
 	return p.writePTYInput(data)
 }
@@ -295,21 +362,24 @@ func (p *terminalPane) writePTYInput(data []byte) error {
 	return nil
 }
 
-func (p *terminalPane) writeGeneratedPTYInput(data []byte) error {
-	return p.writePTYInput(data)
-}
-
 func (p *terminalPane) writeGeneratedInput(data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
-	if !p.consumeExpectedGeneratedInput(data) {
+	if p.execution != nil {
+		p.generatedMu.Lock()
+		defer p.generatedMu.Unlock()
+	}
+	allowed, source := p.consumeExpectedGeneratedInput(data)
+	if !allowed {
 		return nil
 	}
 	p.addGeneratedEchoFilter(data)
-	return p.writeGeneratedPTYInput(data)
+	if events, ok := p.execution.(OrderedExecutionEvents); ok && source != "" {
+		return events.WriteGenerated(data, source)
+	}
+	return p.writePTYInput(data)
 }
-
 func (p *terminalPane) close() {
 	p.mu.Lock()
 	if p.closing {
@@ -333,7 +403,11 @@ func (p *terminalPane) close() {
 	if ptyFile != nil {
 		_ = ptyFile.Close()
 	}
-	_ = p.workspace.runtime.platform.KillCommand(p.cmd)
+	if p.execution != nil {
+		_ = p.execution.Terminate()
+	} else {
+		_ = p.workspace.runtime.platform.KillCommand(p.cmd)
+	}
 }
 
 func (p *terminalPane) summary() paneSummary {

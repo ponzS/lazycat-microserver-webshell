@@ -5,6 +5,7 @@ import (
 )
 
 type terminalWorkspace struct {
+	restoring           bool
 	runtime             *Runtime
 	manager             *WorkspaceManager
 	selector            string

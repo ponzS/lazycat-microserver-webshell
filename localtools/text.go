@@ -100,9 +100,45 @@ func legacyPrefix(data []byte) int {
 }
 
 type textReader struct {
-	source          io.Reader
-	pending, output []byte
-	err             error
+	source  io.Reader
+	decoder TextDecoder
+	output  []byte
+	err     error
+}
+
+// TextDecoder keeps the incomplete raw tail so remote PTYs can checkpoint it
+// with their parser state. It is never applied to command or container bytes.
+type TextDecoder struct{ Pending []byte }
+
+func (d *TextDecoder) Decode(chunk []byte, final bool) []byte {
+	data := append(d.Pending, chunk...)
+	d.Pending = nil
+	if final {
+		return DecodeText(data)
+	}
+	index := 0
+	for index < len(data) {
+		if !utf8.FullRune(data[index:]) {
+			d.Pending = append([]byte(nil), data[index:]...)
+			return repairUnicode(data[:index])
+		}
+		value, size := utf8.DecodeRune(data[index:])
+		if value == utf8.RuneError && size == 1 {
+			head, tail := data[:index], data[index:]
+			count := legacyPrefix(tail)
+			if count == 0 {
+				if len(tail) < 4 && tail[0] >= 0x81 && tail[0] <= 0xfe {
+					d.Pending = append([]byte(nil), tail...)
+					return append([]byte(nil), head...)
+				}
+				return data
+			}
+			d.Pending = append([]byte(nil), tail[count:]...)
+			return append(append([]byte(nil), head...), DecodeText(tail[:count])...)
+		}
+		index += size
+	}
+	return repairUnicode(data)
 }
 
 func NewTextReader(source io.Reader) io.Reader { return &textReader{source: source} }
@@ -114,42 +150,7 @@ func (r *textReader) Read(dst []byte) (int, error) {
 		buf := make([]byte, 32768)
 		n, err := r.source.Read(buf)
 		r.err = err
-		data := append(r.pending, buf[:n]...)
-		r.pending = nil
-		if err != nil {
-			r.output = DecodeText(data)
-			break
-		}
-		index := 0
-		for index < len(data) {
-			if !utf8.FullRune(data[index:]) {
-				r.pending = append([]byte(nil), data[index:]...)
-				r.output = repairUnicode(data[:index])
-				break
-			}
-			value, size := utf8.DecodeRune(data[index:])
-			if value == utf8.RuneError && size == 1 {
-				head := data[:index]
-				tail := data[index:]
-				count := legacyPrefix(tail)
-				if count == 0 {
-					if len(tail) < 4 && tail[0] >= 0x81 && tail[0] <= 0xfe {
-						r.pending = append([]byte(nil), tail...)
-						r.output = append([]byte(nil), head...)
-					} else {
-						r.output = data
-					}
-				} else {
-					r.output = append(append([]byte(nil), head...), DecodeText(tail[:count])...)
-					r.pending = append([]byte(nil), tail[count:]...)
-				}
-				break
-			}
-			index += size
-		}
-		if index == len(data) {
-			r.output = repairUnicode(data)
-		}
+		r.output = r.decoder.Decode(buf[:n], err != nil)
 	}
 	n := copy(dst, r.output)
 	r.output = r.output[n:]

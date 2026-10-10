@@ -32,7 +32,7 @@ func (p *peer) direct(next ssh.NewChannel) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(p.ctx, 30*time.Second)
-	target, err := (&net.Dialer{}).DialContext(ctx, "tcp", tcpAddress(request.Host, request.Port))
+	target, err := p.server.network.DialContext(ctx, "tcp", tcpAddress(request.Host, request.Port))
 	cancel()
 	if err != nil {
 		_ = next.Reject(ssh.ConnectionFailed, "TCP destination unavailable")
@@ -99,7 +99,7 @@ func (p *peer) listenForward(payload []byte) (bool, []byte) {
 	}
 	ctx, cancel := context.WithTimeout(p.ctx, 5*time.Second)
 	defer cancel()
-	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", tcpAddress(host, request.Port))
+	ln, err := p.server.network.Listen(ctx, "tcp", tcpAddress(host, request.Port))
 	if err != nil {
 		return false, nil
 	}

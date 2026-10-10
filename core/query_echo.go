@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"fmt"
 	"regexp"
 	"time"
 )
@@ -35,6 +36,16 @@ func (p *terminalPane) expectGeneratedInput(data []byte, count int) {
 		p.pendingGeneratedInputs = make(map[string]int)
 	}
 	p.pendingGeneratedInputs[string(data)] += count
+	if p.execution != nil {
+		if p.pendingGeneratedSources == nil {
+			p.pendingGeneratedSources = map[string][]string{}
+		}
+		for i := 0; i < count; i++ {
+			p.generatedSequence++
+			p.pendingGeneratedSources[string(data)] = append(p.pendingGeneratedSources[string(data)], fmt.Sprintf("%d/%d", p.rawSequence, p.generatedSequence))
+			p.boundGeneratedSourcesLocked(string(data))
+		}
+	}
 	p.mu.Unlock()
 }
 
@@ -45,13 +56,20 @@ func (p *terminalPane) expectGeneratedCursorReport(count int) {
 	now := time.Now()
 	p.mu.Lock()
 	p.pendingCursorReports += count
+	if p.execution != nil {
+		for i := 0; i < count; i++ {
+			p.generatedSequence++
+			p.pendingCursorSources = append(p.pendingCursorSources, fmt.Sprintf("%d/%d", p.rawSequence, p.generatedSequence))
+			p.boundGeneratedSourcesLocked("")
+		}
+	}
 	p.pendingCursorReportUntil = now.Add(generatedCursorReportWindow)
 	p.mu.Unlock()
 }
 
-func (p *terminalPane) consumeExpectedGeneratedInput(data []byte) bool {
+func (p *terminalPane) consumeExpectedGeneratedInput(data []byte) (bool, string) {
 	if len(data) == 0 {
-		return false
+		return false, ""
 	}
 	key := string(data)
 	now := time.Now()
@@ -61,9 +79,9 @@ func (p *terminalPane) consumeExpectedGeneratedInput(data []byte) bool {
 		if p.cursorReportWindowActiveLocked(now) && p.pendingCursorReports > 0 && isCursorPositionReport(data) {
 			p.pendingCursorReports--
 			p.pendingCursorReportUntil = now.Add(generatedCursorReportWindow)
-			return true
+			return true, p.takeGeneratedSourceLocked(key, isCursorPositionReport(data))
 		}
-		return false
+		return false, ""
 	}
 	p.pendingGeneratedInputs[key]--
 	if p.pendingGeneratedInputs[key] <= 0 {
@@ -72,16 +90,18 @@ func (p *terminalPane) consumeExpectedGeneratedInput(data []byte) bool {
 	if len(p.pendingGeneratedInputs) == 0 {
 		p.pendingGeneratedInputs = nil
 	}
-	return true
+	return true, p.takeGeneratedSourceLocked(key, isCursorPositionReport(data))
 }
 
 func (p *terminalPane) cursorReportWindowActiveLocked(now time.Time) bool {
 	if p.pendingCursorReportUntil.IsZero() {
 		p.pendingCursorReports = 0
+		p.pendingCursorSources = nil
 		return false
 	}
 	if !now.Before(p.pendingCursorReportUntil) {
 		p.pendingCursorReports = 0
+		p.pendingCursorSources = nil
 		p.pendingCursorReportUntil = time.Time{}
 		return false
 	}
@@ -115,27 +135,27 @@ func isCursorPositionReportTail(data []byte) bool {
 	return cursorPositionReportTailPattern.Match(data)
 }
 
-func (p *terminalPane) consumeGeneratedCursorReportInput(data []byte) (bool, []byte) {
+func (p *terminalPane) consumeGeneratedCursorReportInput(data []byte) (bool, []byte, string) {
 	if len(data) == 0 {
-		return false, nil
+		return false, nil, ""
 	}
 	fullReport := isCursorPositionReport(data)
 	tailReport := isCursorPositionReportTail(data)
 	if !fullReport && !tailReport {
-		return false, nil
+		return false, nil, ""
 	}
 	now := time.Now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.cursorReportWindowActiveLocked(now) {
-		return false, nil
+		return false, nil, ""
 	}
 	if fullReport && p.pendingCursorReports > 0 {
 		p.pendingCursorReports--
 		p.pendingCursorReportUntil = now.Add(generatedCursorReportWindow)
-		return false, append([]byte(nil), data...)
+		return false, append([]byte(nil), data...), p.takeGeneratedSourceLocked("", true)
 	}
-	return true, nil
+	return true, nil, ""
 }
 
 func (p *terminalPane) filterGeneratedInputEcho(data []byte) []byte {
@@ -233,4 +253,49 @@ func ttyEchoControlBytes(data []byte) []byte {
 		}
 	}
 	return output
+}
+
+func (p *terminalPane) takeGeneratedSourceLocked(key string, cursor bool) string {
+	if sources := p.pendingGeneratedSources[key]; len(sources) > 0 {
+		source := sources[0]
+		p.pendingGeneratedSources[key] = sources[1:]
+		if len(sources) == 1 {
+			delete(p.pendingGeneratedSources, key)
+		}
+		return source
+	}
+	if cursor && len(p.pendingCursorSources) > 0 {
+		source := p.pendingCursorSources[0]
+		p.pendingCursorSources = p.pendingCursorSources[1:]
+		return source
+	}
+	return ""
+}
+
+// Client-generated queries that no longer fit in the replay history cannot be
+// answered by a later viewer. Bound their source metadata by that same budget.
+func (p *terminalPane) boundGeneratedSourcesLocked(key string) {
+	limit := p.historyLimitBytes / 3
+	if limit < 1 {
+		limit = 1
+	}
+	if key == "" {
+		if len(p.pendingCursorSources) > limit {
+			drop := len(p.pendingCursorSources) - limit
+			for i := 0; i < drop; i++ {
+				p.pendingCursorSources[i] = ""
+			}
+			p.pendingCursorSources = p.pendingCursorSources[drop:]
+			p.pendingCursorReports -= drop
+		}
+		return
+	}
+	if sources := p.pendingGeneratedSources[key]; len(sources) > limit {
+		drop := len(sources) - limit
+		for i := 0; i < drop; i++ {
+			sources[i] = ""
+		}
+		p.pendingGeneratedSources[key] = sources[drop:]
+		p.pendingGeneratedInputs[key] -= drop
+	}
 }

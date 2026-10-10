@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/shlex"
+	"lcmd-webshell/core"
 )
 
 type scpOptions struct {
@@ -22,6 +23,7 @@ type scpStream struct {
 	r       *bufio.Reader
 	w       io.Writer
 	options scpOptions
+	files   core.TargetFiles
 }
 
 func (st *sessionState) startSCP(command string) (bool, bool) {
@@ -65,19 +67,20 @@ func (st *sessionState) startSCP(command string) (bool, bool) {
 		return true, st.fail(errors.New("invalid SCP request"))
 	}
 	home := st.peer.server.platform.DefaultWorkingDirectory()
+	files := st.peer.server.files
 	for i, path := range options.paths {
 		if path == "~" {
 			path = home
 		} else if strings.HasPrefix(path, "~/") {
-			path = filepath.Join(home, path[2:])
+			path = files.Join(home, path[2:])
 		}
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(home, path)
+		if !files.IsAbs(path) {
+			path = files.Join(home, path)
 		}
-		options.paths[i] = filepath.Clean(path)
+		options.paths[i] = files.Clean(path)
 	}
 	st.run = func() uint32 {
-		stream := &scpStream{r: bufio.NewReaderSize(st.channel, 8192), w: st.channel, options: options}
+		stream := &scpStream{r: bufio.NewReaderSize(st.channel, 8192), w: st.channel, options: options, files: st.peer.server.files}
 		var err error
 		if options.send {
 			err = stream.send()
@@ -126,7 +129,7 @@ func (s *scpStream) send() error {
 	for _, pattern := range s.options.paths {
 		paths := []string{pattern}
 		if strings.ContainsAny(pattern, "*?[") {
-			matched, err := filepath.Glob(pattern)
+			matched, err := s.files.Glob(pattern)
 			if err != nil {
 				return err
 			}
@@ -147,11 +150,11 @@ func (s *scpStream) sendPath(path string, depth int) error {
 	if depth > 128 {
 		return errors.New("SCP directory nesting exceeds limit")
 	}
-	info, err := os.Stat(path)
+	info, err := s.files.Stat(path)
 	if err != nil {
 		return err
 	}
-	name := filepath.Base(path)
+	name := s.files.Base(path)
 	if !scpName(name) {
 		return errors.New("filename cannot be represented by SCP")
 	}
@@ -167,12 +170,12 @@ func (s *scpStream) sendPath(path string, depth int) error {
 		if err = s.record(fmt.Sprintf("D%04o 0 %s\n", info.Mode().Perm(), name)); err != nil {
 			return err
 		}
-		entries, err := os.ReadDir(path)
+		entries, err := s.files.ReadDir(path)
 		if err != nil {
 			return err
 		}
 		for _, entry := range entries {
-			if err = s.sendPath(filepath.Join(path, entry.Name()), depth+1); err != nil {
+			if err = s.sendPath(s.files.Join(path, entry.Name()), depth+1); err != nil {
 				return err
 			}
 		}
@@ -181,7 +184,7 @@ func (s *scpStream) sendPath(path string, depth int) error {
 	if !info.Mode().IsRegular() {
 		return errors.New("SCP supports regular files and directories")
 	}
-	file, err := os.Open(path)
+	file, err := s.files.OpenFile(path, os.O_RDONLY, 0)
 	if err != nil {
 		return err
 	}
@@ -198,7 +201,7 @@ func (s *scpStream) sendPath(path string, depth int) error {
 	return s.response()
 }
 func (s *scpStream) receive(target string) error {
-	info, err := os.Stat(target)
+	info, err := s.files.Stat(target)
 	isDir := err == nil && info.IsDir()
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -275,11 +278,11 @@ func (s *scpStream) receiveEntries(target string, isDir bool, depth int, nested 
 		}
 		path := target
 		if isDir {
-			path = filepath.Join(target, fields[2])
+			path = s.files.Join(target, fields[2])
 		}
 		count++
 		// Do not follow a destination symlink chosen by a directory entry.
-		if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if info, err := s.files.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("SCP destination is a symbolic link")
 		}
 		if text[0] == 'D' {
@@ -287,12 +290,12 @@ func (s *scpStream) receiveEntries(target string, isDir bool, depth int, nested 
 				return errors.New("unexpected SCP directory")
 			}
 			created := false
-			if err = os.Mkdir(path, 0700); err == nil {
+			if err = s.files.Mkdir(path, 0700); err == nil {
 				created = true
 			} else if !os.IsExist(err) {
 				return err
 			}
-			info, err := os.Stat(path)
+			info, err := s.files.Stat(path)
 			if err != nil || !info.IsDir() {
 				return errors.New("SCP destination is not a directory")
 			}
@@ -303,7 +306,7 @@ func (s *scpStream) receiveEntries(target string, isDir bool, depth int, nested 
 				return err
 			}
 			if created || s.options.preserve {
-				if err = os.Chmod(path, os.FileMode(mode)&0777); err != nil {
+				if err = s.files.Chmod(path, os.FileMode(mode)&0777); err != nil {
 					return err
 				}
 			}
@@ -313,7 +316,7 @@ func (s *scpStream) receiveEntries(target string, isDir bool, depth int, nested 
 			}
 		}
 		if times != nil && s.options.preserve {
-			if err = os.Chtimes(path, times.accessed, times.modified); err != nil {
+			if err = s.files.Chtimes(path, times.accessed, times.modified); err != nil {
 				return err
 			}
 		}
@@ -321,7 +324,7 @@ func (s *scpStream) receiveEntries(target string, isDir bool, depth int, nested 
 	}
 }
 func (s *scpStream) receiveFile(path string, size int64, mode os.FileMode) error {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	file, err := s.files.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 	if err != nil {
 		return err
 	}
