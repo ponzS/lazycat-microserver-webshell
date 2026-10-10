@@ -1,4 +1,4 @@
-# Native execution protocol 2
+# Native execution protocol 3
 
 The device exposes `GET /s/cloud.lazycat.pty.v1/stream`, upgraded to one multiplexed WebSocket. Control, information and stream operations share that connection. JSON envelopes use `request_id`, `op`, `execution_epoch` and `controller_generation`; responses carry the same request ID. Bytes are base64 JSON byte strings. Individual messages are bounded to 512 KiB.
 
@@ -7,6 +7,8 @@ Admission requires a valid device JWT in `lzc_dapi_auth_token` and a separate `X
 `claim` establishes one controller/transport owner. Persistent decimal generations advance on service replacement and remain stable across network reconnects. Old connections and generations cannot mutate sessions. `probe` is reserved for authenticated host IPC; local management and native IPC credentials are not exposed by remote information responses.
 
 Process operations include `open_pty`, `open_command`, `open_http`, `resolve`/`query`/`list`, `read`, `input`, `generated_input`, `resize`, `signal`, `close_stdin`, `terminate` and `close_intent`. Creation is bound to an immutable logical key and launch digest. Mapped sessions are queried; a missing mapped session is an error. Input uses byte offsets and acknowledges only written bytes. Generated replies use stable event/query identities.
+
+Protocol v3 adds `shell_info` (the target's resolved account shell and LANG/LC_ALL/LC_CTYPE), and explicit `program`/`arguments` on process creation. WebShell shares launch flags, PowerShell initialization and locale policy with its original physical adapters. Prepared arguments are saved in the immutable create intent; recovery does not regenerate a live process's launch. The target inherits its own environment and permits only the existing environment allowlist; service-host PATH/HOME are never substituted.
 
 Each session's ordered events are output, stderr, resize and exit. `event_sequence` is the raw event cursor; it is distinct from Core's filtered byte history cursor. `ack` releases only durably handled events; its optional `checkpoint_sequence` permits deduplication compaction only after a committed parser/replay checkpoint and cannot exceed the acknowledged event cursor. Process `wait` reports real process exit separately from draining inherited output handles.
 

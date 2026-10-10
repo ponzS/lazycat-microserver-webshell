@@ -32,7 +32,8 @@ const (
 	// v40 adds a purpose-scoped local service publication tunnel; terminal replay is unchanged.
 	// v41 adds an optional remote execution backend; container frames and WASM are unchanged.
 	// v42 decodes raw physical PTY output on the server and checkpoints incomplete characters.
-	AgentProtocolVersion = "lcmd-webshell-agent-v42"
+	// v43 centralizes physical shell launch policy; container frames and WASM are unchanged.
+	AgentProtocolVersion = "lcmd-webshell-agent-v43"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')

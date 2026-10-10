@@ -219,6 +219,10 @@ func (b *Backend) open(ctx context.Context, key string, q Request) (*Process, er
 		}
 		q = intent
 	} else if os.IsNotExist(err) {
+		q, err = b.prepareShell(ctx, q)
+		if err != nil {
+			return nil, err
+		}
 		if q.ID == "" {
 			q.ID = randomID()
 		}
@@ -420,6 +424,10 @@ func (b *Backend) AdmissionAllowed() bool {
 // Connection-bound commands have no restart replay. Only their bounded native
 // transport window buffers output; it never becomes an unbounded disk history.
 func (b *Backend) openTransient(ctx context.Context, key string, q Request) (*Process, error) {
+	q, err := b.prepareShell(ctx, q)
+	if err != nil {
+		return nil, err
+	}
 	stop := context.AfterFunc(ctx, func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()

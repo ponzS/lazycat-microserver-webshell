@@ -46,3 +46,5 @@ Unified 队列接收关键 checkpoint 诊断时转记当前应用日志；原生
 WASM 页面初始化由 `tools/ghostty-page-initialization.patch` 在 `Page.initBuf` 统一处理，只清零新页面的单元格区；链接、字形和样式表沿用各自初始化。不得依赖 WASM 的 page allocator 返回全零内存。该约束覆盖初始化、重排、扩容和页面复制；不清空运行中的终端、既有历史或待恢复的完整内存快照。
 
 物理机服务可注入 `ExecutionBackend` 与真实进程句柄；容器默认执行路径保持原样。原始事件与私有 checkpoint 的恢复仅用于此后端。`TargetFiles`/`TargetNetwork` 定义目标资源边界，不在 Core 调用原生系统操作。`Local.Detach` 用于服务重启，显式撤权仍使用 `Close`。
+
+`shell_launch.go` shares physical Shell arguments, PowerShell initialization and locale policy between local and remote adapters. It accepts target metadata without executing commands or changing container bootstrap scripts.

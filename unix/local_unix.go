@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -34,38 +33,14 @@ func (LocalPlatform) DefaultWorkingDirectory() string {
 
 func (p LocalPlatform) Command(launch core.Launch) *exec.Cmd {
 	shell := localAccountShell()
-	args := []string{"-i"}
-	if runtime.GOOS == "darwin" {
-		args = []string{"-il"}
-	}
-	if filepath.Base(shell) == "fish" {
-		args = []string{"--interactive"}
-		if runtime.GOOS == "darwin" {
-			args = append(args, "--login")
-		}
-	}
-	cmd := exec.Command(shell, args...)
+	cmd := exec.Command(shell, core.ShellArguments(shell, runtime.GOOS, "", false, false)...)
 	cmd.Env = core.LocalEnvironment(os.Environ())
 	cmd.Env = append(cmd.Env, "SHELL="+shell)
 	if p.ToolsDir != "" {
 		cmd.Env = append(cmd.Env, "PATH="+p.ToolsDir+string(os.PathListSeparator)+os.Getenv("PATH"), "LIGHTOS_CLIENT_TERMINAL_WRAPPER_DIR="+p.ToolsDir)
 	}
-	locale := "C.UTF-8"
-	if runtime.GOOS == "darwin" {
-		locale = "en_US.UTF-8"
-	}
-	for _, key := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
-		value := strings.ToUpper(os.Getenv(key))
-		if strings.Contains(value, "UTF-8") || strings.Contains(value, "UTF8") {
-			locale = os.Getenv(key)
-			break
-		}
-	}
-	for _, key := range []string{"LANG", "LC_ALL", "LC_CTYPE"} {
-		value := strings.ToUpper(os.Getenv(key))
-		if !strings.Contains(value, "UTF-8") && !strings.Contains(value, "UTF8") {
-			cmd.Env = append(cmd.Env, key+"="+locale)
-		}
+	for key, value := range core.ShellLocale(runtime.GOOS, os.Getenv) {
+		cmd.Env = append(cmd.Env, key+"="+value)
 	}
 	cmd.Dir = launch.InitialCWD
 	if cmd.Dir == "" {

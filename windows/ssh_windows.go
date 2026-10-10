@@ -31,13 +31,7 @@ func (j *commandJob) close() error {
 
 func (p *Platform) SSHCommand(command string, terminal bool) *exec.Cmd {
 	base := p.Command(core.Launch{RootDir: p.DefaultWorkingDirectory()})
-	args := []string{"-NoLogo"}
-	if !terminal {
-		args = append(args, "-NonInteractive")
-	}
-	command = "[Console]::InputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); $OutputEncoding=[Text.UTF8Encoding]::new(); " + command
-	args = append(args, "-Command", command)
-	cmd := exec.Command("powershell.exe", args...)
+	cmd := exec.Command("powershell.exe", core.ShellArguments("powershell.exe", "windows", command, true, !terminal)...)
 	cmd.Env, cmd.Dir = base.Env, base.Dir
 	return cmd
 }

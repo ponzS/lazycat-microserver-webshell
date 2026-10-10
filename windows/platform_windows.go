@@ -37,10 +37,7 @@ func New() (*Platform, error) {
 
 func (*Platform) DefaultWorkingDirectory() string { home, _ := os.UserHomeDir(); return home }
 func (*Platform) Command(launch core.Launch) *exec.Cmd {
-	cmd := exec.Command("powershell.exe", "-NoLogo", "-NoExit", "-Command",
-		"[Console]::InputEncoding=[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); chcp 65001 > $null; "+
-			"$global:LightOSTerminalOriginalPrompt=$function:prompt; "+
-			"function global:prompt { $promptText = & $global:LightOSTerminalOriginalPrompt; [Console]::Write([char]27+']777;webshell-cwd='+[Uri]::EscapeDataString($ExecutionContext.SessionState.Path.CurrentFileSystemLocation.Path)+[char]7); $promptText }")
+	cmd := exec.Command("powershell.exe", core.ShellArguments("powershell.exe", "windows", "", false, false)...)
 	cmd.Env = core.LocalEnvironment(os.Environ())
 	cmd.Dir = launch.InitialCWD
 	if cmd.Dir == "" {

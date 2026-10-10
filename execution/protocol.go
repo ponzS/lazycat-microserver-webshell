@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const ProtocolVersion = 2
+const ProtocolVersion = 3
 const ServiceName = "cloud.lazycat.pty.v1"
 const MaxFrame = 512 << 10
 const OutputWindow = 4 << 20
@@ -38,9 +38,13 @@ type Size struct {
 	X    int `json:"x,omitempty"`
 	Y    int `json:"y,omitempty"`
 }
+type ShellInfo struct {
+	Program     string            `json:"program"`
+	Environment map[string]string `json:"environment"`
+}
 type Request struct {
 	ConnectionBound bool              `json:"connection_bound,omitempty"`
-	Execute         bool              `json:"execute,omitempty"`
+	Execute         bool              `json:"-"`
 	Sessions        []string          `json:"sessions,omitempty"`
 	ID              string            `json:"request_id"`
 	Op              string            `json:"op"`
@@ -53,9 +57,11 @@ type Request struct {
 	Checkpoint      *uint64           `json:"checkpoint_sequence,omitempty"`
 	Data            []byte            `json:"data,omitempty"`
 	Size            Size              `json:"size,omitempty"`
-	Command         string            `json:"command,omitempty"`
+	Program         string            `json:"program,omitempty"`
+	Arguments       []string          `json:"arguments,omitempty"`
+	Command         string            `json:"-"`
 	CWD             string            `json:"cwd,omitempty"`
-	Term            string            `json:"term,omitempty"`
+	Term            string            `json:"-"`
 	Modes           map[uint8]uint32  `json:"modes,omitempty"`
 	Environment     map[string]string `json:"environment,omitempty"`
 	Path            string            `json:"path,omitempty"`
@@ -100,6 +106,7 @@ type FileInfo struct {
 	Link    string    `json:"link,omitempty"`
 }
 type Response struct {
+	Shell     *ShellInfo      `json:"shell,omitempty"`
 	ErrorCode string          `json:"error_code,omitempty"`
 	ID        string          `json:"request_id"`
 	Error     string          `json:"error,omitempty"`
