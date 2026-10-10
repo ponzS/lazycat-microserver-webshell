@@ -131,6 +131,7 @@ export function createSettingsController({
   let mobileShortcutClickSuppression = null;
   let mobileShortcutsScrollbarTimer = 0;
   let desktopShortcutsScrollbarTimer = 0;
+  let fontSizeSaveTimer = 0;
   let lineHeightSaveTimer = 0;
   let scrollbackSaveTimer = 0;
   let focusTimer = 0;
@@ -194,6 +195,7 @@ export function createSettingsController({
   };
 
   const syncView = () => {
+    if (!fontSizeSaveTimer) view.setFontSize?.(snapshot.terminalFontSize);
     view.setCursorStyle?.(snapshot.terminalCursorStyle);
     view.setLineHeight?.(snapshot.terminalLineHeightPercent);
     view.setScrollback?.(snapshot.terminalScrollback);
@@ -333,6 +335,20 @@ export function createSettingsController({
         view.setSaving?.(savingKind, false);
       }
     });
+  };
+
+  const saveFontSizeFromInput = () => {
+    clearTimer(fontSizeSaveTimer);
+    fontSizeSaveTimer = 0;
+    let value;
+    try {
+      value = view.readFontSize();
+    } catch (error) {
+      view.setFontSize?.(snapshot.terminalFontSize);
+      view.setFeedback?.(error.message || "字号设置无效。", "error");
+      return;
+    }
+    controller.setTerminalFontSize(value);
   };
 
   const saveLineHeightFromInput = () => {
@@ -847,6 +863,18 @@ export function createSettingsController({
       if (!fontEditMode && !view.elements?.fontInput?.disabled) view.openFontPicker?.();
     },
     onFontInputChange: uploadFonts,
+    onFontSizeInput: () => {
+      clearTimer(fontSizeSaveTimer);
+      fontSizeSaveTimer = 0;
+      try {
+        view.readFontSize();
+      } catch (error) {
+        return;
+      }
+      fontSizeSaveTimer = windowObject?.setTimeout?.(saveFontSizeFromInput, 360) || 0;
+    },
+    onFontSizeChange: saveFontSizeFromInput,
+    onFontSizeReset: () => controller.setTerminalFontSize(DEFAULT_TERMINAL_FONT_SIZE),
     onCursorStyleChange: (event) => {
       const value = normalizeTerminalCursorStyle(event.target?.value);
       if (value === snapshot.terminalCursorStyle) return;
@@ -1099,6 +1127,7 @@ export function createSettingsController({
     },
     close() {
       const wasOpen = view.isOpen?.() === true;
+      if (fontSizeSaveTimer) saveFontSizeFromInput();
       cancelMobileShortcutInteraction();
       closeMobileEditor();
       closeDesktopEditor();
@@ -1118,6 +1147,7 @@ export function createSettingsController({
       loadGeneration += 1;
       clearTimer(mobileShortcutsScrollbarTimer);
       clearTimer(desktopShortcutsScrollbarTimer);
+      clearTimer(fontSizeSaveTimer);
       clearTimer(lineHeightSaveTimer);
       clearTimer(scrollbackSaveTimer);
       clearTimer(focusTimer);
@@ -1129,7 +1159,9 @@ export function createSettingsController({
       view.close?.();
     },
     flushPending() {
-      if (disposed || terminalScrollbackKeepaliveValue) return;
+      if (disposed) return;
+      if (fontSizeSaveTimer) saveFontSizeFromInput();
+      if (terminalScrollbackKeepaliveValue) return;
       let value;
       try {
         value = view.readScrollback?.();
@@ -1211,7 +1243,11 @@ export function createSettingsController({
       view.setFeedback?.(message, tone);
     },
     setTerminalFontSize(size) {
+      if (disposed) return;
+      clearTimer(fontSizeSaveTimer);
+      fontSizeSaveTimer = 0;
       const next = normalizeTerminalFontSize(size);
+      view.setFontSize?.(next);
       if (next === snapshot.terminalFontSize) return;
       const previous = snapshot.terminalFontSize;
       snapshot = cloneSettingsSnapshot({ ...snapshot, terminalFontSize: next });

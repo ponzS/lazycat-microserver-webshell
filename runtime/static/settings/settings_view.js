@@ -1,9 +1,12 @@
 import {
+  DEFAULT_TERMINAL_FONT_SIZE,
   DEFAULT_TERMINAL_LINE_HEIGHT_PERCENT,
   DEFAULT_TERMINAL_SCROLLBACK,
   MAX_TERMINAL_LINE_HEIGHT_PERCENT,
+  MAX_TERMINAL_FONT_SIZE,
   MAX_TERMINAL_SCROLLBACK,
   MIN_TERMINAL_LINE_HEIGHT_PERCENT,
+  MIN_TERMINAL_FONT_SIZE,
   MIN_TERMINAL_SCROLLBACK,
   desktopShortcutActionLabels,
   desktopShortcutActionOptions,
@@ -45,6 +48,8 @@ export function createSettingsView({
     fontDeleteSelectedButton: byID("settingsFontDeleteSelectedButton"),
     fontCards: byID("settingsFontCards"),
     fontInput: byID("settingsFontInput"),
+    fontSizeInput: byID("settingsFontSizeInput"),
+    fontSizeResetButton: byID("settingsFontSizeResetButton"),
     cursorStyleSelect: byID("settingsCursorStyleSelect"),
     lineHeightInput: byID("settingsLineHeightInput"),
     lineHeightResetButton: byID("settingsLineHeightResetButton"),
@@ -347,6 +352,9 @@ export function createSettingsView({
     readLineHeight() {
       return readInteger(elements.lineHeightInput, MIN_TERMINAL_LINE_HEIGHT_PERCENT, MAX_TERMINAL_LINE_HEIGHT_PERCENT, "行间距");
     },
+    readFontSize() {
+      return readInteger(elements.fontSizeInput, MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE, "字号");
+    },
     readMobileShortcutDraft() {
       return {
         type: selectedMobileShortcutType(),
@@ -534,6 +542,9 @@ export function createSettingsView({
     },
     setLineHeight(value) {
       if (elements.lineHeightInput) elements.lineHeightInput.value = String(value || DEFAULT_TERMINAL_LINE_HEIGHT_PERCENT);
+    },
+    setFontSize(value) {
+      if (elements.fontSizeInput) elements.fontSizeInput.value = String(value || DEFAULT_TERMINAL_FONT_SIZE);
     },
     setCursorStyle(value) {
       if (elements.cursorStyleSelect) elements.cursorStyleSelect.value = value;

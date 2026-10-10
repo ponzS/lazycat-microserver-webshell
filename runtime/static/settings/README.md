@@ -6,7 +6,9 @@
 
 本模块不持有 tab、pane、session、WebSocket、history、replay、resize 或 Canvas 呈现状态。字体、字号、行高、scrollback 和移动布局变化只通过构造参数中的显式回调交给终端运行时适配层。设置变化不得触发、管理或展示历史回放过程。
 
-字体模块下方的光标样式文本下拉框提供块状、竖线和下划线，默认块状，沿用快捷键编辑器的选择框样式及移动端展开选项交互。`terminalCursorStyle` 属于设置快照，`getTerminalCursorStyle()` 供新建终端读取，`onTerminalCursorStyleChange` 将现有终端的显示更新交给 rendering owner。选项使用原生 select 支持键盘选择。
+字体模块下方先显示光标样式，再显示字体大小。字体大小复用历史行数的数字输入、上下增减和恢复默认控件，打开时显示当前字号；输入范围沿用 10–32px，恢复默认为 16px。手动输入停止 360ms 或触发 change 后，统一调用 `setTerminalFontSize()`，沿用本机字号存储和现有 metrics 生效流程；快捷键调字号也同步更新输入框。关闭面板及 pagehide 提交尚未应用的有效字号，dispose 清除待提交计时器。服务端设置响应不覆盖正在等待提交的字号输入。
+
+光标样式文本下拉框提供块状、竖线和下划线，默认块状，沿用快捷键编辑器的选择框样式及移动端展开选项交互。`terminalCursorStyle` 属于设置快照，`getTerminalCursorStyle()` 供新建终端读取，`onTerminalCursorStyleChange` 将现有终端的显示更新交给 rendering owner。选项使用原生 select 支持键盘选择。
 
 ## 公开入口
 
@@ -72,3 +74,5 @@ controller 对外提供只读快照/getter、`start()`、`load()`、`open()`、`
 最小回归步骤：加载设置、切换布尔项、修改字号/行高/scrollback、上传和删除字体、保存/重置/清空两套快捷键、关闭并重新打开面板、触发 pagehide，再确认终端当前画面没有出现历史回放中间过程。
 
 光标样式手工回归：在多个已有终端间选择三种样式，新建终端并刷新页面确认保留；阻断设置保存请求确认选项和终端一起回滚且错误可见；输入内容与会话状态保持完整。产品口径见 `spec/terminal/cursor-appearance/`，本次不新增自动化场景代码。
+
+字号手工回归：先用已有快捷键调整字号再打开设置，确认输入框与实际字号一致；手动输入、点击增减及恢复默认后确认即时生效，重开设置/刷新保留；编辑途中使用快捷键不会被旧计时器覆盖，非法值提交后恢复原字号并提示错误。产品口径见 `spec/app/terminal-font-size-settings/`。
