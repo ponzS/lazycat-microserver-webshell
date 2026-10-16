@@ -52,3 +52,7 @@ Unified 订阅可携带 `replay_burst_limit_bytes`。Provider 只为 snapshot �
 容器会话已有有效网格时，Worker-ready 接入不再要求旧 resize 流程先成功；新的几何测量和 claim 在新连接中处理。Worker 尚未就绪则保留 pendingConnect，并通过现有延后同步任务和 Worker-ready 事件继续推进。失败 Worker 的重建由 health/recovery 负责，连接层不单独重复重建。
 
 v21 默认订阅 `window-ack-v1`，每 pane 最多 1 MiB 已发送未消费字节和 256 个未确认轮次。Provider 在窗口内连续发送，客户端按已解析游标累计确认；超过窗口后等待消费确认，不需要每轮往返。所有文本控制与 binary 保持流内顺序，resize-applied 不越过前序输出。准入的整段 replay 临时使用已确认的 burst 预算，发送 replay-complete 后必须等待消费将占用降回普通窗口。旧 `turn-ack-v1` 客户端仍按原逐轮规则处理。Agent 的快照格式及完整性协议保持原样；v20 Agent 仍可配合新 Provider 工作。
+
+## WASM 快照兼容
+
+Agent v44 的完整补丁构建使用独立 Zig 缓存，WASM 指纹与 v39–v43 不同。`checkpoint_transport.js` 维护当前前端可导入快照的 Agent 版本列表；session owner 在物理 `queue-ready` 后按实际 Agent 版本决定是否请求内存快照。旧容器和 PC 服务继续原始字节回放，版本缺失时也不申请快照。Worker 仍独立校验收到的 WASM 指纹，不放宽导入检查。Agent 版本或 WASM 指纹升级时同步核对此列表与 Provider 的 attach 门禁。

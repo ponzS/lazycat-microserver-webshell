@@ -59,6 +59,10 @@ v50 在 `queries.go` 的 PTY 查询入口回答 OSC 7501 `7501;?` 能力探测�
 
 v51 把终端核心升级为 Ghostty 1.4 lib-vt，checkpoint 由整块线性内存镜像（`ghostty-memory-v1`）改为可移植的官方快照 `ghostty-snapshot-v1`（`GHOSTSNP`），WASM 随之变化。v51 Agent 只对 `ghostty-snapshot-v1` 请求输出 checkpoint；旧原生客户端仍请求 `ghostty-memory-v1` 时 Provider 只把该参数传给 v39–v50 Agent，v51 则回放原始历史。Local 及 v51 Agent 工作区通过 `agent_capabilities` 公布 `ghostty_snapshot_v1`，原生客户端据此决定是否请求快照；浏览器随服务端发布，始终请求快照。Provider 显式保留 v50 的 attach 与工作区恢复兼容。
 
+客户端运行时分支的历史版本另有以下变更：
+
+v44 将完整 WebShell 补丁构建与普通 Ghostty 构建的 Zig 缓存隔离，采用干净构建的 WASM 指纹。终端帧和 checkpoint 格式保持不变，但 v39–v43 的旧指纹不参与新浏览器的内存快照协商；这些 Agent 保留 attach、工作区恢复和原始字节回放。v43 的认证持续通道能力保持不变。Go 解析器与浏览器继续共用 `runtime/static/ghostty-vt.wasm`，不得跨不同指纹导入堆状态。
+
 `host_metrics.go` 仅定义客户端整机指标的可空数据类型及注入接口，不读系统资源、不创建采样任务。实际采样位于独立 `hostmetrics` module，Linux 磁盘选择由 Unix adapter 注入，容器入口不装配它。
 
 在仓库根目录执行 `go build ./core`、`go build ./...`、`go vet ./...`。可交叉编译 Core 以检查平台依赖泄漏，但这不是整机平台支持验收。
@@ -72,3 +76,5 @@ Unified 队列接收关键 checkpoint 诊断时转记当前应用日志；原生
 Checkpoint 引擎与浏览器、原生客户端共用 `ghostty-web` 以 `-Dcpu=generic` 构建的 Ghostty 1.4 lib-vt WASM（补丁 `ghostty-web/patches/ghostty-1.4-webshell.patch` 加 `ghostty-web/wasm/webshell_abi.zig`）。页面清零由上游 `WasmPagePool` 及 `PageList` 对复用槽的 `@memset` 保证，不再维护本地页面初始化补丁。快照为官方 `GHOSTSNP`，经 `ghostty_terminal_snapshot_encode` 导出并 gzip 分片；协议名 `ghostty-snapshot-v1`。
 
 v44 增加 Provider 侧移动端预输入开关持久化；终端帧、SSH、发布协议及 WASM 快照格式不变。Provider 显式保留 v43 及既有版本的 attach、工作区恢复和快照协商能力。
+
+当前 Agent 协议为 v51，原生运行时状态使用 LightOS LPK 版本并保留产物摘要；launcher v5、host_protocol 1、终端帧、SSH/发布及 checkpoint 格式不变，显式保留 v50/v49/v48 和既有 attach 兼容列表。

@@ -49,7 +49,17 @@ const (
 	// turn status and recognizing the installed Antigravity CLI (agy); excludes
 	// semantic OSC 133 zones from agent lifecycle detection and honors CAN/SUB
 	// cancellation. Wire, checkpoint and GHOSTSNP snapshot formats match v51.
-	AgentProtocolVersion = "lcmd-webshell-agent-v52"
+	// The client-runtime branch also introduced the following compatible capabilities.
+	// Upstream v43 also restores physical PTY activity identity.
+	// 主线 v44 增加移动端预输入设置，终端帧与快照格式不变。
+	// v43 connects the native runtime through authenticated persistent channels.
+	// v44 isolates the complete WASM patch build cache and changes its fingerprint.
+	// v43 and earlier remain wire-compatible and use raw replay for this frontend.
+	// v45 moves native registration and live worker updates into launcher v2.
+	// v46 moves native runtime access to private IPC; v45 container agents remain compatible.
+	// v47 prepares cached-launcher updates before worker creation; terminal frames stay compatible.
+	// v51 reports the LightOS LPK version separately from runtime content digests.
+	AgentProtocolVersion = "lcmd-webshell-agent-v51"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')
