@@ -36,6 +36,8 @@ v35 显式兼容 v34/v33/v32/v31/v30/v29/v28/v27 及原容器兼容版本，版�
 
 v52 在 v51 之上透传可选 `pane.agent {id,name,source}`（含通过 `di` 挂载的 agent，`source` 为 `di`；识别已安装的 Antigravity CLI `agy`）；旧客户端可忽略新增字段。身份不推断工作状态；无可靠进程身份时省略，继续显示普通命令。v52 同时撤回 OSC 133 语义区段的 agent 生命周期推断，并处理 CAN/SUB 取消控制字符串。帧、元数据和 `ghostty-snapshot-v1` 快照格式与 v51 相同，快照协商同时接受 v51 与 v52。Provider 与实例 daemon 需同时更新才有 agent 身份；已兼容的 v51 daemon 不会自动停止。只重启 Provider 不会停止独立实例 daemon；重启目标 daemon 会丢失其 shell/PTY 与内存历史，独立 DI 的 setsid daemon/子 PTY 可由 `di` 重新连接。
 
+当前推荐 Agent 协议为 v47，显式保留 v46/v45/v44/v43/v42/v41/v40/v39 及既有版本的 attach 兼容和工作区恢复能力。v44 固定 Zig 0.15.2，并隔离完整 WebShell 补丁的编译缓存；干净构建的 WASM 指纹与 v39–v43 不同。容器启动 attach 时仅与 v44 协商内存快照；浏览器也按物理连接报告的 Agent 版本限制快照请求，旧容器和 PC Agent 继续使用原始字节回放，不自动替换或停止旧进程。v40 的物理机服务发布隧道、v41 的客户端运行时代码归属、v42 的浏览器光标设置和 v43 的认证持续通道能力均保留，终端帧和 checkpoint 格式不变。后续 Agent 版本或 WASM 指纹变更时，需同步核对本文件中的兼容列表、attach 快照门禁及前端 `checkpoint_transport.js` 的快照版本列表。
+
 `program_status` 是可选对象，转发旧终端响应时必须保留字段缺失，不能补成零值对象，否则浏览器会误以为旧核心已经提供应用状态而关闭实时信号兼容。旧核心的当前连接由浏览器旁路观察实时生命周期控制序列；后台实例完整状态需要核心提供 v48 元数据。
 
 `workspace_inspection.go` 提供 `GET /api/workspace?name=<selector>&inspect=1`，沿用容器/物理机的授权和账号隔离。容器使用支持检查的 Agent `inspect`，按实际版本补齐已有排序能力；物理机通过 `client_workspace_inspection.go` 优先读取 `/workspace/inspect`，仅当终端服务的这个路由确实返回 404/405 时兼容读取既有 `/workspace`。票据服务的 404/405、认证失败和其他请求错误不能被误判成客户端版本问题。
@@ -47,3 +49,11 @@ v52 在 v51 之上透传可选 `pane.agent {id,name,source}`（含通过 `di` �
 容器 Unified 转发复用 Core 的 `LogCheckpointDiagnostic`；原 attach 转发也在收到结构化故障时调用同一去重入口，因此首次解析故障进入应用汇总日志，不要求浏览器开启调试。不转发整个 Agent 日志文件，也不更改消息、ACK、尺寸边界或 PTY 生命周期。
 
 v44 增加 `mobile_pre_input_enabled` 设置：GET 返回布尔值，PUT 支持字段级修改，缺失或 null 保持原值，旧配置默认关闭。它仅控制移动端预输入显示，不下发 PTY。显式保留 v43 及既有版本的 attach、工作区恢复和内存快照兼容；无须更新旧 Agent 即可使用此界面能力。
+
+客户端 launcher v4 通过公开的限实例接入 API 自行注册、发心跳与准备更新，宿主管理首次安装和应用入口授权。Agent v47 在缓存启动时先准备目标版本，再创建 worker；私有 Unix IPC 和原版 SDK 扩展点保持。终端帧与 checkpoint 格式保持兼容，显式保留 v46/v45/v44 及已有兼容版本。
+
+客户端票据响应可含 terminal_certificate；存在时通过 clienttransport 在原 SDK gRPC 流内建立固定 worker 证书的 TLS 连接，保持现有终端和文件 API。没有证书字段的旧客户端继续 HTTP 路径。
+
+当前 Agent 协议为 v51，原生运行时状态使用 LightOS LPK 版本并保留产物摘要；launcher v5、host_protocol 1、终端帧、SSH/发布及 checkpoint 格式不变，显式保留 v50/v49/v48 和既有 attach 兼容列表。
+
+合并保留主分支的物理机 activity 身份修复、活动进程命令行/目录采集及移动端 TUI 手势所需信息。运行时与 PTY 分发职责仍按本分支方案执行。

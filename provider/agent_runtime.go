@@ -78,14 +78,14 @@ func isCurrentAgentProtocolVersion(version string) bool {
 
 // v27 and later implement these workspace features.
 func supportsWorkspaceRecovery(version string) bool {
-	if strings.TrimSpace(version) == "lcmd-webshell-agent-v39" {
+	if strings.TrimSpace(version) == "lcmd-webshell-agent-v39" || strings.TrimSpace(version) == "lcmd-webshell-agent-v43" || strings.TrimSpace(version) == "lcmd-webshell-agent-v44" {
 		return true
 	}
 	return isCurrentAgentProtocolVersion(version) || strings.TrimSpace(version) == "lcmd-webshell-agent-v51" || strings.TrimSpace(version) == "lcmd-webshell-agent-v50" || strings.TrimSpace(version) == "lcmd-webshell-agent-v49" || strings.TrimSpace(version) == "lcmd-webshell-agent-v48" || strings.TrimSpace(version) == "lcmd-webshell-agent-v47" || strings.TrimSpace(version) == "lcmd-webshell-agent-v46" || strings.TrimSpace(version) == "lcmd-webshell-agent-v45" || strings.TrimSpace(version) == "lcmd-webshell-agent-v44" || strings.TrimSpace(version) == "lcmd-webshell-agent-v43" || strings.TrimSpace(version) == "lcmd-webshell-agent-v42" || strings.TrimSpace(version) == "lcmd-webshell-agent-v41" || strings.TrimSpace(version) == "lcmd-webshell-agent-v40" || strings.TrimSpace(version) == "lcmd-webshell-agent-v38" || strings.TrimSpace(version) == "lcmd-webshell-agent-v37" || strings.TrimSpace(version) == "lcmd-webshell-agent-v36" || strings.TrimSpace(version) == "lcmd-webshell-agent-v35" || strings.TrimSpace(version) == "lcmd-webshell-agent-v34" || strings.TrimSpace(version) == "lcmd-webshell-agent-v33" || strings.TrimSpace(version) == "lcmd-webshell-agent-v32" || strings.TrimSpace(version) == "lcmd-webshell-agent-v31" || strings.TrimSpace(version) == "lcmd-webshell-agent-v30" || strings.TrimSpace(version) == "lcmd-webshell-agent-v29" || strings.TrimSpace(version) == "lcmd-webshell-agent-v28" || strings.TrimSpace(version) == "lcmd-webshell-agent-v27"
 }
 
 func isAttachCompatibleAgentProtocolVersion(version string) bool {
-	if strings.TrimSpace(version) == "lcmd-webshell-agent-v39" {
+	if strings.TrimSpace(version) == "lcmd-webshell-agent-v39" || strings.TrimSpace(version) == "lcmd-webshell-agent-v43" || strings.TrimSpace(version) == "lcmd-webshell-agent-v44" {
 		return true
 	}
 	switch strings.TrimSpace(version) {
