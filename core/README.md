@@ -37,6 +37,8 @@ v43 修正物理机 activity：Linux 本地 TTY 路径归一化、macOS 完整�
 
 v42 新增浏览器光标样式的设置持久化；终端帧、发布和 SSH 协议保持兼容，WASM 与 v39/v40/v41 相同。Provider 显式保留 v41 的 attach、工作区恢复和内存快照协商能力；Core 不负责浏览器光标绘制。
 
+v44 将完整 WebShell 补丁构建与普通 Ghostty 构建的 Zig 缓存隔离，采用干净构建的 WASM 指纹。终端帧和 checkpoint 格式保持不变，但 v39–v43 的旧指纹不参与新浏览器的内存快照协商；这些 Agent 保留 attach、工作区恢复和原始字节回放。v43 的认证持续通道能力保持不变。Go 解析器与浏览器继续共用 `runtime/static/ghostty-vt.wasm`，不得跨不同指纹导入堆状态。
+
 `host_metrics.go` 仅定义客户端整机指标的可空数据类型及注入接口，不读系统资源、不创建采样任务。实际采样位于独立 `hostmetrics` module，Linux 磁盘选择由 Unix adapter 注入，容器入口不装配它。
 
 在仓库根目录执行 `go build ./core`、`go build ./...`、`go vet ./...`。可交叉编译 Core 以检查平台依赖泄漏，但这不是整机平台支持验收。
@@ -50,3 +52,5 @@ Unified 队列接收关键 checkpoint 诊断时转记当前应用日志；原生
 WASM 页面初始化由 `tools/ghostty-page-initialization.patch` 在 `Page.initBuf` 统一处理，只清零新页面的单元格区；链接、字形和样式表沿用各自初始化。不得依赖 WASM 的 page allocator 返回全零内存。该约束覆盖初始化、重排、扩容和页面复制；不清空运行中的终端、既有历史或待恢复的完整内存快照。
 
 v44 增加 Provider 侧移动端预输入开关持久化；终端帧、SSH、发布协议及 WASM 快照格式不变。Provider 显式保留 v43 及既有版本的 attach、工作区恢复和快照协商能力。
+
+当前 Agent 协议为 v51，原生运行时状态使用 LightOS LPK 版本并保留产物摘要；launcher v5、host_protocol 1、终端帧、SSH/发布及 checkpoint 格式不变，显式保留 v50/v49/v48 和既有 attach 兼容列表。

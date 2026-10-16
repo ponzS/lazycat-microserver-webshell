@@ -32,8 +32,16 @@ const (
 	// v40 adds a purpose-scoped local service publication tunnel; terminal replay is unchanged.
 	// v41 owns the standalone client runtime; v40 wire protocols remain compatible.
 	// v42 persists browser cursor appearance; terminal wire and checkpoint formats are unchanged.
-	// v43 fixes physical PTY activity identity; wire and checkpoint formats are unchanged.
-	AgentProtocolVersion = "lcmd-webshell-agent-v44"
+	// Upstream v43 also restores physical PTY activity identity.
+	// 主线 v44 增加移动端预输入设置，终端帧与快照格式不变。
+	// v43 connects the native runtime through authenticated persistent channels.
+	// v44 isolates the complete WASM patch build cache and changes its fingerprint.
+	// v43 and earlier remain wire-compatible and use raw replay for this frontend.
+	// v45 moves native registration and live worker updates into launcher v2.
+	// v46 moves native runtime access to private IPC; v45 container agents remain compatible.
+	// v47 prepares cached-launcher updates before worker creation; terminal frames stay compatible.
+	// v51 reports the LightOS LPK version separately from runtime content digests.
+	AgentProtocolVersion = "lcmd-webshell-agent-v51"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')
