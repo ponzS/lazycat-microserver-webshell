@@ -72,7 +72,8 @@ func checkpointHash(data []byte) string {
 func newTerminalCheckpointEngine(cols, rows, lines int) (*terminalCheckpointEngine, error) {
 	checkpointRuntime.Do(func() {
 		ctx := context.Background()
-		checkpointRuntime.runtime = wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigCompiler().WithMemoryLimitPages(4096).WithCloseOnContextDone(true))
+		// Prefer native compilation where supported; RISC-V uses the interpreter.
+		checkpointRuntime.runtime = wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithMemoryLimitPages(4096).WithCloseOnContextDone(true))
 		_, checkpointRuntime.err = checkpointRuntime.runtime.NewHostModuleBuilder("env").NewFunctionBuilder().WithFunc(func(uint32, uint32) {}).Export("log").Instantiate(ctx)
 		if checkpointRuntime.err == nil {
 			checkpointRuntime.compiled, checkpointRuntime.err = checkpointRuntime.runtime.CompileModule(ctx, terminalCheckpointWASM)

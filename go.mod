@@ -22,4 +22,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240227224415-6ceb2ff114de // indirect
 	google.golang.org/grpc v1.63.2 // indirect
 	google.golang.org/protobuf v1.35.2 // indirect
+	lcmd-webshell/clienttransport v0.0.0
 )
+
+replace lcmd-webshell/clienttransport => ./clienttransport
