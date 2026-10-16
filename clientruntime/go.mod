@@ -3,8 +3,10 @@ module lcmd-webshell/clientruntime
 go 1.26.0
 
 require (
+	github.com/google/uuid v1.6.0
 	golang.org/x/sys v0.48.0
 	lcmd-webshell v0.0.0
+	lcmd-webshell/clienttransport v0.0.0
 	lcmd-webshell/hostmetrics v0.0.0
 	lcmd-webshell/sshserver v0.0.0
 )
@@ -29,10 +31,16 @@ require (
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/image v0.36.0 // indirect
+	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20240227224415-6ceb2ff114de // indirect
+	google.golang.org/grpc v1.63.2 // indirect
+	google.golang.org/protobuf v1.35.2 // indirect
 )
 
 replace lcmd-webshell => ..
+
+replace lcmd-webshell/clienttransport => ../clienttransport
 
 replace lcmd-webshell/sshserver => ../sshserver
 
