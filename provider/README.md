@@ -31,8 +31,14 @@ v35 显式兼容 v34/v33/v32/v31/v30/v29/v28/v27 及原容器兼容版本，版�
 
 实际功能回归按 `spec-tests/ENVIRONMENT.md` 绑定设备/账号，检查容器列表、授权、工作区、文件、统一连接和重连；未在真实环境执行的内容不能标记通过。
 
-当前推荐 Agent 协议为 v42，显式保留 v41/v40/v39 及既有版本的 attach 兼容和工作区恢复能力。v39/v40/v41/v42 共用初始化复用页面单元格的 WASM；容器启动 attach 时仅与这些版本协商内存快照，旧 Agent 使用原始字节回放，不自动替换或停止旧进程。v38 及之前的旧快照不能导入这些版本。v40 的物理机服务发布隧道不改变容器终端协议；v41 只调整客户端运行时代码归属；v42 新增浏览器光标样式设置，不改变终端帧或快照格式，兼容的旧 Agent 不自动替换或停止。
+当前推荐 Agent 协议为 v47，显式保留 v46/v45/v44/v43/v42/v41/v40/v39 及既有版本的 attach 兼容和工作区恢复能力。v44 固定 Zig 0.15.2，并隔离完整 WebShell 补丁的编译缓存；干净构建的 WASM 指纹与 v39–v43 不同。容器启动 attach 时仅与 v44 协商内存快照；浏览器也按物理连接报告的 Agent 版本限制快照请求，旧容器和 PC Agent 继续使用原始字节回放，不自动替换或停止旧进程。v40 的物理机服务发布隧道、v41 的客户端运行时代码归属、v42 的浏览器光标设置和 v43 的认证持续通道能力均保留，终端帧和 checkpoint 格式不变。后续 Agent 版本或 WASM 指纹变更时，需同步核对本文件中的兼容列表、attach 快照门禁及前端 `checkpoint_transport.js` 的快照版本列表。
 
 `settings.go` 的 `GET /api/settings` 返回 `terminal_cursor_style`；既有字段级更新入口 `PUT /api/settings` 接受 `block`、`bar`、`underline`，未提供或传入 `null` 时不修改该字段，其他值返回 400。设置沿用字体目录内的原子存储，光标样式不下发 PTY、不触发重放。手工验证样式保存、刷新、修改其他设置后保留样式，以及无效值不会覆盖已有配置。
 
 容器 Unified 转发复用 Core 的 `LogCheckpointDiagnostic`；原 attach 转发也在收到结构化故障时调用同一去重入口，因此首次解析故障进入应用汇总日志，不要求浏览器开启调试。不转发整个 Agent 日志文件，也不更改消息、ACK、尺寸边界或 PTY 生命周期。
+
+客户端 launcher v4 通过公开的限实例接入 API 自行注册、发心跳与准备更新，宿主管理首次安装和应用入口授权。Agent v47 在缓存启动时先准备目标版本，再创建 worker；私有 Unix IPC 和原版 SDK 扩展点保持。终端帧与 checkpoint 格式保持兼容，显式保留 v46/v45/v44 及已有兼容版本。
+
+客户端票据响应可含 terminal_certificate；存在时通过 clienttransport 在原 SDK gRPC 流内建立固定 worker 证书的 TLS 连接，保持现有终端和文件 API。没有证书字段的旧客户端继续 HTTP 路径。
+
+当前 Agent 协议为 v51，原生运行时状态使用 LightOS LPK 版本并保留产物摘要；launcher v5、host_protocol 1、终端帧、SSH/发布及 checkpoint 格式不变，显式保留 v50/v49/v48 和既有 attach 兼容列表。
