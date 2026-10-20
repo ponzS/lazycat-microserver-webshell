@@ -12,9 +12,13 @@ require (
 )
 
 require (
+	gitee.com/linakesi/hportal/pty v0.0.0-20261020034010-5a1419a24493 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/charmbracelet/x/conpty v0.1.1 // indirect
 	github.com/charmbracelet/x/errors v0.0.0-20240508181413-e8d8b6e2de86 // indirect
+	github.com/charmbracelet/x/term v0.2.1 // indirect
+	github.com/charmbracelet/x/termios v0.1.1 // indirect
+	github.com/charmbracelet/x/xpty v0.1.3 // indirect
 	github.com/creack/pty v1.1.24 // indirect
 	github.com/ebitengine/purego v0.10.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
