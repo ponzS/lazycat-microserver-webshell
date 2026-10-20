@@ -45,3 +45,7 @@ WASM 执行引擎自动选择平台支持的实现：amd64/arm64 通常使用编
 launcher v5、终端 v48 阶段：原 SDK gRPC 注册承载私有 Unix 应用流，终端/SSH/文件/发布仍在本机运行。应用传输和证书实现由本仓库 clienttransport 维护，不给 hportal 增加源码依赖。
 
 运行时 v49 在 launcher/worker 进程入口统一清理内部代理环境变量及 ELECTRON_RUN_AS_NODE，宿主和 worker 启动器不再重复过滤；nano/version 模式保留调用方环境。微服代理仍由私有 proxy_url 配置显式提供，用户 shell 配置行为不变。CLI/PC 透传 bootstrap 扩展字段，launcher v5 控制协议保持兼容。
+
+## 进程内通用 PTY（Agent v52）
+
+物理机网页和 SSH PTY 编译复用 hportal 仓库的独立轻模块 `gitee.com/linakesi/hportal/pty`，固定到仓库提交对应版本。它只提供底层 PTY 适配，不引入 hportal 网络核心，也不增加 PTY RPC/端口；解析、shell、授权、保留会话、Job/进程回收和热更新仍由本运行时维护。库随运行时重新构建并由 LPK 分发，不要求宿主 daemon 执行 PTY。兼容原终端帧、launcher v5、host_protocol 1、SSH/发布和 WASM；Provider 显式保留 v51 attach/工作区能力。正常构建使用锁定依赖，不依赖本地 go.work 或开发机路径。
