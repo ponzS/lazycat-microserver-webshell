@@ -56,3 +56,5 @@ v21 默认订阅 `window-ack-v1`，每 pane 最多 1 MiB 已发送未消费字�
 ## WASM 快照兼容
 
 Agent v44 的完整补丁构建使用独立 Zig 缓存，WASM 指纹与 v39–v43 不同。`checkpoint_transport.js` 维护当前前端可导入快照的 Agent 版本列表；session owner 在物理 `queue-ready` 后按实际 Agent 版本决定是否请求内存快照。旧容器和 PC 服务继续原始字节回放，版本缺失时也不申请快照。Worker 仍独立校验收到的 WASM 指纹，不放宽导入检查。Agent 版本或 WASM 指纹升级时同步核对此列表与 Provider 的 attach 门禁。
+
+合并后的当前 Agent 为 v53，包含主分支物理机 activity 修复；本次构建的 WASM 与合并后的主分支资产一致。前后端仅为已确认同一构建的 v53 协商内存快照，其余兼容版本继续字节回放；不跨不同指纹导入快照。v52 的进程内通用 PTY、LPK 版本与任务回收职责保持，显式兼容旧 v52/v51。

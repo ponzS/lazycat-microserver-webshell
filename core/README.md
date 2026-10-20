@@ -56,3 +56,5 @@ v44 增加 Provider 侧移动端预输入开关持久化；终端帧、SSH、发
 v51 开始，原生运行时状态使用 LightOS LPK 版本并保留产物摘要；launcher v5、host_protocol 1、终端帧、SSH/发布及 checkpoint 格式不变，显式保留 v50/v49/v48 和既有 attach 兼容列表。
 
 当前 Agent 为 v52，本机平台经 hportal 纯 PTY 模块复用底层库，Core 的平台边界、终端帧和 checkpoint 不变。退出结果继续使用真实进程状态；Provider 显式保留 v51 attach/工作区能力，不把新 SDK 网络服务作为依赖。
+
+合并后的当前 Agent 为 v53，包含主分支物理机 activity 修复；本次构建的 WASM 与合并后的主分支资产一致。前后端仅为已确认同一构建的 v53 协商内存快照，其余兼容版本继续字节回放；不跨不同指纹导入快照。v52 的进程内通用 PTY、LPK 版本与任务回收职责保持，显式兼容旧 v52/v51。

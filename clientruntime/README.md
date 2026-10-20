@@ -49,3 +49,5 @@ launcher v5、终端 v48 阶段：原 SDK gRPC 注册承载私有 Unix 应用流
 ## 进程内通用 PTY（Agent v52）
 
 物理机网页和 SSH PTY 编译复用 hportal 仓库的独立轻模块 `gitee.com/linakesi/hportal/pty`，固定到仓库提交对应版本。它只提供底层 PTY 适配，不引入 hportal 网络核心，也不增加 PTY RPC/端口；解析、shell、授权、保留会话、Job/进程回收和热更新仍由本运行时维护。库随运行时重新构建并由 LPK 分发，不要求宿主 daemon 执行 PTY。兼容原终端帧、launcher v5、host_protocol 1、SSH/发布和 WASM；Provider 显式保留 v51 attach/工作区能力。正常构建使用锁定依赖，不依赖本地 go.work 或开发机路径。
+
+合并后的当前 Agent 为 v53，包含主分支物理机 activity 修复；本次构建的 WASM 与合并后的主分支资产一致。前后端仅为已确认同一构建的 v53 协商内存快照，其余兼容版本继续字节回放；不跨不同指纹导入快照。v52 的进程内通用 PTY、LPK 版本与任务回收职责保持，显式兼容旧 v52/v51。
