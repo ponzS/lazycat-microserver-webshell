@@ -20,3 +20,5 @@
 依赖方向为 Unix → Core；Core 不反向导入。系统专属文件通过 build tags 或平台后缀隔离。容器原有脚本与 Process.Kill 行为保持不变；本地模式使用独立的 PTY/session 回收和编码兼容适配。
 
 Linux 执行 `go build ./unix`、`go vet ./unix`；macOS 库可用 `GOOS=darwin go build ./unix` 检查。真实回归需隔离用户 HOME，检查 rc、代理环境、CWD、resize、编码、关闭和父进程退出。进程有意自行脱离 session/父子关系或提权后，不按名称强行猜测归属；该边界需在实机审核。
+
+本机网页和 SSH PTY 通过 `gitee.com/linakesi/hportal/pty` 的进程内薄库启动/调整尺寸。`local_unix.go` 共用启动辅助，SSH 模式在启动前应用到 slave；默认 shell、环境、编码、TTY/CWD、进程归属和信号仍由 Webshell 维护。容器的原 Unix PTY 路径不变。
