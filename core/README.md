@@ -53,4 +53,6 @@ WASM 页面初始化由 `tools/ghostty-page-initialization.patch` 在 `Page.init
 
 v44 增加 Provider 侧移动端预输入开关持久化；终端帧、SSH、发布协议及 WASM 快照格式不变。Provider 显式保留 v43 及既有版本的 attach、工作区恢复和快照协商能力。
 
-当前 Agent 协议为 v51，原生运行时状态使用 LightOS LPK 版本并保留产物摘要；launcher v5、host_protocol 1、终端帧、SSH/发布及 checkpoint 格式不变，显式保留 v50/v49/v48 和既有 attach 兼容列表。
+v51 开始，原生运行时状态使用 LightOS LPK 版本并保留产物摘要；launcher v5、host_protocol 1、终端帧、SSH/发布及 checkpoint 格式不变，显式保留 v50/v49/v48 和既有 attach 兼容列表。
+
+当前 Agent 为 v52，本机平台经 hportal 纯 PTY 模块复用底层库，Core 的平台边界、终端帧和 checkpoint 不变。退出结果继续使用真实进程状态；Provider 显式保留 v51 attach/工作区能力，不把新 SDK 网络服务作为依赖。

@@ -46,3 +46,4 @@ v44 增加 `mobile_pre_input_enabled` 设置：GET 返回布尔值，PUT 支持�
 当前 Agent 协议为 v51，原生运行时状态使用 LightOS LPK 版本并保留产物摘要；launcher v5、host_protocol 1、终端帧、SSH/发布及 checkpoint 格式不变，显式保留 v50/v49/v48 和既有 attach 兼容列表。
 
 合并保留主分支的物理机 activity 身份修复、活动进程命令行/目录采集及移动端 TUI 手势所需信息。运行时与 PTY 分发职责仍按本分支方案执行。
+Agent v52 仅调整物理机运行时的进程内 PTY 依赖，网络与业务协议不变，显式保留 v51 的 attach 和工作区恢复。Provider 不代理 hportal PTY RPC，仍经现有应用流访问本机 Webshell 服务。

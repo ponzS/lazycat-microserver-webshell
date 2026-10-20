@@ -41,7 +41,8 @@ const (
 	// v46 moves native runtime access to private IPC; v45 container agents remain compatible.
 	// v47 prepares cached-launcher updates before worker creation; terminal frames stay compatible.
 	// v51 reports the LightOS LPK version separately from runtime content digests.
-	AgentProtocolVersion = "lcmd-webshell-agent-v51"
+	// v52 reuses the in-process PTY library; terminal wire and task ownership are unchanged.
+	AgentProtocolVersion = "lcmd-webshell-agent-v52"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')
