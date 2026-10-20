@@ -1,5 +1,5 @@
-gitee.com/linakesi/hportal/pty v0.0.0-20261020034010-5a1419a24493 h1:YEHGgGuBmPyyo3d+Tfzcb7ocr0oJfz3YW5uXo/Dppuo=
-gitee.com/linakesi/hportal/pty v0.0.0-20261020034010-5a1419a24493/go.mod h1:snb6hKoO/0NvVcItcVToV37NTIKW3DVVO7WhzHE40hY=
+gitee.com/linakesi/hportal/pty v0.0.0-20261020035628-f481de41b1f6 h1:+1/DUWGtHYouNdBcaNM4uOv5DCgUSO1RzACYypPvHF0=
+gitee.com/linakesi/hportal/pty v0.0.0-20261020035628-f481de41b1f6/go.mod h1:snb6hKoO/0NvVcItcVToV37NTIKW3DVVO7WhzHE40hY=
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/charmbracelet/x/conpty v0.1.1 h1:s1bUxjoi7EpqiXysVtC+a8RrvPPNcNvAjfi4jxsAuEs=
