@@ -3,7 +3,7 @@ module lcmd-webshell
 go 1.24.6
 
 require (
-	gitee.com/linakesi/hportal/pty v0.0.0-20261020035628-f481de41b1f6
+	gitee.com/linakesi/hportal/pty v0.0.0-20261021081435-191e76ea1039
 	gitee.com/linakesi/lzc-sdk v0.1.0
 	github.com/creack/pty v1.1.24
 	github.com/gorilla/websocket v1.5.3
