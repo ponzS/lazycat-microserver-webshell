@@ -31,13 +31,13 @@ v35 显式兼容 v34/v33/v32/v31/v30/v29/v28/v27 及原容器兼容版本，版�
 
 实际功能回归按 `spec-tests/ENVIRONMENT.md` 绑定设备/账号，检查容器列表、授权、工作区、文件、统一连接和重连；未在真实环境执行的内容不能标记通过。
 
-当前推荐 Agent 协议为 v53，显式保留 v52/v51 及既有版本的 attach 和工作区恢复。v53 合并主分支物理机 activity 修复及当前 WASM 基线；内存快照只与已确认使用同一构建的当前 v53 协商，Worker 仍严格检查实际指纹。其他兼容 Agent 使用字节回放，不自动终止或替换旧任务。
+当前推荐 Agent 协议为 v54，合入主线移动端预输入设置和 Codex 输入修复，显式保留 v53/v52/v51、主线 v44/v43 及既有版本的 attach 和工作区恢复。v54 与已发布 v53 的 WASM 字节一致，内存快照仅与这两个已核验构建协商，Worker 仍检查实际指纹。其他兼容 Agent 使用字节回放，不自动终止或替换旧任务。
 
 `settings.go` 的 `GET /api/settings` 返回 `terminal_cursor_style`；既有字段级更新入口 `PUT /api/settings` 接受 `block`、`bar`、`underline`，未提供或传入 `null` 时不修改该字段，其他值返回 400。设置沿用字体目录内的原子存储，光标样式不下发 PTY、不触发重放。手工验证样式保存、刷新、修改其他设置后保留样式，以及无效值不会覆盖已有配置。
 
 容器 Unified 转发复用 Core 的 `LogCheckpointDiagnostic`；原 attach 转发也在收到结构化故障时调用同一去重入口，因此首次解析故障进入应用汇总日志，不要求浏览器开启调试。不转发整个 Agent 日志文件，也不更改消息、ACK、尺寸边界或 PTY 生命周期。
 
-v44 增加 `mobile_pre_input_enabled` 设置：GET 返回布尔值，PUT 支持字段级修改，缺失或 null 保持原值，旧配置默认关闭。它仅控制移动端预输入显示，不下发 PTY。显式保留 v43 及既有版本的 attach、工作区恢复和内存快照兼容；无须更新旧 Agent 即可使用此界面能力。
+主线 v44（本分支合并为 v54）增加 `mobile_pre_input_enabled` 设置：GET 返回布尔值，PUT 支持字段级修改，缺失或 null 保持原值，旧配置默认关闭。它仅控制移动端预输入显示，不下发 PTY。显式保留旧 Agent 的 attach 和工作区恢复；快照按已核验构建范围协商，无须更新旧 Agent 即可使用此界面能力。
 
 客户端 launcher v4 通过公开的限实例接入 API 自行注册、发心跳与准备更新，宿主管理首次安装和应用入口授权。Agent v47 在缓存启动时先准备目标版本，再创建 worker；私有 Unix IPC 和原版 SDK 扩展点保持。终端帧与 checkpoint 格式保持兼容，显式保留 v46/v45/v44 及已有兼容版本。
 
@@ -49,3 +49,5 @@ v51 开始，原生运行时状态使用 LightOS LPK 版本并保留产物摘要
 Agent v52 仅调整物理机运行时的进程内 PTY 依赖，网络与业务协议不变，显式保留 v51 的 attach 和工作区恢复。Provider 不代理 hportal PTY RPC，仍经现有应用流访问本机 Webshell 服务。
 
 v53 在合并新主分支后独立递增，避免重用先前 v52 Agent 缓存而漏掉 activity 修复；终端帧、SSH、发布、launcher v5 与 host_protocol 1 均不改变。
+
+v54 在本次合并后独立递增，避免复用 v53 的 Agent 安装缓存而遗漏新设置；与 v53 保持相同 WASM 与终端帧，launcher v5 / host_protocol 1 不变。

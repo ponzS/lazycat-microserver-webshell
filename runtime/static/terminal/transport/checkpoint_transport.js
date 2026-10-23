@@ -1,7 +1,7 @@
 export const memoryCheckpointProtocol = "ghostty-memory-v1";
 // Keep this list aligned with the WASM fingerprint and Agent checkpoint gate.
 // Older container and PC agents stay connected through raw history replay.
-export const memoryCheckpointAgentProtocols = new Set(["lcmd-webshell-agent-v53"]);
+export const memoryCheckpointAgentProtocols = new Set(["lcmd-webshell-agent-v54", "lcmd-webshell-agent-v53"]);
 
 export function createCheckpointReceiver(session) {
   let state = null;

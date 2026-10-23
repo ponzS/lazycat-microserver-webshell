@@ -43,7 +43,8 @@ const (
 	// v51 reports the LightOS LPK version separately from runtime content digests.
 	// v52 reuses the in-process PTY library; terminal wire and task ownership are unchanged.
 	// v53 incorporates upstream activity fixes and the merged WASM build.
-	AgentProtocolVersion = "lcmd-webshell-agent-v53"
+	// v54 合入主线移动预输入与 Codex 输入修复，沿用 v53 的 WASM 和终端帧。
+	AgentProtocolVersion = "lcmd-webshell-agent-v54"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')
