@@ -75,10 +75,10 @@ Unified 队列接收关键 checkpoint 诊断时转记当前应用日志；原生
 
 Checkpoint 引擎与浏览器、原生客户端共用 `ghostty-web` 以 `-Dcpu=generic` 构建的 Ghostty 1.4 lib-vt WASM（补丁 `ghostty-web/patches/ghostty-1.4-webshell.patch` 加 `ghostty-web/wasm/webshell_abi.zig`）。页面清零由上游 `WasmPagePool` 及 `PageList` 对复用槽的 `@memset` 保证，不再维护本地页面初始化补丁。快照为官方 `GHOSTSNP`，经 `ghostty_terminal_snapshot_encode` 导出并 gzip 分片；协议名 `ghostty-snapshot-v1`。
 
-主线 v44 增加 Provider 侧移动端预输入开关持久化；本分支合并为 v54。终端帧、SSH、发布协议及快照格式不变，旧 Agent 的连接与工作区恢复继续兼容，快照仍按下方实际构建范围协商。
+主线 v44 增加 Provider 侧移动端预输入开关持久化；此前在本分支合并为 v54。终端帧、SSH、发布协议及快照格式不变，旧 Agent 的连接与工作区恢复继续兼容，快照仍按下方实际构建范围协商。
 
 v51 开始，原生运行时状态使用 LightOS LPK 版本并保留产物摘要；launcher v5、host_protocol 1、终端帧、SSH/发布及 checkpoint 格式不变，显式保留 v50/v49/v48 和既有 attach 兼容列表。
 
-当前 Agent 为 v52，本机平台经 hportal 纯 PTY 模块复用底层库，Core 的平台边界、终端帧和 checkpoint 不变。退出结果继续使用真实进程状态；Provider 显式保留 v51 attach/工作区能力，不把新 SDK 网络服务作为依赖。
+Agent v52 开始，本机平台经 hportal 纯 PTY 模块复用底层库，Core 的平台边界、终端帧和 checkpoint 不变。退出结果继续使用真实进程状态；Provider 显式保留 v51 attach/工作区能力，不把新 SDK 网络服务作为依赖。
 
-合并后的当前 Agent 为 v54，保留移动端预输入设置和 Codex 输入修复，以及本分支的运行时分发、通用 PTY 与任务回收。WASM 与已发布 v53 字节一致，前后端仅为已确认相同构建的 v54/v53 协商内存快照，其余兼容版本继续字节回放；显式保留 v53/v52/v51 及主线 v44/v43 的 attach 与工作区恢复，不跨未知构建导入快照。
+合并后的当前 Agent 为 v55，保留主线 V3 的工作区只读检查、实例排序、应用生命周期和 OSC 7501 能力应答，以及本分支的运行时分发、通用 PTY 与任务回收。当前 WASM 为主线的 432,920 字节构建（SHA-256 `3ffe9c8a89fbf44ef8f0798da8e68f4caee659d3ad7f59aee68afe6bb4bf468d`），与已发布 v53/v54 不同；前后端只为 v55 协商内存快照。显式保留 v54/v53/v52/v51、主线 v50–v43 及既有版本的 attach 与工作区恢复，其余兼容版本继续原始字节回放，不自动替换旧 Agent 或重启任务，不跨未知构建导入快照。
