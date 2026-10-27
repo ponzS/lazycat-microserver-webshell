@@ -50,4 +50,4 @@ launcher v5、终端 v48 阶段：原 SDK gRPC 注册承载私有 Unix 应用流
 
 物理机网页和 SSH PTY 编译复用 hportal 仓库的独立轻模块 `gitee.com/linakesi/hportal/pty`，固定到仓库提交对应版本。它只提供底层 PTY 适配，不引入 hportal 网络核心，也不增加 PTY RPC/端口；解析、shell、授权、保留会话、Job/进程回收和热更新仍由本运行时维护。库随运行时重新构建并由 LPK 分发，不要求宿主 daemon 执行 PTY。兼容原终端帧、launcher v5、host_protocol 1、SSH/发布和 WASM；Provider 显式保留 v51 attach/工作区能力。正常构建使用锁定依赖，不依赖本地 go.work 或开发机路径。
 
-合并后的当前 Agent 为 v54，保留移动端预输入设置和 Codex 输入修复，以及本分支的运行时分发、通用 PTY 与任务回收。WASM 与已发布 v53 字节一致，前后端仅为已确认相同构建的 v54/v53 协商内存快照，其余兼容版本继续字节回放；显式保留 v53/v52/v51 及主线 v44/v43 的 attach 与工作区恢复，不跨未知构建导入快照。
+合并后的当前 Agent 为 v55，保留主线 V3 的工作区只读检查、实例排序、应用生命周期和 OSC 7501 能力应答，以及本分支的运行时分发、通用 PTY 与任务回收。当前 WASM 为主线的 432,920 字节构建（SHA-256 `3ffe9c8a89fbf44ef8f0798da8e68f4caee659d3ad7f59aee68afe6bb4bf468d`），与已发布 v53/v54 不同；前后端只为 v55 协商内存快照。显式保留 v54/v53/v52/v51、主线 v50–v43 及既有版本的 attach 与工作区恢复，其余兼容版本继续原始字节回放，不自动替换旧 Agent 或重启任务，不跨未知构建导入快照。
