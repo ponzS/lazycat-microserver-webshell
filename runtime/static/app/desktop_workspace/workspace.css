@@ -584,6 +584,10 @@ body.is-desktop-workspace-reordering * {
     color: var(--chrome-text-strong);
   }
 
+  .desktop-workspace-icon.desktop-workspace-expand:not(:disabled):hover {
+    background: var(--chrome-bg);
+  }
+
   .desktop-workspace-session:hover > .desktop-workspace-icon {
     opacity: 1;
     pointer-events: auto;
