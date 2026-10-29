@@ -18,6 +18,8 @@
 
 会话快捷键继续由 `app/shortcuts/` 分派，双击、F2 和改名快捷键复用 `workspace/tab_label_controller` 的原位编辑器，通过只读锚点定位到侧栏；Enter/失焦保存、Escape 取消及输入法保护沿用原实现。右键、Shift+F10/ContextMenu 键调用 `terminal/interaction.openTabMenu()`，菜单操作及当前自定义快捷键保持一致。中键关闭也走已有的会话关闭确认。
 
+可点击的实例名称和会话选项默认显示 `pointer`。鼠标和触摸均需按住 320ms 才进入排序并显示 `grabbing`；等待期间移动达到 8px 则取消本次长按，保留点击与触摸滚动。松开、Escape、窗口失焦及其他取消路径统一清理长按计时和拖拽光标。
+
 `reorder_controller.js` 只拥有鼠标和触摸长按的纵向拖拽、占位、自动滚动、取消和动画资源；不拥有工作区数据。会话排序使用已声明的 `tab_reorder_anchor` 能力，单次提交原子 `reorder_tab`，保留焦点和分屏，失败恢复顺序并通过现有 owner 刷新。`instance_order_controller.js` 拥有服务端账号实例顺序的读取、乐观显示和失败回退，使用 Provider 的 `api/instance-order` 公开桥接，不再读取浏览器旧的 `desktopInstanceOrder`。移动采用前后相邻 selector 锚点，不覆盖筛选掉的实例；只串行提交实例层级的顺序，不改工作区标签排序。初次显示、总览打开、每次目录刷新和恢复前台时重新读取，迟到 GET 不覆盖新提交；缺少新接口时保留可用导航，显式保存失败会提示。拖拽期间目录更新留在数据层，结束后统一呈现；不跨实例移动会话。低动态效果偏好关闭位置补间。移动端与传统 PC 分组预览的标签拖拽仍由 `terminal/overview/` 拥有，卡片携带 selector，拖拽容器限制在所属实例内；排序提交复用本模块与侧栏相同的工作区命令及失败恢复，不按裸 tab ID 操作其他实例。
 
 `session_presentation.js` 跟踪所有真实前台进程，不以 Agent 名称白名单决定是否展示。Codex 复用已有精确识别，其他入口按可执行文件、解释器脚本或模块名展示；不解析 OSC 标题，不把命令参数、令牌或内联代码输出到 DOM。后台元数据由服务端只读检查更新，不新增终端连接或活动轮询；该状态表达进程活动，不猜测 Agent 内部的思考/等待阶段。
