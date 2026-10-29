@@ -1,5 +1,6 @@
 import { desktopSessionActivity } from "./session_presentation.js";
 import { createDesktopSessionLabels } from "./session_label.js";
+import { createDesktopSidebarRevealController } from "./sidebar_reveal_controller.js";
 
 export const desktopIcon = (documentObject, name) => {
   const paths = {
@@ -84,7 +85,14 @@ export function createDesktopWorkspaceView({ documentObject = document, windowOb
   expand.setAttribute("aria-controls", sidebar.id);
   expand.setAttribute("aria-expanded", "false");
   expand.hidden = true;
-  shell.prepend(sidebar, expand);
+  const revealRegion = documentObject.createElement("div");
+  revealRegion.className = "desktop-workspace-reveal-region";
+  revealRegion.hidden = true;
+  revealRegion.append(expand);
+  shell.prepend(sidebar, revealRegion);
+  const sidebarReveal = createDesktopSidebarRevealController({
+    documentObject, windowObject, region: revealRegion, button: expand,
+  });
   const relocations = ["attachmentToggle", "instanceSwitcher", "terminalNetworkMonitor"]
     .map((id) => {
       const element = documentObject.getElementById(id);
@@ -125,6 +133,8 @@ export function createDesktopWorkspaceView({ documentObject = document, windowOb
     documentObject.body.classList.toggle("desktop-workspace-collapsed", active && collapsed);
     sidebar.inert = collapsed;
     expand.hidden = !active || !collapsed;
+    revealRegion.hidden = expand.hidden;
+    sidebarReveal.setEnabled(active && collapsed);
     collapse.setAttribute("aria-expanded", collapsed ? "false" : "true");
     if (!animate) {
       sidebar.getBoundingClientRect();
@@ -318,8 +328,9 @@ export function createDesktopWorkspaceView({ documentObject = document, windowOb
       labels.dispose();
       areaAnimation?.cancel();
       this.setActive(false);
+      sidebarReveal.dispose();
       sidebar.remove();
-      expand.remove();
+      revealRegion.remove();
       for (const { anchor } of relocations) anchor.remove();
       sections.clear();
     },

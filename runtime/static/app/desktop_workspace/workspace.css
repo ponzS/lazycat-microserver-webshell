@@ -1,4 +1,5 @@
 .desktop-workspace-sidebar[hidden],
+.desktop-workspace-reveal-region[hidden],
 .desktop-workspace-expand[hidden] {
   display: none;
 }
@@ -10,6 +11,7 @@
 }
 
 .desktop-workspace-mode .app-shell {
+  --desktop-workspace-ease: cubic-bezier(0.23, 1, 0.32, 1);
   flex-direction: row;
   overflow: hidden;
   padding-top: var(--lzc-safe-area-inset-top);
@@ -27,7 +29,6 @@
 }
 
 .desktop-workspace-sidebar {
-  --desktop-workspace-ease: cubic-bezier(0.23, 1, 0.32, 1);
   --desktop-workspace-status-size: 5px;
   position: absolute;
   inset: var(--lzc-safe-area-inset-top) auto 0 0;
@@ -460,16 +461,38 @@ body.is-desktop-workspace-reordering * {
   outline-offset: -1px;
 }
 
-.desktop-workspace-expand {
+.desktop-workspace-reveal-region {
+  --desktop-workspace-expand-left: max(10px, var(--lzc-safe-area-inset-left));
   position: absolute;
   z-index: 26;
-  left: max(10px, var(--lzc-safe-area-inset-left));
-  top: calc(10px + var(--lzc-safe-area-inset-top));
+  left: 0;
+  top: var(--lzc-safe-area-inset-top);
+  width: calc(var(--desktop-workspace-expand-left) + 32px + 24px);
+  height: 66px;
+  pointer-events: none;
+}
+
+.desktop-workspace-expand {
+  position: absolute;
+  left: var(--desktop-workspace-expand-left);
+  top: 10px;
   width: 32px;
   height: 32px;
   border: 1px solid var(--chrome-line);
   border-radius: 7px;
   background: var(--chrome-bg);
+  pointer-events: auto;
+  transform: translateX(0);
+  transition: transform 180ms var(--desktop-workspace-ease);
+}
+
+.desktop-workspace-expand.is-auto-hidden:not(:focus-visible) {
+  transform: translateX(calc(-100% - var(--desktop-workspace-expand-left) - 1px));
+  pointer-events: none;
+}
+
+.desktop-workspace-expand:focus-visible {
+  transition: none;
 }
 
 .desktop-workspace-footer:empty {
@@ -593,6 +616,15 @@ body.is-desktop-workspace-reordering * {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .desktop-workspace-expand {
+    transition: opacity 125ms ease;
+  }
+
+  .desktop-workspace-expand.is-auto-hidden:not(:focus-visible) {
+    transform: none;
+    opacity: 0;
+  }
+
   .desktop-workspace-sidebar {
     transition: opacity 125ms ease;
   }
