@@ -1,5 +1,5 @@
 import { decodeFastBinaryFrame } from "./terminal_fast_integrity.js";
-import { createCheckpointReceiver, memoryCheckpointProtocol } from "./checkpoint_transport.js";
+import { createCheckpointReceiver, memoryCheckpointAgentProtocols, memoryCheckpointProtocol } from "./checkpoint_transport.js";
 
 const noop = () => {};
 
@@ -296,6 +296,9 @@ export function createTerminalSessionProtocolController({
       }
       const size = terminalResize.size(session);
       const checkpointCapabilities = terminalCheckpointCapabilitiesForTerminal(session.term);
+      const checkpointAgentCompatible = memoryCheckpointAgentProtocols.has(
+        multiplexedConnection.snapshot().agentProtocolVersion,
+      );
       currentMultiplexedConnection = multiplexedConnection;
       currentSocket = multiplexedConnection.open({
         pane_id: session.id,
@@ -309,7 +312,8 @@ export function createTerminalSessionProtocolController({
         history_replay_mode: session.resetOnNextReplay ? "snapshot" : "",
         flow_control: "window-ack-v1",
         replay_burst_limit_bytes: terminalOutput.getReplayBatchLimit(session),
-        checkpoint_protocol: !sessionProtocol && typeof DecompressionStream === "function" ? memoryCheckpointProtocol : "",
+        checkpoint_protocol: !sessionProtocol && checkpointAgentCompatible
+          && typeof DecompressionStream === "function" ? memoryCheckpointProtocol : "",
         foreground: themePayload.foreground,
         background: themePayload.background,
         cursor: themePayload.cursor,

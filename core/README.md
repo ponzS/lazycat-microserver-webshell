@@ -51,6 +51,10 @@ v49 增加 Provider 对管理端公开账号实例顺序接口的桥接，不增
 
 v50 在 `queries.go` 的 PTY 查询入口回答 OSC 7501 `7501;?` 能力探测，接受 BEL/ST 结束并用 ST 应答。应答通过现有受控生成输入路径完成，先于同一输出流中后续的 DA sentinel，不依赖浏览器连接，也不在历史回放时重新执行。这样遵循该协议的任意 CLI 能自动启用既有 `program_status` 上报；不设置工具专用环境变量，不解析任务正文。浏览器不再把前台进程驻留当作工作中，也不把 busy 结束推测成成功未读；无可靠任务状态时图标及提示留空，进程名和关闭保护不变。帧、元数据和 WASM 不变，Provider 显式保留 v49 的已有兼容能力；旧核心需要显式更新后才具备能力应答。
 
+客户端运行时分支的历史版本另有以下变更：
+
+v44 将完整 WebShell 补丁构建与普通 Ghostty 构建的 Zig 缓存隔离，采用干净构建的 WASM 指纹。终端帧和 checkpoint 格式保持不变，但 v39–v43 的旧指纹不参与新浏览器的内存快照协商；这些 Agent 保留 attach、工作区恢复和原始字节回放。v43 的认证持续通道能力保持不变。Go 解析器与浏览器继续共用 `runtime/static/ghostty-vt.wasm`，不得跨不同指纹导入堆状态。
+
 `host_metrics.go` 仅定义客户端整机指标的可空数据类型及注入接口，不读系统资源、不创建采样任务。实际采样位于独立 `hostmetrics` module，Linux 磁盘选择由 Unix adapter 注入，容器入口不装配它。
 
 在仓库根目录执行 `go build ./core`、`go build ./...`、`go vet ./...`。可交叉编译 Core 以检查平台依赖泄漏，但这不是整机平台支持验收。
@@ -63,4 +67,10 @@ Unified 队列接收关键 checkpoint 诊断时转记当前应用日志；原生
 
 WASM 页面初始化由 `tools/ghostty-page-initialization.patch` 在 `Page.initBuf` 统一处理，只清零新页面的单元格区；链接、字形和样式表沿用各自初始化。不得依赖 WASM 的 page allocator 返回全零内存。该约束覆盖初始化、重排、扩容和页面复制；不清空运行中的终端、既有历史或待恢复的完整内存快照。
 
-v44 增加 Provider 侧移动端预输入开关持久化；终端帧、SSH、发布协议及 WASM 快照格式不变。Provider 显式保留 v43 及既有版本的 attach、工作区恢复和快照协商能力。
+主线 v44 增加 Provider 侧移动端预输入开关持久化；此前在本分支合并为 v54。终端帧、SSH、发布协议及快照格式不变，旧 Agent 的连接与工作区恢复继续兼容，快照仍按下方实际构建范围协商。
+
+v51 开始，原生运行时状态使用 LightOS LPK 版本并保留产物摘要；launcher v5、host_protocol 1、终端帧、SSH/发布及 checkpoint 格式不变，显式保留 v50/v49/v48 和既有 attach 兼容列表。
+
+Agent v52 开始，本机平台经 hportal 纯 PTY 模块复用底层库，Core 的平台边界、终端帧和 checkpoint 不变。退出结果继续使用真实进程状态；Provider 显式保留 v51 attach/工作区能力，不把新 SDK 网络服务作为依赖。
+
+合并后的当前 Agent 为 v55，保留主线 V3 的工作区只读检查、实例排序、应用生命周期和 OSC 7501 能力应答，以及本分支的运行时分发、通用 PTY 与任务回收。当前 WASM 为主线的 432,920 字节构建（SHA-256 `3ffe9c8a89fbf44ef8f0798da8e68f4caee659d3ad7f59aee68afe6bb4bf468d`），与已发布 v53/v54 不同；前后端只为 v55 协商内存快照。显式保留 v54/v53/v52/v51、主线 v50–v43 及既有版本的 attach 与工作区恢复，其余兼容版本继续原始字节回放，不自动替换旧 Agent 或重启任务，不跨未知构建导入快照。
