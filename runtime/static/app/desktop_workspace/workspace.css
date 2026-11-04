@@ -222,7 +222,6 @@
 }
 
 .desktop-workspace-session {
-  --desktop-workspace-close-space: 0px;
   position: relative;
   display: flex;
   align-items: center;
@@ -257,7 +256,6 @@
   flex: 1 1 0;
   min-width: 0;
   box-sizing: border-box;
-  padding-right: var(--desktop-workspace-close-space);
   max-height: 2.8em;
   line-height: 1.4;
   overflow: hidden;
@@ -337,37 +335,46 @@
 }
 
 .desktop-workspace-session-application {
+  display: block;
   flex: 0 0 auto;
-  max-width: min(76px, 25%);
+  box-sizing: border-box;
+  width: min(76px, 25%);
+  min-width: 28px;
+  height: 16px;
+  padding-right: 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--chrome-text-muted);
   font-size: 10px;
-  transform: translateX(calc(0px - var(--desktop-workspace-close-space)));
+  text-align: right;
 }
 
-.desktop-workspace-session-application[hidden] {
-  display: none;
+.desktop-workspace-session-application-icon {
+  display: block;
+  width: 12px;
+  height: 12px;
+  margin: 2px 2px 0 auto;
+  background: currentColor;
+  -webkit-mask: no-repeat center / contain;
+  mask: no-repeat center / contain;
 }
 
 .desktop-workspace-session > .desktop-workspace-icon {
   position: absolute;
-  right: 0;
+  right: 5px;
   top: 50%;
   transform: translateY(-50%);
   opacity: 0;
+  visibility: hidden;
   pointer-events: none;
   background: transparent;
 }
 
 .desktop-workspace-session:focus-within > .desktop-workspace-icon {
   opacity: 1;
+  visibility: visible;
   pointer-events: auto;
-}
-
-.desktop-workspace-session:focus-within {
-  --desktop-workspace-close-space: 26px;
 }
 
 .desktop-workspace-resize-handle {
@@ -589,6 +596,7 @@ body.is-desktop-workspace-reordering * {
 
   .desktop-workspace-session:hover > .desktop-workspace-icon {
     opacity: 1;
+    visibility: visible;
     pointer-events: auto;
   }
 
@@ -596,19 +604,19 @@ body.is-desktop-workspace-reordering * {
     color: var(--chrome-text-strong);
   }
 
-  .desktop-workspace-session:hover {
-    --desktop-workspace-close-space: 26px;
+  .desktop-workspace-session:hover .desktop-workspace-session-application,
+  .desktop-workspace-session:focus-within .desktop-workspace-session-application {
+    visibility: hidden;
   }
 }
 
 @media (hover: none), (pointer: coarse) {
   .desktop-workspace-session > .desktop-workspace-icon {
+    position: static;
+    transform: none;
     opacity: 1;
+    visibility: visible;
     pointer-events: auto;
-  }
-
-  .desktop-workspace-session {
-    --desktop-workspace-close-space: 26px;
   }
 }
 
