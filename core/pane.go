@@ -43,6 +43,7 @@ type terminalPane struct {
 	busy                       bool
 	command                    string
 	commandLine                string
+	agent                      *AgentIdentity
 	cwd                        string
 	activityCheckedAt          time.Time
 	programStatus              programStatusTracker
@@ -342,6 +343,10 @@ func (p *terminalPane) summary() paneSummary {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	programStatus := p.programStatus.ProgramStatus
+	agent := p.agent
+	if p.exited {
+		agent = nil
+	}
 	return paneSummary{
 		ID:                p.id,
 		Cols:              p.cols,
@@ -361,5 +366,6 @@ func (p *terminalPane) summary() paneSummary {
 		HistoryGeneration: p.historyGeneration,
 		OutputOffset:      p.history.end,
 		ProgramStatus:     &programStatus,
+		Agent:             agent,
 	}
 }

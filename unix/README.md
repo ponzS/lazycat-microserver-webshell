@@ -13,6 +13,8 @@
 - platform_darwin.go、activity_darwin.go：macOS 平台及 ps/lsof 活动查询；不依赖 /proc。
 - agent_reconcile_linux.go：原 Linux 持久 agent 的身份核对与回收。PC 使用管理层的私有父管道，不调用此扫描逻辑。
 
+`agent_identity.go` 维护可选身份 ID：`codex`、`claude-code`、`pi`、`gemini`、`opencode`、`aider`、`goose`、`amp`、`qwen-code`、`antigravity-cli`（原生 `agy` 可执行文件）。Linux `agent_identity_linux.go` 只检查可执行名、argv0 和已知解释器入口，不读取环境或任务参数；`command_line` 收敛为可执行名/已确认入口。DI 无控制查询协议，不使用 `.json` 启动命令推断当前 Agent；通过已连接socket双向peer inode、相同DI executable inode或同一规范化路径（支持原子升级前的deleted映像）、当前后代前台PTY建立证据。支持Claude原生`claude.exe`。FD权限、netlink不可用、跨namespace或不可验证包装器时保守省略。仅显示当前已连接pane的Agent，已detach的后台会话不错误挂到shell。macOS直接命令可提供身份，DI跨PTY识别当前仅Linux支持，Windows保持原采集行为。
+
 ## 约束与验证
 
 `metrics_linux.go` 仅为 `LocalPlatform` 提供 `/sys/block` 整盘选择，排除分区、loop 和虚拟叠加层；仅在指标请求内调用，不参与容器资源统计或后台扫描。macOS 的指标由独立 hostmetrics module 委托原生采样库读取，不使用 Linux 路径。
