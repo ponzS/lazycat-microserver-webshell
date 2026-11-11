@@ -7,6 +7,14 @@ const privateModes = [1, 6, 7, 9, 25, 47, 1000, 1002, 1003, 1004, 1005, 1006, 10
 const ansiModes = [2, 4, 12, 20];
 const encoder = new TextEncoder();
 
+// The core reads a 0 default color as "unset", and Ghostty 1.4 ignores the
+// fg/bg pair unless both are set, so a theme with a black background (or
+// foreground) rendered default text white. The pair is always configured
+// together: its black member is sent as #000001 (see appearance/runtime_controller.js).
+const withExplicitDefaultColors = (config) => (config?.fgColor || config?.bgColor
+  ? { ...config, fgColor: config.fgColor || 1, bgColor: config.bgColor || 1 }
+  : config);
+
 export function createTerminalEngine() {
   let native = null;
   let ghostty = null;
@@ -85,6 +93,7 @@ export function createTerminalEngine() {
   return Object.freeze({
     async init({ wasmURL, cols, rows, config }, timing = null) {
       synchronizedOutput.reset();
+      config = withExplicitDefaultColors(config);
       terminalConfig = config || {};
       const startedAt = timing ? performance.now() : 0;
       ghostty = await loadCheckpointGhostty(wasmURL);
