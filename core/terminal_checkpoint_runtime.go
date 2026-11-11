@@ -18,6 +18,11 @@ import (
 )
 
 const TerminalMemoryCheckpointProtocol = "ghostty-memory-v1"
+const TerminalSnapshotCheckpointProtocol = "ghostty-snapshot-v1"
+
+// TerminalSnapshotCapability tells native clients that the attach path accepts
+// TerminalSnapshotCheckpointProtocol. Browsers ship with the server and need no gate.
+const TerminalSnapshotCapability = "ghostty_snapshot_v1"
 
 const terminalCheckpointMaxMemory = 256 << 20
 
@@ -35,10 +40,8 @@ var checkpointRuntime struct {
 type terminalMemoryCheckpoint struct {
 	Protocol        string `json:"protocol"`
 	WASMSHA256      string `json:"wasm_sha256"`
-	MemorySHA256    string `json:"memory_sha256"`
-	MemoryBytes     uint32 `json:"memory_bytes"`
-	Handle          uint32 `json:"handle"`
-	Stack           uint32 `json:"stack"`
+	SnapshotSHA256  string `json:"snapshot_sha256"`
+	SnapshotBytes   uint32 `json:"snapshot_bytes"`
 	Cols            int    `json:"cols"`
 	Rows            int    `json:"rows"`
 	ScrollbackLines int    `json:"scrollback_lines"`
@@ -88,9 +91,9 @@ func newTerminalCheckpointEngine(cols, rows, lines int) (*terminalCheckpointEngi
 		return nil, err
 	}
 	e := &terminalCheckpointEngine{module: module, cols: cols, rows: rows, scrollback: lines}
-	if module.ExportedGlobal("__webshell_checkpoint_stack") == nil {
+	if module.ExportedFunction("ghostty_terminal_snapshot_encode") == nil {
 		e.close()
-		return nil, errors.New("checkpoint WASM ABI unavailable")
+		return nil, errors.New("checkpoint snapshot ABI unavailable")
 	}
 	e.capacity = e.scrollbackCapacity(cols, rows)
 	config := make([]byte, 80)
@@ -287,13 +290,31 @@ func (e *terminalCheckpointEngine) snapshot(cursor uint64) (*terminalMemoryCheck
 	if e.module == nil || e.module.IsClosed() {
 		return nil, errors.New("checkpoint terminal is closed")
 	}
-	memory, ok := e.module.Memory().Read(0, e.module.Memory().Size())
-	if !ok || len(memory) > terminalCheckpointMaxMemory {
-		return nil, errors.New("checkpoint memory exceeds limit")
+	slots, err := e.call("ghostty_wasm_alloc_u8_array", 8)
+	if err != nil || slots == 0 {
+		return nil, fmt.Errorf("allocate snapshot output: %v", err)
+	}
+	defer e.call("ghostty_wasm_free_u8_array", slots, 8)
+	encoded, err := e.call("ghostty_terminal_snapshot_encode", uint64(e.handle), slots, slots+4)
+	if err != nil || encoded != 1 {
+		return nil, fmt.Errorf("encode terminal snapshot: result=%d error=%v", encoded, err)
+	}
+	meta, ok := e.module.Memory().Read(uint32(slots), 8)
+	if !ok {
+		return nil, errors.New("snapshot output is out of bounds")
+	}
+	ptr, size := binary.LittleEndian.Uint32(meta), binary.LittleEndian.Uint32(meta[4:])
+	defer e.call("ghostty_terminal_snapshot_free", uint64(ptr), uint64(size))
+	if ptr == 0 || size == 0 || size > terminalCheckpointMaxMemory {
+		return nil, errors.New("terminal snapshot exceeds limit")
+	}
+	snapshot, ok := e.module.Memory().Read(ptr, size)
+	if !ok {
+		return nil, errors.New("terminal snapshot is out of bounds")
 	}
 	var compressed bytes.Buffer
 	zip, _ := gzip.NewWriterLevel(&compressed, gzip.BestSpeed)
-	if _, err := zip.Write(memory); err != nil {
+	if _, err := zip.Write(snapshot); err != nil {
 		return nil, err
 	}
 	if err := zip.Close(); err != nil {
@@ -302,9 +323,8 @@ func (e *terminalCheckpointEngine) snapshot(cursor uint64) (*terminalMemoryCheck
 	if compressed.Len() > terminalCheckpointMaxCompressed {
 		return nil, errors.New("compressed checkpoint exceeds limit")
 	}
-	return &terminalMemoryCheckpoint{Protocol: TerminalMemoryCheckpointProtocol,
-		WASMSHA256: checkpointHash(terminalCheckpointWASM), MemorySHA256: checkpointHash(memory), MemoryBytes: uint32(len(memory)),
-		Handle: e.handle, Stack: uint32(e.module.ExportedGlobal("__webshell_checkpoint_stack").Get()),
+	return &terminalMemoryCheckpoint{Protocol: TerminalSnapshotCheckpointProtocol,
+		WASMSHA256: checkpointHash(terminalCheckpointWASM), SnapshotSHA256: checkpointHash(snapshot), SnapshotBytes: size,
 		Cols: e.cols, Rows: e.rows, ScrollbackLines: e.scrollback, ScrollbackBytes: e.capacity,
 		Cursor: fmt.Sprint(cursor - uint64(len(e.pending))), Compressed: compressed.Bytes()}, nil
 }

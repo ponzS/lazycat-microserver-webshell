@@ -51,16 +51,18 @@ v49 增加 Provider 对管理端公开账号实例顺序接口的桥接，不增
 
 v50 在 `queries.go` 的 PTY 查询入口回答 OSC 7501 `7501;?` 能力探测，接受 BEL/ST 结束并用 ST 应答。应答通过现有受控生成输入路径完成，先于同一输出流中后续的 DA sentinel，不依赖浏览器连接，也不在历史回放时重新执行。这样遵循该协议的任意 CLI 能自动启用既有 `program_status` 上报；不设置工具专用环境变量，不解析任务正文。浏览器不再把前台进程驻留当作工作中，也不把 busy 结束推测成成功未读；无可靠任务状态时图标及提示留空，进程名和关闭保护不变。帧、元数据和 WASM 不变，Provider 显式保留 v49 的已有兼容能力；旧核心需要显式更新后才具备能力应答。
 
+v51 把终端核心升级为 Ghostty 1.4 lib-vt，checkpoint 由整块线性内存镜像（`ghostty-memory-v1`）改为可移植的官方快照 `ghostty-snapshot-v1`（`GHOSTSNP`），WASM 随之变化。v51 Agent 只对 `ghostty-snapshot-v1` 请求输出 checkpoint；旧原生客户端仍请求 `ghostty-memory-v1` 时 Provider 只把该参数传给 v39–v50 Agent，v51 则回放原始历史。Local 及 v51 Agent 工作区通过 `agent_capabilities` 公布 `ghostty_snapshot_v1`，原生客户端据此决定是否请求快照；浏览器随服务端发布，始终请求快照。Provider 显式保留 v50 的 attach 与工作区恢复兼容。
+
 `host_metrics.go` 仅定义客户端整机指标的可空数据类型及注入接口，不读系统资源、不创建采样任务。实际采样位于独立 `hostmetrics` module，Linux 磁盘选择由 Unix adapter 注入，容器入口不装配它。
 
 在仓库根目录执行 `go build ./core`、`go build ./...`、`go vet ./...`。可交叉编译 Core 以检查平台依赖泄漏，但这不是整机平台支持验收。
 
 运行验证使用真实 agent/PTY 和已有 REQ/AC，重点覆盖输入输出、主题查询、布局、尺寸、快照及 fallback。发布环境及浏览器手测方法见根 README 和 `spec-tests/ENVIRONMENT.md`。
 
-原生分配诊断最多 8 条（首条和最新 7 条），只含申请大小、页面容量、偏移合法性及重试次数，不包含 URI 或终端正文。诊断 ABI 为 4 个头部 u32 加 8×32 个记录 u32；字段顺序见 `terminal_checkpoint_allocation.go`。operation：1=write、2=resize；stage：1=URI、2=ID、3=复制扩容；caller：1=重排、2=行复制；reason：1=缺少连续空间、2=元数据无效、3=扩容尝试。记录可能包含最终失败前已处理的分配不足；不可把记录数量当作解析器崩溃次数。只在实际进入原生调用且该调用链失败时读取。首次错误仍由 pane 保存并在重新接入时报告。
+原生分配诊断 ABI（4 个头部 u32 加 8×32 个记录 u32，字段顺序见 `terminal_checkpoint_allocation.go`）在 Ghostty 1.4 上保留导出但恒为空：旧版为定位页面分配故障而打的引擎补丁已随上游重写移除，读取方必须把零记录视为“无原生证据”而非“无故障”。首次错误仍由 pane 保存并在重新接入时报告。
 
 Unified 队列接收关键 checkpoint 诊断时转记当前应用日志；原生 daemon 仍写自己的独立日志。去重标识包含作用域、pane、创建时间、首次故障时间及 WASM 指纹。输入日志载荷上限 128 KiB，输出上限 64 KiB，超限明确标注省略。
 
-WASM 页面初始化由 `tools/ghostty-page-initialization.patch` 在 `Page.initBuf` 统一处理，只清零新页面的单元格区；链接、字形和样式表沿用各自初始化。不得依赖 WASM 的 page allocator 返回全零内存。该约束覆盖初始化、重排、扩容和页面复制；不清空运行中的终端、既有历史或待恢复的完整内存快照。
+Checkpoint 引擎与浏览器、原生客户端共用 `ghostty-web` 以 `-Dcpu=generic` 构建的 Ghostty 1.4 lib-vt WASM（补丁 `ghostty-web/patches/ghostty-1.4-webshell.patch` 加 `ghostty-web/wasm/webshell_abi.zig`）。页面清零由上游 `WasmPagePool` 及 `PageList` 对复用槽的 `@memset` 保证，不再维护本地页面初始化补丁。快照为官方 `GHOSTSNP`，经 `ghostty_terminal_snapshot_encode` 导出并 gzip 分片；协议名 `ghostty-snapshot-v1`。
 
 v44 增加 Provider 侧移动端预输入开关持久化；终端帧、SSH、发布协议及 WASM 快照格式不变。Provider 显式保留 v43 及既有版本的 attach、工作区恢复和快照协商能力。

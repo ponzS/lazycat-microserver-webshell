@@ -479,16 +479,30 @@ const z = class K {
   readResponse() {
     if (!this.hasResponse())
       return null;
-    const A = 256, B = this.exports.ghostty_wasm_alloc_u8_array(A) >>> 0;
+    // Drain every pending reply at once. Fixed-size reads split one reply
+    // (e.g. a burst of OSC 4 palette reports) across separate PTY writes.
+    const A = 65536, B = this.exports.ghostty_wasm_alloc_u8_array(A) >>> 0, parts = [];
+    let total = 0;
     try {
-      const g = this.exports.ghostty_terminal_read_response(this.handle, B, A);
-      if (g <= 0)
-        return null;
-      const E = new Uint8Array(this.memory.buffer, B, g);
-      return new TextDecoder().decode(E.slice());
+      while (this.hasResponse()) {
+        const g = this.exports.ghostty_terminal_read_response(this.handle, B, A);
+        if (g <= 0)
+          break;
+        parts.push(new Uint8Array(this.memory.buffer, B, g).slice());
+        total += g;
+      }
     } finally {
       this.exports.ghostty_wasm_free_u8_array(B, A);
     }
+    if (!total)
+      return null;
+    const E = new Uint8Array(total);
+    let offset = 0;
+    for (const part of parts) {
+      E.set(part, offset);
+      offset += part.length;
+    }
+    return new TextDecoder().decode(E);
   }
   /**
    * Query arbitrary terminal mode by number

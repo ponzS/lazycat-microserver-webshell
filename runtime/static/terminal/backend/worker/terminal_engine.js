@@ -1,6 +1,6 @@
 import { packRows } from "../cell_packet.js";
 import { captureNativeRenderDiagnostics } from "./render_diagnostics.js";
-import { loadCheckpointGhostty, restoreMemoryCheckpoint, validateMemoryCheckpoint } from "./memory_checkpoint.js";
+import { loadCheckpointGhostty, restoreSnapshotCheckpoint, validateSnapshotCheckpoint } from "./snapshot_checkpoint.js";
 import { createSynchronizedOutput } from "./synchronized_output.js";
 
 const privateModes = [1, 6, 7, 9, 25, 47, 1000, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016, 1047, 1049, 2004, 2026, 2027];
@@ -120,11 +120,12 @@ export function createTerminalEngine() {
       return result;
     },
     async restore({ checkpoint }, trace = null) {
-      validateMemoryCheckpoint(ghostty, checkpoint);
+      validateSnapshotCheckpoint(ghostty, checkpoint);
       const restoredGhostty = ghostty.newCheckpointInstance();
       const restored = restoredGhostty.createTerminal(checkpoint.cols, checkpoint.rows, { scrollbackLimit: checkpoint.scrollback_lines });
       trace?.("checkpoint_restore_start");
-      await restoreMemoryCheckpoint(restoredGhostty, restored, checkpoint, terminalConfig);
+      try { await restoreSnapshotCheckpoint(restoredGhostty, restored, checkpoint, terminalConfig); }
+      catch (error) { restored.free(); throw error; }
       trace?.("checkpoint_restore_complete");
       native.free();
       ghostty = restoredGhostty;

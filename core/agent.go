@@ -42,7 +42,10 @@ const (
 	// terminal wire formats and checkpoint WASM remain unchanged.
 	// v50 answers application lifecycle capability queries before the DA sentinel;
 	// terminal wire formats and checkpoint WASM remain unchanged.
-	AgentProtocolVersion = "lcmd-webshell-agent-v50"
+	// v51 moves the checkpoint core to Ghostty 1.4 and replaces whole-heap
+	// ghostty-memory-v1 exports with ghostty-snapshot-v1 (GHOSTSNP); memory-v1
+	// requests replay raw history.
+	AgentProtocolVersion = "lcmd-webshell-agent-v51"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')
