@@ -64,7 +64,8 @@ const (
 	// v54 合入主线移动预输入与 Codex 输入修复，沿用 v53 的 WASM 和终端帧。
 	// v55 combines V3 workspace inspection and lifecycle reporting with the native runtime;
 	// the merged WASM differs from v53/v54, which retain attach and raw history replay.
-	AgentProtocolVersion = "lcmd-webshell-agent-v55"
+	// v56 merges Ghostty 1.4 snapshots and agent identity with the distributed runtime.
+	AgentProtocolVersion = "lcmd-webshell-agent-v56"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')
