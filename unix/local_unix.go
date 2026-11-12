@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	terminalpty "gitee.com/linakesi/hportal/pty"
+	terminalpty "gitee.com/linakesi/hportal/misc/cli/pty"
 	"lcmd-webshell/core"
 	"lcmd-webshell/localtools"
 )

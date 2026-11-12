@@ -65,7 +65,8 @@ const (
 	// v55 combines V3 workspace inspection and lifecycle reporting with the native runtime;
 	// the merged WASM differs from v53/v54, which retain attach and raw history replay.
 	// v56 merges Ghostty 1.4 snapshots and agent identity with the distributed runtime.
-	AgentProtocolVersion = "lcmd-webshell-agent-v56"
+	// v57 follows the PTY helper relocation into hportal misc/cli; wire and snapshot formats stay unchanged.
+	AgentProtocolVersion = "lcmd-webshell-agent-v57"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')
