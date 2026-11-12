@@ -45,7 +45,11 @@ const (
 	// v51 moves the checkpoint core to Ghostty 1.4 and replaces whole-heap
 	// ghostty-memory-v1 exports with ghostty-snapshot-v1 (GHOSTSNP); memory-v1
 	// requests replay raw history.
-	AgentProtocolVersion = "lcmd-webshell-agent-v51"
+	// v52 adds optional process/DI agent identity (pane.agent), independent of
+	// turn status and recognizing the installed Antigravity CLI (agy); excludes
+	// semantic OSC 133 zones from agent lifecycle detection and honors CAN/SUB
+	// cancellation. Wire, checkpoint and GHOSTSNP snapshot formats match v51.
+	AgentProtocolVersion = "lcmd-webshell-agent-v52"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')
