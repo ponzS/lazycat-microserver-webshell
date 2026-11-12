@@ -32,17 +32,9 @@ v35 显式兼容 v34/v33/v32/v31/v30/v29/v28/v27 及原容器兼容版本，版�
 
 实际功能回归按 `spec-tests/ENVIRONMENT.md` 绑定设备/账号，检查容器列表、授权、工作区、文件、统一连接和重连；未在真实环境执行的内容不能标记通过。
 
-当前推荐 Agent 协议为 v52，显式保留 v51/v50/v49/v48/v47/v46/v45/v44/v43/v42/v41/v40/v39 及既有版本的 attach 兼容和工作区恢复能力。v39/v40/v41/v42/v43/v44/v45/v46/v47/v48/v49/v50 共用初始化复用页面单元格的 WASM；容器启动 attach 时仅与这些版本协商内存快照，旧 Agent 使用原始字节回放，不自动替换或停止旧进程。v38 及之前的旧快照不能导入这些版本。v40 的物理机服务发布隧道不改变容器终端协议；v41 只调整客户端运行时代码归属；v42 新增浏览器光标样式设置；v43 修正物理机 activity 采集；v44 增加只读工作区查询，v45 刷新只读查询中已有 pane 的进程身份，v46 增加物理机工作区读取兼容，v47 增加历史代次和输出游标，v48 增加应用生命周期及累计完成次数。物理机采用新版终端核心后提供对应的新增元数据；终端帧、快照和 WASM 保持兼容。兼容的旧 Agent 不自动替换或停止。v49 只增加 Provider 对公开账号实例顺序接口的桥接，帧格式、工作区元数据和快照格式均不变；显式保留 v48 的 attach、恢复和 WASM 兼容，排序不要求替换旧 Agent。v50 补齐 Core 的 OSC 7501 能力应答，先于 DA sentinel 发送，使遵循该协议的 CLI 自动启用生命周期上报；不改变帧、元数据或快照格式，显式保留 v49 的兼容能力。能力应答依赖目标终端核心更新，但不自动替换或重建已有会话。v51 把终端核心升级为 Ghostty 1.4，快照改为可移植的 `ghostty-snapshot-v1`（`GHOSTSNP`）：仅当实际 Agent 版本等于当前协议时才传 `--checkpoint-protocol ghostty-snapshot-v1`；旧原生客户端请求的 `ghostty-memory-v1` 只传给 v39–v50，v51 对其回放原始字节。当前协议的 Agent 在 `agent_capabilities` 中公布 `ghostty_snapshot_v1`。
+当前合并版本为 Agent v56：使用 Ghostty 1.4 的 `ghostty-snapshot-v1`（GHOSTSNP）快照，同时保留客户端运行时分发、通用 PTY、任务回收及主线 agent 身份识别。当前 WASM 为 617239 字节，SHA-256 `5eb1c3c84ae118b4b8b9737ba45b1226c5b6dbb3ee84e3eb359fa7a495959614`。v51/v52 曾在两个分支表示不同实现，容器 Provider 只为 v56 声明新快照能力并协商该格式；原生客户端按实际工作区能力协商。显式保留 v55–v9 的 attach 和 v55–v27 的工作区恢复，旧核心继续原始历史回放，不自动替换 Agent 或重启任务。旧内存快照不导入新内核。
 
 v52 在 v51 之上透传可选 `pane.agent {id,name,source}`（含通过 `di` 挂载的 agent，`source` 为 `di`；识别已安装的 Antigravity CLI `agy`）；旧客户端可忽略新增字段。身份不推断工作状态；无可靠进程身份时省略，继续显示普通命令。v52 同时撤回 OSC 133 语义区段的 agent 生命周期推断，并处理 CAN/SUB 取消控制字符串。帧、元数据和 `ghostty-snapshot-v1` 快照格式与 v51 相同，快照协商同时接受 v51 与 v52。Provider 与实例 daemon 需同时更新才有 agent 身份；已兼容的 v51 daemon 不会自动停止。只重启 Provider 不会停止独立实例 daemon；重启目标 daemon 会丢失其 shell/PTY 与内存历史，独立 DI 的 setsid daemon/子 PTY 可由 `di` 重新连接。
-
-当前推荐 Agent 协议为 v47，显式保留 v46/v45/v44/v43/v42/v41/v40/v39 及既有版本的 attach 兼容和工作区恢复能力。v44 固定 Zig 0.15.2，并隔离完整 WebShell 补丁的编译缓存；干净构建的 WASM 指纹与 v39–v43 不同。容器启动 attach 时仅与 v44 协商内存快照；浏览器也按物理连接报告的 Agent 版本限制快照请求，旧容器和 PC Agent 继续使用原始字节回放，不自动替换或停止旧进程。v40 的物理机服务发布隧道、v41 的客户端运行时代码归属、v42 的浏览器光标设置和 v43 的认证持续通道能力均保留，终端帧和 checkpoint 格式不变。后续 Agent 版本或 WASM 指纹变更时，需同步核对本文件中的兼容列表、attach 快照门禁及前端 `checkpoint_transport.js` 的快照版本列表。
-
-当前推荐 Agent 协议为 v53，显式保留 v52/v51 及既有版本的 attach 和工作区恢复。v53 合并主分支物理机 activity 修复及当前 WASM 基线；内存快照只与已确认使用同一构建的当前 v53 协商，Worker 仍严格检查实际指纹。其他兼容 Agent 使用字节回放，不自动终止或替换旧任务。
-
-当前推荐 Agent 协议为 v54，合入主线移动端预输入设置和 Codex 输入修复，显式保留 v53/v52/v51、主线 v44/v43 及既有版本的 attach 和工作区恢复。v54 与已发布 v53 的 WASM 字节一致，内存快照仅与这两个已核验构建协商，Worker 仍检查实际指纹。其他兼容 Agent 使用字节回放，不自动终止或替换旧任务。
-
-合并后的当前 Agent 为 v55，保留主线 V3 的工作区只读检查、实例排序、应用生命周期和 OSC 7501 能力应答，以及本分支的运行时分发、通用 PTY 与任务回收。当前 WASM 为主线的 432,920 字节构建（SHA-256 `3ffe9c8a89fbf44ef8f0798da8e68f4caee659d3ad7f59aee68afe6bb4bf468d`），与已发布 v53/v54 不同；前后端只为 v55 协商内存快照。显式保留 v54/v53/v52/v51、主线 v50–v43 及既有版本的 attach 与工作区恢复，其余兼容版本继续原始字节回放，不自动替换旧 Agent 或重启任务，不跨未知构建导入快照。
 
 `program_status` 是可选对象，转发旧终端响应时必须保留字段缺失，不能补成零值对象，否则浏览器会误以为旧核心已经提供应用状态而关闭实时信号兼容。旧核心的当前连接由浏览器旁路观察实时生命周期控制序列；后台实例完整状态需要核心提供 v48 元数据。
 
@@ -54,19 +46,8 @@ v52 在 v51 之上透传可选 `pane.agent {id,name,source}`（含通过 `di` �
 
 容器 Unified 转发复用 Core 的 `LogCheckpointDiagnostic`；原 attach 转发也在收到结构化故障时调用同一去重入口，因此首次解析故障进入应用汇总日志，不要求浏览器开启调试。不转发整个 Agent 日志文件，也不更改消息、ACK、尺寸边界或 PTY 生命周期。
 
-主线 v44（本分支合并为 v54）增加 `mobile_pre_input_enabled` 设置：GET 返回布尔值，PUT 支持字段级修改，缺失或 null 保持原值，旧配置默认关闭。它仅控制移动端预输入显示，不下发 PTY。显式保留旧 Agent 的 attach 和工作区恢复；快照按已核验构建范围协商，无须更新旧 Agent 即可使用此界面能力。
+v44 增加 `mobile_pre_input_enabled` 设置：GET 返回布尔值，PUT 支持字段级修改，缺失或 null 保持原值，旧配置默认关闭。它仅控制移动端预输入显示，不下发 PTY。显式保留 v43 及既有版本的 attach、工作区恢复和内存快照兼容；无须更新旧 Agent 即可使用此界面能力。
 
-客户端 launcher v4 通过公开的限实例接入 API 自行注册、发心跳与准备更新，宿主管理首次安装和应用入口授权。Agent v47 在缓存启动时先准备目标版本，再创建 worker；私有 Unix IPC 和原版 SDK 扩展点保持。终端帧与 checkpoint 格式保持兼容，显式保留 v46/v45/v44 及已有兼容版本。
+客户端 launcher v5 / host_protocol 1 通过限实例接入 API 登记、续权和准备更新，运行及目标版本跟随 LightOS LPK，产物摘要用于完整性与缓存。物理机 PTY 在进程内复用 hportal 的独立薄库，不增加 PTY RPC。
 
-客户端票据响应可含 terminal_certificate；存在时通过 clienttransport 在原 SDK gRPC 流内建立固定 worker 证书的 TLS 连接，保持现有终端和文件 API。没有证书字段的旧客户端继续 HTTP 路径。
-
-v51 开始，原生运行时状态使用 LightOS LPK 版本并保留产物摘要；launcher v5、host_protocol 1、终端帧、SSH/发布及 checkpoint 格式不变，显式保留 v50/v49/v48 和既有 attach 兼容列表。
-
-合并保留主分支的物理机 activity 身份修复、活动进程命令行/目录采集及移动端 TUI 手势所需信息。运行时与 PTY 分发职责仍按本分支方案执行。
-Agent v52 仅调整物理机运行时的进程内 PTY 依赖，网络与业务协议不变，显式保留 v51 的 attach 和工作区恢复。Provider 不代理 hportal PTY RPC，仍经现有应用流访问本机 Webshell 服务。
-
-v53 在合并新主分支后独立递增，避免重用先前 v52 Agent 缓存而漏掉 activity 修复；终端帧、SSH、发布、launcher v5 与 host_protocol 1 均不改变。
-
-v54 在本次合并后独立递增，避免复用 v53 的 Agent 安装缓存而遗漏新设置；与 v53 保持相同 WASM 与终端帧，launcher v5 / host_protocol 1 不变。
-
-主线 V3 的实例顺序通过公开的账号接口读写，不改变实例内标签顺序，也不要求更新旧 Agent。只读检查、输出位置、应用生命周期和 OSC 7501 能力应答已合入 v55；旧核心缺少的新能力仍按实际响应处理，不因版本号兼容而假定其已经具备。
+票据中的 `terminal_certificate` 存在时，clienttransport 在原 SDK gRPC 流内固定信任 worker 证书并建立 TLS，业务仍验证用途票据；缺少该字段的旧客户端保留 HTTP 兼容路径。
