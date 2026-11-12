@@ -16,4 +16,4 @@
 
 必须实机验证 PowerShell Profile、Unicode、主题、resize、退出码、前台/后台子进程，以及父进程被结束时的回收；交叉编译不等于这些场景已验收。
 
-Agent v52 的物理机 PTY 使用 `gitee.com/linakesi/hportal/pty`，底层固定 xpty v0.1.3。薄库释放创建句柄并提供正确 Wait/管道关闭；本模块仍先挂起创建、加入所属 Job 再恢复运行，仍管理活动记录、CWD 和 SSH 模式/信号。无需新增 SDK RPC 或端口，PTY 与解析器在同一运行时进程。
+物理机 PTY 使用 `gitee.com/linakesi/hportal/misc/cli/pty`，底层固定 xpty v0.1.3。薄库释放创建句柄并提供正确 Wait/管道关闭；本模块仍先挂起创建、加入所属 Job 再恢复运行，仍管理活动记录、CWD 和 SSH 模式/信号。无需新增 SDK RPC 或端口，PTY 与解析器在同一运行时进程。

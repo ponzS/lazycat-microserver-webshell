@@ -81,4 +81,4 @@ v51 开始，原生运行时状态使用 LightOS LPK 版本并保留产物摘要
 
 Agent v52 开始，本机平台经 hportal 纯 PTY 模块复用底层库，Core 的平台边界、终端帧和 checkpoint 不变。退出结果继续使用真实进程状态；Provider 显式保留 v51 attach/工作区能力，不把新 SDK 网络服务作为依赖。
 
-当前合并版本为 Agent v56：使用 Ghostty 1.4 的 `ghostty-snapshot-v1`（GHOSTSNP）快照，同时保留客户端运行时分发、通用 PTY、任务回收及主线 agent 身份识别。当前 WASM 为 617239 字节，SHA-256 `5eb1c3c84ae118b4b8b9737ba45b1226c5b6dbb3ee84e3eb359fa7a495959614`。v51/v52 曾在两个分支表示不同实现，容器 Provider 只为 v56 声明新快照能力并协商该格式；原生客户端按实际工作区能力协商。显式保留 v55–v9 的 attach 和 v55–v27 的工作区恢复，旧核心继续原始历史回放，不自动替换 Agent 或重启任务。旧内存快照不导入新内核。
+当前合并版本为 Agent v57：使用 Ghostty 1.4 的 `ghostty-snapshot-v1`（GHOSTSNP）快照，同时保留客户端运行时分发、通用 PTY、任务回收及主线 agent 身份识别。当前 WASM 为 617239 字节，SHA-256 `5eb1c3c84ae118b4b8b9737ba45b1226c5b6dbb3ee84e3eb359fa7a495959614`。v51/v52 曾在两个分支表示不同实现，容器 Provider 为 v56/v57 声明新快照能力并协商该格式；原生客户端按实际工作区能力协商。显式保留 v56–v9 的 attach 和 v56–v27 的工作区恢复，旧核心继续原始历史回放，不自动替换 Agent 或重启任务。旧内存快照不导入新内核。

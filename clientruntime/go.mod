@@ -12,7 +12,7 @@ require (
 )
 
 require (
-	gitee.com/linakesi/hportal/pty v0.0.0-20261102094738-32a0930c0698 // indirect
+	gitee.com/linakesi/hportal/misc/cli/pty v0.0.0-20261112052759-9e74d96e3beb // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/charmbracelet/x/conpty v0.1.1 // indirect
 	github.com/charmbracelet/x/errors v0.0.0-20240508181413-e8d8b6e2de86 // indirect

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"syscall"
 
-	terminalpty "gitee.com/linakesi/hportal/pty"
+	terminalpty "gitee.com/linakesi/hportal/misc/cli/pty"
 	win "golang.org/x/sys/windows"
 	"lcmd-webshell/core"
 	"lcmd-webshell/localtools"

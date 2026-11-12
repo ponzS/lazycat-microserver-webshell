@@ -48,6 +48,6 @@ launcher v5、终端 v48 阶段：原 SDK gRPC 注册承载私有 Unix 应用流
 
 ## 进程内通用 PTY（Agent v52）
 
-物理机网页和 SSH PTY 编译复用 hportal 仓库的独立轻模块 `gitee.com/linakesi/hportal/pty`，固定到仓库提交对应版本。它只提供底层 PTY 适配，不引入 hportal 网络核心，也不增加 PTY RPC/端口；解析、shell、授权、保留会话、Job/进程回收和热更新仍由本运行时维护。库随运行时重新构建并由 LPK 分发，不要求宿主 daemon 执行 PTY。兼容原终端帧、launcher v5、host_protocol 1、SSH/发布和 WASM；Provider 显式保留 v51 attach/工作区能力。正常构建使用锁定依赖，不依赖本地 go.work 或开发机路径。
+物理机网页和 SSH PTY 编译复用 hportal 的 CLI 范围内轻量封装 `gitee.com/linakesi/hportal/misc/cli/pty`，固定到仓库提交对应版本。它只提供底层 PTY 适配，不引入 hportal 网络核心，也不增加 PTY RPC/端口；解析、shell、授权、保留会话、Job/进程回收和热更新仍由本运行时维护。库随运行时重新构建并由 LPK 分发，不要求宿主 daemon 执行 PTY。兼容原终端帧、launcher v5、host_protocol 1、SSH/发布和 WASM；Provider 显式保留 v51 attach/工作区能力。正常构建使用锁定依赖，不依赖本地 go.work 或开发机路径。
 
-当前合并版本为 Agent v56：使用 Ghostty 1.4 的 `ghostty-snapshot-v1`（GHOSTSNP）快照，同时保留客户端运行时分发、通用 PTY、任务回收及主线 agent 身份识别。当前 WASM 为 617239 字节，SHA-256 `5eb1c3c84ae118b4b8b9737ba45b1226c5b6dbb3ee84e3eb359fa7a495959614`。v51/v52 曾在两个分支表示不同实现，容器 Provider 只为 v56 声明新快照能力并协商该格式；原生客户端按实际工作区能力协商。显式保留 v55–v9 的 attach 和 v55–v27 的工作区恢复，旧核心继续原始历史回放，不自动替换 Agent 或重启任务。旧内存快照不导入新内核。
+当前合并版本为 Agent v57：使用 Ghostty 1.4 的 `ghostty-snapshot-v1`（GHOSTSNP）快照，同时保留客户端运行时分发、通用 PTY、任务回收及主线 agent 身份识别。当前 WASM 为 617239 字节，SHA-256 `5eb1c3c84ae118b4b8b9737ba45b1226c5b6dbb3ee84e3eb359fa7a495959614`。v51/v52 曾在两个分支表示不同实现，容器 Provider 为 v56/v57 声明新快照能力并协商该格式；原生客户端按实际工作区能力协商。显式保留 v56–v9 的 attach 和 v56–v27 的工作区恢复，旧核心继续原始历史回放，不自动替换 Agent 或重启任务。旧内存快照不导入新内核。

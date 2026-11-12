@@ -9,7 +9,7 @@ import (
 	"sync"
 	"unsafe"
 
-	terminalpty "gitee.com/linakesi/hportal/pty"
+	terminalpty "gitee.com/linakesi/hportal/misc/cli/pty"
 	win "golang.org/x/sys/windows"
 )
 
