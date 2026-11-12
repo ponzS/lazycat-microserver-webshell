@@ -291,11 +291,12 @@ export class RemoteTerminal {
     this.rows = state.rows;
     this.responses.push(...(state.responses || []));
     const remaining = Number(state.syncOutputRemainingMs || 0);
-    if (remaining <= 0) {
-      clearTimeout(this.syncOutputTimer);
-      this.syncOutputTimer = null;
-      this.syncOutputDeadline = 0;
-    } else if (!this.syncOutputTimer) {
+    // New output can extend the idle deadline. Always adopt the worker's latest
+    // hold; expiration only asks it for a snapshot and never bypasses DEC 2026.
+    clearTimeout(this.syncOutputTimer);
+    this.syncOutputTimer = null;
+    this.syncOutputDeadline = 0;
+    if (remaining > 0) {
       const generation = this.generation;
       this.syncOutputDeadline = performance.now() + remaining;
       this.syncOutputTimer = setTimeout(() => {
@@ -324,7 +325,14 @@ export class RemoteTerminal {
     return result;
   }
   renderedPresentation() { return this.lastRenderedFrame?.presentation || null; }
-  get isSynchronizedOutputHeld() { return this.syncOutputDeadline > performance.now(); }
+  get isSynchronizedOutputHeld() {
+    // A released snapshot stays drawable even if the next write starts another
+    // hold before the browser's render tick. Otherwise a busy stream starves safety frames.
+    const frame = this.renderingFrame || (this.frame !== this.lastRenderedFrame ? this.frame : null);
+    const frameReady = frame && frame.cols === this.cols && frame.rows === this.rows
+      && frame.historyEpoch === this.progress?.historyEpoch;
+    return !frameReady && this.syncOutputDeadline > performance.now();
+  }
   get currentState() { return this.renderingFrame || this.progress || this.frame; }
   renderWithFrame(callback) {
     this.renderingFrame = this.frame;

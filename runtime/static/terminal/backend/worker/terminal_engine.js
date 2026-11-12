@@ -87,6 +87,7 @@ export function createTerminalEngine() {
     }
     native.markClean();
     cachedRevision = revision;
+    synchronizedOutput.presented();
     return frame;
   };
 
@@ -117,6 +118,7 @@ export function createTerminalEngine() {
       const writeStartSerial = serial;
       const parseStartedAt = timing ? performance.now() : 0;
       native.write(bytes);
+      if (bytes.length > 0) synchronizedOutput.wrote(native.getMode(2026, false));
       const parsedAt = timing ? performance.now() : 0;
       trackHistory();
       revision += 1;
