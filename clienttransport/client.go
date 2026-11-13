@@ -7,6 +7,8 @@ import (
 	_ "embed"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -16,6 +18,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 //go:embed ca.crt
@@ -85,10 +88,18 @@ func (t Target) DialTLSContext(ctx context.Context, _, _ string) (net.Conn, erro
 	}
 	headers, err := stream.Header()
 	if err != nil {
-		return nil, err
+		return nil, clientHandshakeError(err)
 	}
 	if values := headers.Get("lightos-client-transport"); len(values) != 1 || values[0] != "1" {
-		return nil, errors.New("client transport protocol mismatch")
+		if len(values) == 0 {
+			// Header may return no error for a failed RPC. RecvMsg exposes its
+			// final status before we classify a missing header as incompatible.
+			var frame wrapperspb.BytesValue
+			if err := stream.RecvMsg(&frame); err != nil {
+				return nil, clientHandshakeError(err)
+			}
+		}
+		return nil, errors.New("终端连接协议不兼容（client transport protocol mismatch）。")
 	}
 	local, peer := net.Pipe()
 	go func() { _ = forward(stream, peer); cancel(); connection.Close() }()
@@ -103,6 +114,13 @@ func (t Target) DialTLSContext(ctx context.Context, _, _ string) (net.Conn, erro
 	}
 	success = true
 	return secured, nil
+}
+
+func clientHandshakeError(err error) error {
+	if errors.Is(err, io.EOF) || strings.Contains(err.Error(), "error reading server preface: EOF") {
+		return fmt.Errorf("无法连接终端。请检查目标设备的网络环境后重试。\n详细原因：握手前连接关闭（EOF）。\n原始错误：%w", err)
+	}
+	return fmt.Errorf("无法连接终端。\n详细原因：%w", err)
 }
 
 func (t Target) HTTPClient(timeout time.Duration) *http.Client {

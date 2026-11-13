@@ -32,7 +32,7 @@ v35 显式兼容 v34/v33/v32/v31/v30/v29/v28/v27 及原容器兼容版本，版�
 
 实际功能回归按 `spec-tests/ENVIRONMENT.md` 绑定设备/账号，检查容器列表、授权、工作区、文件、统一连接和重连；未在真实环境执行的内容不能标记通过。
 
-当前合并版本为 Agent v57：使用 Ghostty 1.4 的 `ghostty-snapshot-v1`（GHOSTSNP）快照，同时保留客户端运行时分发、通用 PTY、任务回收及主线 agent 身份识别。当前 WASM 为 617239 字节，SHA-256 `5eb1c3c84ae118b4b8b9737ba45b1226c5b6dbb3ee84e3eb359fa7a495959614`。v51/v52 曾在两个分支表示不同实现，容器 Provider 为 v56/v57 声明新快照能力并协商该格式；原生客户端按实际工作区能力协商。显式保留 v56–v9 的 attach 和 v56–v27 的工作区恢复，旧核心继续原始历史回放，不自动替换 Agent 或重启任务。旧内存快照不导入新内核。
+当前合并版本为 Agent v58：使用 Ghostty 1.4 的 `ghostty-snapshot-v1`（GHOSTSNP）快照，同时保留客户端运行时分发、通用 PTY、任务回收及主线 agent 身份识别。当前 WASM 为 617239 字节，SHA-256 `5eb1c3c84ae118b4b8b9737ba45b1226c5b6dbb3ee84e3eb359fa7a495959614`。v51/v52 曾在两个分支表示不同实现，容器 Provider 为 v56/v57/v58 声明新快照能力并协商该格式；原生客户端按实际工作区能力协商。显式保留 v57–v9 的 attach 和 v57–v27 的工作区恢复，旧核心继续原始历史回放，不自动替换 Agent 或重启任务。旧内存快照不导入新内核。
 
 v52 在 v51 之上透传可选 `pane.agent {id,name,source}`（含通过 `di` 挂载的 agent，`source` 为 `di`；识别已安装的 Antigravity CLI `agy`）；旧客户端可忽略新增字段。身份不推断工作状态；无可靠进程身份时省略，继续显示普通命令。v52 同时撤回 OSC 133 语义区段的 agent 生命周期推断，并处理 CAN/SUB 取消控制字符串。帧、元数据和 `ghostty-snapshot-v1` 快照格式与 v51 相同，快照协商同时接受 v51 与 v52。Provider 与实例 daemon 需同时更新才有 agent 身份；已兼容的 v51 daemon 不会自动停止。只重启 Provider 不会停止独立实例 daemon；重启目标 daemon 会丢失其 shell/PTY 与内存历史，独立 DI 的 setsid daemon/子 PTY 可由 `di` 重新连接。
 
@@ -51,3 +51,5 @@ v44 增加 `mobile_pre_input_enabled` 设置：GET 返回布尔值，PUT 支持�
 客户端 launcher v5 / host_protocol 1 通过限实例接入 API 登记、续权和准备更新，运行及目标版本跟随 LightOS LPK，产物摘要用于完整性与缓存。物理机 PTY 在进程内复用 hportal 的独立薄库，不增加 PTY RPC。
 
 票据中的 `terminal_certificate` 存在时，clienttransport 在原 SDK gRPC 流内固定信任 worker 证书并建立 TLS，业务仍验证用途票据；缺少该字段的旧客户端保留 HTTP 兼容路径。
+
+Agent v58 保留 v57 的终端帧和快照格式，并显式兼容 v57 的 attach、工作区恢复和快照能力。物理机连接失败时保留 RPC 原始原因；握手前 EOF 使用目标设备网络环境检查提示，同时适用于 CLI 和图形客户端，不调整 SDK 代理行为。
