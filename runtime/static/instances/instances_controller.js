@@ -9,7 +9,6 @@ import {
 } from "./instances_model.js";
 import {
   createInstancesNavigation,
-  withMobileRemoteDesktopPreference,
 } from "./instances_navigation.js";
 import { createInstancesView } from "./instances_view.js";
 
@@ -46,7 +45,6 @@ export function createInstancesController({
   prepareHomeNavigation = () => {},
   commitHomeNavigation = () => {},
   rollbackHomeNavigation = () => {},
-  getMobileRemoteDesktopEnabled = () => false,
   showToast = () => {},
   consoleObject = globalThis.console,
 } = {}) {
@@ -205,13 +203,8 @@ export function createInstancesController({
       if (disposed) {
         return false;
       }
-      const targetURL = withMobileRemoteDesktopPreference(
-        homeURL,
-        getMobileRemoteDesktopEnabled?.() === true,
-        windowObject?.location?.href,
-      );
       commitHomeNavigation?.();
-      windowObject?.location?.assign?.(targetURL);
+      windowObject?.location?.assign?.(homeURL);
       return true;
     } catch (error) {
       if (disposed || error?.name === "AbortError") {
