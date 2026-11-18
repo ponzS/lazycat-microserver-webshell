@@ -312,9 +312,12 @@ export function startGlobalRuntime() {
   const getActiveGeneration = () => workspaceTargetController?.getGeneration() ?? 0;
   const setActiveInstanceName = (name) => workspaceTargetController?.setActiveName(name) ?? 0;
   let activeWorkspaceGeneration = "";
+  let workspaceSupportsSnapshotCheckpoints = false;
   const getWorkspaceGeneration = () => activeWorkspaceGeneration;
   const setWorkspaceGenerationFromState = (state) => {
     requireManagedClientWorkspace(state);
+    workspaceSupportsSnapshotCheckpoints = Array.isArray(state?.agent_capabilities)
+      && state.agent_capabilities.includes("ghostty_snapshot_v1");
     const next = String(state?.workspace_generation || "").trim();
     if (next === activeWorkspaceGeneration) {
       return false;
@@ -2071,6 +2074,7 @@ export function startGlobalRuntime() {
   });
 
   const sessionProtocolOptions = {
+    supportsSnapshotCheckpoints: () => workspaceSupportsSnapshotCheckpoints,
     isByteIOLogEnabled: () => diagnostics.isByteIOLogEnabled(),
     documentObject: document,
     navigatorObject: navigator,
@@ -2431,6 +2435,7 @@ export function startGlobalRuntime() {
     hideStartupError: () => hideStartupErrorPanel(),
     invalidateWorkspaceGeneration: () => {
       activeWorkspaceGeneration = "";
+      workspaceSupportsSnapshotCheckpoints = false;
     },
     syncNetworkSockets: (options) => syncTerminalNetworkMonitorSockets(options),
     onTargetChange: ({ previousName, name }) => {

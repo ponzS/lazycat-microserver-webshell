@@ -29,6 +29,7 @@ export function createTerminalSessionProtocolController({
   terminalUnifiedTransport = null,
   terminalReplay = null,
   resolveSessionProtocol = () => null,
+  supportsSnapshotCheckpoints = () => false,
   terminalOutput = null,
   terminalPresentation = null,
   terminalResize = null,
@@ -309,7 +310,8 @@ export function createTerminalSessionProtocolController({
         history_replay_mode: session.resetOnNextReplay ? "snapshot" : "",
         flow_control: "window-ack-v1",
         replay_burst_limit_bytes: terminalOutput.getReplayBatchLimit(session),
-        checkpoint_protocol: !sessionProtocol && typeof DecompressionStream === "function" ? snapshotCheckpointProtocol : "",
+        checkpoint_protocol: !sessionProtocol && supportsSnapshotCheckpoints() && typeof DecompressionStream === "function"
+          ? snapshotCheckpointProtocol : undefined,
         foreground: themePayload.foreground,
         background: themePayload.background,
         cursor: themePayload.cursor,
