@@ -40,17 +40,61 @@ func populateProcessIdentity(p *procInfo, dir string) {
 			p.Agent = a
 		}
 	}
-	switch filepath.Base(p.Exe) {
-	case "node", "nodejs", "bun", "python", "python3":
+	isPython := p.Cmd == "python" || p.Cmd == "python3" || strings.HasPrefix(p.Cmd, "python3.")
+	if p.Cmd == "node" || p.Cmd == "nodejs" || p.Cmd == "bun" || isPython {
 		second, err := readProcessToken(reader)
-		if err == nil {
-			if a := identifyAgent(p.Exe, second); a != nil {
-				p.Agent = a
-				p.Launcher = second
-				p.Cmd += " " + second
+		if err != nil {
+			second = ""
+		}
+		if a := identifyAgent(p.Exe, second); a != nil {
+			p.Agent = a
+			p.Launcher = second
+			p.Cmd += " " + second
+		} else if isPython {
+			// Console scripts use Python as /proc/exe. Keep only the known entry.
+			switch name := filepath.Base(second); name {
+			case "pip", "pip3", "pipx", "poetry", "gunicorn", "uvicorn", "hypercorn",
+				"django-admin", "flask", "fastapi", "ansible", "ansible-playbook", "ansible-galaxy",
+				"supervisorctl", "supervisord":
+				p.Cmd = name
 			}
+		} else if tool := nodeToolName(first, second); tool != "" {
+			p.Cmd = tool
 		}
 	}
+}
+
+// npm may overwrite argv[0] with "npm <task>". Other package managers keep a
+// Node script or a Corepack shim in argv[1]. Publish only the known tool name.
+func nodeToolName(first, second string) string {
+	title, _, _ := strings.Cut(first, " ")
+	switch title {
+	case "npm", "npx", "pnpm", "pnpx", "yarn", "yarnpkg":
+		return title
+	}
+	base := filepath.Base(second)
+	switch base {
+	case "npm", "npm-cli.js":
+		return "npm"
+	case "npx", "npx-cli.js":
+		return "npx"
+	case "pnpm", "pnpm.cjs", "pnpm.js":
+		return "pnpm"
+	case "pnpx", "pnpx.cjs", "pnpx.js":
+		return "pnpx"
+	case "yarn", "yarnpkg", "yarn.js", "yarnpkg.js":
+		return "yarn"
+	case "lzc-cli", "lzc-docker", "lzc-docker-compose":
+		return base
+	}
+	if strings.HasSuffix(second, "/@lazycatcloud/lzc-cli/scripts/cli.js") {
+		return "lzc-cli"
+	}
+	if filepath.Base(filepath.Dir(second)) == "releases" && filepath.Base(filepath.Dir(filepath.Dir(second))) == ".yarn" &&
+		strings.HasPrefix(base, "yarn-") && strings.HasSuffix(base, ".cjs") {
+		return "yarn"
+	}
+	return ""
 }
 
 // Avoid buffered read-ahead into task arguments after the second token.

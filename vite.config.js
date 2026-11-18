@@ -36,6 +36,11 @@ const restoreRuntimeAssetBase = {
 const emitRuntimeSupportAssets = {
   name: "lcmd-emit-runtime-support-assets",
   generateBundle() {
+    this.emitFile({
+      type: "asset",
+      fileName: "tool-icons-LICENSE.txt",
+      source: sourceAsset("app/desktop_workspace/tool_icons/LICENSE.md"),
+    });
     for (const fileName of [
       "app/bootstrap/legacy_service_worker_retirement.js",
       "ghostty-web.LICENSE",

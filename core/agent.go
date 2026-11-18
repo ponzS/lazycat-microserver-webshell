@@ -67,7 +67,8 @@ const (
 	// v56 merges Ghostty 1.4 snapshots and agent identity with the distributed runtime.
 	// v57 follows the PTY helper relocation into hportal misc/cli; wire and snapshot formats stay unchanged.
 	// v58 enables official Ghostty Kitty rendering and ordered core-owned query replies.
-	AgentProtocolVersion = "lcmd-webshell-agent-v58"
+	// v59 identifies Node-launched package managers and LazyCat CLI in Linux foreground metadata.
+	AgentProtocolVersion = "lcmd-webshell-agent-v59"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')

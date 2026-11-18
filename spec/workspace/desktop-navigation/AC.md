@@ -133,7 +133,7 @@ Gate: required
 Given 用户在新版 PC 侧栏中查看多个名称末尾不同的长会话名
 When 用户查看这些会话并缩窄侧栏
 Then 会话内容相对实例标题保留小幅左侧缩进以区分父子层级，悬停与选中背景左右留白一致，其余宽度充分利用，任务动画与标题字号大小一致，空闲时保留同宽位置，名称区域右沿与实例展开收起箭头右沿对齐
-And Codex、Claude Code、Pi、Gemini CLI、OpenCode、Goose、Amp、Qwen Code 和 Antigravity CLI 显示与原生客户端一致的图标，其他工具保留入口名称；提示位于会话名称右侧，悬停可读取工具名，名称左侧起点及任务状态保持稳定
+And Codex、Claude Code、Pi、Gemini CLI、OpenCode、Goose、Amp、Qwen Code 和 Antigravity CLI 显示与原生客户端一致的图标，Vim、npm、pnpm、Yarn、Node.js、Python、Go、Bun 及常用 Linux 命令、语言和服务按前台入口显示对应图标，lzc-cli 和 hclient-cli 共用懒猫微服标识；未收录的可执行文件保留入口名称；提示位于会话名称右侧，悬停可读取工具名，名称左侧起点及任务状态保持稳定
 And 名称最多显示两行，一行不足时使用第二行；超过两行时在中间省略，保留开头和末尾以区分项目或文件名，悬停及重命名仍可读取完整名称
 And 在支持鼠标悬停的布局中，鼠标悬停或键盘聚焦会话时，工具图标或工具名在原位置替换为关闭按钮，不另占名称宽度，名称排版和行高保持稳定；移出且焦点离开后恢复工具提示，关闭操作仍沿用运行中命令的保护
 
