@@ -1,7 +1,7 @@
 import { packRows } from "../cell_packet.js";
 import { captureNativeRenderDiagnostics } from "./render_diagnostics.js";
 import { loadCheckpointGhostty, restoreSnapshotCheckpoint, validateSnapshotCheckpoint } from "./snapshot_checkpoint.js";
-import { createSynchronizedOutput } from "./synchronized_output.js";
+import { createSynchronizedOutput, writeAtRenderBoundaries } from "./synchronized_output.js";
 
 const privateModes = [1, 6, 7, 9, 25, 47, 1000, 1002, 1003, 1004, 1005, 1006, 1007, 1015, 1016, 1047, 1049, 2004, 2026, 2027];
 const ansiModes = [2, 4, 12, 20];
@@ -40,11 +40,11 @@ export function createTerminalEngine() {
     for (let row = first; row < last; row += 1) lines.push(native.getScrollbackLine(row - base));
     return { start: first, epoch: historyEpoch, packet: packRows(lines, native.cols) };
   };
-  const progress = () => {
+  const progress = (consumeResponses = true) => {
     const length = native.getScrollbackLength();
     const responses = [];
     let responseBytes = 0;
-    while (native.hasResponse()) {
+    while (consumeResponses && native.hasResponse()) {
       const response = native.readResponse();
       if (!response) break;
       responses.push(response);
@@ -64,13 +64,7 @@ export function createTerminalEngine() {
       responses,
     };
   };
-  const snapshot = (viewportY = 0, trace = null, cellSize = null) => {
-    if (cellSize?.width > 0 && cellSize?.height > 0) native.setCellSize(cellSize.width, cellSize.height);
-    const state = progress();
-    if (state.syncOutputRemainingMs > 0) {
-      trace?.("snapshot_held", { syncOutputRemainingMs: state.syncOutputRemainingMs });
-      return state;
-    }
+  const captureViewport = (state, viewportY, trace) => {
     trace?.("render_state_start");
     native.update();
     trace?.("render_state_complete");
@@ -89,6 +83,17 @@ export function createTerminalEngine() {
     frame.imageFrame = native.captureImages(viewportY, 0);
     native.markClean();
     cachedRevision = revision;
+    return frame;
+  };
+  const snapshot = (viewportY = 0, trace = null, cellSize = null) => {
+    // Applying cell geometry can reset DEC 2026 in Ghostty.
+    const remaining = synchronizedOutput.observe(native.getMode(2026, false));
+    if (remaining > 0) {
+      trace?.("snapshot_held", { syncOutputRemainingMs: remaining });
+      return progress();
+    }
+    if (cellSize?.width > 0 && cellSize?.height > 0) native.setCellSize(cellSize.width, cellSize.height);
+    const frame = captureViewport(progress(), viewportY, trace);
     synchronizedOutput.presented();
     return frame;
   };
@@ -114,18 +119,28 @@ export function createTerminalEngine() {
       });
       return frame;
     },
-    write({ data }, timing = null) {
+    write({ data, captureSyncFrame }, timing = null) {
       if (!native) throw new Error("Terminal backend is not initialized");
       const bytes = typeof data === "string" ? encoder.encode(data) : data;
       const writeStartSerial = serial;
       const parseStartedAt = timing ? performance.now() : 0;
-      native.write(bytes);
-      if (bytes.length > 0) synchronizedOutput.wrote(native.getMode(2026, false));
+      let syncFrame = null;
+      if (captureSyncFrame) {
+        writeAtRenderBoundaries(native, bytes, (sameScreen) => {
+          synchronizedOutput.began();
+          // Retain at most one complete boundary per write. Replay and hidden
+          // panes go through the normal parser lane without packing any frames.
+          if (syncFrame || !sameScreen) return;
+          trackHistory();
+          revision += 1;
+          syncFrame = captureViewport(progress(false), 0, null);
+        });
+      } else native.write(bytes);
       const parsedAt = timing ? performance.now() : 0;
       trackHistory();
       revision += 1;
-      // No RenderState update, cell packing or markClean on the parser lane.
       const result = { ...progress(), writeStartSerial };
+      if (syncFrame && result.syncOutputRemainingMs > 0) result.syncFrame = syncFrame;
       if (timing) {
         timing.parseMs = parsedAt - parseStartedAt;
         timing.progressMs = performance.now() - parsedAt;

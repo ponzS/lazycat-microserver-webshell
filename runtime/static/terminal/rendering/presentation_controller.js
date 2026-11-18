@@ -718,6 +718,10 @@ export function createTerminalPresentationController({
         return false;
       }
     }
+    const backend = session.term?.wasmTerm;
+    const painted = backend?.isFrameCurrent ? null : backend?.renderedPresentation?.();
+    const completeBoundary = painted?.synchronizedBoundary
+      && BigInt(painted.appliedCursor) >= (session.historyReplayTargetCursor ?? 0n);
     if (
       !session.fullRenderPending
       || session.activationFitPending
@@ -725,6 +729,7 @@ export function createTerminalPresentationController({
       || session.pendingRenderFitGeneration !== session.measuredFitGeneration
       || session.pendingRenderReplayGeneration !== session.terminalReplayGeneration
       || (session.pendingRenderContentGeneration !== session.terminalContentGeneration
+        && !completeBoundary
         && (!session.hasPresentedFrame || session.presentedFitGeneration !== session.measuredFitGeneration
           || session.presentedReplayGeneration !== session.terminalReplayGeneration))
     ) {
@@ -741,9 +746,7 @@ export function createTerminalPresentationController({
       || session.presentedResizeEpoch;
     session.hasPresentedFrame = true;
     session.renderGeneration = Number(session.renderGeneration || 0) + 1;
-    const backend = session.term?.wasmTerm;
     localFrames.set(session, { backend, generation: backend?.generation, identity: frameIdentity(session) });
-    const painted = backend?.isFrameCurrent ? null : backend?.renderedPresentation?.();
     session.presentedContentGeneration = session.pendingRenderContentGeneration;
     session.presentedHistoryCursor = painted ? BigInt(painted.appliedCursor) : session.appliedHistoryCursor;
     session.renderSnapshot = createRenderSnapshot(session, { presented: true,
@@ -1186,6 +1189,11 @@ export function createTerminalPresentationController({
       return false;
     }
     const liveGeometryAckPending = isLiveGeometryActive(session) && session.resizeAckPending;
+    if (!liveGeometryAckPending && session.term?.wasmTerm?.isWaitingForSynchronizedOutput) {
+      session.presentationStallStartedAt = 0;
+      session.presentationStallLastAttemptAt = 0;
+      return false;
+    }
     if (isCurrent(session) && !liveGeometryAckPending) {
       session.presentationStallStartedAt = 0;
       session.presentationStallLastAttemptAt = 0;

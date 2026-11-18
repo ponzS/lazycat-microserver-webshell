@@ -131,8 +131,17 @@ export class RemoteTerminal {
         const frameTiming = pending.startedAt !== null ? {} : null;
         const acceptAt = frameTiming ? performance.now() : 0;
         this.traceOperation(data.id, pending, "ui_frame_accept_start");
-        if (data.result?.terminalState) this.acceptFrame(data.result, frameTiming);
-        else if (data.result?.terminalProgress) this.acceptProgress(data.result);
+        const result = data.result;
+        if (result?.terminalState) this.acceptFrame(result, frameTiming);
+        else if (result?.terminalProgress) {
+          if (result.syncFrame) {
+            const { syncFrame, ...progress } = result;
+            if ((this.viewport?.() || 0) <= 0.01 && this.presentationAt(syncFrame.revision)) {
+              this.acceptFrame({ ...syncFrame, synchronizedBoundary: true }, frameTiming, false);
+            }
+            this.acceptProgress(progress);
+          } else this.acceptProgress(result);
+        }
         if (frameTiming) completeDiagnostic({ ...frameTiming,
           frameAcceptMs: performance.now() - acceptAt, rpcTotalMs: performance.now() - pending.startedAt });
         pending.resolve(data.result);
@@ -234,7 +243,7 @@ export class RemoteTerminal {
     promise.catch(() => {});
     return promise;
   }
-  acceptFrame(frame, timing = null) {
+  acceptFrame(frame, timing = null, notify = true) {
     const unpackAt = timing ? performance.now() : 0;
     if (this.frame && frame.revision < this.frame.revision) return;
     if (frame.viewport && (frame.viewport.columns !== frame.cols || frame.viewport.rows !== frame.rows)) throw new Error("Terminal frame geometry mismatch");
@@ -292,7 +301,7 @@ export class RemoteTerminal {
     this.acceptHistory(frame.history);
     if (timing) timing.frameUnpackMs = performance.now() - unpackAt;
     this.dirty = true;
-    this.onChange?.();
+    if (notify) this.onChange?.();
   }
   acceptProgress(state, notify = true) {
     if (this.progress && state.revision < this.progress.revision) return;
@@ -302,8 +311,7 @@ export class RemoteTerminal {
     this.rows = state.rows;
     this.responses.push(...(state.responses || []));
     const remaining = Number(state.syncOutputRemainingMs || 0);
-    // New output can extend the idle deadline. Always adopt the worker's latest
-    // hold; expiration only asks it for a snapshot and never bypasses DEC 2026.
+    // Expiration asks the worker to recheck its own synchronized-output deadline.
     clearTimeout(this.syncOutputTimer);
     this.syncOutputTimer = null;
     this.syncOutputDeadline = 0;
@@ -335,14 +343,22 @@ export class RemoteTerminal {
     }
     return result;
   }
-  renderedPresentation() { return this.lastRenderedFrame?.presentation || null; }
+  renderedPresentation() {
+    const frame = this.lastRenderedFrame;
+    return frame?.synchronizedBoundary && frame.presentation
+      ? { ...frame.presentation, synchronizedBoundary: true }
+      : frame?.presentation || null;
+  }
+  get isWaitingForSynchronizedOutput() {
+    return !this.failed && !this.disposed && this.syncOutputDeadline > performance.now();
+  }
   get isSynchronizedOutputHeld() {
     // A released snapshot stays drawable even if the next write starts another
     // hold before the browser's render tick. Otherwise a busy stream starves safety frames.
     const frame = this.renderingFrame || (this.frame !== this.lastRenderedFrame ? this.frame : null);
     const frameReady = frame && frame.cols === this.cols && frame.rows === this.rows
       && frame.historyEpoch === this.progress?.historyEpoch;
-    return !frameReady && this.syncOutputDeadline > performance.now();
+    return !frameReady && this.isWaitingForSynchronizedOutput;
   }
   get currentState() { return this.renderingFrame || this.progress || this.frame; }
   renderWithFrame(callback) {
@@ -427,7 +443,7 @@ export class RemoteTerminal {
       rowStep, colStep, rowContent: rows,
     };
   }
-  write(data) { return this.request("write", { data }); }
+  write(data, captureSyncFrame = false) { return this.request("write", { data, captureSyncFrame }); }
   captureRenderEvidence() {
     if (this.diagnosticPending) return this.diagnosticPending;
     const generation = this.generation;
@@ -480,7 +496,7 @@ export class RemoteTerminal {
   }
   getImageFrame() { return (this.renderingFrame || this.frame)?.imageFrame; }
   getViewport() {
-    if (!this.renderingFrame && this.isReady && !this.isSynchronizedOutputHeld && (this.viewportRevision !== this.progress.revision || (this.frame?.imageFrame?.nextTickMs > 0 && !this.imageTimer) || (this.frame?.imageFrame && this.frame.imageFrame.offset !== Math.ceil(this.viewport?.() || 0)))) {
+    if (!this.renderingFrame && this.isReady && !this.isWaitingForSynchronizedOutput && (this.viewportRevision !== this.progress.revision || (this.frame?.imageFrame?.nextTickMs > 0 && !this.imageTimer) || (this.frame?.imageFrame && this.frame.imageFrame.offset !== Math.ceil(this.viewport?.() || 0)))) {
       if (!this.snapshotPending) {
         const generation = this.generation;
         const promise = this.request("snapshot", { viewportY: this.viewport?.() || 0, cellSize: this.cellSize }).finally(() => {
@@ -490,7 +506,8 @@ export class RemoteTerminal {
         this.snapshotPending = promise;
       }
     }
-    return this.isFrameReady && (this.hasRenderedFrame || this.isFrameCurrent) ? this.viewportCells : null;
+    return this.isFrameReady && (this.hasRenderedFrame || this.isFrameCurrent || this.frame.synchronizedBoundary)
+      ? this.viewportCells : null;
   }
   getLine(row) { return this.getViewport() ? this.lines?.[row] || null : null; }
   getScrollbackLength() { return this.currentState?.scrollback || 0; }

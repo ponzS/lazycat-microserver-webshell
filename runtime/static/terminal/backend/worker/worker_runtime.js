@@ -48,9 +48,10 @@ export function createBackendWorkerRuntime({ scope, engine, queryText }) {
       }
       else throw new Error(`Unknown terminal backend command: ${type}`);
       const transfers = [];
-      if (result?.viewport) transfers.push(result.viewport.bytes.buffer, result.history.packet.bytes.buffer);
+      const frame = result?.syncFrame || result;
+      if (frame?.viewport) transfers.push(frame.viewport.bytes.buffer, frame.history.packet.bytes.buffer);
       else if (result?.packet) transfers.push(result.packet.bytes.buffer);
-      for (const buffer of new Set((result?.imageFrame?.images || []).map((image) => image.pixels.buffer))) transfers.push(buffer);
+      for (const buffer of new Set((frame?.imageFrame?.images || []).map((image) => image.pixels.buffer))) transfers.push(buffer);
       if (timing) {
         timing.workerQueueMs = startedAt - receivedAt;
         timing.workerExecutionMs = performance.now() - startedAt;

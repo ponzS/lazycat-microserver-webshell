@@ -19,7 +19,9 @@ export function installBackendTerminalAdapter(term) {
     const generation = backend.generation;
     const identity = term.backendIdentity?.();
     observeParsedTerminalWrite(term, data);
-    const frame = await backend.write(data);
+    const captureSyncFrame = backend.visible?.() && !term.renderSuppressionDepth
+      && (term.viewportY || 0) <= 0.01 && (term.targetViewportY || 0) <= 0.01;
+    const frame = await backend.write(data, captureSyncFrame);
     if (term.isDisposed || term.wasmTerm !== backend || generation !== backend.generation) throw retired();
     requireCurrentIdentity(term, backend, identity);
     term.processTerminalResponses();

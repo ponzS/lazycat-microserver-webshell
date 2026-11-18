@@ -38,11 +38,11 @@ UI 画布资源可由 rendering owner 保留或释放。`terminal_adapter.js` �
 
 v20 保留原生 resize 的错误名供服务端诊断读取，resize 原有成功／失败返回值与终端行为不变。错误名通过静态 WASM 内存读取，失败后不额外申请原生堆内存；同一模块每次调用记录最后一次 resize 错误。新 WASM 指纹需要前后端同步更新。
 
-v21 中 write 只解析、返回代际／模式／回复等轻量进度，不更新 RenderState、不打包整屏。UI 在需要绘制时请求一个 snapshot，同一 pane 最多一个 snapshot 在途；后续字节不取消已经生成的完整帧。绘制期间从同一帧读取尺寸、光标和历史坐标，消费进度与画面版本分开。隐藏 pane 继续解析，恢复可见后按需生成视口。
+普通 write 解析字节并返回代际、模式和回复等进度。UI 按需请求 snapshot，同一 pane 最多一个 snapshot 在途。绘制期间从同一帧读取尺寸、光标和历史坐标，消费进度与画面版本分开。隐藏 pane 继续解析，恢复可见后按需生成视口。
 
 恢复预备的 Worker 可供紧接着的回放 reset 复用一次；仅在 generation、配置和命令序列均未改变时生效。任何后续命令、失败或配置变化都回到原来的完整重建。
 
-`worker/synchronized_output.js` 在实际写入后观察原生 DEC 2026 模式并记录最后输出时间。同步区间内继续消费字节、生成终端回复和确认 Queue ACK，保留旧完整帧，snapshot 不更新或清理 RenderState；持续输出不会因超过固定 1 秒而按刷新率播放历史。空闲 1000ms 后允许展示未结束的同步内容，连续同步输出最多每 2000ms 生成一次安全中间帧；只有实际捕获完整 snapshot 才重新开始该等待，进度查询不消耗放行机会。超时不注入原始字节、不修改原生模式。UI 根据最新进度续约代际隔离的定时唤醒，到期重新请求 Worker 检查和抓帧；已放行但尚未绘制的完整帧仍可展示一次，不能被随后的解析进度重新阻塞。退出同步模式立即取消等待并恢复普通按帧绘制。`frameRevision`／`viewportRevision` 表示缓存帧版本，`revision` 表示解析进度，`frameCurrent` 区分两者；旧完整帧保留自己的消费游标，不得标成最新字节已展示。
+`worker/synchronized_output.js` 将可见终端的实时输出分段交给 Ghostty。Ghostty 确认进入 DEC 2026 模式时，Worker 可保留重绘前的完整画面，每批最多捕获一帧。历史回放、隐藏 pane 和滚动历史期间沿用按需获取帧。同步区间内继续消费字节、生成终端回复和确认 Queue ACK。等待结束标记时，snapshot 也延后会重置同步模式的字形尺寸更新；有效等待期间，呈现看门狗暂停因画面落后而发起的恢复。只有同一同步区间持续 8 秒仍未结束时才允许超时补绘，并从实际补绘起重新计时。UI 根据 Worker 的期限安排唤醒，允许已取得的完整帧在下一轮同步期间显示，退出同步模式后恢复普通按帧绘制。`frameRevision`／`viewportRevision` 表示缓存帧版本，`revision` 表示解析进度。已显示的边界帧不推进到该批末尾的消费游标。
 
 只读捕获区分 Worker 的解析 `revision` 与 RenderState 的 `cachedRevision`，UI 指纹只和同版本 RenderState 对照。解析已经前进但尚未到下一次画面生成时，`cacheCurrent=false` 属于预期的阶段差异，不能直接判定为漏渲染。
 
