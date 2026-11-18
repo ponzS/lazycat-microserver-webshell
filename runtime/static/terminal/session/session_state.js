@@ -161,6 +161,7 @@ const createActivityState = () => ({
   busy: false,
   command: "",
   processCommandLine: "",
+  agentId: "",
   cwd: "",
   activityCheckedAt: 0,
   lastTerminalOutputAt: 0,

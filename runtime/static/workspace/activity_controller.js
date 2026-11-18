@@ -60,6 +60,7 @@ export function createWorkspaceActivityController({
       pane.busy = isBusy;
       pane.command = paneState.command || "";
       pane.processCommandLine = paneState.command_line || "";
+      pane.agentId = paneState.agent?.id || "";
       pane.cwd = paneState.cwd || pane.cwd || "";
       pane.activityCheckedAt = Number(paneState.activity_checked_at || 0);
       if (previousCommand !== pane.command || previousCommandLine !== pane.processCommandLine) {

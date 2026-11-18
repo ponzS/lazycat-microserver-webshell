@@ -22,7 +22,8 @@ const agents = new Map([
   ["antigravity-cli", { name: "Antigravity CLI", icon: antigravity }],
 ]);
 const aliases = new Map([
-  ["claude", "claude-code"], ["qwen", "qwen-code"], ["agy", "antigravity-cli"],
+  ["claude", "claude-code"], ["qwen", "qwen-code"],
+  ["agy", "antigravity-cli"], ["antigravity", "antigravity-cli"],
 ]);
 const packages = [
   ["codex", "@openai/codex"], ["claude-code", "@anthropic-ai/claude-code"],
@@ -31,6 +32,8 @@ const packages = [
 ];
 
 export function desktopAgentIdentity(pane) {
+  const reported = agents.get(pane.agentId);
+  if (reported) return reported;
   if (isCodexTerminalIdentity(pane)) return agents.get("codex");
   const unquote = (value) => String(value || "").replace(/^(["'])(.*)\1$/, "$2");
   const tokens = (String(pane.processCommandLine || "").match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || []).map(unquote);

@@ -52,6 +52,7 @@ export function updateDesktopSessionActivity(tab, pane, state, { read = false } 
     busy: state.busy === true,
     command: state.command || "",
     processCommandLine: state.command_line || "",
+    agentId: state.agent?.id || "",
     cwd: state.cwd || "",
   });
   if (generation && cursor !== null) {
