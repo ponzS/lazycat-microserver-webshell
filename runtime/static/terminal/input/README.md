@@ -20,6 +20,8 @@
 
 用户输入与 generated response 必须显式分类。generated payload 带 `generated: true`，普通输入继续带当前 cols/rows、pixel size 和已应用 resize epoch。单 pane 输入失败只能触发该 pane 的 logical 恢复，不能关闭 Unified 物理连接。
 
+Worker 完成一次写入并核对连接代次后，由 `drainGeneratedResponses()` 读取 Ghostty 的应答队列。此时同步发出的 `onData` 事件沿用自动应答的回放和发送规则，即使遇到新的查询序列，也不会触发尺寸接管。
+
 ## 状态所有权
 
 `input_controller.js` 是 `pendingInput*`、`inputBuffer*`、`inputQueue*`、`suppressGeneratedTerminalInputUntil` 和 `processingGeneratedTerminalResponses` 的唯一运行时修改者。session state 只负责建立初始字段，transport/history/resize/rendering 只能通过 controller 公开 API 观察或触发输入动作。不存在跨页面或跨 attach 的输入锁状态。

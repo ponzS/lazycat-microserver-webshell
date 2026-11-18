@@ -13,7 +13,7 @@ const requireCurrentIdentity = (term, backend, identity) => {
 
 // DOM/Canvas/input stay in UI. Native mutations await the worker; reads use
 // only its last complete frame.
-export function installBackendTerminalAdapter(term) {
+export function installBackendTerminalAdapter(term, drainGeneratedResponses) {
   term.writeInternal = async (data, callback) => {
     const backend = term.wasmTerm;
     const generation = backend.generation;
@@ -22,7 +22,8 @@ export function installBackendTerminalAdapter(term) {
     const frame = await backend.write(data);
     if (term.isDisposed || term.wasmTerm !== backend || generation !== backend.generation) throw retired();
     requireCurrentIdentity(term, backend, identity);
-    term.processTerminalResponses();
+    // Ghostty emits these replies synchronously through the same onData event as keys.
+    drainGeneratedResponses();
     if ((typeof data === "string" && data.includes("\x07")) || (data instanceof Uint8Array && data.includes(7))) term.bellEmitter.fire();
     term.linkDetector?.invalidateCache();
     if ((term.viewportY || 0) <= 0.01 && (term.targetViewportY || 0) <= 0.01) {

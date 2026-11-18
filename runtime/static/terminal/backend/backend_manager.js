@@ -1,7 +1,7 @@
 import { RemoteTerminal } from "./remote_terminal.js";
 import { installBackendTerminalAdapter } from "./terminal_adapter.js";
 
-export function createTerminalBackendManager({ wasmURL, isVisible = () => true, onError = () => {}, onReady = () => {}, diagnosticsEnabled = () => false, resizeDiagnosticsEnabled = () => false, recordEvent = () => {} }) {
+export function createTerminalBackendManager({ wasmURL, drainGeneratedResponses, isVisible = () => true, onError = () => {}, onReady = () => {}, diagnosticsEnabled = () => false, resizeDiagnosticsEnabled = () => false, recordEvent = () => {} }) {
   const backends = new Set();
   const sessions = new WeakMap();
   const pendingDiagnostics = new WeakMap();
@@ -55,7 +55,7 @@ export function createTerminalBackendManager({ wasmURL, isVisible = () => true, 
           return backend;
         },
       };
-      installBackendTerminalAdapter(term);
+      installBackendTerminalAdapter(term, () => drainGeneratedResponses(sessions.get(term)));
     },
     bindSession(session) {
       sessions.set(session.term, session);

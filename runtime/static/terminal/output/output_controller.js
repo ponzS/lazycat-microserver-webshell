@@ -43,7 +43,6 @@ export function createTerminalOutputController({
   cancelPendingRender = noop,
   schedulePresentationValidation = noop,
   armReplayGeneratedSuppression = noop,
-  drainGeneratedResponses = noop,
   resetHostViewport = noop,
   positionInput = noop,
   sendQueueTurnAck = (session, pending, payload) => {
@@ -199,7 +198,6 @@ export function createTerminalOutputController({
         session.term.requestRender?.({ throttle: true });
       }
       advanceContentGeneration(session);
-      drainGeneratedResponses(session);
       if (
         ((replayOutput || suppressRender) && !replayWriter)
         || (!replayOutput && !suppressRender && deferHiddenRender(session))

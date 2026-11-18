@@ -129,7 +129,7 @@ export function createTerminalInputController({
     if (!session) {
       return false;
     }
-    const response = generatedResponse(data);
+    const response = session.processingGeneratedTerminalResponses || generatedResponse(data);
     const responseTail = generatedResponseTail(data);
     if (session.replayOutputDepth > 0 && !session.allowGeneratedInputDuringReplay) {
       return response || responseTail;

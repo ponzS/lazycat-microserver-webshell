@@ -540,6 +540,7 @@ export function startGlobalRuntime() {
   });
   const terminalBackend = createTerminalBackendManager({
     wasmURL: ghosttyWASMURL,
+    drainGeneratedResponses: (session) => terminalInput?.drainGeneratedResponses(session),
     diagnosticsEnabled: () => diagnostics.isInitializationCollecting() || diagnostics.isByteIOLogEnabled(),
     resizeDiagnosticsEnabled: () => diagnostics.isTerminalRenderCaptureEnabled(),
     recordEvent: recordTerminalSessionEvent,
@@ -2039,7 +2040,6 @@ export function startGlobalRuntime() {
     cancelPendingRender: (term) => terminalPresentation.cancelPendingRender(term),
     schedulePresentationValidation: (session) => terminalPresentation.scheduleValidation(session),
     armReplayGeneratedSuppression: (session) => terminalInput?.armReplayGeneratedSuppression(session),
-    drainGeneratedResponses: (session) => terminalInput?.drainGeneratedResponses(session),
     resetHostViewport: (session, options) => terminalIME?.resetHostViewport(session, options),
     positionInput: (session) => terminalIME?.positionInput(session),
     recoverQueueTurnAck: (session) => terminalHealth.fail(session, "Terminal queue turn acknowledgement failed."),
