@@ -33,6 +33,16 @@ func populateProcessIdentity(p *procInfo, dir string) {
 	defer f.Close()
 	reader := io.LimitReader(f, 4096)
 	first, _ := readProcessToken(reader)
+	// Debian shares one executable between the Redis server and its checkers.
+	// Redis can also append a listen address to its process title.
+	switch p.Cmd {
+	case "redis-server", "redis-check-rdb", "redis-check-aof":
+		word, _, _ := strings.Cut(first, " ")
+		switch name := filepath.Base(word); name {
+		case "redis-server", "redis-sentinel", "redis-check-rdb", "redis-check-aof":
+			p.Cmd = name
+		}
+	}
 	// Some runtimes set their process title (e.g. Pi). An exact executable
 	// token is accepted; arbitrary text and arguments are never searched.
 	if first != "" && !strings.ContainsAny(first, " \t\r\n") {

@@ -88,7 +88,7 @@ for (const [icon, commands] of [
   ["mysql", "mysql mysqld mysqladmin mysqldump"],
   ["mariadb", "mariadb mariadbd mariadb-dump"],
   ["sqlite", "sqlite3"],
-  ["redis", "redis-cli redis-server redis-sentinel"],
+  ["redis", "redis-cli redis-server redis-sentinel redis-check-rdb redis-check-aof redis-benchmark"],
   ["mongodb", "mongo mongosh mongod"],
   ["apache", "httpd apache2 apachectl apache2ctl"],
   ["rabbitmq", "rabbitmq-server rabbitmqctl"],
