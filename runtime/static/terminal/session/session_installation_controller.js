@@ -68,6 +68,7 @@ export function createTerminalSessionInstallationController({
     tuiAdapterInstaller?.installOpencodeTouch?.(session);
     tuiAdapterInstaller?.installHerdrTouch?.(session);
     tuiAdapterInstaller?.installPiTouch?.(session);
+    tuiAdapterInstaller?.installAgyTouch?.(session);
     tuiAdapterInstaller?.installGrokTouch?.(session);
     tuiAdapterInstaller?.installClaudeContextMenu?.(session);
     tuiAdapterInstaller?.installClaudeDesktopSelection?.(session);

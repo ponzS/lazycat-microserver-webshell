@@ -29,6 +29,7 @@ import {
   installOpencodeFullscreenContextMenuAdapter,
   installOpencodeFullscreenDesktopSelectionAdapter,
   installPiFullscreenTouchAdapter,
+  installAgyFullscreenTouchAdapter,
   isClaudeFullscreenTouchCandidate,
   isGrokFullscreenContextMenuCandidate,
   isGrokFullscreenDesktopSelectionCandidate,
@@ -38,6 +39,7 @@ import {
   isOpencodeFullscreenContextMenuCandidate,
   isOpencodeFullscreenDesktopSelectionCandidate,
   isPiFullscreenTouchCandidate,
+  isAgyFullscreenTouchCandidate,
 } from "./terminal/tui_adapters/index.js";
 import {
   createDiagnosticsController,
@@ -1801,6 +1803,7 @@ export function startGlobalRuntime() {
     installOpencodeFullscreenDesktopSelectionAdapter,
     installHerdrFullscreenTouchAdapter,
     installPiFullscreenTouchAdapter,
+    installAgyFullscreenTouchAdapter,
     installClaudeFullscreenContextMenuAdapter,
     installClaudeFullscreenDesktopSelectionAdapter,
     installGrokFullscreenTouchAdapter,
@@ -1809,6 +1812,7 @@ export function startGlobalRuntime() {
     isOpencodeFullscreenTouchCandidate,
     isHerdrFullscreenTouchCandidate,
     isPiFullscreenTouchCandidate,
+    isAgyFullscreenTouchCandidate,
     isGrokFullscreenTouchCandidate,
     moveThresholdPx: touchShortcutMoveThresholdPx,
     longPressDelayMs: touchSelectionLongPressDelayMs,

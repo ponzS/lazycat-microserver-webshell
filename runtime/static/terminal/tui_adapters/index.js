@@ -47,6 +47,7 @@ export {
   isOfficialGrokEntrypoint,
 } from "./grok/index.js";
 export { createTerminalTUIAdapterInstaller } from "./installation_controller.js";
+export { installAgyFullscreenTouchAdapter, isAgyFullscreenTouchCandidate } from "./agy/index.js";
 export {
   createCodexThemeAdapter,
   resolveCodexKeyInput,

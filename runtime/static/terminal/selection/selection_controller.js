@@ -333,18 +333,22 @@ export function createTerminalSelectionController({
       return null;
     }
     const rect = canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) {
+    const hostRect = session?.terminalHost?.getBoundingClientRect?.();
+    const visibleTop = Math.max(rect.top, hostRect?.top ?? rect.top);
+    const visibleBottom = Math.min(rect.bottom, hostRect?.bottom ?? rect.bottom);
+    const visibleHeight = visibleBottom - visibleTop;
+    if (rect.width <= 0 || visibleHeight <= 0) {
       return null;
     }
-    const edge = Math.max(1, Math.min(rect.height / 3, Math.max(autoScrollEdgePx, metrics.height * 1.5)));
+    const edge = Math.max(1, Math.min(visibleHeight / 3, Math.max(autoScrollEdgePx, metrics.height * 1.5)));
     let direction = 0;
     let distance = 0;
-    if (y < rect.top + edge) {
+    if (y < visibleTop + edge) {
       direction = -1;
-      distance = rect.top + edge - y;
-    } else if (y > rect.bottom - edge) {
+      distance = visibleTop + edge - y;
+    } else if (y > visibleBottom - edge) {
       direction = 1;
-      distance = y - (rect.bottom - edge);
+      distance = y - (visibleBottom - edge);
     }
     if (!direction) {
       return null;

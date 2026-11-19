@@ -93,6 +93,9 @@ export function createTerminalMobileViewportController({
   const syncTerminalViewportPan = (session) => {
     const panY = terminalViewportPanY(session, {
       resizeSuppressed: isMobileKeyboardResizeSuppressed(),
+      revealFollowerBottom: isTouchShortcutLayout()
+        && session?.term?.wasmTerm?.isRemote === true
+        && (!session.sizeClaimed || session.sizeClaimRequired === true),
       viewportReferenceHeight: mobileViewportReferenceHeight,
       viewportHeight: mobileViewportHeight,
       isHostElement: isHTMLElement,
@@ -105,7 +108,7 @@ export function createTerminalMobileViewportController({
     const cursorLayer = session?.terminalCursorLayer;
     if (isHTMLElement(cursorLayer)) {
       // Cursor rendering owns its cell-position transform. Apply the shared
-      // keyboard pan through top so later cursor draws retain both offsets.
+      // viewport pan through top so later cursor draws retain both offsets.
       const top = panY > 0 ? `-${panY}px` : "";
       if (cursorLayer.style.top !== top) cursorLayer.style.top = top;
     }

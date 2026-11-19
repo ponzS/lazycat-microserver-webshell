@@ -145,11 +145,12 @@ export function isKeyboardLikeViewportHeightChange(previousHeight, nextHeight, {
 
 export function terminalViewportPanY(session, {
   resizeSuppressed = false,
+  revealFollowerBottom = false,
   viewportReferenceHeight = 0,
   viewportHeight = 0,
   isHostElement = (value) => Boolean(value && Number.isFinite(Number(value.clientHeight))),
 } = {}) {
-  if (!resizeSuppressed) {
+  if (!resizeSuppressed && !revealFollowerBottom) {
     return 0;
   }
   const term = session?.term;
@@ -170,10 +171,24 @@ export function terminalViewportPanY(session, {
     Math.min(Math.max(0, (Number(term.rows) || 1) - 1), Number(cursor.y) || 0),
   );
   const cursorBottom = Math.ceil((cursorRow + 1) * cellHeight);
+  const overflow = logicalHeight - visibleHeight;
+  let followerPan = 0;
+  if (revealFollowerBottom) {
+    const alternate = term.wasmTerm?.isAlternateScreen?.() || term.buffer?.active?.type === "alternate";
+    const historyRows = Math.max(0, Number(term.getScrollbackLength?.()) || 0);
+    const viewportOffset = Math.max(0, Number(term.viewportY) || 0);
+    if (!alternate && historyRows > 0) {
+      // Reduce the crop near the oldest history so the first row remains reachable.
+      followerPan = Math.min(overflow, Math.max(0, (historyRows - viewportOffset) * cellHeight));
+    } else {
+      followerPan = Math.min(overflow, Math.max(0, cursorBottom - visibleHeight));
+    }
+  }
+  if (!resizeSuppressed) return followerPan;
   const keyboardPanLimit = Math.max(
     0,
     normalizeViewportPixels(viewportReferenceHeight) - normalizeViewportPixels(viewportHeight),
   );
   const overflowPastViewport = Math.max(0, cursorBottom + cellHeight - visibleHeight);
-  return Math.min(logicalHeight - visibleHeight, keyboardPanLimit, overflowPastViewport);
+  return Math.max(followerPan, Math.min(overflow, keyboardPanLimit, overflowPastViewport));
 }

@@ -1404,6 +1404,7 @@ export function createTerminalResizeController({
       }
       const finishFollowerFit = () => {
         session.activationFitPending = false;
+        syncViewportPan(session);
         presentation()?.ensure(session, { reason: "server_geometry_follow", forceHistory: true });
         return { ok: true, measurable: isMeasurable(session), ...size(session), sizeChanged: false, canvasChanged: false };
       };

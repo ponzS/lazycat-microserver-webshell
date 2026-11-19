@@ -37,6 +37,7 @@ export function createTerminalTUIAdapterInstaller({
   installOpencodeFullscreenDesktopSelectionAdapter = () => {},
   installHerdrFullscreenTouchAdapter = () => {},
   installPiFullscreenTouchAdapter = () => {},
+  installAgyFullscreenTouchAdapter = () => {},
   installClaudeFullscreenContextMenuAdapter = () => {},
   installClaudeFullscreenDesktopSelectionAdapter = () => {},
   installGrokFullscreenTouchAdapter = () => {},
@@ -45,6 +46,7 @@ export function createTerminalTUIAdapterInstaller({
   isOpencodeFullscreenTouchCandidate = () => false,
   isHerdrFullscreenTouchCandidate = () => false,
   isPiFullscreenTouchCandidate = () => false,
+  isAgyFullscreenTouchCandidate = () => false,
   isGrokFullscreenTouchCandidate = () => false,
   moveThresholdPx = 8,
   longPressDelayMs = 450,
@@ -184,6 +186,12 @@ export function createTerminalTUIAdapterInstaller({
     session,
     isPiFullscreenTouchCandidate,
     installPiFullscreenTouchAdapter,
+  );
+
+  const installAgyTouch = (session) => installFullscreenTouch(
+    session,
+    isAgyFullscreenTouchCandidate,
+    installAgyFullscreenTouchAdapter,
   );
 
   const installGrokTouch = (session) => installFullscreenTouch(
@@ -372,5 +380,6 @@ export function createTerminalTUIAdapterInstaller({
     installOpencodeContextMenu,
     installOpencodeDesktopSelection,
     installPiTouch,
+    installAgyTouch,
   });
 }

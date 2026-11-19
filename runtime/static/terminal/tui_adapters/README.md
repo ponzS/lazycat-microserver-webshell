@@ -23,6 +23,7 @@ Codex 的主题适配同样独立位于 `codex/`：提供进程识别与背景�
 - `pi/`：pi fullscreen 触摸适配。
 - `grok/`：Grok fullscreen 触摸、右键和桌面本地选择。
 - `codex/`：Codex fullscreen 触摸、右键、桌面本地选择，以及输入区域派生背景跟随 WebShell 主题。
+- `agy/`：已识别的 Antigravity CLI 在备用屏幕启用鼠标追踪时使用全屏触摸适配。纵向拖动发送滚轮，长按进入本地选择。
 
 相关 Node/Go 行为测试按工具分布在仓库根目录。最小回归需同时覆盖目标 TUI 和一个不匹配 TUI，确认事件所有权不会跨工具泄漏。
 
