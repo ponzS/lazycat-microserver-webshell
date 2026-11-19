@@ -335,7 +335,7 @@ export class RemoteTerminal {
     }
     return result;
   }
-  renderedPresentation() { return this.lastRenderedFrame?.presentation || null; }
+  renderedPresentation() { return (this.renderingFrame || this.lastRenderedFrame)?.presentation || null; }
   get isSynchronizedOutputHeld() {
     // A released snapshot stays drawable even if the next write starts another
     // hold before the browser's render tick. Otherwise a busy stream starves safety frames.
@@ -347,10 +347,12 @@ export class RemoteTerminal {
   get currentState() { return this.renderingFrame || this.progress || this.frame; }
   renderWithFrame(callback) {
     this.renderingFrame = this.frame;
-    this.lastRenderedFrame = this.frame;
     try {
       const rendered = callback();
-      if (rendered) this.hasRenderedFrame = true;
+      if (rendered) {
+        this.lastRenderedFrame = this.renderingFrame;
+        this.hasRenderedFrame = true;
+      }
       if (rendered && this.resizeTrace && !this.resizeTrace.drawn && this.resizeTrace.generation === this.generation
         && this.frame?.revision >= this.resizeTrace.targetRevision) {
         this.resizeTrace.drawn = true;
