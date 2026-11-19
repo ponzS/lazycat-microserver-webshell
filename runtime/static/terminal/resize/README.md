@@ -8,28 +8,28 @@
 
 当 fit 得出的 cols/rows、Canvas backing size、presentation generation 和 ACK/fence 状态都没有变化时，controller 必须走稳定几何快速路径：不捕获/恢复 viewport、不重置 host scroll、不重新定位 IME、不更新选区手柄，也不触发 full render。当前设备已经成功 claim 且没有新的 owner observation 时，重复点击、focus 和鼠标事件不得再次发送相同 claim；只有尺寸变化、远端 epoch/owner release 或明确的设备接管才重新进入 resize 事务。
 
-当前设备接管必须使用 `claimForCurrentDevice()`、`claimTabForCurrentDevice()` 或 `claimActiveTabForCurrentDevice()`。如果显式 claim 到达时已有普通 resize 等待 ACK，controller 必须记录 latest-only pending claim，并在 ACK 或 `resize_owner_active` 后使用最新可测 DOM 几何升级为新的 claim；不得被同 target 去重吞掉，也不得先显示远端 owner 的过渡尺寸。`resizePane()` 统一拒绝在已有可见帧且观察到远端 owner 后发送被动 geometry/force-sync 帧；本设备已成功 claim 后，后续迟到几何修正必须继承 `claim:true`，不能降级为普通 resize。`isCurrentDeviceClaimRequired()` 只向 presentation 暴露远端 owner observation 的只读门禁；`schedulePresentationResize()` 在本设备已经 claim 后会为字体/行高等迟到 geometry 修正保留 claim 语义。tab、pane、页面恢复和 viewport 只发布使用意图，不能自行修改 claim/epoch 字段。
+终端区域中可信的桌面点击或确认的触屏轻点进入 `claimFromTerminalGesture()`。接管请求带上该手势看到的服务端尺寸代次。服务端确认后，该逻辑连接的后续尺寸更新携带这次授权的代次。输入、布局、标签激活和普通滚动均沿用现有控制权。
 
 普通原子 resize 在 ACK 前不得切换本地 Ghostty 网格。matching ACK 到达时必须重新冻结当前 output queue 的完整 entry 数量，把 ACK 前已经收到的全部字节先按旧网格排空；ACK handler 返回后收到的字节才属于新网格。不得沿用发送请求时的旧队列计数，否则 F11、切 tab 或折叠等场景中 ACK 前迟到字节会被新 cols/rows 解析，产生临时旧行、乱码或疑似串会话内容。
 
-桌面分屏拖拽、普通桌面窗口 resize，以及已有稳定画面上的字号/行高变化，是明确的 live geometry 例外：本地 Ghostty 网格/Canvas 可在服务端 ACK 前按当前 DOM 和字体 metrics 乐观重排，live Canvas 始终可见且顶部锚定。该例外只改变交互期间的本地呈现，不改变服务端 owner、resize epoch 或最终尺寸权威；replay、重连、首次恢复、tab 激活修复、字体族资源加载及非交互式几何校正仍走上述 ACK fence 与原子呈现。
+桌面分屏拖拽、普通桌面窗口 resize，以及已有稳定画面上的字号/行高变化，由当前持有者执行 live geometry：本地 Ghostty 网格/Canvas 可在服务端 ACK 前按当前 DOM 和字体 metrics 乐观重排，live Canvas 始终可见且顶部锚定。该例外只改变交互期间的本地呈现，不改变服务端 owner、resize epoch 或最终尺寸权威；replay、重连、首次恢复、tab 激活修复、字体族资源加载及非交互式几何校正仍走上述 ACK fence 与原子呈现。
 
-远端尺寸只作为 observation，本设备只有在明确的 pointer、focus、viewport 或 owner release 边界才重新 claim。snapshot、重连、历史恢复和非 live 的 resize 中间过程都不得显示，也不得通过重新 replay 历史掩盖几何问题。
+其他窗口接管后，本页沿用服务端网格。普通布局变化只由持有者提交。
 
 replay、重连、字体族加载和其他原子恢复事务期间显示的 last-known-good hold frame 不能降低清晰度：hold canvas 的 backing dimensions 已按 CSS 尺寸乘当前 renderer DPR 分配，并通过真实 DPR=3 回归验证。字号/行高等 live geometry 不捕获、不显示也不缩放 hold Canvas。
 
-分屏条交互式拖拽必须通过 `beginTabInteractiveResize()` / `updateTabInteractiveResize()` / `endTabInteractiveResize()` 建立显式事务。开始时取消旧 scheduler 和可能残留的 hold；拖动中由 workspace 每个布局 RAF 通知 update，本模块以 80ms 上限节流本地 fit/full render，并用 trailing timer 保证最后一次被节流的 DOM 尺寸不会长期落后。此时 `resizePane()`、`schedulePane()` 和 ResizeObserver 的迟到工作必须被 live geometry fence 拒绝，但 live output 仍可提交到当前 Canvas。结束时强制一次最终本地 fit，并以 `claim:true` 提交最终尺寸。不得为每个 pointermove 创建 resize epoch、ACK、output fence 或原子 presentation hold。
+分屏条交互式拖拽必须通过 `beginTabInteractiveResize()` / `updateTabInteractiveResize()` / `endTabInteractiveResize()` 建立显式事务。开始时取消旧 scheduler 和可能残留的 hold；拖动中由 workspace 每个布局 RAF 通知 update，本模块以 80ms 上限节流本地 fit/full render，并用 trailing timer 保证最后一次被节流的 DOM 尺寸不会长期落后。此时 `resizePane()`、`schedulePane()` 和 ResizeObserver 的迟到工作必须被 live geometry fence 拒绝，但 live output 仍可提交到当前 Canvas。结束时强制一次最终本地 fit，并由持有者提交最终尺寸。不得为每个 pointermove 创建 resize epoch、ACK、output fence 或原子 presentation hold。
 
 网络 resize 每个 pane 同时只能有一个本地 epoch 在途。新尺寸只覆盖 `pendingResizeTarget`，当前 ACK 后再发送最新目标；超时重试必须复用当前 `requestedResizeEpoch`，不能分配新 epoch 让迟到 ACK 变成 stale。桌面 window resize 复用同一 live geometry 状态，以 settle timer 结束并提交最终尺寸。
 
-resize 请求状态机严格绑定当前 logical `connectionEpoch`。transport 在每次新连接推进 epoch 后必须先调用 `beginConnection()`：旧连接的 ACK/fence/settle 和 `TerminalResizeController` 立即退休，迟到回调不能修改新连接；可见 pane 的 latest target、在途显式 claim 或已确认的本设备 owner 意图会在新 replay 给出服务端 epoch/geometry 后至多重放一次。隐藏 pane 不自动抢占，只保留 `sizeClaimRequired`，等待显式使用意图。新请求 epoch 必须大于旧请求和 replay epoch，输入模块只有在新连接 resize ACK 完成后才可 flush pending input。只有 `resizeAckPending=true` 的本地请求才能推进 `TerminalResizeController`；另一设备的更高 epoch 是 remote observation，已应用 remote ACK 的重复广播必须幂等接受，不能再次拿旧本地 request ID 校验并制造 mismatch warning。
+每个尺寸事务绑定当前逻辑连接。重新连接后采用回放提供的网格，等待新的终端点击或轻点。若用户在断开时明确点击，可将这一次待发送的请求交给随后的首个连接。收到更高的服务端代次后，旧授权和延迟请求作废。
 
 ## 公开入口与契约
 
 外部只能从 `terminal/resize/index.js` 导入。
 
 - `createTerminalResizeController()`：模块单一编排入口。公开尺寸读取、可测量判断、resize/claim/reassert、当前 pane/tab 设备接管、协议 ACK/error/owner 处理、输出 settle、tab 调度、session 安装和幂等销毁。
-- `beginConnection(session, { connectionEpoch })`：transport 推进 logical connection epoch 后的唯一 resize transition 入口；幂等退休旧事务，并把仍有效的可见 target/claim 意图迁移到新 replay 边界。
+- `beginConnection(session, { connectionEpoch })` 清理旧连接的请求、画面等待和尺寸授权。
 - `beginTabInteractiveResize()` / `updateTabInteractiveResize()` / `endTabInteractiveResize()`：幂等管理 tab 内各 session 的 live geometry；只做本地网格/Canvas 重排与最终尺寸提交，不拥有布局比例，也不自行持久化 workspace。
 - `beginMetricsLiveGeometry()` / `updateMetricsLiveGeometry()` / `endMetricsLiveGeometry()`：供 metrics owner 管理单 session 的字号/行高 live source；可与分屏/window source 重叠，任一 source 结束都不能提前终止另一 source。
 - `scheduleTabLiveGeometry()`：桌面 window resize 的 live geometry + trailing commit 入口。

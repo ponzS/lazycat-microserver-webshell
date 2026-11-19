@@ -68,7 +68,8 @@ const (
 	// v57 follows the PTY helper relocation into hportal misc/cli; wire and snapshot formats stay unchanged.
 	// v58 enables official Ghostty Kitty rendering and ordered core-owned query replies.
 	// v59 recognizes CLI entrypoints and Redis multi-call binaries in Linux foreground metadata.
-	AgentProtocolVersion = "lcmd-webshell-agent-v59"
+	// v60 binds shared PTY geometry to a pointer takeover on the attached connection.
+	AgentProtocolVersion = "lcmd-webshell-agent-v60"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')

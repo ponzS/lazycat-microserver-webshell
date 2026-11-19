@@ -75,6 +75,9 @@ export function createTerminalResizeController({
 } = {}) {
   let disposed = false;
   const ownedSessions = new Set();
+  // Only a trusted terminal click/tap creates an entry. A matching server ACK turns
+  // the one-shot takeover into permission to update that connection's existing grant.
+  const resizeAuthority = new WeakMap();
   const failedSessions = new WeakSet();
   const recoveringGeometry = new WeakSet();
   const pendingLiveIntents = new WeakSet();
@@ -507,7 +510,7 @@ export function createTerminalResizeController({
     }
     if (!session.resizeAckPending) {
       session.sizeClaimRequired = !dimensionsEqual(session, { cols: session.serverCols, rows: session.serverRows });
-      if (target.claim && !session.sizeClaimRequired) session.sizeClaimed = true;
+      if (target.claim && resizeAuthority.has(session) && !session.sizeClaimRequired) session.sizeClaimed = true;
     }
     resetHostViewport(session, { clean: true });
     positionInput(session);
@@ -624,6 +627,7 @@ export function createTerminalResizeController({
         return;
       }
       if (!isVisible(session)) {
+        if (!resizeAuthority.get(session)?.grantEpoch) resizeAuthority.delete(session);
         clearPendingSizeClaim(session);
         presentation()?.cancelHold(session, { restoreReady: session.hasPresentedFrame === true });
         return;
@@ -643,29 +647,10 @@ export function createTerminalResizeController({
     if (nextConnectionEpoch <= 0 || Number(session.resizeConnectionEpoch || 0) === nextConnectionEpoch) {
       return false;
     }
-    const requestTarget = session.resizeAckPending && Number(session.requestedCols || 0) > 0
-      ? {
-        cols: session.requestedCols,
-        rows: session.requestedRows,
-        pixelWidth: session.requestedPixelWidth,
-        pixelHeight: session.requestedPixelHeight,
-        claim: session.requestedResizeClaim === true,
-      }
-      : null;
-    const preserveVisibleIntent = isVisible(session);
-    const hadClaimIntent = session.pendingSizeClaim === true
-      || session.requestedResizeClaim === true
-      || session.pendingResizeTarget?.claim === true;
-    const wasSizeClaimed = session.sizeClaimed === true;
-    const latestTarget = preserveVisibleIntent
-      ? (session.pendingResizeTarget || requestTarget)
-      : null;
-    const pendingClaim = preserveVisibleIntent && (
-      hadClaimIntent
-      || latestTarget?.claim === true
-      || wasSizeClaimed
-    );
-    const pendingClaimOptions = session.pendingSizeClaimOptions || {};
+    const authority = resizeAuthority.get(session);
+    const pendingClick = authority?.waitingForConnection === true;
+    if (pendingClick) authority.waitingForConnection = false;
+    else resizeAuthority.delete(session);
     const previousConnectionEpoch = Number(session.resizeConnectionEpoch || 0);
     const retiredResizeEpoch = normalizeTerminalResizeEpoch(session.requestedResizeEpoch);
 
@@ -693,23 +678,15 @@ export function createTerminalResizeController({
     session.resizeController = new TerminalResizeController();
     session.resizeConnectionEpoch = nextConnectionEpoch;
     session.resizeConnectionTransitionPending = true;
-    if (pendingClaim) {
-      session.pendingResizeTarget = null;
-      queuePendingSizeClaim(session, pendingClaimOptions);
-    } else {
-      clearPendingSizeClaim(session);
-      session.sizeClaimRequired = session.sizeClaimRequired === true || hadClaimIntent || wasSizeClaimed;
-      session.pendingResizeTarget = latestTarget ? { ...latestTarget, claim: false } : null;
-    }
+    session.pendingResizeTarget = null;
+    clearPendingSizeClaim(session);
+    session.sizeClaimRequired = true;
+    if (pendingClick) queuePendingSizeClaim(session);
     recordEvent(session, "resize_connection_transition", {
       previousConnectionEpoch,
       connectionEpoch: nextConnectionEpoch,
       retiredResizeEpoch,
-      pendingClaim,
-      pendingTarget: session.pendingResizeTarget ? {
-        cols: session.pendingResizeTarget.cols,
-        rows: session.pendingResizeTarget.rows,
-      } : null,
+      pendingClaim: pendingClick,
     });
     return true;
   };
@@ -720,6 +697,10 @@ export function createTerminalResizeController({
       trace(session, "send_size_skip", { reason: "socket_unavailable" });
       return false;
     }
+    const authority = resizeAuthority.get(session);
+    if (!authority || authority.waitingForConnection || session.resizeConnectionTransitionPending) return false;
+    const takeover = !authority.grantEpoch;
+    const ownerEpoch = authority.grantEpoch || authority.baseEpoch;
     const currentSize = size(session);
     const cols = Math.max(0, Math.floor(Number(dimensions?.cols) || currentSize.cols));
     const rows = Math.max(0, Math.floor(Number(dimensions?.rows) || currentSize.rows));
@@ -796,8 +777,7 @@ export function createTerminalResizeController({
       && !session.resizeOutputSettleActive
       && localGeometryMatches
       && !session.sizeClaimRequired;
-    const claimAlreadySatisfied = !claim
-      || (session.sizeClaimed === true && !session.sizeClaimRequired);
+    const claimAlreadySatisfied = !takeover;
     // forceSizeSync is used by RAF/timeout retries. Once the same request has
     // been acknowledged (or a legacy connection has accepted the local
     // geometry), another identical control frame cannot change the result and
@@ -842,7 +822,7 @@ export function createTerminalResizeController({
     session.requestedPixelWidth = pixelWidth;
     session.requestedPixelHeight = pixelHeight;
     session.resizeAckPending = resizeEpochSupported;
-    session.requestedResizeClaim = claim;
+    session.requestedResizeClaim = takeover;
     session.resizeController = session.resizeController || new TerminalResizeController();
     if (resizeEpochSupported) {
       session.resizeController.request({
@@ -860,7 +840,8 @@ export function createTerminalResizeController({
         rows,
         pixel_width: pixelWidth,
         pixel_height: pixelHeight,
-        ...(claim ? { claim: true } : {}),
+        owner_epoch: ownerEpoch,
+        ...(takeover ? { claim: true } : {}),
         ...(resizeEpochSupported ? { resize_epoch: resizeEpoch } : {}),
       });
       if (sent === false) {
@@ -878,7 +859,8 @@ export function createTerminalResizeController({
     session.lastSentPixelWidth = pixelWidth;
     session.lastSentPixelHeight = pixelHeight;
     session.lastSentConnectionEpoch = Number(session.connectionEpoch || 0);
-    if (claim) {
+    if (takeover) {
+      if (!resizeEpochSupported) authority.grantEpoch = ownerEpoch;
       session.sizeClaimed = true;
       session.lastSizeClaimAt = now();
       clearPendingSizeClaim(session);
@@ -887,7 +869,7 @@ export function createTerminalResizeController({
       requestedResizeEpoch: resizeEpoch,
       cols,
       rows,
-      claim,
+      claim: takeover,
       ...visualDetails(session, target),
     });
     trace(session, "send_size_sent", {
@@ -911,7 +893,8 @@ export function createTerminalResizeController({
     const rows = Math.max(0, Math.floor(Number(session.requestedRows) || 0));
     const pixelWidth = Math.max(0, Math.floor(Number(session.requestedPixelWidth) || 0));
     const pixelHeight = Math.max(0, Math.floor(Number(session.requestedPixelHeight) || 0));
-    if (!resizeEpoch || cols <= 0 || rows <= 0) {
+    const authority = resizeAuthority.get(session);
+    if (!authority || !resizeEpoch || cols <= 0 || rows <= 0) {
       return false;
     }
     try {
@@ -921,6 +904,7 @@ export function createTerminalResizeController({
         rows,
         pixel_width: pixelWidth,
         pixel_height: pixelHeight,
+        owner_epoch: authority.grantEpoch || authority.baseEpoch,
         ...(session.requestedResizeClaim === true ? { claim: true } : {}),
         resize_epoch: resizeEpoch,
       });
@@ -959,6 +943,16 @@ export function createTerminalResizeController({
     return sent;
   };
 
+  const relinquishSize = (session) => {
+    resizeAuthority.delete(session);
+    session.sizeClaimed = false;
+    session.sizeClaimRequired = true;
+    session.pendingResizeTarget = null;
+    clearPendingSizeClaim(session);
+    if (session.resizeFenceTarget) session.resizeFenceTarget.claim = false;
+    if (liveGeometrySessions.has(session)) finishLiveGeometry(session, "size_owner_changed");
+  };
+
   const handleOwnerReleased = (session, message) => {
     if (disposed || !session || session.closed) {
       return false;
@@ -978,9 +972,8 @@ export function createTerminalResizeController({
     session.serverRows = Math.max(0, Math.floor(Number(message?.rows) || 0));
     session.serverPixelWidth = Math.max(0, Math.floor(Number(message?.pixel_width) || 0));
     session.serverPixelHeight = Math.max(0, Math.floor(Number(message?.pixel_height) || 0));
-    session.sizeClaimRequired = true;
-    session.sizeClaimed = false;
-    session.requestedResizeClaim = false;
+    // A release can have the same epoch as the click's base while our takeover is in flight.
+    if (resizeAuthority.get(session)?.grantEpoch || !session.resizeAckPending) relinquishSize(session);
     recordEvent(session, "resize_owner_released", {
       appliedResizeEpoch: epoch,
       ...visualDetails(session),
@@ -1046,6 +1039,12 @@ export function createTerminalResizeController({
     if (duplicateAppliedAck) {
       recordEvent(session, "resize_ack_duplicate", staleDetails());
       return true;
+    }
+    const ownAck = session.resizeAckPending === true && requestedEpoch === epoch;
+    if (ownAck && session.requestedResizeClaim && resizeAuthority.has(session)) {
+      resizeAuthority.get(session).grantEpoch = epoch;
+    } else if (!ownAck && (!requestedEpoch || BigInt(epoch) > BigInt(requestedEpoch))) {
+      relinquishSize(session);
     }
     if (session.resizeAckPending === true) {
       const resizeController = session.resizeController || (session.resizeController = new TerminalResizeController());
@@ -1241,9 +1240,8 @@ export function createTerminalResizeController({
       return false;
     }
     session.resizeAckPending = false;
-    session.sizeClaimed = false;
+    relinquishSize(session);
     session.requestedResizeClaim = false;
-    session.sizeClaimRequired = true;
     if (String(message?.reason || "").trim() === "resize_owner_active") {
       const appliedEpoch = normalizeTerminalResizeEpoch(message?.applied_epoch);
       if (appliedEpoch) {
@@ -1395,8 +1393,7 @@ export function createTerminalResizeController({
     if (!shouldSettlePresentation && session.resizePresentationHold) {
       return failedTerminalFit(isMeasurable(session));
     }
-    if (session.term?.wasmTerm?.isRemote && isReplayCommitted(session)
-      && !shouldClaimSize && !session.sizeClaimed) {
+    if (!resizeAuthority.has(session) && session.term?.wasmTerm?.isRemote && isReplayCommitted(session)) {
       // A follower's DOM viewport can differ from the shared PTY. Display the
       // authoritative grid; only user intent may request a different grid.
       if (session.resizeFenceActive || session.resizeAckPending || session.resizeOutputSettleActive) {
@@ -1988,6 +1985,7 @@ export function createTerminalResizeController({
       disposed
       || !session
       || session.closed
+      || !resizeAuthority.has(session)
       || sourceSessions.has(session)
       || failedSessions.has(session)
       || !session.hasPresentedFrame
@@ -2193,7 +2191,8 @@ export function createTerminalResizeController({
     if (disposed || !session || session.closed || session.exitExpected) {
       return false;
     }
-    if (!isSocketOpen(session) || nativeGeometry.isPending(session) || session.resizeFenceAckReceived
+    if (!resizeAuthority.has(session)) return false;
+    if (!isSocketOpen(session) || session.resizeConnectionTransitionPending || nativeGeometry.isPending(session) || session.resizeFenceAckReceived
       || (session.replayGeometryLocked && !isReplayCommitted(session))) {
       return queuePendingSizeClaim(session, options);
     }
@@ -2232,21 +2231,21 @@ export function createTerminalResizeController({
     return fit.claimSent === true;
   };
 
-  const claimTabForCurrentDevice = (tab, options = {}) => {
-    if (disposed || !tab) {
-      return false;
+  const claimFromTerminalGesture = (session, event) => {
+    if (disposed || !session || session.closed || session.exitExpected || event?.isTrusted !== true
+      || (event.type !== "click" && event.type !== "touchend")
+      || !session.terminalHost?.contains(event.target)) return false;
+    const waitingForConnection = !isSocketOpen(session);
+    if (waitingForConnection || !resizeAuthority.has(session)) {
+      resizeAuthority.set(session, {
+        baseEpoch: normalizeTerminalResizeEpoch(session.appliedResizeEpoch) || "0",
+        grantEpoch: "",
+        waitingForConnection,
+      });
+      session.sizeClaimRequired = true;
     }
-    syncTabMobilePixelScroll(tab);
-    let handled = false;
-    for (const session of tab.panes.values()) {
-      handled = claimForCurrentDevice(session, options) || handled;
-    }
-    return handled;
+    return claimForCurrentDevice(session);
   };
-
-  const claimActiveTabForCurrentDevice = (options = {}) => (
-    claimTabForCurrentDevice(getCurrentTab(), options)
-  );
 
   const resizeTabForCurrentDevice = (tab, options = {}) => {
     if (disposed || !tab) {
@@ -2314,18 +2313,14 @@ export function createTerminalResizeController({
       session.resizeAckPending = false;
     }
     const replayResizeEpoch = normalizeTerminalResizeEpoch(message?.resize_epoch);
-    if (replayResizeEpoch && !session.resizeAckPending) {
+    if ((replayResizeEpoch || session.resizeConnectionTransitionPending) && !session.resizeAckPending) {
       session.appliedResizeEpoch = replayResizeEpoch;
       session.serverCols = Math.max(0, Math.floor(Number(message?.cols) || 0));
       session.serverRows = Math.max(0, Math.floor(Number(message?.rows) || 0));
       session.serverPixelWidth = Math.max(0, Math.floor(Number(message?.pixel_width) || 0));
       session.serverPixelHeight = Math.max(0, Math.floor(Number(message?.pixel_height) || 0));
       if (session.resizeConnectionTransitionPending) {
-        const previousRequestedEpoch = normalizeTerminalResizeEpoch(session.requestedResizeEpoch);
-        session.requestedResizeEpoch = previousRequestedEpoch
-          && BigInt(previousRequestedEpoch) > BigInt(replayResizeEpoch)
-          ? previousRequestedEpoch
-          : replayResizeEpoch;
+        session.requestedResizeEpoch = replayResizeEpoch;
         session.requestedCols = session.serverCols;
         session.requestedRows = session.serverRows;
         session.requestedPixelWidth = session.serverPixelWidth;
@@ -2375,6 +2370,7 @@ export function createTerminalResizeController({
 
   const finishExited = (session) => {
     if (disposed || !session || session.closed) return false;
+    relinquishSize(session);
     lifecycle.cancel(session);
     pendingNativeOptions.delete(session);
     clearPendingSizeClaim(session);
@@ -2443,10 +2439,7 @@ export function createTerminalResizeController({
   // successful ACK. The next attach owns replay geometry and the latest claim.
   const retireForRecovery = (session) => {
     if (disposed || !session || session.closed) return false;
-    const claim = session.pendingSizeClaim || session.requestedResizeClaim || session.sizeClaimed
-      || session.pendingResizeTarget?.claim;
-    const claimOptions = session.pendingSizeClaimOptions || {};
-    const target = session.pendingResizeTarget;
+    relinquishSize(session);
     cancelPane(session);
     recoveringGeometry.add(session);
     failedSessions.delete(session);
@@ -2454,8 +2447,7 @@ export function createTerminalResizeController({
     session.requestedResizeClaim = false;
     session.replayGeometryPending = false;
     session.replayGeometryLocked = false;
-    session.pendingResizeTarget = target;
-    if (claim && isVisible(session)) queuePendingSizeClaim(session, claimOptions);
+    session.pendingResizeTarget = null;
     return true;
   };
 
@@ -2495,10 +2487,7 @@ export function createTerminalResizeController({
     canvasMatchesExpectedSize,
     sendSize,
     resendPendingSize,
-    claimSize,
-    claimForCurrentDevice,
-    claimTabForCurrentDevice,
-    claimActiveTabForCurrentDevice,
+    claimFromTerminalGesture,
     reassertSize,
     reassertSizeForMouse,
     resizePane,

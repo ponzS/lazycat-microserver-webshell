@@ -88,3 +88,5 @@ Agent v58 启用随包 Ghostty 官方 Kitty Graphics 和 Wuffs PNG 解码。原�
 CSI/Kitty 查询由服务端相同核心按输出顺序应答，不依赖已连接的客户端，也不重复接受客户端应答；OSC 7501 和颜色查询保留原入口。图片会话仍按既有合同使用原始历史回放，不新增图形资源 checkpoint 恢复承诺。非图形会话继续使用 `ghostty-snapshot-v1`（GHOSTSNP）。实际 WASM 指纹由分发清单记录，不跨不兼容构建恢复。
 
 Provider 显式保留 v57–v9 的 attach 和 v57–v27 的工作区恢复；v56/v57 的 GHOSTSNP 协商能力不变。旧核心不自动替换，用户进程不自动重启。终端图片的跨客户端验收合同见 `spec/terminal/inline-images/`；构建检查不代替真实 Codex 会话验收。
+
+Agent v60 将尺寸控制绑定到单个 pane 的已连接客户端。显式接管使用点击时观察到的 `owner_epoch`（首次为 `0`）和新的 `resize_epoch`。后续调整使用首次授权的代次，切换持有者或断开连接会使旧授权失效。普通输入和协议应答只传递字节。

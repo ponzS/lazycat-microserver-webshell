@@ -116,7 +116,7 @@ export function createTerminalSessionInstallationController({
 
   const installDOMListeners = (session) => {
     const cleanup = lifecycle.install(session, {
-      onPointerDown: (event) => {
+      onPointerDown: () => {
         const current = getTabById(session.tabId);
         setActivePane(current, session.id, {
           focus: false,

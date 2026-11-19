@@ -164,7 +164,7 @@ export function createWorkspaceStateApplyController({
           syncTabButtonOrder((state.tabs || []).map((tab) => tabs.get(tab.id)));
           const current = tabs.get(previousActiveTabId) || tabs.get(getActiveTabId()) || tabs.values().next().value || null;
           if (current && (current.id !== previousActiveTabId || changedTabs.has(current.id))) {
-            setActiveTab(current.id, { focus: false, remember: false, rememberRecent: false, claimCurrentDevice: false });
+            setActiveTab(current.id, { focus: false, remember: false, rememberRecent: false });
             lifecycle.scheduleFrame(() => {
               if (isCurrentRequest(targetName, generation) && tabs.get(current.id) === current && getActiveTabId() === current.id) {
                 connectPendingSessionsForTab(current, { allowHidden: true });
@@ -196,7 +196,6 @@ export function createWorkspaceStateApplyController({
           setActiveTab(nextActiveTab.id, {
             focus,
             rememberRecent: !stateRecentTabIds,
-            claimCurrentDevice: false,
           });
           const appliedRecentTabIds = getRecentTabIds();
           if (stateRecentTabIds && appliedRecentTabIds[0] !== nextActiveTab.id) {

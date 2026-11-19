@@ -33,7 +33,7 @@ export function createTerminalIMEController({
   cancelKeyboardDismissRecovery = noop,
   cancelTouchInteraction = noop,
   reassertSize = noop,
-  claimCurrentDeviceSize = noop,
+  claimFromTerminalGesture = noop,
   scrollToBottom = noop,
   sendInput = noop,
   pasteText = () => Promise.resolve(false),
@@ -46,6 +46,7 @@ export function createTerminalIMEController({
   registerSessionCleanup = noop,
   moveThresholdPx = 8,
   doubleTapDelayMs = 320,
+  longPressDelayMs = 450,
   nativeDeleteIdleResetMs = 900,
   lifecycleFactory = createTerminalIMELifecycle,
 } = {}) {
@@ -1085,22 +1086,28 @@ export function createTerminalIMEController({
       }
     }, { capture: true });
     const isTerminalTouchTarget = (target) => isElement(target) && target.closest(".terminal-host") === host;
-    const claimCurrentDeviceTerminalSize = (event) => {
-      if (event.pointerType === "mouse") pageFocusMouse = null;
-      if (
-        !isTerminalTouchTarget(event.target)
-        || event.isPrimary === false
-        || (event.pointerType === "mouse" && event.button !== 0)
-      ) {
-        return;
+    let terminalPointerPress = null;
+    lifecycle.listen(session, shell, "pointerdown", (event) => {
+      terminalPointerPress = null;
+      if (event.isTrusted && event.isPrimary && event.pointerType !== "touch" && event.button === 0
+        && isTerminalTouchTarget(event.target)) {
+        terminalPointerPress = { x: event.clientX, y: event.clientY };
       }
-      claimCurrentDeviceSize(session);
-    };
-    lifecycle.listen(session, shell, "pointerdown", claimCurrentDeviceTerminalSize, { capture: true, passive: true });
+    }, { capture: true, passive: true });
+    lifecycle.listen(session, shell, "pointercancel", () => { terminalPointerPress = null; }, { capture: true });
+    lifecycle.listen(session, shell, "click", (event) => {
+      const press = terminalPointerPress;
+      terminalPointerPress = null;
+      if (press && isTerminalTouchTarget(event.target) && event.detail > 0 && event.button === 0
+        && Math.hypot(event.clientX - press.x, event.clientY - press.y) < moveThresholdPx) {
+        claimFromTerminalGesture(session, event);
+      }
+    }, { capture: true, passive: true });
     lifecycle.listen(session, host, "pointerdown", (event) => {
       if (event.pointerType === "touch" || event.pointerType === "pen") {
         return;
       }
+      pageFocusMouse = null;
       if (requiresTouchKeyboardDoubleTap()) focusInput(session, { requestMobileKeyboard: true });
       else lifecycle.frame(session, () => focusInput(session));
     });
@@ -1108,16 +1115,15 @@ export function createTerminalIMEController({
       keyboardDiagnostics.record(session, "tap.start", {
         touchLayout: requiresTouchKeyboardDoubleTap(), terminalTarget: isTerminalTouchTarget(event.target),
       }, event);
-      if (!requiresTouchKeyboardDoubleTap() || event.touches.length !== 1 || !isTerminalTouchTarget(event.target)) {
+      if (event.touches.length !== 1 || !isTerminalTouchTarget(event.target)) {
         mobileTapTouchState = null;
         lastMobileTap = null;
         return;
       }
-      claimCurrentDeviceSize(session);
-      keyboardDiagnostics.record(session, "tap.size-claim-return", {}, event);
       const touch = event.touches[0];
       mobileTapTouchState = {
         identifier: touch.identifier,
+        startedAt: eventTime(event),
         startX: touch.clientX,
         startY: touch.clientY,
         moved: false,
@@ -1138,7 +1144,7 @@ export function createTerminalIMEController({
         if (!mobileTapTouchState.moved) keyboardDiagnostics.record(session, "tap.move-rejected", {
           dx: touch.clientX - mobileTapTouchState.startX, dy: touch.clientY - mobileTapTouchState.startY,
         }, event);
-        if (!mobileTapTouchState.moved) blurInput(session, { preserveTouchGesture: true });
+        if (!mobileTapTouchState.moved && requiresTouchKeyboardDoubleTap()) blurInput(session, { preserveTouchGesture: true });
         mobileTapTouchState.moved = true;
         lastMobileTap = null;
       }
@@ -1149,8 +1155,8 @@ export function createTerminalIMEController({
         state: mobileTapTouchState ? { ...mobileTapTouchState } : null,
         previousTap: lastMobileTap ? { ...lastMobileTap } : null,
       }, event);
-      if (!requiresTouchKeyboardDoubleTap() || !mobileTapTouchState) {
-        keyboardDiagnostics.record(session, "tap.rejected", { reason: "no-touch-layout-or-start-state" }, event);
+      if (!mobileTapTouchState) {
+        keyboardDiagnostics.record(session, "tap.rejected", { reason: "no-start-state" }, event);
         mobileTapTouchState = null;
         lastMobileTap = null;
         return;
@@ -1160,7 +1166,8 @@ export function createTerminalIMEController({
       mobileTapTouchState = null;
       const currentTime = eventTime(event);
       if (
-        !touch || touch.identifier !== state.identifier || state.moved
+        !touch || touch.identifier !== state.identifier || state.moved || term.isDraggingScrollbar
+        || (term.touchScrollActive && term.touchScrollMoved)
         || Math.abs(touch.clientX - state.startX) >= moveThresholdPx
         || Math.abs(touch.clientY - state.startY) >= moveThresholdPx
       ) {
@@ -1168,6 +1175,12 @@ export function createTerminalIMEController({
         lastMobileTap = null;
         return;
       }
+      // The terminal grid is shared. Wait until this contact is known to be a tap.
+      if (currentTime - state.startedAt < longPressDelayMs) {
+        claimFromTerminalGesture(session, event);
+        keyboardDiagnostics.record(session, "tap.size-claim-return", {}, event);
+      }
+      if (!requiresTouchKeyboardDoubleTap()) return;
       const elapsed = lastMobileTap ? currentTime - lastMobileTap.at : Infinity;
       const isDoubleTap = elapsed >= 0 && elapsed <= doubleTapDelayMs
         && Math.hypot(touch.clientX - lastMobileTap.x, touch.clientY - lastMobileTap.y) < moveThresholdPx * 2;

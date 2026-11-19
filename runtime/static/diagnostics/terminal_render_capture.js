@@ -158,7 +158,8 @@ export function createTerminalRenderCapture({ windowObject = globalThis.window,
         "resizeEpoch", "cols", "rows", "replayDurationMs", "serverReplayDurationMs",
         "recoveryBaseline", "checkpointSnapshotBytes", "snapshotBytes", "cursor", "error", "captureDurationMs", "holdDurationMs",
         "settleDurationMs", "quietMs", "maxHoldMs", "queuedBytes", "queueEntries", "nativePending",
-        "reusedPendingRequest", "queuedBehindRequest", "requestedResizeEpoch", "appliedResizeEpoch"]) {
+        "reusedPendingRequest", "queuedBehindRequest", "requestedResizeEpoch", "appliedResizeEpoch",
+        "claim", "requestWasClaim", "remoteEpoch"]) {
         const value = details[key];
         if (["string", "number", "boolean"].includes(typeof value)) metadata[key] = typeof value === "string" ? value.slice(0, 200) : value;
       }

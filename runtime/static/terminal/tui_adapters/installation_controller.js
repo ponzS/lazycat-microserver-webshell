@@ -112,13 +112,7 @@ export function createTerminalTUIAdapterInstaller({
     hasSelection: () => getTerminalSelection()?.hasSelection(session) === true,
     isKeyboardClaimed: (event) => getTerminalIME()?.isKeyboardClaimed(event) === true,
     shouldPreserveTouchDefault: (event) => getTerminalIME()?.shouldPreserveTouchDefault?.(event) === true,
-    prepareMouseInput: () => {
-      const resize = getTerminalResize();
-      if (typeof resize?.claimForCurrentDevice === "function") {
-        return resize.claimForCurrentDevice(session);
-      }
-      return resize?.claimSize?.(session, { force: true });
-    },
+    prepareMouseInput: () => getTerminalResize()?.reassertSize(session),
     rowHeight: () => {
       const renderer = session?.term?.renderer;
       return Math.max(

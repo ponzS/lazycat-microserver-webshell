@@ -14,7 +14,6 @@ export function createWorkspacePaneActivationController({
   syncCursorBlinkState = () => {},
   updateSelectionHandles = () => {},
   schedulePaneResize = () => {},
-  claimCurrentDeviceSize = () => {},
   presentationIsCurrent = () => false,
   cancelPendingRender = () => {},
   connectPendingSession = () => {},
@@ -51,15 +50,7 @@ export function createWorkspacePaneActivationController({
     syncCursorBlinkState();
     updateSelectionHandles(activePane);
     const shouldResize = resize && (!wasActive || resizeIfActive);
-    const shouldClaimCurrentDevice = tab.id === getActiveTabId()
-      && !isApplyingWorkspaceState()
-      && (userInteraction || (shouldResize && !wasActive));
-    if (shouldClaimCurrentDevice) {
-      claimCurrentDeviceSize(activePane, {
-        forceFullRender: shouldResize,
-        hideUntilRender: shouldResize && !presentationIsCurrent(activePane),
-      });
-    } else if (shouldResize && tab.id === getActiveTabId()) {
+    if (shouldResize && tab.id === getActiveTabId()) {
       schedulePaneResize(activePane, {
         forceFullRender: true,
         hideUntilRender: !presentationIsCurrent(activePane),

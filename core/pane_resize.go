@@ -4,38 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/gorilla/websocket"
-	"strings"
 	"time"
 )
-
-func (p *terminalPane) applyLegacyInputResize(cols, rows, pixelWidth, pixelHeight int, source *paneClient) error {
-	if cols <= 0 || rows <= 0 {
-		return nil
-	}
-	p.resizeMu.Lock()
-	defer p.resizeMu.Unlock()
-	p.mu.Lock()
-	currentEpoch := p.resizeEpoch
-	currentCols := p.cols
-	currentRows := p.rows
-	currentPixelWidth := p.pixelWidth
-	currentPixelHeight := p.pixelHeight
-	owner := p.resizeOwner
-	p.mu.Unlock()
-	if currentEpoch != 0 && (owner == nil || owner != source) && (NormalizeCols(cols) != currentCols || NormalizeRows(rows) != currentRows || (pixelWidth > 0 && normalizeTerminalPixelDimension(pixelWidth) != currentPixelWidth) || (pixelHeight > 0 && normalizeTerminalPixelDimension(pixelHeight) != currentPixelHeight)) {
-		p.enqueueResizeError(source, currentEpoch, "resize_owner_active")
-		return errors.New("resize owner is active")
-	}
-	if err := p.resizeWithPixelsUnlocked(cols, rows, pixelWidth, pixelHeight); err != nil {
-		return err
-	}
-	if source != nil {
-		p.mu.Lock()
-		p.resizeOwner = source
-		p.mu.Unlock()
-	}
-	return nil
-}
 
 func (p *terminalPane) updateTerminalThemeColors(foreground, background, cursor string) {
 	foreground = normalizeTerminalHexColor(foreground, "")
@@ -57,80 +27,31 @@ func (p *terminalPane) updateTerminalThemeColors(foreground, background, cursor 
 	p.mu.Unlock()
 }
 
-func (p *terminalPane) resize(cols, rows int) error {
-	return p.resizeWithPixels(cols, rows, 0, 0)
-}
-
-func (p *terminalPane) resizeWithPixels(cols, rows, pixelWidth, pixelHeight int) error {
-	p.resizeMu.Lock()
-	defer p.resizeMu.Unlock()
-	return p.resizeWithPixelsUnlocked(cols, rows, pixelWidth, pixelHeight)
-}
-
-func (p *terminalPane) resizeWithPixelsUnlocked(cols, rows, pixelWidth, pixelHeight int) error {
-	cols = NormalizeCols(cols)
-	rows = NormalizeRows(rows)
-	pixelWidth = normalizeTerminalPixelDimension(pixelWidth)
-	pixelHeight = normalizeTerminalPixelDimension(pixelHeight)
-	p.mu.Lock()
+// Called with outputMu and mu held so attaches see the grid and its epoch together.
+func (p *terminalPane) resizePTYLocked(cols, rows, pixelWidth, pixelHeight int) error {
 	if p.closing {
-		p.mu.Unlock()
 		return errTerminalPaneClosing
 	}
-	if pixelWidth == 0 {
-		pixelWidth = p.pixelWidth
-	}
-	if pixelHeight == 0 {
-		pixelHeight = p.pixelHeight
-	}
 	if p.cols == cols && p.rows == rows && p.pixelWidth == pixelWidth && p.pixelHeight == pixelHeight {
-		p.mu.Unlock()
 		return nil
 	}
-	ptyFile := p.ptyFile
-	exited := p.exited
-	p.cols = cols
-	p.rows = rows
-	p.pixelWidth = pixelWidth
-	p.pixelHeight = pixelHeight
+	if !p.exited && p.ptyFile != nil {
+		if err := p.workspace.runtime.platform.ResizePTY(p.ptyFile, cols, rows, pixelWidth, pixelHeight); err != nil {
+			return err
+		}
+	}
+	p.cols, p.rows = cols, rows
+	p.pixelWidth, p.pixelHeight = pixelWidth, pixelHeight
 	p.resizeCheckpointLocked(cols, rows, p.historyLimitBytes/averageHistoryBytesPerLine)
-	p.mu.Unlock()
-	if exited || ptyFile == nil {
-		return nil
-	}
-	if err := p.workspace.runtime.platform.ResizePTY(ptyFile, cols, rows, pixelWidth, pixelHeight); err != nil {
-		return err
-	}
 	return nil
 }
 
 func (p *terminalPane) applyResize(message TerminalControlMessage, source *paneClient) error {
 	resizeStartedAt := time.Now()
 	epoch, hasEpoch := parseTerminalResizeEpoch(message.ResizeEpoch)
-	if !hasEpoch {
-		if strings.TrimSpace(message.ResizeEpoch) != "" {
-			p.enqueueResizeError(source, 0, "invalid_resize_epoch")
-			return errors.New("invalid resize epoch")
-		}
-		p.resizeMu.Lock()
-		defer p.resizeMu.Unlock()
-		p.mu.Lock()
-		legacyEpoch := p.resizeEpoch
-		owner := p.resizeOwner
-		p.mu.Unlock()
-		if legacyEpoch == 0 || (owner != nil && owner == source) {
-			if err := p.resizeWithPixelsUnlocked(message.Cols, message.Rows, message.PixelWidth, message.PixelHeight); err != nil {
-				return err
-			}
-			if source != nil {
-				p.mu.Lock()
-				p.resizeOwner = source
-				p.mu.Unlock()
-			}
-			return nil
-		}
-		p.enqueueResizeError(source, legacyEpoch, "resize_owner_active")
-		return errors.New("resize owner is active")
+	if !hasEpoch || message.OwnerEpoch == "" {
+		p.enqueueResizeError(source, epoch, "resize_gesture_required")
+		return errors.New("missing resize ownership information")
 	}
 
 	p.resizeMu.Lock()
@@ -138,6 +59,9 @@ func (p *terminalPane) applyResize(message TerminalControlMessage, source *paneC
 
 	p.mu.Lock()
 	currentEpoch := p.resizeEpoch
+	owner := p.resizeOwner
+	ownerEpoch := p.resizeOwnerEpoch
+	_, attached := p.clients[source]
 	currentCols := p.cols
 	currentRows := p.rows
 	currentPixelWidth := p.pixelWidth
@@ -154,48 +78,48 @@ func (p *terminalPane) applyResize(message TerminalControlMessage, source *paneC
 	if pixelHeight == 0 {
 		pixelHeight = currentPixelHeight
 	}
-	if epoch < currentEpoch {
-		p.enqueueResizeError(source, epoch, "stale_resize_epoch")
-		return errors.New("stale resize epoch")
+	// A takeover names the last server epoch observed at the actual click.
+	// Owner updates name the original grant, so delayed updates cannot acquire ownership.
+	sameOwner := attached && owner == source
+	duplicate := sameOwner && epoch == currentEpoch
+	expectedBase := formatTerminalResizeEpoch(currentEpoch)
+	if currentEpoch == 0 {
+		expectedBase = "0"
+	}
+	valid := sameOwner && !message.Claim && message.OwnerEpoch == formatTerminalResizeEpoch(ownerEpoch)
+	if message.Claim {
+		valid = attached && ((epoch > currentEpoch && message.OwnerEpoch == expectedBase) ||
+			(duplicate && epoch == ownerEpoch))
+	}
+	if !valid || epoch < currentEpoch {
+		p.enqueueResizeError(source, epoch, "resize_owner_active")
+		return errors.New("resize ownership changed")
 	}
 	if epoch == currentEpoch && (cols != currentCols || rows != currentRows || pixelWidth != currentPixelWidth || pixelHeight != currentPixelHeight) {
 		p.enqueueResizeError(source, epoch, "resize_epoch_conflict")
 		return errors.New("resize epoch conflict")
 	}
-	// A resize from an attached client owns the shared PTY geometry until
-	// that client detaches. A stale epoch alone must not keep an offline
-	// device as the owner forever.
-	p.mu.Lock()
-	ownerActive := p.resizeOwner != nil
-	owner := p.resizeOwner
-	p.mu.Unlock()
-	if ownerActive && !message.Claim && epoch != currentEpoch && source != owner {
-		p.enqueueResizeError(source, epoch, "resize_owner_active")
-		return errors.New("resize owner is active")
-	}
 	outputWaitStartedAt := time.Now()
 	p.outputMu.Lock()
 	outputWaitMS := float64(time.Since(outputWaitStartedAt).Microseconds()) / 1000
-	if err := p.resizeWithPixelsUnlocked(cols, rows, pixelWidth, pixelHeight); err != nil {
+	p.mu.Lock()
+	if err := p.resizePTYLocked(cols, rows, pixelWidth, pixelHeight); err != nil {
+		p.mu.Unlock()
 		p.outputMu.Unlock()
 		p.enqueueResizeError(source, epoch, "pty_resize_failed")
 		return err
 	}
-	p.mu.Lock()
 	p.resizeEpoch = epoch
-	if source != nil {
+	if message.Claim {
+		p.resizeOwnerEpoch = epoch
 		p.resizeOwner = source
 	}
-	currentCols = p.cols
-	currentRows = p.rows
-	currentPixelWidth = p.pixelWidth
-	currentPixelHeight = p.pixelHeight
 	clients := make([]*paneClient, 0, len(p.clients))
 	for client := range p.clients {
 		clients = append(clients, client)
 	}
 	p.mu.Unlock()
-	p.enqueueResizeApplied(epoch, currentCols, currentRows, currentPixelWidth, currentPixelHeight, clients,
+	p.enqueueResizeApplied(epoch, cols, rows, pixelWidth, pixelHeight, clients,
 		map[string]any{"apply_duration_ms": float64(time.Since(resizeStartedAt).Microseconds()) / 1000, "output_lock_wait_ms": outputWaitMS})
 	p.outputMu.Unlock()
 	return nil

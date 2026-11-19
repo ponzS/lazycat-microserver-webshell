@@ -22,7 +22,7 @@ export function createAppRuntimeRecoveryController({
   closeUnifiedTransport = () => {},
   rememberWorkspaceRestoreState = () => {},
   resumeDevices = () => {},
-  claimActiveTabSize = () => {},
+  resizeActiveTabForCurrentDevice = () => {},
   resumeWorkspaceRetry = () => {},
   refreshWorkspaceActivity = () => Promise.resolve(),
   updateSelection = () => {},
@@ -311,7 +311,7 @@ export function createAppRuntimeRecoveryController({
     }
     rememberWorkspaceRestoreState();
     resumeDevices();
-    claimActiveTabSize({ forceFullRender: true, hideUntilRender: true });
+    resizeActiveTabForCurrentDevice({ forceFullRender: true, hideUntilRender: true });
     recoverUnifiedTransport("visibility_resume");
     reconnectVisibleSessions({ allowHidden: true, probe: true });
     refreshActivitySilently();
@@ -328,7 +328,7 @@ export function createAppRuntimeRecoveryController({
     if (!resumeReservation.accepted) {
       return true;
     }
-    claimActiveTabSize({ forceFullRender: true });
+    resizeActiveTabForCurrentDevice({ forceFullRender: true });
     recoverUnifiedTransport("window_focus");
     reconnectVisibleSessions({ allowHidden: true, probe: true });
     refreshActivitySilently();
@@ -346,7 +346,7 @@ export function createAppRuntimeRecoveryController({
     }
     rememberWorkspaceRestoreState();
     resumeDevices();
-    claimActiveTabSize({ forceFullRender: true, hideUntilRender: true });
+    resizeActiveTabForCurrentDevice({ forceFullRender: true, hideUntilRender: true });
     recoverUnifiedTransport("pageshow_resume");
     reconnectVisibleSessions({ allowHidden: true, probe: true });
     refreshActivitySilently();

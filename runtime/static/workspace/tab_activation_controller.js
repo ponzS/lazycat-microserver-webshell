@@ -27,7 +27,6 @@ export function createWorkspaceTabActivationController({
   scrollTabButtonIntoView = () => {},
   scheduleOverviewRender = () => {},
   scheduleVisibleTabResize = () => {},
-  claimVisibleTabSize = () => {},
   syncConnectionDemands = () => {},
   persistActiveTab = () => Promise.resolve(false),
   showToast = () => {},
@@ -63,7 +62,6 @@ export function createWorkspaceTabActivationController({
     focus = true,
     remember = true,
     rememberRecent = true,
-    claimCurrentDevice = true,
   } = {}) => {
     const tab = tabRegistry.get(tabId);
     if (!tab || disposed || isAppDisposed()) {
@@ -117,7 +115,6 @@ export function createWorkspaceTabActivationController({
 
       const activationInstanceGeneration = getInstanceGeneration();
       const shouldPersistActiveTab = !isApplyingWorkspaceState() && !wasActive;
-      const shouldClaimCurrentDevice = claimCurrentDevice && !isApplyingWorkspaceState() && !wasActive;
       const activationIsCurrent = () => isCurrentTab(tab, activationInstanceGeneration);
       scheduler.schedule(tab.id, [
         () => measureTask("tab activation state", () => {
@@ -134,11 +131,7 @@ export function createWorkspaceTabActivationController({
         }),
         () => measureTask("tab activation resize", () => {
           if (activationIsCurrent()) {
-            if (shouldClaimCurrentDevice) {
-              claimVisibleTabSize(tab, { forceFullRender: true });
-            } else {
-              scheduleVisibleTabResize(tab, { immediate: false });
-            }
+            scheduleVisibleTabResize(tab, { immediate: shouldPersistActiveTab });
           }
         }),
         () => measureTask("tab activation membership", () => {

@@ -379,7 +379,13 @@ func (b *terminalQueueBroker) HandlePaneControl(message TerminalQueueClientMessa
 			return stream.WriteAgentFrame(AgentFrameGeneratedInput, []byte(control.Data))
 		}
 		return stream.WriteAgentFrame(AgentFrameInput, []byte(control.Data))
-	case "resize", "theme":
+	case "resize":
+		if control.OwnerEpoch == "" {
+			stream.enqueueControl(control.ResizeGestureRequired())
+			return nil
+		}
+		fallthrough
+	case "theme":
 		return stream.WriteAgentFrame(AgentFrameResize, message.Control)
 	case "input_lock":
 		// Compatibility no-op for older pages during rolling upgrades.

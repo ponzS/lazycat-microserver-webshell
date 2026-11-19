@@ -1,5 +1,6 @@
 const generatedTerminalResponsePattern =
   /^(?:\x1b)?(?:\[\d{1,4};\d{1,4}R|\[\d{1,4}R|\[0n|\[\?[\d;]{1,16}c|\[>[\d;]{1,16}c)/;
+const kittyKeyboardFlagsReply = /^\x1b\[\?\d{1,2}u/;
 const generatedTerminalResponseTailPattern =
   /^(?:\[\d{1,4};\d{1,4}R|\[\d{1,4}R|\d{1,4};\d{1,4}R|;\d{1,4}R|\d{1,4}R|\dR)+$/;
 
@@ -12,7 +13,7 @@ export function isGeneratedTerminalResponse(data, { isKittyGraphicsResponse = ()
   }
   let remaining = data;
   while (remaining) {
-    const match = generatedTerminalResponsePattern.exec(remaining);
+    const match = generatedTerminalResponsePattern.exec(remaining) || kittyKeyboardFlagsReply.exec(remaining);
     if (!match) {
       return false;
     }

@@ -22,26 +22,7 @@ func handleTerminalControlMessage(pane *terminalPane, payload []byte, client *pa
 			if message.Generated {
 				_ = pane.writeGeneratedInput([]byte(message.Data))
 			} else {
-				if message.ResizeEpoch != "" {
-					if err := pane.applyResize(message, client); err != nil {
-						return true
-					}
-					_ = pane.writeInputWithDimensions([]byte(message.Data), 0, 0, 0, 0)
-				} else {
-					if err := pane.applyLegacyInputResize(message.Cols, message.Rows, message.PixelWidth, message.PixelHeight, client); err != nil {
-						// Keep the input itself usable, but never let a legacy client
-						// silently overwrite a geometry owned by an epoch-aware client.
-						_ = pane.writeInputWithDimensions([]byte(message.Data), 0, 0, 0, 0)
-						return true
-					}
-					_ = pane.writeInputWithDimensions(
-						[]byte(message.Data),
-						0,
-						0,
-						0,
-						0,
-					)
-				}
+				_ = pane.writeInput([]byte(message.Data))
 			}
 		}
 	case "resize":

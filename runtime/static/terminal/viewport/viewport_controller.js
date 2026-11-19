@@ -26,7 +26,7 @@ export function createTerminalMobileViewportController({
   isAuxiliaryInputFocused = () => false,
   getSessions = () => [],
   hasActivePanes = () => Boolean(getActiveSession()),
-  claimActiveTabForCurrentDevice = noop,
+  resizeActiveTabForCurrentDevice = noop,
   resetHostViewport = noop,
   positionInput = noop,
   updateSelectionHandles = noop,
@@ -139,7 +139,7 @@ export function createTerminalMobileViewportController({
   };
 
   const releaseTerminalInputViewportLock = (session, { resync = true } = {}) => {
-    if (!session) {
+    if (!session?.inputViewportLock) {
       return false;
     }
     session.inputViewportLock = null;
@@ -273,7 +273,7 @@ export function createTerminalMobileViewportController({
     viewportGeometryStableFrames = 0;
     viewportClaimDeferred = false;
     viewportClaimDeferredReason = "";
-    claimActiveTabForCurrentDevice({
+    resizeActiveTabForCurrentDevice({
       forceFullRender: true,
       hideUntilRender: true,
       reason,

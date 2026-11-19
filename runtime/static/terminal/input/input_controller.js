@@ -16,8 +16,6 @@ export function createTerminalInputController({
   isSocketOpen = (session) => session?.socket?.readyState === globalThis.WebSocket?.OPEN,
   getCurrentLease = () => null,
   isConnectionParked = (session) => Boolean(session.connectionLeaseClosing),
-  getResizeSize = () => ({ cols: 0, rows: 0, pixelWidth: 0, pixelHeight: 0 }),
-  normalizeResizeEpoch = (value) => String(value || ""),
   getThemePayload = () => ({}),
   sendPayload = (session, payload) => {
     session.socket.send(JSON.stringify(payload));
@@ -34,7 +32,6 @@ export function createTerminalInputController({
   appendDebugError = noop,
   holdCursorVisible = noop,
   reassertSize = noop,
-  claimCurrentDeviceSize = noop,
   registerSessionCleanup = noop,
   now = () => Date.now(),
   chunkChars = 16 * 1024,
@@ -150,19 +147,9 @@ export function createTerminalInputController({
     if (!data || !(generated ? isGeneratedReady(session) : isReady(session))) {
       return false;
     }
-    const { cols, rows, pixelWidth, pixelHeight } = getResizeSize(session);
     const payload = { type: "input", data, ...getThemePayload() };
     if (generated) {
       payload.generated = true;
-    } else if (cols > 0 && rows > 0) {
-      payload.cols = cols;
-      payload.rows = rows;
-      payload.pixel_width = pixelWidth;
-      payload.pixel_height = pixelHeight;
-      const resizeEpoch = normalizeResizeEpoch(session.appliedResizeEpoch);
-      if (resizeEpoch) {
-        payload.resize_epoch = resizeEpoch;
-      }
     }
     try {
       return sendPayload(session, payload) !== false;
@@ -447,7 +434,6 @@ export function createTerminalInputController({
     const connectionWasParked = isConnectionParked(session);
     if (data && userInput) {
       markUserInput(session);
-      if (!session.sizeClaimed || session.sizeClaimRequired) claimCurrentDeviceSize(session);
       scrollToBottom(session);
       requestConnection(session, {
         reason: "user_input",

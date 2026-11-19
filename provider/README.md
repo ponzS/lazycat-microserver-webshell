@@ -32,7 +32,7 @@ v35 显式兼容 v34/v33/v32/v31/v30/v29/v28/v27 及原容器兼容版本，版�
 
 实际功能回归按 `spec-tests/ENVIRONMENT.md` 绑定设备/账号，检查容器列表、授权、工作区、文件、统一连接和重连；未在真实环境执行的内容不能标记通过。
 
-当前 Agent v59 沿用 v58 的 attach、工作区恢复和快照协议，补充 Linux 前台工具识别。v58 接入官方 Ghostty 图片核心，见 `core/README.md`。Provider 显式保留 v57 及既有 attach、工作区恢复兼容列表，也保留 v56/v57 的 GHOSTSNP 协商能力。图片会话仍使用原始历史回放；不会自动替换正在运行的旧 Agent 或重启用户进程。实际 WASM 摘要从随包分发清单读取，不在此维护独立兼容基线。
+Agent v59 沿用 v58 的 attach、工作区恢复和快照协议，补充 Linux 前台工具识别。v58 接入官方 Ghostty 图片核心，见 `core/README.md`。Provider 显式保留 v57 及既有 attach、工作区恢复兼容列表，也保留 v56/v57 的 GHOSTSNP 协商能力。图片会话仍使用原始历史回放；不会自动替换正在运行的旧 Agent 或重启用户进程。实际 WASM 摘要从随包分发清单读取，不在此维护独立兼容基线。
 
 v52 在 v51 之上透传可选 `pane.agent {id,name,source}`（含通过 `di` 挂载的 agent，`source` 为 `di`；识别已安装的 Antigravity CLI `agy`）；旧客户端可忽略新增字段。身份不推断工作状态；无可靠进程身份时省略，继续显示普通命令。v52 同时撤回 OSC 133 语义区段的 agent 生命周期推断，并处理 CAN/SUB 取消控制字符串。帧、元数据和 `ghostty-snapshot-v1` 快照格式与 v51 相同，快照协商同时接受 v51 与 v52。Provider 与实例 daemon 需同时更新才有 agent 身份；已兼容的 v51 daemon 不会自动停止。只重启 Provider 不会停止独立实例 daemon；重启目标 daemon 会丢失其 shell/PTY 与内存历史，独立 DI 的 setsid daemon/子 PTY 可由 `di` 重新连接。
 
@@ -51,3 +51,5 @@ v44 增加 `mobile_pre_input_enabled` 设置：GET 返回布尔值，PUT 支持�
 客户端 launcher v5 / host_protocol 1 通过限实例接入 API 登记、续权和准备更新，运行及目标版本跟随 LightOS LPK，产物摘要用于完整性与缓存。物理机 PTY 在进程内复用 hportal 的独立薄库，不增加 PTY RPC。
 
 票据中的 `terminal_certificate` 存在时，clienttransport 在原 SDK gRPC 流内固定信任 worker 证书并建立 TLS，业务仍验证用途票据；缺少该字段的旧客户端保留 HTTP 兼容路径。
+
+当前 Agent v60 引入终端点击接管协议。Provider 保留 v59 的工作区、快照和 attach 兼容性。更新后的入口可拒绝旧页面的无授权尺寸声明，已运行的兼容 Agent 保持原有生命周期。

@@ -1074,7 +1074,7 @@ export function startGlobalRuntime() {
     getActiveSession: () => activeSession(),
     getSessions: () => getAllSessions(),
     hasActivePanes: () => Boolean(currentTab()?.panes.size),
-    claimActiveTabForCurrentDevice: (options) => terminalResize?.claimActiveTabForCurrentDevice(options),
+    resizeActiveTabForCurrentDevice: (options) => terminalResize?.resizeActiveTabForCurrentDevice(options),
     resetHostViewport: (session, options) => terminalIME?.resetHostViewport(session, options),
     positionInput: (session) => terminalIME?.positionInput(session),
     updateSelectionHandles: (session) => terminalSelection?.updateHandles(session),
@@ -1610,7 +1610,6 @@ export function startGlobalRuntime() {
     syncCursorBlinkState: () => syncCursorBlinkState(),
     updateSelectionHandles: (session) => terminalSelection?.updateHandles(session),
     schedulePaneResize: (session, options, scheduleOptions) => terminalResize?.schedulePane(session, options, scheduleOptions),
-    claimCurrentDeviceSize: (session, options) => terminalResize?.claimForCurrentDevice(session, options),
     presentationIsCurrent: (session) => terminalPresentation?.isCurrent(session) === true,
     cancelPendingRender: (term) => terminalPresentation?.cancelPendingRender(term),
     connectPendingSession: (session) => terminalTransportRuntime?.connectPendingSession(session),
@@ -1897,8 +1896,6 @@ export function startGlobalRuntime() {
     isReplayCommitted: (session) => terminalReplay.isCommitted(session),
     isSocketOpen: (session) => session?.socket?.readyState === WebSocket.OPEN,
     getCurrentLease: (session) => terminalTransportRuntime?.currentLease(session) || null,
-    getResizeSize: (session) => terminalResize.size(session),
-    normalizeResizeEpoch: (value) => terminalResize.normalizeEpoch(value),
     getThemePayload: () => terminalThemePayload(),
     getBufferedAmount: (session) => Number(session?.socket?.bufferedAmount || 0),
     checkConnectionHealth: (session, options) => terminalSessionConnection.checkHealth(session, options),
@@ -1911,7 +1908,6 @@ export function startGlobalRuntime() {
     appendDebugError: (title, details) => appendDebugError(title, details),
     holdCursorVisible: (session) => holdTerminalCursorVisible(session),
     reassertSize: (session) => terminalResize.reassertSize(session),
-    claimCurrentDeviceSize: (session) => terminalResize.claimForCurrentDevice(session),
     registerSessionCleanup: (session, cleanup) => terminalSessionController?.addCleanup(session, cleanup),
   });
 
@@ -1944,7 +1940,7 @@ export function startGlobalRuntime() {
       terminalTUIAdapterInstaller?.cancelTouchInteraction(session);
     },
     reassertSize: (session, options) => terminalResize?.reassertSize(session, options),
-    claimCurrentDeviceSize: (session) => terminalResize?.claimForCurrentDevice(session),
+    claimFromTerminalGesture: (session, event) => terminalResize?.claimFromTerminalGesture(session, event),
     scrollToBottom: (session) => scrollTerminalToBottomForUserInput(session),
     sendInput: (session, data) => terminalInput?.sendOrQueue(session, data),
     pasteText: (session, text) => terminalClipboard?.pasteSession(session, text),
@@ -1957,6 +1953,7 @@ export function startGlobalRuntime() {
     registerSessionCleanup: (session, cleanup) => terminalSessionController?.addCleanup(session, cleanup),
     moveThresholdPx: touchShortcutMoveThresholdPx,
     doubleTapDelayMs: mobileKeyboardDoubleTapDelayMs,
+    longPressDelayMs: touchSelectionLongPressDelayMs,
   });
 
   const preInputAttachmentsAPI = createAttachmentsAPI({ baseURL: window.location.href });
@@ -2368,7 +2365,6 @@ export function startGlobalRuntime() {
     scrollTabButtonIntoView: (button) => scrollTabButtonIntoView(button),
     scheduleOverviewRender: scheduleWorkspaceNavigationRender,
     scheduleVisibleTabResize: (tab, options) => terminalResize.scheduleVisibleTab(tab, options),
-    claimVisibleTabSize: (tab, options) => terminalResize.claimTabForCurrentDevice(tab, options),
     syncConnectionDemands: (options) => terminalTransportRuntime?.syncConnectionDemands(options),
     persistActiveTab: (tabId) => persistActiveWorkspaceTab(tabId),
     showToast: (message) => showToast(message),
@@ -2482,7 +2478,7 @@ export function startGlobalRuntime() {
     closeUnifiedTransport: (reason) => terminalUnifiedTransport?.close(reason),
     rememberWorkspaceRestoreState: () => rememberWorkspaceRestoreState(),
     resumeDevices: () => devices.handleResume(),
-    claimActiveTabSize: (options) => terminalResize?.claimActiveTabForCurrentDevice(options),
+    resizeActiveTabForCurrentDevice: (options) => terminalResize?.resizeActiveTabForCurrentDevice(options),
     resumeWorkspaceRetry: () => workspaceRefresh?.resumeRetry(),
     refreshWorkspaceActivity: (options) => workspaceActivity?.refreshActivity(options),
     updateSelection: () => terminalSelection?.update(),

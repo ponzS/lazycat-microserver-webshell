@@ -3,6 +3,10 @@
 规格：[REQ](../../../spec/terminal/resize-sync/REQ.md) · [AC](../../../spec/terminal/resize-sync/AC.md)。环境与目标：[ENVIRONMENT](../../ENVIRONMENT.md)。
 单模块：`./run-ac.sh --selector terminal/resize-sync`（产品根目录）。
 
+客户在 `0.3.71-test.229` 更新后确认 agy 画面跳动已修复。该问题的现场证据与手工检查单见 [agy 点击终端后画面上下跳动](agy-resize-manual.md)。
+
+以下是 2026 年 9 月的重连输入场景及历史验证结果。文中获焦、视口变化和重连可接管尺寸的描述适用于当时的版本。v60 的接管条件见[当前尺寸同步规格](../../../spec/terminal/resize-sync/REQ.md)。
+
 ## 场景元数据
 
 - 状态：active

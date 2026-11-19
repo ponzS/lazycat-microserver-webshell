@@ -39,6 +39,7 @@ type terminalPane struct {
 	pixelHeight                int
 	resizeEpoch                uint64
 	resizeOwner                *paneClient
+	resizeOwnerEpoch           uint64
 	tty                        string
 	busy                       bool
 	command                    string
@@ -250,19 +251,8 @@ func (p *terminalPane) markExited(err error) {
 }
 
 func (p *terminalPane) writeInput(data []byte) error {
-	return p.writeInputWithSize(data, 0, 0)
-}
-
-func (p *terminalPane) writeInputWithSize(data []byte, cols, rows int) error {
-	return p.writeInputWithDimensions(data, cols, rows, 0, 0)
-}
-
-func (p *terminalPane) writeInputWithDimensions(data []byte, cols, rows, pixelWidth, pixelHeight int) error {
 	if len(data) == 0 {
 		return nil
-	}
-	if cols > 0 && rows > 0 {
-		_ = p.resizeWithPixels(cols, rows, pixelWidth, pixelHeight)
 	}
 	dropInput, generatedInput := p.consumeGeneratedCursorReportInput(data)
 	if dropInput {

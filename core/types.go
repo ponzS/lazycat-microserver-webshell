@@ -123,12 +123,18 @@ type TerminalControlMessage struct {
 	PixelWidth  int    `json:"pixel_width,omitempty"`
 	PixelHeight int    `json:"pixel_height,omitempty"`
 	ResizeEpoch string `json:"resize_epoch,omitempty"`
+	OwnerEpoch  string `json:"owner_epoch,omitempty"`
 	Claim       bool   `json:"claim,omitempty"`
 	Data        string `json:"data"`
 	Generated   bool   `json:"generated,omitempty"`
 	Foreground  string `json:"foreground,omitempty"`
 	Background  string `json:"background,omitempty"`
 	Cursor      string `json:"cursor,omitempty"`
+}
+
+// ResizeGestureRequired lets an older page continue using the connection without changing the PTY.
+func (m TerminalControlMessage) ResizeGestureRequired() map[string]any {
+	return map[string]any{"type": "resize-error", "resize_epoch": m.ResizeEpoch, "reason": "resize_gesture_required"}
 }
 
 // AgentIdentity is process identity, never evidence of an active model turn.

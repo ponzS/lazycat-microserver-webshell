@@ -10,7 +10,7 @@
 
 应用层只能从 `terminal/input/index.js` 导入 `createTerminalIMEController()`、lifecycle 和纯模型；`terminal/input/ime/index.js` 只作为 input 模块内部的子域入口。controller 是 composition、textarea、主动聚焦、native delete、paste 去重和 touch claim 的唯一 owner；lifecycle 独占 session listener、RAF 和 timer，并在 pane close/dispose 后拒绝迟到 callback。`installSession()` 幂等，pane close 和页面 dispose 后不接受迟到输入。
 
-移动端双击由本 controller 按事件时间戳统一识别，保留 320ms、8px 和 16px 的既有阈值，不增加单次按住时长的键盘门槛。选择逻辑认领的长按、滚动、多指和取消手势会清理本组点击历史。有效请求同步聚焦当前已挂载 textarea，不再经过 600ms 聚焦许可；system 恢复仍不得替后台终端取得焦点。
+移动端双击由本 controller 按事件时间戳统一识别，保留 320ms、8px 和 16px 的既有阈值，不增加单次按住时长的键盘门槛。在 touchend 确认轻点后才申请本机终端尺寸。选择逻辑认领的长按、滚动、多指和取消手势会清理本组点击历史。有效请求同步聚焦当前已挂载 textarea，不再经过 600ms 聚焦许可；system 恢复仍不得替后台终端取得焦点。
 
 资源创建阶段禁止 Ghostty 初始化抢焦，并通过 `focusOnClick: false` 禁止包装层内置的单击/触摸聚焦；仅覆盖 `term.focus` 无法阻止包装层直接聚焦 textarea。该选项不能禁用触摸滚动：host 的具名 touchstart/move/end/cancel、惯性和滚动条仍由维护在 `ghostty-web/lib/` 的包装层提供，IME 只接管焦点与手势认领。host 不再作为可编辑或可聚焦节点。桌面 pointer 聚焦、触摸双击展开和单击收起统一由 IME 处理，不能在 shell 捕获阶段失焦后又被 Canvas 重新聚焦。IME 保留可用的 Ghostty 滚动收尾；真正失焦才通知 viewport 恢复，新请求取消旧恢复、惯性及选择/TUI 的待处理触摸任务。
 

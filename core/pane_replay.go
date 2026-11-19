@@ -80,6 +80,7 @@ func (p *terminalPane) detachClient(client *paneClient) {
 	ownerReleased := p.resizeOwner == client
 	if ownerReleased {
 		p.resizeOwner = nil
+		p.resizeOwnerEpoch = 0
 	}
 	clients := make([]*paneClient, 0, len(p.clients))
 	if ownerReleased {

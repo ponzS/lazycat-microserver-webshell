@@ -455,12 +455,10 @@ export function createTerminalMetricsController({
     }
     const tab = getCurrentTab();
     const pane = tab?.panes?.get?.(tab.activePaneId);
-    const cols = Number(pane?.term?.cols) || 0;
-    const rows = Number(pane?.term?.rows) || 0;
-    if (cols > 0 && rows > 0) {
-      return { cols, rows };
-    }
-    return estimatedSizeForElement(getTerminalArea()) || { cols: 120, rows: 32 };
+    // A follower may display another device's grid. New terminals start at this page's size.
+    return estimatedSizeForElement(getTerminalArea())
+      || pane?.fitAddon?.proposeDimensions?.()
+      || { cols: 120, rows: 32 };
   };
 
   const dispose = () => {
