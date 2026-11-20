@@ -8,7 +8,7 @@
 
 当 fit 得出的 cols/rows、Canvas backing size、presentation generation 和 ACK/fence 状态都没有变化时，controller 必须走稳定几何快速路径：不捕获/恢复 viewport、不重置 host scroll、不重新定位 IME、不更新选区手柄，也不触发 full render。当前设备已经成功 claim 且没有新的 owner observation 时，重复点击、focus 和鼠标事件不得再次发送相同 claim；只有尺寸变化、远端 epoch/owner release 或明确的设备接管才重新进入 resize 事务。
 
-终端区域中可信的桌面点击或确认的触屏轻点进入 `claimFromTerminalGesture()`。接管请求带上该手势看到的服务端尺寸代次。服务端确认后，该逻辑连接的后续尺寸更新携带这次授权的代次。输入、布局、标签激活和普通滚动均沿用现有控制权。
+终端区域中可信的桌面点击或确认的触屏轻点进入 `claimFromTerminalGesture()`。主动切换会话时，目标会话的可见窗格也会在 DOM 尺寸有效且回放完成后申请适配。接管请求携带当前已知的服务端尺寸代次，后续尺寸更新携带服务端确认的授权代次。输入、布局、后台恢复和普通滚动沿用现有控制权。
 
 普通原子 resize 在 ACK 前不得切换本地 Ghostty 网格。matching ACK 到达时必须重新冻结当前 output queue 的完整 entry 数量，把 ACK 前已经收到的全部字节先按旧网格排空；ACK handler 返回后收到的字节才属于新网格。不得沿用发送请求时的旧队列计数，否则 F11、切 tab 或折叠等场景中 ACK 前迟到字节会被新 cols/rows 解析，产生临时旧行、乱码或疑似串会话内容。
 

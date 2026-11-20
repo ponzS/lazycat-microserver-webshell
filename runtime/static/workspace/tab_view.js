@@ -60,7 +60,7 @@ export function createWorkspaceTabView({
         closeTab(tab.id);
         return;
       }
-      activateTab(tab.id);
+      activateTab(tab.id, { resizeForSelection: true });
     });
     button.addEventListener("dblclick", (event) => {
       if (event.target.closest(".tab-close")) {

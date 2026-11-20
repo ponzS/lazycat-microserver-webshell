@@ -107,7 +107,8 @@ export function createDesktopWorkspaceController({
     pendingSelection = transaction;
     try {
       closeMenus();
-      if (selector !== getActiveName()) await switchTarget(selector);
+      const openingSelectedTab = selector !== getActiveName();
+      if (openingSelectedTab) await switchTarget(selector);
       else if (!directory.isActiveReady()) await refreshActiveWorkspace(selector);
       if (disposed || navigation !== transaction || selector !== getActiveName()) return false;
       if (!directory.isActiveReady()) return false;
@@ -116,7 +117,7 @@ export function createDesktopWorkspaceController({
           showToast("该会话已关闭");
           return false;
         }
-        activateTab(tabId, { focus });
+        activateTab(tabId, { focus, resizeForSelection: true, openingSelectedTab });
       }
       scheduleRender();
       return true;

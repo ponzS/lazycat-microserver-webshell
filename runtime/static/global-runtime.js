@@ -599,7 +599,7 @@ export function startGlobalRuntime() {
     onInstancesChange: () => desktopWorkspace?.handleInstancesChange(),
     onSameTargetNavigation: (nextTab) => {
       if (nextTab && tabs.has(nextTab)) {
-        workspacePersistence.withLocationUpdateSuppressed(() => setActiveTab(nextTab));
+        workspacePersistence.withLocationUpdateSuppressed(() => setActiveTab(nextTab, { resizeForSelection: true }));
       }
     },
     consumePopState: () => terminalOverview?.consumeHistoryBack() === true,
@@ -777,7 +777,8 @@ export function startGlobalRuntime() {
     setPresentationReady: (session, ready) => terminalPresentation?.setReady(session, ready),
     ensurePresentation: (session, options) => terminalPresentation?.ensure(session, options),
     flushPendingInput: (session) => terminalInput?.flushPending(session),
-    onReplayReady: () => {
+    onReplayReady: (session) => {
+      terminalResize?.resumeSelectionResize(session);
       if (isClientInstanceName(getActiveName())) {
         terminalTransportRuntime?.syncConnectionDemands({ reason: "replay_ready" });
       }
@@ -1456,7 +1457,7 @@ export function startGlobalRuntime() {
     getTabs: () => tabs,
     getActiveTabId,
     getActiveName,
-    activateTab: (tabId) => setActiveTab(tabId),
+    activateTab: (tabId) => setActiveTab(tabId, { resizeForSelection: true }),
     showToast: (message) => showToast(message),
   });
   const getOrderedTabs = () => workspaceTabNavigation.getOrderedTabs();
@@ -1575,7 +1576,7 @@ export function startGlobalRuntime() {
       || terminalSelection?.isSheetOpen() === true
     ),
     createTab: () => createUserTab(),
-    activateTab: (tabId) => setActiveTab(tabId),
+    activateTab: (tabId) => setActiveTab(tabId, { resizeForSelection: true }),
     closeTab: (tabId) => closeTab(tabId),
     canReorderTabs: () => !desktopWorkspace?.isActive() && workspaceTabReorder?.isSupported() === true,
     reorderTab: (tabId, beforeTabId) => postWorkspaceAction("reorder_tab", {

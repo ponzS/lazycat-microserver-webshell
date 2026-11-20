@@ -75,9 +75,10 @@ export function createTerminalResizeController({
 } = {}) {
   let disposed = false;
   const ownedSessions = new Set();
-  // Only a trusted terminal click/tap creates an entry. A matching server ACK turns
+  // A terminal gesture or a user-selected tab can create an entry. A matching server ACK turns
   // the one-shot takeover into permission to update that connection's existing grant.
   const resizeAuthority = new WeakMap();
+  let pendingTabResize = null;
   const failedSessions = new WeakSet();
   const recoveringGeometry = new WeakSet();
   const pendingLiveIntents = new WeakSet();
@@ -1393,7 +1394,12 @@ export function createTerminalResizeController({
     if (!shouldSettlePresentation && session.resizePresentationHold) {
       return failedTerminalFit(isMeasurable(session));
     }
-    if (!resizeAuthority.has(session) && session.term?.wasmTerm?.isRemote && isReplayCommitted(session)) {
+    const resizeForSelection = pendingTabResize !== null && pendingTabResize.tab === getCurrentTab()
+      && pendingTabResize.panes.has(session)
+      && !session.resizeConnectionTransitionPending
+      && isSocketOpen(session)
+      && isReplayCommitted(session);
+    if (!resizeForSelection && !resizeAuthority.has(session) && session.term?.wasmTerm?.isRemote && isReplayCommitted(session)) {
       // A follower's DOM viewport can differ from the shared PTY. Display the
       // authoritative grid; only user intent may request a different grid.
       if (session.resizeFenceActive || session.resizeAckPending || session.resizeOutputSettleActive) {
@@ -1415,6 +1421,12 @@ export function createTerminalResizeController({
       const dimensions = session.fitAddon?.proposeDimensions?.();
       if (!dimensions || dimensions.cols <= 0 || dimensions.rows <= 0) {
         return failedTerminalFit(isMeasurable(session));
+      }
+      if (resizeForSelection) {
+        pendingTabResize.panes.delete(session);
+        if (!pendingTabResize.panes.size) pendingTabResize = null;
+        beginSizeClaim(session);
+        shouldClaimSize = true;
       }
       const fittedDimensions = {
         cols: Math.max(1, Math.floor(Number(dimensions.cols) || 0)),
@@ -2112,6 +2124,7 @@ export function createTerminalResizeController({
   };
 
   const cancelTab = (tab) => {
+    if (pendingTabResize?.tab === tab) pendingTabResize = null;
     const timer = windowLiveResizeTimers.get(tab);
     if (timer) {
       windowObject.clearTimeout(timer);
@@ -2131,15 +2144,22 @@ export function createTerminalResizeController({
     return true;
   };
 
-  const scheduleVisibleTab = (tab, { immediate = false } = {}) => {
+  const scheduleVisibleTab = (tab, { immediate = false, resizeForSelection = false } = {}) => {
     if (disposed || !tab) {
       return false;
     }
     return lifecycle.scheduleTabFrame(tab, () => {
+      if (tab !== getCurrentTab()) return;
+      if (resizeForSelection) {
+        pendingTabResize = { tab, panes: new Set(tab.panes.values()) };
+      } else if (pendingTabResize?.tab !== tab) {
+        pendingTabResize = null;
+      }
       for (const session of tab.panes.values()) {
+        const selectedForResize = pendingTabResize?.panes.has(session) === true;
         if (presentation()?.stateIsCurrent(session) && !session.activationFitPending) {
           connectPendingSession(session);
-          continue;
+          if (!selectedForResize) continue;
         }
         const presentationCurrent = presentation()?.isCurrent(session) === true;
         schedulePane(session, {
@@ -2231,10 +2251,7 @@ export function createTerminalResizeController({
     return fit.claimSent === true;
   };
 
-  const claimFromTerminalGesture = (session, event) => {
-    if (disposed || !session || session.closed || session.exitExpected || event?.isTrusted !== true
-      || (event.type !== "click" && event.type !== "touchend")
-      || !session.terminalHost?.contains(event.target)) return false;
+  const beginSizeClaim = (session) => {
     const waitingForConnection = !isSocketOpen(session);
     if (waitingForConnection || !resizeAuthority.has(session)) {
       resizeAuthority.set(session, {
@@ -2244,6 +2261,13 @@ export function createTerminalResizeController({
       });
       session.sizeClaimRequired = true;
     }
+  };
+
+  const claimFromTerminalGesture = (session, event) => {
+    if (disposed || !session || session.closed || session.exitExpected || event?.isTrusted !== true
+      || (event.type !== "click" && event.type !== "touchend")
+      || !session.terminalHost?.contains(event.target)) return false;
+    beginSizeClaim(session);
     return claimForCurrentDevice(session);
   };
 
@@ -2505,6 +2529,11 @@ export function createTerminalResizeController({
     scheduleTabLiveGeometry,
     scheduleTab,
     scheduleVisibleTab,
+    resumeSelectionResize(session) {
+      if (pendingTabResize?.tab === getCurrentTab() && pendingTabResize?.panes.has(session)) {
+        schedulePane(session, {}, { immediate: true });
+      }
+    },
     scheduleActiveTabWindowResize,
     resizeTabForCurrentDevice,
     resizeActiveTabForCurrentDevice,

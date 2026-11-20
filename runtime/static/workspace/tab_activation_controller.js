@@ -62,6 +62,8 @@ export function createWorkspaceTabActivationController({
     focus = true,
     remember = true,
     rememberRecent = true,
+    resizeForSelection = false,
+    openingSelectedTab = false,
   } = {}) => {
     const tab = tabRegistry.get(tabId);
     if (!tab || disposed || isAppDisposed()) {
@@ -131,7 +133,10 @@ export function createWorkspaceTabActivationController({
         }),
         () => measureTask("tab activation resize", () => {
           if (activationIsCurrent()) {
-            scheduleVisibleTabResize(tab, { immediate: shouldPersistActiveTab });
+            scheduleVisibleTabResize(tab, {
+              immediate: shouldPersistActiveTab,
+              resizeForSelection: resizeForSelection && !isApplyingWorkspaceState() && (!wasActive || openingSelectedTab),
+            });
           }
         }),
         () => measureTask("tab activation membership", () => {
