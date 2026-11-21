@@ -1111,6 +1111,14 @@ export function createTerminalIMEController({
       if (requiresTouchKeyboardDoubleTap()) focusInput(session, { requestMobileKeyboard: true });
       else lifecycle.frame(session, () => focusInput(session));
     });
+    const keyboardActiveForTouch = () => {
+      const activeInput = getActiveSession()?.term?.textarea;
+      return isKeyboardViewportActive() || Boolean(activeInput && documentObject.activeElement === activeInput);
+    };
+    const claimTapSize = (event) => {
+      claimFromTerminalGesture(session, event);
+      keyboardDiagnostics.record(session, "tap.size-claim-return", {}, event);
+    };
     const startMobileTap = (event) => {
       keyboardDiagnostics.record(session, "tap.start", {
         touchLayout: requiresTouchKeyboardDoubleTap(), terminalTarget: isTerminalTouchTarget(event.target),
@@ -1126,6 +1134,7 @@ export function createTerminalIMEController({
         startedAt: eventTime(event),
         startX: touch.clientX,
         startY: touch.clientY,
+        keyboardActive: keyboardActiveForTouch(),
         moved: false,
       };
     };
@@ -1175,12 +1184,12 @@ export function createTerminalIMEController({
         lastMobileTap = null;
         return;
       }
-      // The terminal grid is shared. Wait until this contact is known to be a tap.
-      if (currentTime - state.startedAt < longPressDelayMs) {
-        claimFromTerminalGesture(session, event);
-        keyboardDiagnostics.record(session, "tap.size-claim-return", {}, event);
+      const mayClaimSize = currentTime - state.startedAt < longPressDelayMs
+        && !state.keyboardActive && !keyboardActiveForTouch();
+      if (!requiresTouchKeyboardDoubleTap()) {
+        if (mayClaimSize) claimTapSize(event);
+        return;
       }
-      if (!requiresTouchKeyboardDoubleTap()) return;
       const elapsed = lastMobileTap ? currentTime - lastMobileTap.at : Infinity;
       const isDoubleTap = elapsed >= 0 && elapsed <= doubleTapDelayMs
         && Math.hypot(touch.clientX - lastMobileTap.x, touch.clientY - lastMobileTap.y) < moveThresholdPx * 2;
@@ -1190,7 +1199,17 @@ export function createTerminalIMEController({
         doubleTapDelayMs, moveThresholdPx,
       }, event);
       if (!isDoubleTap) {
-        lastMobileTap = { at: currentTime, x: touch.clientX, y: touch.clientY };
+        const tap = { at: currentTime, x: touch.clientX, y: touch.clientY };
+        lastMobileTap = tap;
+        // A second tap can turn this into a keyboard gesture. Claim only after
+        // the double-tap interval, while this tab and its viewport still apply.
+        if (mayClaimSize) lifecycle.timeout(session, () => {
+          if (lastMobileTap !== tap) return;
+          lastMobileTap = null;
+          if (!documentObject.hidden && getActiveSession()?.tabId === session.tabId && !keyboardActiveForTouch()) {
+            claimTapSize(event);
+          }
+        }, doubleTapDelayMs);
         blurInput(session, { preserveTouchGesture: true });
         if (!documentObject.hasFocus() && !event.defaultPrevented
           && !term.touchScrollMoved && !term.isDraggingScrollbar) {
