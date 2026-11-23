@@ -10,6 +10,7 @@ export function createWorkspaceTargetController({
   invalidateWorkspaceGeneration = () => {},
   syncNetworkSockets = () => {},
   onTargetChange = () => {},
+  setOpeningResize = () => {},
   resetWorkspace = () => {},
   updateLocation = () => {},
   refreshWorkspaceWithRetry = () => Promise.resolve(false),
@@ -46,7 +47,7 @@ export function createWorkspaceTargetController({
     return Boolean(name) && name === getActiveName() && !disposed && !isDisposed();
   };
 
-  const switchTo = async (nextName, { updateURL = true, replaceURL = false } = {}) => {
+  const switchTo = async (nextName, { updateURL = true, replaceURL = false, resizeOnOpen = updateURL } = {}) => {
     const normalized = String(nextName || "").trim();
     if (disposed || isDisposed() || !normalized || normalized === getActiveName()) {
       return false;
@@ -54,6 +55,7 @@ export function createWorkspaceTargetController({
     clearRefreshRetry();
     hideStartupError();
     const generation = setActiveName(normalized);
+    setOpeningResize(generation, resizeOnOpen);
     if (updateURL) {
       updateLocation(normalized, { replace: replaceURL, tabId: "" });
     }

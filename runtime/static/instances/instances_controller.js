@@ -157,13 +157,13 @@ export function createInstancesController({
     }
   };
 
-  const switchTo = async (nextName, { updateURL = true, replaceURL = false } = {}) => {
+  const switchTo = async (nextName, { updateURL = true, replaceURL = false, resizeOnOpen = updateURL } = {}) => {
     const normalized = String(nextName || "").trim();
     if (disposed || !normalized || normalized === String(getActiveName?.() || "").trim()) {
       return;
     }
     closeSwitcher();
-    const task = onSwitchTarget?.(normalized, { updateURL, replaceURL });
+    const task = onSwitchTarget?.(normalized, { updateURL, replaceURL, resizeOnOpen });
     render();
     await task;
     render();

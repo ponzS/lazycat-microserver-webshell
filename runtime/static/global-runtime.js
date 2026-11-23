@@ -205,7 +205,15 @@ export function startGlobalRuntime() {
   if (typeof globalThis !== "undefined") {
     globalThis.$t = i18n.t;
   }
-  restoreInitialWorkspaceLocation({ windowObject: window, searchParams: params });
+  const hadRequestedTarget = Boolean((params.get("target") || params.get("name") || "").trim());
+  const restoredFromStorage = restoreInitialWorkspaceLocation({ windowObject: window, searchParams: params });
+  const restoredWorkspace = params.get("workspace_restore") === "1" || (restoredFromStorage && !hadRequestedTarget);
+  if (params.has("workspace_restore")) {
+    params.delete("workspace_restore");
+    const url = new URL(window.location.href);
+    url.searchParams.delete("workspace_restore");
+    window.history.replaceState(window.history.state, "", url);
+  }
   const isEmbedMode = params.has("embed");
   document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const startupDiagnostics = createStartupDiagnostics();
@@ -1484,7 +1492,7 @@ export function startGlobalRuntime() {
     getActiveGeneration,
     getActiveTabId,
     getOrderedTabs,
-    switchTarget: (name) => instances.switchTo(name),
+    switchTarget: (name, options) => instances.switchTo(name, options),
     refreshActiveWorkspace: (name) => refreshWorkspaceWithRetry({
       instanceName: name, generation: getActiveGeneration(), focus: false,
     }),
@@ -2337,7 +2345,10 @@ export function startGlobalRuntime() {
   const moveTab = (tabId, position) => workspaceTabController.moveTab(tabId, position);
 
   workspaceTabActivation = createWorkspaceTabActivationController({
-    beforeActivate: (previous, next) => terminalSurfaces.beforeActivate(previous, next),
+    beforeActivate: (previous, next) => {
+      if (previous !== next) terminalResize.cancelSelectionResize(previous);
+      terminalSurfaces.beforeActivate(previous, next);
+    },
     onActivated: (tab, previous) => terminalSurfaces.activate(tab, previous),
     onCleared: () => terminalSurfaces.clear(),
     finishLayoutInteraction: () => {
@@ -2387,6 +2398,10 @@ export function startGlobalRuntime() {
     readRestartTabForName: (name) => readRestartTabForName(name),
     clearRestartTabForReload: () => clearRestartTabForReload(),
     readRequestedTab: () => new URLSearchParams(window.location.search).get("tab") || "",
+    // A top-level navigation opens a terminal. Reload, history restoration
+    // and embedded previews only recover the shared size.
+    resizeOnInitialNavigation: !restoredWorkspace && !isEmbedMode && window === window.top
+      && window.performance?.getEntriesByType?.("navigation")[0]?.type === "navigate",
     setWorkspaceGenerationFromState: (state) => setWorkspaceGenerationFromState(state),
     closeTab: (tabId, options) => closeTab(tabId, options),
     createTab: (options) => createTab(options),
@@ -2453,6 +2468,7 @@ export function startGlobalRuntime() {
       attachments.handleTargetChange();
       preInput?.syncContext();
     },
+    setOpeningResize: (generation, requested) => workspaceStateApply.setOpeningResize(generation, requested),
     resetWorkspace: () => workspaceTabController?.resetForInstance(),
     updateLocation: (name, options) => updateLocationName(name, options),
     refreshWorkspaceWithRetry: (options) => workspaceRefresh?.refreshWithRetry(options),

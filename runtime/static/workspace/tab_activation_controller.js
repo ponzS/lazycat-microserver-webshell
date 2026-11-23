@@ -135,7 +135,7 @@ export function createWorkspaceTabActivationController({
           if (activationIsCurrent()) {
             scheduleVisibleTabResize(tab, {
               immediate: shouldPersistActiveTab,
-              resizeForSelection: resizeForSelection && !isApplyingWorkspaceState() && (!wasActive || openingSelectedTab),
+              resizeForSelection: resizeForSelection && (openingSelectedTab || (!wasActive && !isApplyingWorkspaceState())),
             });
           }
         }),

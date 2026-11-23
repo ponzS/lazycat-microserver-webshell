@@ -108,7 +108,7 @@ export function createDesktopWorkspaceController({
     try {
       closeMenus();
       const openingSelectedTab = selector !== getActiveName();
-      if (openingSelectedTab) await switchTarget(selector);
+      if (openingSelectedTab) await switchTarget(selector, { resizeOnOpen: !tabId });
       else if (!directory.isActiveReady()) await refreshActiveWorkspace(selector);
       if (disposed || navigation !== transaction || selector !== getActiveName()) return false;
       if (!directory.isActiveReady()) return false;

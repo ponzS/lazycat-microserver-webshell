@@ -12,6 +12,7 @@ export function createWorkspaceStateApplyController({
   readRestartTabForName = () => "",
   clearRestartTabForReload = () => {},
   readRequestedTab = () => "",
+  resizeOnInitialNavigation = false,
   setWorkspaceGenerationFromState = () => false,
   destroyLocalHistory = () => Promise.resolve(false),
   closeTab = () => {},
@@ -42,6 +43,8 @@ export function createWorkspaceStateApplyController({
   let applying = false;
   let disposed = false;
   let revision = 0;
+  let initialNavigation = resizeOnInitialNavigation;
+  let openingResizeGeneration = null;
   const lifecycle = lifecycleFactory(lifecycleOptions);
 
   const runApplying = (task) => {
@@ -193,9 +196,14 @@ export function createWorkspaceStateApplyController({
           ? tabs.get(restartTab) || tabs.get(stateActiveTab) || tabs.get(requestedTab) || tabs.get(savedTab) || tabs.values().next().value || null
           : tabs.get(restartTab) || tabs.get(requestedTab) || tabs.get(savedTab) || tabs.get(stateActiveTab) || tabs.values().next().value || null;
         if (nextActiveTab) {
+          const resizeForOpening = initialNavigation || openingResizeGeneration === generation;
+          initialNavigation = false;
+          openingResizeGeneration = null;
           setActiveTab(nextActiveTab.id, {
             focus,
             rememberRecent: !stateRecentTabIds,
+            resizeForSelection: resizeForOpening,
+            openingSelectedTab: resizeForOpening,
           });
           const appliedRecentTabIds = getRecentTabIds();
           if (stateRecentTabIds && appliedRecentTabIds[0] !== nextActiveTab.id) {
@@ -240,5 +248,9 @@ export function createWorkspaceStateApplyController({
     isDisposed: () => disposed,
     getRevision: () => revision,
     runApplying,
+    setOpeningResize(generation, requested) {
+      initialNavigation = false;
+      openingResizeGeneration = requested ? generation : null;
+    },
   });
 }

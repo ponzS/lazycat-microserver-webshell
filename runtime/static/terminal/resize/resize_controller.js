@@ -78,6 +78,7 @@ export function createTerminalResizeController({
   // A terminal gesture, divider drag or user-selected tab can create an entry. A matching server ACK turns
   // the one-shot takeover into permission to update that connection's existing grant.
   const resizeAuthority = new WeakMap();
+  const replayedSizeEpoch = new WeakSet();
   let pendingTabResize = null;
   const failedSessions = new WeakSet();
   const recoveringGeometry = new WeakSet();
@@ -1397,8 +1398,13 @@ export function createTerminalResizeController({
     if (!shouldSettlePresentation && session.resizePresentationHold) {
       return failedTerminalFit(isMeasurable(session));
     }
-    const resizeForSelection = pendingTabResize !== null && pendingTabResize.tab === getCurrentTab()
-      && pendingTabResize.panes.has(session)
+    const selection = pendingTabResize?.tab === getCurrentTab() ? pendingTabResize : null;
+    const selectionEpoch = selection?.panes.get(session);
+    const appliedEpoch = normalizeTerminalResizeEpoch(session.appliedResizeEpoch) || "0";
+    const selectionIsStale = selectionEpoch != null && selectionEpoch !== appliedEpoch;
+    if (selectionIsStale) selection.panes.delete(session);
+    const resizeForSelection = selectionEpoch !== undefined && !selectionIsStale
+      && isVisible(session)
       && !session.resizeConnectionTransitionPending
       && isSocketOpen(session)
       && isReplayCommitted(session);
@@ -2136,8 +2142,12 @@ export function createTerminalResizeController({
     return true;
   };
 
-  const cancelTab = (tab) => {
+  const cancelSelectionResize = (tab) => {
     if (pendingTabResize?.tab === tab) pendingTabResize = null;
+  };
+
+  const cancelTab = (tab) => {
+    cancelSelectionResize(tab);
     const timer = windowLiveResizeTimers.get(tab);
     if (timer) {
       windowObject.clearTimeout(timer);
@@ -2161,13 +2171,18 @@ export function createTerminalResizeController({
     if (disposed || !tab) {
       return false;
     }
+    if (resizeForSelection && tab === getCurrentTab()) {
+      pendingTabResize = {
+        tab,
+        panes: new Map([...tab.panes.values()].filter(session => !session.closed && !session.exitExpected).map(session => [
+          session,
+          replayedSizeEpoch.has(session) ? normalizeTerminalResizeEpoch(session.appliedResizeEpoch) || "0" : null,
+        ])),
+      };
+    }
     return lifecycle.scheduleTabFrame(tab, () => {
       if (tab !== getCurrentTab()) return;
-      if (resizeForSelection) {
-        pendingTabResize = { tab, panes: new Set(tab.panes.values()) };
-      } else if (pendingTabResize?.tab !== tab) {
-        pendingTabResize = null;
-      }
+      if (pendingTabResize?.tab !== tab) pendingTabResize = null;
       for (const session of tab.panes.values()) {
         const selectedForResize = pendingTabResize?.panes.has(session) === true;
         if (presentation()?.stateIsCurrent(session) && !session.activationFitPending) {
@@ -2350,6 +2365,10 @@ export function createTerminalResizeController({
       session.resizeAckPending = false;
     }
     const replayResizeEpoch = normalizeTerminalResizeEpoch(message?.resize_epoch);
+    replayedSizeEpoch.add(session);
+    if (pendingTabResize?.panes.get(session) === null) {
+      pendingTabResize.panes.set(session, replayResizeEpoch || "0");
+    }
     if ((replayResizeEpoch || session.resizeConnectionTransitionPending) && !session.resizeAckPending) {
       session.appliedResizeEpoch = replayResizeEpoch;
       session.serverCols = Math.max(0, Math.floor(Number(message?.cols) || 0));
@@ -2574,6 +2593,7 @@ export function createTerminalResizeController({
         ? scheduleOutputSettle(session, { reason: "output_received" })
         : false;
     },
+    cancelSelectionResize,
     cancelTab,
     disposeSession(session) {
       nativeGeometry.cancel(session);
