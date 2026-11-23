@@ -69,7 +69,8 @@ const (
 	// v58 enables official Ghostty Kitty rendering and ordered core-owned query replies.
 	// v59 recognizes CLI entrypoints and Redis multi-call binaries in Linux foreground metadata.
 	// v60 binds shared PTY geometry to a pointer takeover on the attached connection.
-	AgentProtocolVersion = "lcmd-webshell-agent-v60"
+	// v61 isolates Agent maintenance from login profiles and separates diagnostics from receipts.
+	AgentProtocolVersion = "lcmd-webshell-agent-v61"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')

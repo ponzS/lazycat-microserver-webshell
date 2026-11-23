@@ -52,4 +52,6 @@ v44 增加 `mobile_pre_input_enabled` 设置：GET 返回布尔值，PUT 支持�
 
 票据中的 `terminal_certificate` 存在时，clienttransport 在原 SDK gRPC 流内固定信任 worker 证书并建立 TLS，业务仍验证用途票据；缺少该字段的旧客户端保留 HTTP 兼容路径。
 
-当前 Agent v60 引入终端点击接管协议。Provider 保留 v59 的工作区、快照和 attach 兼容性。更新后的入口可拒绝旧页面的无授权尺寸声明，已运行的兼容 Agent 保持原有生命周期。
+Agent v60 引入终端点击接管协议。Provider 保留 v59 的工作区、快照和 attach 兼容性。更新后的入口可拒绝旧页面的无授权尺寸声明，已运行的兼容 Agent 保持原有生命周期。
+
+Agent v61 沿用 v60 的终端帧、工作区和快照能力。Provider 使用非登录 shell 检查、安装和启动容器 Agent，通过退出码和标准输出中的完整回执判断执行结果，标准错误进入诊断记录。
