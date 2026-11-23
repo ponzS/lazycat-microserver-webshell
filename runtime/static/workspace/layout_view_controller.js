@@ -37,7 +37,7 @@ export function createWorkspaceLayoutViewController({
 
   const installSplitResizeHandle = (divider, tab, node, childIndex, direction) => {
     divider.addEventListener("pointerdown", (event) => {
-      if (disposed || event.isPrimary === false || (event.button !== undefined && event.button !== 0)) {
+      if (disposed || !event.isTrusted || event.isPrimary === false || (event.button !== undefined && event.button !== 0)) {
         return;
       }
       event.preventDefault();
@@ -59,6 +59,13 @@ export function createWorkspaceLayoutViewController({
       const firstBasis = (first.getBoundingClientRect()[direction === "vertical" ? "width" : "height"] / total) * 100;
       const secondBasis = (second.getBoundingClientRect()[direction === "vertical" ? "width" : "height"] / total) * 100;
       const combined = firstBasis + secondBasis;
+      const paneIDs = new Set();
+      const collectPanes = (child) => {
+        if (child?.type === "leaf") paneIDs.add(child.paneId);
+        else child?.children?.forEach(collectPanes);
+      };
+      collectPanes(node.children[childIndex]);
+      collectPanes(node.children[childIndex + 1]);
       activeDragFinish?.({ persist: false });
       divider.classList.add("is-dragging");
       container.classList.add("is-resizing");
@@ -66,6 +73,8 @@ export function createWorkspaceLayoutViewController({
       let finished = false;
       let layoutFrame = 0;
       let pendingCurrent = null;
+      let currentFirst = firstBasis;
+      let resizing = false;
 
       const applyPendingLayout = () => {
         if (pendingCurrent === null) {
@@ -75,11 +84,17 @@ export function createWorkspaceLayoutViewController({
         pendingCurrent = null;
         const nextFirst = Math.max(12, Math.min(combined - 12, firstBasis + delta));
         const nextSecond = Math.max(12, combined - nextFirst);
+        if (Math.abs(nextFirst - currentFirst) < 0.0001) return false;
+        if (!resizing) {
+          resizing = true;
+          beginTabInteractiveResize(tab, { dividerPaneIDs: paneIDs });
+        }
+        currentFirst = nextFirst;
         node.children[childIndex].size = nextFirst;
         node.children[childIndex + 1].size = nextSecond;
         first.style.flexBasis = `${nextFirst}%`;
         second.style.flexBasis = `${nextSecond}%`;
-        updateTabInteractiveResize(tab);
+        updateTabInteractiveResize(tab, { paneIDs });
         return true;
       };
 
@@ -138,8 +153,11 @@ export function createWorkspaceLayoutViewController({
         ) {
           try { divider.releasePointerCapture?.(event.pointerId); } catch { /* Capture may already be retired by the browser. */ }
         }
-        try { endTabInteractiveResize(tab); } catch (error) { showToast(error?.message || "分屏调整失败"); }
-        if (persist && tab && !disposed && !isApplyingWorkspaceState()) {
+        if (resizing) {
+          try { endTabInteractiveResize(tab, { dividerPaneIDs: paneIDs }); }
+          catch (error) { showToast(error?.message || "分屏调整失败"); }
+        }
+        if (persist && resizing && tab && !disposed && !isApplyingWorkspaceState()) {
           // The drag already applied this layout. Its acknowledgement must
           // not rebuild dividers or replace a newer local interaction.
           Promise.resolve(postWorkspaceAction("update_layout", {
@@ -159,6 +177,10 @@ export function createWorkspaceLayoutViewController({
         ) {
           return;
         }
+        const releasePosition = direction === "vertical" ? upEvent?.clientX : upEvent?.clientY;
+        if (upEvent?.type === "pointerup" && Number.isFinite(releasePosition) && (resizing || pendingCurrent !== null)) {
+          pendingCurrent = releasePosition;
+        }
         finish();
       };
       const onBlur = () => finish();
@@ -175,7 +197,6 @@ export function createWorkspaceLayoutViewController({
       documentObject?.addEventListener?.("visibilitychange", onVisibilityChange);
       try {
         divider.setPointerCapture?.(event.pointerId);
-        beginTabInteractiveResize(tab);
       } catch (error) {
         finish({ persist: false });
         showToast(error?.message || "分屏调整失败");

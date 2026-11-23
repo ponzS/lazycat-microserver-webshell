@@ -2149,9 +2149,9 @@ export function startGlobalRuntime() {
     isApplyingWorkspaceState,
     setActivePane: (tab, paneId, options) => setActivePane(tab, paneId, options),
     resizeTab: (tab) => terminalResize?.resizeTab(tab),
-    beginTabInteractiveResize: (tab) => terminalResize?.beginTabInteractiveResize(tab),
-    updateTabInteractiveResize: (tab) => terminalResize?.updateTabInteractiveResize(tab),
-    endTabInteractiveResize: (tab) => terminalResize?.endTabInteractiveResize(tab),
+    beginTabInteractiveResize: (tab, options) => terminalResize?.beginTabInteractiveResize(tab, options),
+    updateTabInteractiveResize: (tab, options) => terminalResize?.updateTabInteractiveResize(tab, options),
+    endTabInteractiveResize: (tab, options) => terminalResize?.endTabInteractiveResize(tab, options),
     postWorkspaceAction: (action, payload, options) => postWorkspaceAction(action, payload, options),
     showToast: (message) => showToast(message),
   });

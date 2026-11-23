@@ -75,7 +75,7 @@ export function createTerminalResizeController({
 } = {}) {
   let disposed = false;
   const ownedSessions = new Set();
-  // A terminal gesture or a user-selected tab can create an entry. A matching server ACK turns
+  // A terminal gesture, divider drag or user-selected tab can create an entry. A matching server ACK turns
   // the one-shot takeover into permission to update that connection's existing grant.
   const resizeAuthority = new WeakMap();
   let pendingTabResize = null;
@@ -740,6 +740,9 @@ export function createTerminalResizeController({
           claim: pendingClaim,
           inFlightEpoch: String(session.requestedResizeEpoch || ""),
         });
+      } else {
+        // The drag may return to the in-flight size. Drop the now-obsolete intermediate target.
+        session.pendingResizeTarget = null;
       }
       trace(session, "send_size_skip", {
         reason: targetMatches ? "pending_target_same" : "pending_target_queued",
@@ -2057,12 +2060,16 @@ export function createTerminalResizeController({
     "metrics_live_geometry_end",
   );
 
-  const beginTabInteractiveResize = (tab) => {
+  const beginTabInteractiveResize = (tab, { dividerPaneIDs } = {}) => {
     if (disposed || !tab?.panes) {
       return false;
     }
     let started = false;
-    for (const session of tab.panes.values()) {
+    for (const [paneID, session] of tab.panes) {
+      if (dividerPaneIDs) {
+        if (!dividerPaneIDs.has(paneID) || session.closed || session.exitExpected || !isVisible(session)) continue;
+        beginSizeClaim(session);
+      }
       started = beginLiveGeometryForSource(
         session,
         interactiveResizeSessions,
@@ -2072,13 +2079,13 @@ export function createTerminalResizeController({
     return started;
   };
 
-  const updateTabInteractiveResize = (tab) => {
+  const updateTabInteractiveResize = (tab, { paneIDs } = {}) => {
     if (disposed || !tab?.panes) {
       return false;
     }
     let updated = false;
-    for (const session of tab.panes.values()) {
-      if (!interactiveResizeSessions.has(session)) {
+    for (const [paneID, session] of tab.panes) {
+      if ((paneIDs && !paneIDs.has(paneID)) || !interactiveResizeSessions.has(session)) {
         continue;
       }
       const result = resizePaneLiveGeometry(session);
@@ -2087,17 +2094,23 @@ export function createTerminalResizeController({
     return updated;
   };
 
-  const endTabInteractiveResize = (tab) => {
+  const endTabInteractiveResize = (tab, { dividerPaneIDs } = {}) => {
     if (!tab?.panes) {
       return false;
     }
     let ended = false;
-    for (const session of tab.panes.values()) {
-      ended = endLiveGeometryForSource(
+    for (const [paneID, session] of tab.panes) {
+      if (dividerPaneIDs && !dividerPaneIDs.has(paneID)) continue;
+      const endedLiveResize = endLiveGeometryForSource(
         session,
         interactiveResizeSessions,
         "interactive_resize_end",
-      ) || ended;
+      );
+      ended = endedLiveResize || ended;
+      if (!endedLiveResize && dividerPaneIDs && isVisible(session)) {
+        // A pane may still be replaying or waiting for its first frame at release.
+        claimForCurrentDevice(session);
+      }
     }
     return ended;
   };
