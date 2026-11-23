@@ -35,8 +35,6 @@ func (s *Server) queue(w http.ResponseWriter, r *http.Request) {
 	s.sockets[conn] = struct{}{}
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); delete(s.sockets, conn); s.mu.Unlock() }()
-	ctx, cancel := context.WithCancel(s.ctx)
-	defer cancel()
 	conn.SetReadLimit(core.WebsocketReadLimit)
 	var mu sync.Mutex
 	write := func(kind int, data []byte) error {
@@ -45,6 +43,13 @@ func (s *Server) queue(w http.ResponseWriter, r *http.Request) {
 		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		return conn.WriteMessage(kind, data)
 	}
+	s.serveQueue(s.ctx, write, func() (int, []byte, error) {
+		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		return conn.ReadMessage()
+	}, core.ParsePositiveInt(r.URL.Query().Get("terminal_scrollback")))
+}
+
+func (s *Server) serveQueue(ctx context.Context, write func(int, []byte) error, read func() (int, []byte, error), scrollback int) {
 	writeJSON := func(value any) error {
 		data, err := json.Marshal(value)
 		if err != nil {
@@ -62,10 +67,9 @@ func (s *Server) queue(w http.ResponseWriter, r *http.Request) {
 		AgentProtocolVersion: core.AgentProtocolVersion, PreferredAgentProtocolVersion: core.AgentProtocolVersion}) != nil {
 		return
 	}
-	s.setScrollback(core.ParsePositiveInt(r.URL.Query().Get("terminal_scrollback")))
+	s.setScrollback(scrollback)
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-		kind, data, err := conn.ReadMessage()
+		kind, data, err := read()
 		if err != nil {
 			return
 		}

@@ -81,6 +81,8 @@ v51 开始，原生运行时状态使用 LightOS LPK 版本并保留产物摘要
 
 Agent v52 开始，本机平台经 hportal 纯 PTY 模块复用底层库，Core 的平台边界、终端帧和 checkpoint 不变。退出结果继续使用真实进程状态；Provider 显式保留 v51 attach/工作区能力，不把新 SDK 网络服务作为依赖。
 
+Agent v62 为 macOS 物理机增加本机 IPC 接入，复用同一个会话和 Unified 队列。现有终端帧、工作区和快照格式保持兼容。
+
 Agent v59 细化 Linux 前台 Node 工具名称，沿用 v58 的帧、工作区字段和快照能力。
 
 Agent v58 启用随包 Ghostty 官方 Kitty Graphics 和 Wuffs PNG 解码。原生与 Web 共用官方图片存储、布局、占位解析和动画；平台仅复制像素并按 RenderState 分层绘制。维护补丁与 ABI 位于 `ghostty-web/patches/ghostty-wasm-graphics.patch`、`ghostty-web/wasm/webshell_images.zig` 和 `webshell_abi.zig`。仅接受 direct 传输，拒绝读取客户端本地文件和共享内存。新建本地/容器 PTY 使用 `TERM_PROGRAM=LightOS-Ghostty`，不修改已有进程环境。

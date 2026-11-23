@@ -63,7 +63,8 @@ export function buildClientRuntime({
     GOROOT: "",
     GOTOOLCHAIN: "local",
     GOWORK: "off",
-    CGO_ENABLED: "0",
+    // Darwin production artifacts are built on macOS for Security.framework peer checks.
+    CGO_ENABLED: goos === "darwin" && hostOS === "darwin" ? "1" : "0",
     GOOS: goos,
     GOARCH: goarch,
     GOPRIVATE: process.env.GOPRIVATE || "gitee.com/linakesi,github.com/jeesk",

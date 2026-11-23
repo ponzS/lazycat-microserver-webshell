@@ -1,6 +1,6 @@
 # 本地终端 HTTP 服务
 
-Start 接收受信任管理层提供的微服、账号、设备、启用代次和独立随机密钥，只监听 127.0.0.1 的随机端口。PC 入口注入 Unix/Windows 平台；本包不安装 agent、不访问 lightos-admin 私有实现，不负责账号登录或二进制重启。
+Start 接收受信任管理层提供的微服、账号、设备、启用代次和独立随机密钥。旧入口使用 127.0.0.1 的随机端口，托管运行时显式注入私有 listener。PC 入口注入 Unix/Windows 平台。本包不安装 agent、不访问 lightos-admin 私有实现，不负责账号登录或二进制重启。
 
 - server.go / auth.go：生命周期与门禁。业务请求同时校验网关凭据、可信微服头、HMAC 票据的实例/账号/设备/代次及过期时间。
 - `StartWithServices` 注入独立 SSH 与整机指标能力；未装配的能力不可访问。`metrics.go` 的 GET `/metrics` 在普通终端门禁后按请求调用 `core.HostMetricsSource`，3 秒请求时限，追加代次摘要，无计时器或后台采样；不打开或关闭终端会话。PC/CLI 在各自入口注入独立 `hostmetrics` module，容器不导入采样依赖。
@@ -8,6 +8,7 @@ Start 接收受信任管理层提供的微服、账号、设备、启用代次�
 - `publish.go` 在同一运行时 HTTP listener（客户端使用私有 IPC）上提供 `/publish/connect` 二进制 WebSocket 隧道。它只接受管理端签发、绑定实例/账号/设备/启用代次/发布记录和目标地址的用途专属短期票据；物理机向票据指定的 HTTP/HTTPS 上游主机与端口拨号，不新增局域网监听端口。已建立的隧道随本服务关闭或网关撤权结束，普通浏览器终端和 SSH 协议不复用此入口。
 - 可选 `Config.AdmissionAllowed` 只控制新业务请求，不关闭已有 WebSocket 或 PTY。暂停时仍允许经过原有网关及专用票据鉴权的 `/ssh/status`、`/ssh/config`，以便查询状态和明确撤权；普通终端和 SSH 隧道新接入返回不可用。容器未注入此门禁时保持原行为。
 - queue.go：一条 Unified WebSocket 复用所有 pane，直接调用 Core broker 和进程内 attach，不启动附加 agent。连接就绪时发送与容器一致的 `queue-ready`（`state: open`）；不能用 `queue-state` 代替，否则公共前端不会进入就绪状态，也不会正常启动心跳。
+- `local_terminal_darwin.go` 在正式签名的 Darwin 托管运行时中增加 Unix 域套接字接入。内核提供对端凭据和审计令牌，双方验证操作系统用户、Apple 签名团队及目标程序签名标识。首帧指定实例、账号和微服，运行时验证当前绑定与接入租约后进入同一 Unified 队列。暂停或退役会断开本机连接。此入口没有 HTTP 路由或 TCP/UDP 监听。Darwin 需要启用 cgo 以链接 Security.framework。
 - legacy.go：保留现有 MCP 单 pane 接口，只转换帧，不维护另一套 PTY/历史。
 - files.go：保留客户端的系统根目录视图及路径格式，按桌面用户权限执行文件操作。上传到独立临时目录，不覆盖已有文件。
 

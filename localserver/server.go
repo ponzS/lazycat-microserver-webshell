@@ -104,6 +104,7 @@ func StartWithServices(parent context.Context, config Config, platform core.Plat
 		BaseContext: func(net.Listener) context.Context { return ctx }}
 	go func() { _ = s.http.Serve(listener); s.Close() }()
 	go func() { <-ctx.Done(); s.Close() }()
+	s.startLocalTerminal()
 	return s, nil
 }
 

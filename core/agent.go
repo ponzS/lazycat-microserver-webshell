@@ -70,7 +70,8 @@ const (
 	// v59 recognizes CLI entrypoints and Redis multi-call binaries in Linux foreground metadata.
 	// v60 binds shared PTY geometry to a pointer takeover on the attached connection.
 	// v61 isolates Agent maintenance from login profiles and separates diagnostics from receipts.
-	AgentProtocolVersion = "lcmd-webshell-agent-v61"
+	// v62 adds optional authenticated macOS IPC for physical terminal queues.
+	AgentProtocolVersion = "lcmd-webshell-agent-v62"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')
