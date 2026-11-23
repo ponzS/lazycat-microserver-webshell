@@ -156,56 +156,51 @@ func (p *terminalPane) filterGeneratedInputEcho(data []byte) []byte {
 
 	var output []byte
 	for len(buffer) > 0 {
-		matched := false
-		for index := 0; index < len(pending); index++ {
-			if len(pending[index].raw) > 0 && bytes.HasPrefix(buffer, pending[index].raw) {
-				buffer = buffer[len(pending[index].raw):]
-				pending = append(pending[:index], pending[index+1:]...)
-				matched = true
+		// Search each expected reply once across the chunk. In raw mode the PTY
+		// may never echo it, even while a fullscreen program writes megabytes.
+		first, width, matched := len(buffer), 0, -1
+		for index, echo := range pending {
+			for _, pattern := range [][]byte{echo.raw, echo.quoted} {
+				if len(pattern) == 0 {
+					continue
+				}
+				if at := bytes.Index(buffer, pattern); at >= 0 && at < first {
+					first, width, matched = at, len(pattern), index
+				}
+			}
+			if first == 0 {
 				break
 			}
-			if len(pending[index].quoted) > 0 && bytes.HasPrefix(buffer, pending[index].quoted) {
-				buffer = buffer[len(pending[index].quoted):]
-				pending = append(pending[:index], pending[index+1:]...)
-				matched = true
-				break
-			}
 		}
-		if matched {
-			continue
+		if matched < 0 {
+			break
 		}
-
-		if keep := generatedEchoPrefixMatchLen(buffer, pending); keep > 0 {
-			emit := len(buffer) - keep
-			if emit > 0 {
-				output = append(output, buffer[:emit]...)
-			}
-			p.mu.Lock()
-			p.generatedEchoPending = append(p.generatedEchoPending, pending...)
-			p.generatedEchoOutputPending = append(p.generatedEchoOutputPending[:0], buffer[emit:]...)
-			p.mu.Unlock()
-			return output
-		}
-
-		output = append(output, buffer[0])
-		buffer = buffer[1:]
+		output = append(output, buffer[:first]...)
+		buffer = buffer[first+width:]
+		pending = append(pending[:matched], pending[matched+1:]...)
 	}
 
+	// Only the final suffix can become a match on the next PTY read.
+	keep := generatedEchoPrefixMatchLen(buffer, pending)
+	end := len(buffer) - keep
+	if output == nil {
+		output = buffer[:end]
+	} else {
+		output = append(output, buffer[:end]...)
+	}
 	p.mu.Lock()
+	p.generatedEchoOutputPending = append(p.generatedEchoOutputPending[:0], buffer[end:]...)
 	p.generatedEchoPending = append(p.generatedEchoPending, pending...)
 	p.mu.Unlock()
 	return output
 }
 
 func generatedEchoPrefixMatchLen(buffer []byte, pending []terminalGeneratedEcho) int {
-	maxKeep := min(len(buffer), maxPendingGeneratedEchoOutput)
+	longest := 0
 	for _, echo := range pending {
-		echoKeep := len(echo.raw) - 1
-		if quotedKeep := len(echo.quoted) - 1; quotedKeep > echoKeep {
-			echoKeep = quotedKeep
-		}
-		maxKeep = min(maxKeep, echoKeep)
+		longest = max(longest, len(echo.raw)-1, len(echo.quoted)-1)
 	}
+	maxKeep := min(len(buffer), longest, maxPendingGeneratedEchoOutput)
 	for keep := maxKeep; keep > 0; keep-- {
 		suffix := buffer[len(buffer)-keep:]
 		for _, echo := range pending {

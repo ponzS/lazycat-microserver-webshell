@@ -27,7 +27,7 @@ buildscript: |
     printf 'Vite WebShell runtime manifest is missing\n' >&2
     exit 1
   fi
-  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -o "$CONTENT_DIR/lcmd-webshell" .
+  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 node ./tools/with-checkpoint-compiler.mjs build -mod=readonly -buildvcs=false -o "$CONTENT_DIR/lcmd-webshell" .
   if [ -n "${TERMINAL_RUNTIME_RELEASE:-}" ]; then
     node clientruntime/merge-release.mjs --output="$CONTENT_DIR/client-runtime" "$TERMINAL_RUNTIME_RELEASE"
   else

@@ -1,0 +1,68 @@
+--- a/internal/engine/wazevo/call_engine.go
++++ b/internal/engine/wazevo/call_engine.go
+@@ -90,6 +90,7 @@
+ 		memoryWait64TrampolineAddress *byte
+ 		// memoryNotifyTrampolineAddress holds the address of the memory_notify trampoline function.
+ 		memoryNotifyTrampolineAddress *byte
++		terminationCheckRemaining uint32
+ 	}
+ )
+ 
+@@ -270,6 +271,7 @@
+ 	}()
+ 
+ 	if ensureTermination {
++		c.execCtx.terminationCheckRemaining = wazevoapi.TerminationCheckInterval
+ 		done := m.CloseModuleOnCanceledOrTimeout(ctx)
+ 		defer done()
+ 	}
+@@ -423,6 +425,7 @@
+ 			if err := m.FailIfClosed(); err != nil {
+ 				panic(err)
+ 			}
++			c.execCtx.terminationCheckRemaining = wazevoapi.TerminationCheckInterval
+ 			c.execCtx.exitCode = wazevoapi.ExitCodeOK
+ 			afterGoFunctionCallEntrypoint(c.execCtx.goCallReturnAddress, c.execCtxPtr,
+ 				uintptr(unsafe.Pointer(c.execCtx.stackPointerBeforeGoCall)), c.execCtx.framePointerBeforeGoCall)
+--- a/internal/engine/wazevo/frontend/lower.go
++++ b/internal/engine/wazevo/frontend/lower.go
+@@ -1350,6 +1350,17 @@
+ 		c.switchTo(originalLen, loopHeader)
+ 
+ 		if c.ensureTermination {
++			// Return to Go periodically to check termination and allow the
++			// cancellation callback to run even when there is only one P.
++			const offset = wazevoapi.ExecutionContextOffsetTerminationCheckRemaining
++			remaining := builder.AllocateInstruction().AsLoad(c.execCtxPtrValue, offset.U32(), ssa.TypeI32).Insert(builder).Return()
++			one := builder.AllocateInstruction().AsIconst32(1).Insert(builder).Return()
++			remaining = builder.AllocateInstruction().AsIsub(remaining, one).Insert(builder).Return()
++			builder.AllocateInstruction().AsStore(ssa.OpcodeStore, remaining, c.execCtxPtrValue, offset.U32()).Insert(builder)
++			check, body := builder.AllocateBasicBlock(), builder.AllocateBasicBlock()
++			builder.AllocateInstruction().AsBrnz(remaining, ssa.ValuesNil, body).Insert(builder)
++			c.insertJumpToBlock(ssa.ValuesNil, check)
++			builder.SetCurrentBlock(check)
+ 			checkModuleExitCodePtr := builder.AllocateInstruction().
+ 				AsLoad(c.execCtxPtrValue,
+ 					wazevoapi.ExecutionContextOffsetCheckModuleExitCodeTrampolineAddress.U32(),
+@@ -1360,6 +1371,10 @@
+ 			builder.AllocateInstruction().
+ 				AsCallIndirect(checkModuleExitCodePtr, &c.checkModuleExitCodeSig, args).
+ 				Insert(builder)
++			c.insertJumpToBlock(ssa.ValuesNil, body)
++			builder.SetCurrentBlock(body)
++			builder.Seal(check)
++			builder.Seal(body)
+ 		}
+ 	case wasm.OpcodeIf:
+ 		bt := c.readBlockType()
+--- a/internal/engine/wazevo/wazevoapi/offsetdata.go
++++ b/internal/engine/wazevo/wazevoapi/offsetdata.go
+@@ -53,6 +53,8 @@
+ 	ExecutionContextOffsetMemoryWait32TrampolineAddress Offset = 1160
+ 	ExecutionContextOffsetMemoryWait64TrampolineAddress Offset = 1168
+ 	ExecutionContextOffsetMemoryNotifyTrampolineAddress Offset = 1176
++	ExecutionContextOffsetTerminationCheckRemaining     Offset = 1184
++	TerminationCheckInterval                                   = 64
+ )
+ 
+ // ModuleContextOffsetData allows the compilers to get the information about offsets to the fields of wazevo.moduleContextOpaque,

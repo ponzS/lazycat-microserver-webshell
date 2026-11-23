@@ -32,7 +32,7 @@ LightOS 的最终打包阶段追加 `--version=<lightos-admin/package.yml版本>
 
 发行清单记录嵌入的 `wasm_sha256`，七个平台必须一致，并与 LPK 当前构建的 WASM 一致。工作区有并行修改时使用固定源码快照构建；可用 `TERMINAL_SOURCE_SNAPSHOT_SHA256` 记录开发快照摘要。正式发行仍要求已提交源码和对应平台签名。
 
-WASM 执行引擎自动选择平台支持的实现：amd64/arm64 通常使用编译器，Linux riscv64 使用解释器。七平台构建成功不代替相应设备的性能及功能验证。
+WASM 执行引擎自动选择平台支持的实现。v64 的打包入口在 amd64 和 arm64 应用固定版本的 Wazero 构建补丁，把循环中的 Go 终止检查合并为每 64 次循环入口检查一次。解释器路径沿用上游实现。补丁通过 `tools/with-checkpoint-compiler.mjs` 应用到临时模块副本，固定 WASM 和快照格式继续共用。可从模块目录使用 `node <WebShell>/tools/with-checkpoint-compiler.mjs build` 复现打包时的编译方式。七平台构建成功不代替相应设备的性能及功能验证。
 
 在本模块目录使用构建工具准备的 Go 执行 `go build ./...` 和 `go vet ./...`。功能验证包括终端、文件、SSH/SFTP、端口转发及续期；打包后核对目标平台、摘要和 manifest。
 

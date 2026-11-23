@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync 
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { homedir } from "node:os"
+import { runWithCheckpointCompiler } from "../tools/with-checkpoint-compiler.mjs"
 
 const root = dirname(fileURLToPath(import.meta.url))
 const webshell = resolve(root, "..")
@@ -85,9 +86,8 @@ export function buildClientRuntime({
     }
   }
   try {
-    execFileSync(goCommand, ["build", "-mod=readonly", "-trimpath", "-buildvcs=false", "-ldflags=-s -w", "-o", temporary, "."], {
+    runWithCheckpointCompiler(goCommand, ["build", "-mod=readonly", "-trimpath", "-buildvcs=false", "-ldflags=-s -w", "-o", temporary, "."], {
       cwd: root,
-      stdio: "inherit",
       env: buildEnvironment,
     })
     const wasm = readFileSync(join(webshell, "runtime/static/ghostty-vt.wasm"))

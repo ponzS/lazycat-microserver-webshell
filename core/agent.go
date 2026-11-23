@@ -71,7 +71,9 @@ const (
 	// v60 binds shared PTY geometry to a pointer takeover on the attached connection.
 	// v61 isolates Agent maintenance from login profiles and separates diagnostics from receipts.
 	// v62 adds optional authenticated macOS IPC for physical terminal queues.
-	AgentProtocolVersion = "lcmd-webshell-agent-v62"
+	// v63 scans generated terminal echoes by chunk during sustained PTY output.
+	// v64 reduces checkpoint compilation's loop-check overhead on amd64 and arm64.
+	AgentProtocolVersion = "lcmd-webshell-agent-v64"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')
