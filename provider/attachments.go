@@ -31,6 +31,8 @@ var errAttachmentTooLarge = errors.New("attachment file is too large")
 
 var errAttachmentBadRequest = errors.New("bad attachment request")
 
+var errAttachmentDirectoryPermission = errors.New("没有权限读取此目录。")
+
 type attachmentUploadBackend interface {
 	UploadAttachment(ctx context.Context, scope AgentScope, username string, filename string, content io.Reader) (attachmentUploadResult, error)
 }
@@ -590,6 +592,8 @@ func writeAttachmentUploadError(w http.ResponseWriter, err error) {
 
 func writeAttachmentFileError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, errAttachmentDirectoryPermission):
+		http.Error(w, err.Error(), http.StatusForbidden)
 	case errors.Is(err, errAttachmentBadRequest):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	case errors.Is(err, context.Canceled):
@@ -706,11 +710,17 @@ func (lightOSAttachmentFileBackend) ListAttachmentFiles(ctx context.Context, sco
 	if err != nil {
 		return attachmentFileListResponse{}, err
 	}
-	var response attachmentFileListResponse
-	if err := json.Unmarshal(output, &response); err != nil {
+	var result struct {
+		attachmentFileListResponse
+		PermissionDenied bool `json:"permission_denied"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
 		return attachmentFileListResponse{}, err
 	}
-	return response, nil
+	if result.PermissionDenied {
+		return attachmentFileListResponse{}, errAttachmentDirectoryPermission
+	}
+	return result.attachmentFileListResponse, nil
 }
 
 func (lightOSAttachmentFileBackend) StatAttachmentFiles(ctx context.Context, scope AgentScope, username string, paths []string) ([]attachmentFileEntry, error) {
@@ -801,6 +811,11 @@ func buildAttachmentListScript(path string) string {
 		attachmentJSONShellFunction(),
 		"target=" + ShellScriptQuote(target),
 		"if [ ! -d \"$target\" ]; then echo 'path is not a directory' >&2; exit 1; fi",
+		// lightosctl forwards the command output without its exit status.
+		`if [ ! -r "$target" ] || [ ! -x "$target" ]; then`,
+		`  printf '%s\n' '{"permission_denied":true}'`,
+		"  exit 0",
+		"fi",
 		"dir=$(cd \"$target\" 2>/dev/null && pwd -P) || exit 1",
 		"parent=$(dirname \"$dir\")",
 		"root=",

@@ -542,6 +542,7 @@ const MESSAGES = {
     "文件列表请求不可用。": "File listing is unavailable.",
     "文件列表读取失败 ({status})": "Could not load the file list ({status})",
     "文件列表读取失败。": "Could not load the file list.",
+    "没有权限读取此目录。": "You don’t have permission to read this directory.",
     "当前浏览器无法上传附件。": "This browser cannot upload attachments.",
     "当前页面策略禁止主动读取剪贴板，请使用系统粘贴快捷键。": "Clipboard access is blocked by this page's policy. Use your system paste shortcut.",
     "当前浏览器无法创建附件文件。": "This browser cannot create attachment files.",

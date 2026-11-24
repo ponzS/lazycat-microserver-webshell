@@ -57,3 +57,5 @@ Agent v60 引入终端点击接管协议。Provider 保留 v59 的工作区、�
 Agent v62 支持 Mac 物理机通过签名校验后的本机 Unix IPC 接入既有 Unified 队列。Provider 保留 v61 的协议和快照兼容能力。
 
 Agent v61 沿用 v60 的终端帧、工作区和快照能力。Provider 使用非登录 shell 检查、安装和启动容器 Agent，通过退出码和标准输出中的完整回执判断执行结果，标准错误进入诊断记录。
+
+Agent v65 随实例目录权限提示发布。Provider 使用实例用户检查目录权限，通过文件列表脚本输出识别权限拒绝并返回 HTTP 403。v64 继续支持 attach、工作区恢复和快照协商。

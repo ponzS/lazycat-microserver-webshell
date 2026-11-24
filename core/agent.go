@@ -73,7 +73,8 @@ const (
 	// v62 adds optional authenticated macOS IPC for physical terminal queues.
 	// v63 scans generated terminal echoes by chunk during sustained PTY output.
 	// v64 reduces checkpoint compilation's loop-check overhead on amd64 and arm64.
-	AgentProtocolVersion = "lcmd-webshell-agent-v64"
+	// v65 reports container directory permission errors in the Provider.
+	AgentProtocolVersion = "lcmd-webshell-agent-v65"
 
 	agentFrameBinary         = byte('B')
 	AgentFrameText           = byte('T')
