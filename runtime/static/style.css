@@ -3850,6 +3850,14 @@ body.is-mobile-shortcut-dragging {
   line-height: 1;
 }
 
+:where(body:not(.responsive-desktop-layout, .is-embed-mode)) .tab-overview-header {
+  grid-template-columns: 44px minmax(0, 1fr) 44px;
+}
+
+:where(body:not(.responsive-desktop-layout, .is-embed-mode)) .tab-overview-add {
+  display: none;
+}
+
 .tab-overview-back:hover,
 .tab-overview-back:focus-visible,
 .tab-overview-add:hover,
@@ -5740,8 +5748,11 @@ body.is-tab-overview-dragging {
 
   :where(body:not(.responsive-desktop-layout)) .tab-overview-header {
     min-height: calc(46px + var(--lzc-safe-area-inset-top));
-    grid-template-columns: 44px minmax(0, 1fr) 34px;
     padding: var(--lzc-safe-area-inset-top) max(10px, var(--lzc-safe-area-inset-right)) 0 max(10px, var(--lzc-safe-area-inset-left));
+  }
+
+  :where(body.is-embed-mode:not(.responsive-desktop-layout)) .tab-overview-header {
+    grid-template-columns: 44px minmax(0, 1fr) 34px;
   }
 
   :where(body:not(.responsive-desktop-layout)) .tab-overview-header h2 {
@@ -5753,7 +5764,7 @@ body.is-tab-overview-dragging {
     height: 44px;
   }
 
-  :where(body:not(.responsive-desktop-layout)) .tab-overview-add {
+  :where(body.is-embed-mode:not(.responsive-desktop-layout)) .tab-overview-add {
     width: 34px;
     height: 34px;
   }
